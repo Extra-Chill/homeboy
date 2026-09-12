@@ -9,8 +9,12 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub const ARTIFACT_MANIFEST_FILE: &str = "homeboy-artifact-manifest.json";
-pub const ARTIFACT_MANIFEST_SCHEMA: &str = "homeboy/artifact-manifest/v1";
+/// Re-exported from the owning contract so the wire identifier has one
+/// definition rather than two that can drift apart at a version bump.
+pub use homeboy_lab_contract::lab::handoff::ARTIFACT_MANIFEST_FILE;
+/// Re-exported from the owning contract so the wire identifier has one
+/// definition rather than two that can drift apart at a version bump.
+pub use homeboy_lab_contract::lab::handoff::ARTIFACT_MANIFEST_SCHEMA;
 pub const RUNTIME_AGENT_ARTIFACT_PATHS_SCHEMA: &str = "homeboy/runtime-agent-artifact-paths/v1";
 
 // Drift guard: the lab-contract type layer (`command_contract::lab::handoff`)

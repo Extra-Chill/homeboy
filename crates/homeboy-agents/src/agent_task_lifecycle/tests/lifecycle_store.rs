@@ -58,6 +58,11 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
     right
         .write_controller_plan(run_id, &right_plan)
         .expect("write right plan");
+    left.write_record(&record(&left, run_id, "left"))
+        .expect("write left record");
+    right
+        .write_record(&record(&right, run_id, "right"))
+        .expect("write right record");
     left.write_aggregate(run_id, &left_aggregate)
         .expect("write left aggregate");
     right
@@ -321,4 +326,51 @@ fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
         .join("workspace-terminal-authority")
         .exists());
     assert!(right.read_record(run_id).is_err());
+}
+
+#[test]
+fn cook_index_projection_reconciles_after_its_filesystem_write_fails() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "projection-retry-cook";
+    let first_run = "projection-retry-first";
+    let latest_run = "projection-retry-latest";
+
+    for run_id in [first_run, latest_run] {
+        let mut run = record(&store, run_id, "projection-retry");
+        run.metadata["cook_id"] = json!(cook_id);
+        store.write_record(&run).unwrap();
+    }
+    store
+        .write_cook_index_attempt(cook_id, 1, first_run, "first".to_string(), None)
+        .unwrap();
+
+    crate::agent_task_lifecycle::fail_next_cook_index_projection_write_for_test();
+    let error = store
+        .write_cook_index_attempt(cook_id, 2, latest_run, "latest".to_string(), None)
+        .expect_err("the derived filesystem projection write is injected to fail");
+    assert!(
+        error.details["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("Cook-index projection")),
+        "unexpected injected-write error: {error:?}"
+    );
+
+    let observation = store.open_observation_readonly().unwrap();
+    let projection = observation
+        .control_plane_resource_projection("agent_task_run", cook_id)
+        .unwrap()
+        .expect("SQLite commits the alias before the derived file write");
+    assert_eq!(projection.resource_id, latest_run);
+
+    let index = store
+        .read_cook_index(cook_id)
+        .expect("SQLite-backed read retries the derived projection");
+    assert_eq!(index.latest_run_id, latest_run);
+    assert_eq!(index.attempts.len(), 2);
+    assert_eq!(
+        store.read_cook_index(cook_id).unwrap(),
+        index,
+        "a restarted reader converges on the same durable index"
+    );
 }

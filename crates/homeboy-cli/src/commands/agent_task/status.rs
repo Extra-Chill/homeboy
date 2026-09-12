@@ -26,8 +26,9 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, LogsArgs, QuarantineArgs, RearmArgs,
-    ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
+    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs,
 };
 #[cfg(test)]
 use super::candidate::CandidateState;
@@ -337,6 +338,9 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         0
     };
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
+    if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
+        attach_lab_snapshot_failure_projection(&mut value, &record);
+    }
     if value["action_eligibility"]["actions"]
         .as_array()
         .is_some_and(|actions| {
@@ -1204,7 +1208,34 @@ pub(super) fn list_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, None);
+    attach_agent_task_discovery_actionable(&mut value, None, false);
+    Ok((value, 0))
+}
+
+pub(super) fn list_runs_page(
+    filter: agent_task_service::AgentTaskDiscoveryFilter,
+    args: ListArgs,
+) -> CmdResult<Value> {
+    let command = list_continuation_prefix(&args);
+    let branch_scoped = args.branch.is_some();
+    let limit = args.limit.unwrap_or(20);
+    let report = agent_task_service_direct::discover_runs_page(
+        filter,
+        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+            limit,
+            cursor: args.cursor,
+            repo: args.repo,
+            workspace: args.worktree,
+            task_url: args.task_url,
+            submitted_after: args.submitted_after,
+            state: args.state,
+            placement: args.run_placement,
+            parent_id: args.parent_id,
+            branch: args.branch,
+        },
+    )?;
+    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    attach_agent_task_discovery_actionable(&mut value, Some(&command), branch_scoped);
     Ok((value, 0))
 }
 
@@ -1213,7 +1244,7 @@ pub(super) fn list_filtered_latest_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_filtered_latest_run(options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, None);
+    attach_agent_task_discovery_actionable(&mut value, None, false);
     Ok((value, 0))
 }
 
@@ -1228,13 +1259,14 @@ pub(super) fn list_filtered_latest_runs(
 pub(super) fn list_active(
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
+    let branch_scoped = options.branch.is_some();
     let report = agent_task_service_direct::discover_runs_with_options(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
         options,
     )?;
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
 
-    let buckets = active_liveness_buckets(&report);
+    let buckets = active_liveness_buckets(&report.runs);
     if let Value::Object(map) = &mut value {
         map.insert("buckets".to_string(), buckets);
         map.insert(
@@ -1242,8 +1274,69 @@ pub(super) fn list_active(
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
-    attach_agent_task_discovery_actionable(&mut value, Some("homeboy agent-task active"));
+    attach_agent_task_discovery_actionable(
+        &mut value,
+        Some("homeboy agent-task active"),
+        branch_scoped,
+    );
     Ok((value, 0))
+}
+
+pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
+    let command = active_continuation_prefix(&args);
+    let branch_scoped = args.branch.is_some();
+    let limit = args.limit.unwrap_or(20);
+    let report = agent_task_service_direct::discover_runs_page(
+        agent_task_service::AgentTaskDiscoveryFilter::Active,
+        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+            limit,
+            cursor: args.cursor,
+            branch: args.branch,
+            ..Default::default()
+        },
+    )?;
+    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    if let Value::Object(map) = &mut value {
+        map.insert("buckets".to_string(), active_liveness_buckets(&report.runs));
+        map.insert(
+            "reconcile_hint".to_string(),
+            json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
+        );
+    }
+    attach_agent_task_discovery_actionable(&mut value, Some(&command), branch_scoped);
+    Ok((value, 0))
+}
+
+fn list_continuation_prefix(args: &ListArgs) -> String {
+    let mut command = "homeboy agent-task list".to_string();
+    append_discovery_scope(
+        &mut command,
+        [
+            ("repo", args.repo.as_deref()),
+            ("worktree", args.worktree.as_deref()),
+            ("task-url", args.task_url.as_deref()),
+            ("submitted-after", args.submitted_after.as_deref()),
+            ("state", args.state.as_deref()),
+            ("run-placement", args.run_placement.as_deref()),
+            ("parent-id", args.parent_id.as_deref()),
+            ("branch", args.branch.as_deref()),
+        ],
+    );
+    command
+}
+
+fn active_continuation_prefix(args: &ActiveArgs) -> String {
+    let mut command = "homeboy agent-task active".to_string();
+    append_discovery_scope(&mut command, [("branch", args.branch.as_deref())]);
+    command
+}
+
+fn append_discovery_scope<const N: usize>(command: &mut String, fields: [(&str, Option<&str>); N]) {
+    for (flag, value) in fields {
+        if let Some(value) = value {
+            command.push_str(&format!(" --{flag} {}", quote_arg(value)));
+        }
+    }
 }
 
 /// `agent-task active --reconcile`: preview stale/suspect/unreconciled records
@@ -1260,28 +1353,63 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
     let run_id = args.run_id;
     if args.apply {
-        let acknowledgement =
-            homeboy::agents::orchestration::execute_action_from_current_environment(
-                &run_id,
-                &homeboy_control_plane_contract::ControlPlaneActionRequest {
-                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
-                        .to_string(),
-                    action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
-                    idempotency_key: args
-                        .idempotency_key
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                    actor: "homeboy-cli".to_string(),
-                    expected_updated_at: None,
-                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
-                    confirmed: true,
-                },
-            )?;
-        let exit = i32::from(matches!(
-            acknowledgement.outcome,
-            homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-        ));
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let resolved_run_ids =
+            agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, &run_id)?;
+        let scope_key = args
+            .idempotency_key
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mut acknowledgements = Vec::with_capacity(resolved_run_ids.len());
+        let scoped = resolved_run_ids.len() > 1;
+        for resolved_run_id in resolved_run_ids {
+            // A group is only a selection mechanism. Every durable record gets
+            // its own action identity, receipt, and event stream.
+            let idempotency_key = if scoped {
+                uuid::Uuid::new_v5(
+                    &uuid::Uuid::NAMESPACE_OID,
+                    format!("{scope_key}:reconcile:{resolved_run_id}").as_bytes(),
+                )
+                .to_string()
+            } else {
+                scope_key.clone()
+            };
+            acknowledgements.push(
+                homeboy::agents::orchestration::execute_action_from_current_environment(
+                    &resolved_run_id,
+                    &homeboy_control_plane_contract::ControlPlaneActionRequest {
+                        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                            .to_string(),
+                        action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
+                        effect_id: homeboy_control_plane_contract::EffectId(format!(
+                            "cli:{resolved_run_id}:reconcile:{idempotency_key}"
+                        )),
+                        idempotency_key,
+                        actor: "homeboy-cli".to_string(),
+                        expected_updated_at: None,
+                        parameters:
+                            homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                        confirmed: true,
+                    },
+                )?,
+            );
+        }
+        let exit = i32::from(acknowledgements.iter().any(|acknowledgement| {
+            acknowledgement.outcome
+                == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        }));
+        if acknowledgements.len() == 1 {
+            return Ok((
+                serde_json::to_value(acknowledgements.remove(0)).unwrap_or(Value::Null),
+                exit,
+            ));
+        }
         return Ok((
-            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+            json!({
+                "schema": "homeboy/control-plane-reconcile-scope-result/v1",
+                "requested_run_id": run_id,
+                "acknowledgements": acknowledgements,
+            }),
             exit,
         ));
     }
@@ -1318,7 +1446,7 @@ pub(super) fn reconcile_records(dry_run: bool) -> CmdResult<Value> {
 /// four-way mapping in the CLI, which is precisely the duplication #W3-4 is
 /// about: an orchestrator reading `liveness: "suspect"` had to reimplement the
 /// same table to know whether it was allowed to reconcile.
-fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport) -> Value {
+fn active_liveness_buckets(runs: &[agent_task_service_direct::AgentTaskDiscoveryRun]) -> Value {
     use agent_task_service_direct::AgentTaskLiveness;
 
     let mut buckets = serde_json::Map::new();
@@ -1326,7 +1454,7 @@ fn active_liveness_buckets(report: &agent_task_service::AgentTaskDiscoveryReport
         buckets.insert(liveness.as_str().to_string(), Value::Array(Vec::new()));
     }
 
-    for run in &report.runs {
+    for run in runs {
         // A run with no classification (the `all`/`latest` filters do not
         // classify) is treated as active — the behaviour the previous
         // `Some(Active) | None` arm encoded.
@@ -1386,9 +1514,92 @@ fn lab_transport_repair_action_for_receipt(
     .with_kind(CommandNextActionKind::Repair)
 }
 
+/// Snapshot construction happens before a provider or runner owns work. The
+/// recovery marker is compatibility-tolerant because persisted failures from
+/// before lifecycle projection carried the producer's stale command string.
+fn lab_snapshot_recovery_projection(
+    record: &AgentTaskRunRecord,
+    retry: &RetryReplayAction,
+) -> Option<Value> {
+    let recovery = record
+        .metadata
+        .pointer("/pre_execution_failure/details/recovery")?;
+    let snapshot_construction = record
+        .metadata
+        .pointer("/pre_execution_failure/details/classification")?
+        .as_str()
+        == Some("snapshot_construction");
+    let lifecycle_marker = matches!(
+        (
+            recovery.get("owner").and_then(Value::as_str),
+            recovery.get("action").and_then(Value::as_str),
+        ),
+        (
+            Some("durable_lifecycle"),
+            Some("project_lifecycle_recovery")
+        ) | (
+            Some("homeboy_snapshot_staging"),
+            Some("rebuild_snapshot_staging_and_replay_cook")
+        )
+    );
+    if !snapshot_construction || !lifecycle_marker {
+        return None;
+    }
+    let remediation = recovery
+        .get("remediation")
+        .and_then(Value::as_str)
+        .unwrap_or("Correct the controller-side snapshot inputs before retrying or starting replacement lifecycle work.");
+    let reason = retry
+        .reason
+        .as_deref()
+        .or_else(|| recovery.get("reason").and_then(Value::as_str));
+    let owner = if let Some(cook_id) = record.metadata["cook_id"].as_str() {
+        json!({
+            "lifecycle": "cook",
+            "cook_id": cook_id,
+            "attempt_run_id": record.run_id,
+        })
+    } else {
+        json!({
+            "lifecycle": "agent_task",
+            "run_id": record.run_id,
+        })
+    };
+    Some(json!({
+        "owner": owner,
+        "readiness": retry.readiness,
+        "reason": reason,
+        "admission": retry.admission,
+        "action": retry.action.as_ref().and_then(|action| action.action.clone()),
+        "remediation": remediation,
+    }))
+}
+
+fn attach_lab_snapshot_failure_projection(value: &mut Value, record: &AgentTaskRunRecord) {
+    let retry = retry_replay_action(record);
+    if let Some(projection) = lab_snapshot_recovery_projection(record, &retry) {
+        value["lab_snapshot_failure"] = projection;
+    }
+}
+
 const DISCOVERY_NEXT_ACTION_LIMIT: usize = 8;
 
-fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Option<&str>) {
+fn attach_agent_task_discovery_actionable(
+    value: &mut Value,
+    active_command: Option<&str>,
+    branch_scoped: bool,
+) {
+    if branch_scoped {
+        // The service summary is reusable across discovery callers and carries
+        // fleet reconciliation guidance. A branch-filtered CLI response must
+        // only offer its per-run reconciliation commands.
+        if let Some(summary) = value
+            .get_mut("liveness_summary")
+            .and_then(Value::as_object_mut)
+        {
+            summary.remove("reconcile_command");
+        }
+    }
     let runs = value
         .get("runs")
         .and_then(Value::as_array)
@@ -1396,18 +1607,19 @@ fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Opt
         .unwrap_or_default();
     let mut metadata = CommandActionableMetadata::default();
 
-    if value
-        .get("liveness_summary")
-        .and_then(Value::as_object)
-        .is_some_and(|summary| {
-            ["stale", "suspect", "unreconciled"].iter().any(|bucket| {
-                summary
-                    .get(*bucket)
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default()
-                    > 0
+    if !branch_scoped
+        && value
+            .get("liveness_summary")
+            .and_then(Value::as_object)
+            .is_some_and(|summary| {
+                ["stale", "suspect", "unreconciled"].iter().any(|bucket| {
+                    summary
+                        .get(*bucket)
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default()
+                        > 0
+                })
             })
-        })
     {
         metadata.next_actions.push(
             CommandNextAction::new(
@@ -1419,13 +1631,13 @@ fn attach_agent_task_discovery_actionable(value: &mut Value, active_command: Opt
     }
     if let (Some(command), Some(cursor), Some(limit)) = (
         active_command,
-        value.get("next_cursor").and_then(Value::as_u64),
+        value.get("next_cursor").and_then(Value::as_str),
         value.get("limit").and_then(Value::as_u64),
     ) {
         metadata.next_actions.push(
             CommandNextAction::new(
                 "show next page",
-                format!("{command} --limit {limit} --cursor {cursor}"),
+                format!("{command} --limit {limit} --cursor {}", quote_arg(cursor)),
             )
             .with_kind(CommandNextActionKind::Show),
         );
@@ -1770,6 +1982,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
     let retry = retry_replay_action(&record);
+    let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
     let next_commands = diagnose_next_commands(
         &record,
         retry.action.as_ref(),
@@ -1793,6 +2006,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "runner_diagnostic_probe": runner_diagnostic_probe,
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
+        "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
     if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
@@ -3503,6 +3717,10 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:cancel:{idempotency_key}",
+                args.run_id
+            )),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -3571,22 +3789,67 @@ mod cancel_exit_code_tests {
 }
 
 pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-        &lifecycle_store,
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
-        &args.reason,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:quarantine:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: json!({ "reason": args.reason }),
+            },
+            confirmed: args.confirm,
+        },
     )?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let exit = i32::from(
+        acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
+    );
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit,
+    ))
 }
 
 pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record =
-        agent_task_lifecycle::rearm_quarantined_run_in_store(&lifecycle_store, &args.run_id)?;
-    Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
+        &args.run_id,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Rearm,
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "cli:{}:rearm:{idempotency_key}",
+                args.run_id
+            )),
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: args.confirm,
+        },
+    )?;
+    let exit = i32::from(
+        acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
+    );
+    Ok((
+        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+        exit,
+    ))
 }
 
 fn hydrated_executor_input_value(
@@ -4780,6 +5043,10 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
                 }),
             });
         }
+        // Historical snapshot records include the producer's obsolete generic
+        // retry command. Durable recovery projection owns that command now, so
+        // retain the failure facts but never relay the stale hint as diagnosis.
+        let details = diagnostic_pre_execution_details(details);
         return Some(CollectedDiagnostic {
             task_id: "controller".to_string(),
             class: failure
@@ -4817,6 +5084,18 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             })
         }),
     })
+}
+
+fn diagnostic_pre_execution_details(details: &Value) -> Value {
+    let mut details = details.clone();
+    let is_snapshot_failure =
+        details.get("classification").and_then(Value::as_str) == Some("snapshot_construction");
+    if is_snapshot_failure {
+        if let Some(recovery) = details.get_mut("recovery").and_then(Value::as_object_mut) {
+            recovery.remove("command");
+        }
+    }
+    details
 }
 
 fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {

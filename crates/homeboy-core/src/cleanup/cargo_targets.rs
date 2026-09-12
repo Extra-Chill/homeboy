@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::shell::quote_path;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{Error, Result};
@@ -19,6 +19,9 @@ const OWNER_FILE: &str = ".homeboy-owner";
 const LAST_USED_FILE: &str = ".homeboy-last-used-ms";
 const CACHE_CURRENT: &str = ".homeboy-cache-current";
 const CACHE_STAGING_PREFIX: &str = ".homeboy-cache-staging-";
+const SEED_MARKER_FILE: &str = ".homeboy-seeded-at-ms";
+const EXPLICIT_TARGET_FILE: &str = ".homeboy-explicit-cargo-target.json";
+const CALLER_OWNED_EXPLICIT_TARGET: &str = "caller-owned explicit Cargo target";
 const LEGACY_LIFECYCLE_INFERRED: &str = "legacy lifecycle metadata inferred";
 const CARGO_TARGET_LEASE_WAIT: Duration = Duration::from_secs(30);
 const CARGO_TARGET_LEASE_POLL: Duration = Duration::from_millis(25);
@@ -69,6 +72,13 @@ pub struct CargoTargetStore {
     pub size_bytes: u64,
     pub last_used_unix_ms: u64,
     pub reasons: Vec<String>,
+}
+
+/// Lifecycle state stays under Homeboy's managed root, so an explicit caller
+/// target never needs Homeboy sidecars or becomes eligible for removal.
+#[derive(Debug, Serialize, Deserialize)]
+struct ExplicitCargoTargetRecord {
+    path: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -231,9 +241,14 @@ pub fn acquire_managed_cargo_target(
 /// mutable checkout's local output from becoming part of the build lifecycle.
 pub fn acquire_isolated_cargo_target(
     owner: &str,
-    _source_path: &Path,
-    _explicit_target: Option<&str>,
+    source_path: &Path,
+    explicit_target: Option<&str>,
 ) -> Result<ManagedCargoTarget> {
+    // A caller-owned explicit target stays the caller's, so isolation applies
+    // only to the shared managed root this function otherwise leases.
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        return acquire_explicit_cargo_target(owner, source_path, target);
+    }
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -317,9 +332,13 @@ pub fn acquire_managed_cargo_target_for_environment(
 fn acquire_managed_cargo_target_for_compatibility(
     owner: &str,
     source_path: &Path,
-    _explicit_target: Option<&str>,
+    explicit_target: Option<&str>,
     compatibility: &CargoTargetCompatibility,
 ) -> Result<ManagedCargoTarget> {
+    if let Some(target) = explicit_target.filter(|target| !target.trim().is_empty()) {
+        return acquire_explicit_cargo_target(owner, source_path, target);
+    }
+
     let root = shared_cargo_target_root()?;
     admit_shared_cargo_target(&root)?;
     acquire_managed_cargo_target_for_compatibility_in(&root, owner, source_path, compatibility)
@@ -394,6 +413,8 @@ fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
         || name
             .to_str()
             .is_some_and(|name| name.starts_with(CACHE_STAGING_PREFIX))
+        || name == SEED_MARKER_FILE
+        || name == EXPLICIT_TARGET_FILE
 }
 
 /// Synchronize a Cargo cache projection without transferring Cargo's live lock.
@@ -594,6 +615,53 @@ fn cargo_target_publication_wait_error(
         "holder_lease_age_ms": holder_lease_age_ms,
     });
     error
+}
+
+fn resolve_explicit_cargo_target(source_path: &Path, target: &str) -> PathBuf {
+    let target_dir = PathBuf::from(target);
+    if target_dir.is_absolute() {
+        target_dir
+    } else {
+        source_path.join(target_dir)
+    }
+}
+
+fn acquire_explicit_cargo_target(
+    owner: &str,
+    source_path: &Path,
+    target: &str,
+) -> Result<ManagedCargoTarget> {
+    let root = shared_cargo_target_root()?;
+    fs::create_dir_all(&root)
+        .map_err(|error| io_error(error, "create explicit Cargo target lifecycle root"))?;
+    acquire_explicit_cargo_target_in(&root, owner, source_path, target, SystemTime::now())
+}
+
+fn acquire_explicit_cargo_target_in(
+    root: &Path,
+    owner: &str,
+    source_path: &Path,
+    target: &str,
+    now: SystemTime,
+) -> Result<ManagedCargoTarget> {
+    let target_dir = resolve_explicit_cargo_target(source_path, target);
+    let registry_owner = format!("explicit-cargo-target:{}", target_dir.to_string_lossy());
+    let lease = acquire_shared_cargo_target_in(root, &registry_owner, now)?;
+    let record = ExplicitCargoTargetRecord {
+        path: target_dir.to_string_lossy().to_string(),
+    };
+    fs::write(
+        lease.target_dir().join(EXPLICIT_TARGET_FILE),
+        serde_json::to_vec(&record).expect("explicit Cargo target record serializes"),
+    )
+    .map_err(|error| io_error(error, "write explicit Cargo target lifecycle record"))?;
+    Ok(ManagedCargoTarget {
+        target_dir,
+        resolution: "local",
+        owner: owner.to_string(),
+        promote_to: None,
+        _lease: Some(lease),
+    })
 }
 
 /// Collect the target identity from repository inputs and the declared child
@@ -847,7 +915,18 @@ fn cleanup_shared_cargo_targets_with_reserve_deficit(
         .unwrap_or(0);
     let mut retained_by_reason = BTreeMap::new();
     let mut candidates = Vec::new();
-    let mut remaining = inventory_bytes;
+    // Caller-owned explicit targets remain visible in inventory, but do not
+    // consume the managed-store budget because Homeboy cannot reclaim them.
+    let mut remaining: u64 = stores
+        .iter()
+        .filter(|store| {
+            !store
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("skipped:"))
+        })
+        .map(|store| store.size_bytes)
+        .sum();
     let mut has_more = false;
     let mut time_budget_exhausted = false;
     let mut inspected_count = 0;
@@ -1018,9 +1097,14 @@ fn storage_status(
     let retention = crate::defaults::load_config().retention;
     let capacity = filesystem_capacity(root)?;
     let stores = inventory(root, now, older_than, lease_ttl)?;
-    let managed_bytes = stores.iter().map(|store| store.size_bytes).sum();
+    let managed_bytes = stores
+        .iter()
+        .filter(|store| !is_caller_owned_explicit_target(store))
+        .map(|store| store.size_bytes)
+        .sum();
     let protected_bytes = stores
         .iter()
+        .filter(|store| !is_caller_owned_explicit_target(store))
         .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
         .map(|store| store.size_bytes)
         .sum();
@@ -1103,11 +1187,13 @@ fn admit_shared_cargo_target_with_capacity(
     )?;
     let mut reclaimable: Vec<_> = stores
         .iter()
+        .filter(|store| !is_caller_owned_explicit_target(store))
         .filter(|store| !store.reasons.iter().any(|reason| reason == "active_lease"))
         .collect();
     reclaimable.sort_by_key(|store| std::cmp::Reverse(store.size_bytes));
     let protected_bytes: u64 = stores
         .iter()
+        .filter(|store| !is_caller_owned_explicit_target(store))
         .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
         .map(|store| store.size_bytes)
         .sum();
@@ -1331,6 +1417,31 @@ fn inventory(
         if !metadata.is_dir() {
             continue;
         }
+        match explicit_target_record(&path) {
+            Ok(Some(record)) => {
+                let target_path = PathBuf::from(&record.path);
+                let mut reasons = vec![format!("skipped:{CALLER_OWNED_EXPLICIT_TARGET}")];
+                if store_is_active(&path, now, lease_ttl, false)? {
+                    reasons.push("active_lease".to_string());
+                }
+                stores.push(CargoTargetStore {
+                    path: record.path,
+                    owner: read_owner(&path),
+                    size_bytes: observed_path_size(&target_path)?,
+                    last_used_unix_ms: last_used(&path).unwrap_or_default(),
+                    reasons,
+                });
+                continue;
+            }
+            Ok(None) => {}
+            Err(()) => {
+                stores.push(skipped_store(
+                    &path,
+                    "invalid explicit Cargo target lifecycle record",
+                ));
+                continue;
+            }
+        }
         let Some(last_used_unix_ms) = last_used(&path).or_else(|| legacy_last_used(&path)) else {
             stores.push(skipped_store(&path, "missing Homeboy lifecycle metadata"));
             continue;
@@ -1354,6 +1465,26 @@ fn inventory(
         });
     }
     Ok(stores)
+}
+
+fn explicit_target_record(
+    path: &Path,
+) -> std::result::Result<Option<ExplicitCargoTargetRecord>, ()> {
+    let record = path.join(EXPLICIT_TARGET_FILE);
+    match fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn observed_path_size(path: &Path) -> Result<u64> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => path_size(path),
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(io_error(error, "stat explicit Cargo target")),
+    }
 }
 
 fn store_is_active(
@@ -1510,6 +1641,14 @@ fn skipped_store(path: &Path, reason: &str) -> CargoTargetStore {
         reasons: vec![format!("skipped:{reason}")],
     }
 }
+
+fn is_caller_owned_explicit_target(store: &CargoTargetStore) -> bool {
+    store
+        .reasons
+        .iter()
+        .any(|reason| reason == &format!("skipped:{CALLER_OWNED_EXPLICIT_TARGET}"))
+}
+
 fn order_stores(left: &CargoTargetStore, right: &CargoTargetStore) -> std::cmp::Ordering {
     left.last_used_unix_ms
         .cmp(&right.last_used_unix_ms)
@@ -2536,5 +2675,143 @@ mod tests {
         let command = output.next_command.unwrap();
         assert!(command.contains("--apply"));
         assert!(command.contains("--cursor '"));
+    }
+
+    #[test]
+    fn explicit_target_registry_keeps_concurrent_holders_live_without_adopting_the_target() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        fs::write(source.path().join("Cargo.toml"), "[package]").unwrap();
+        let first = acquire_explicit_cargo_target_in(
+            root.path(),
+            "isolated",
+            source.path(),
+            "generated-target",
+            now,
+        )
+        .unwrap();
+        fs::create_dir_all(first.target_dir()).unwrap();
+        fs::write(first.target_dir().join("artifact"), b"payload").unwrap();
+        assert_eq!(first.target_dir(), source.path().join("generated-target"));
+        assert!(!first.target_dir().join(LEASE_FILE).exists());
+
+        let second = acquire_explicit_cargo_target_in(
+            root.path(),
+            "compatibility",
+            source.path(),
+            "generated-target",
+            now,
+        )
+        .unwrap();
+        assert_eq!(second.target_dir(), first.target_dir());
+        let active = inventory(
+            root.path(),
+            now,
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].path, first.target_dir().display().to_string());
+        assert_eq!(active[0].size_bytes, 7);
+        assert!(active[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "active_lease"));
+        assert!(active[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == &format!("skipped:{CALLER_OWNED_EXPLICIT_TARGET}")));
+
+        drop(first);
+        assert!(inventory(
+            root.path(),
+            now,
+            Duration::from_secs(60),
+            Duration::from_secs(60)
+        )
+        .unwrap()[0]
+            .reasons
+            .iter()
+            .any(|reason| reason == "active_lease"));
+        drop(second);
+
+        let registry = fs::read_dir(root.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        write_last_used(&registry, now.checked_sub(Duration::from_secs(61)).unwrap()).unwrap();
+        let mut cleanup_options = options(root.path(), false, now);
+        cleanup_options.max_bytes = 0;
+        let dry_run = cleanup_shared_cargo_targets(cleanup_options.clone()).unwrap();
+        assert_eq!(dry_run.candidate_count, 0);
+        assert!(source.path().join("generated-target/artifact").exists());
+        cleanup_options.apply = true;
+        let output = cleanup_shared_cargo_targets(cleanup_options).unwrap();
+        assert_eq!(output.applied_count, 0);
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(output.retained_by_reason[CALLER_OWNED_EXPLICIT_TARGET], 1);
+        assert!(source.path().join("Cargo.toml").exists());
+        assert!(source.path().join("generated-target/artifact").exists());
+    }
+
+    #[test]
+    fn explicit_source_and_absolute_targets_are_reported_but_never_removed_in_a_mixed_apply() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let absolute = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        fs::write(source.path().join("Cargo.toml"), "[package]").unwrap();
+        fs::write(absolute.path().join("artifact"), b"payload").unwrap();
+        let source_target =
+            acquire_explicit_cargo_target_in(root.path(), "isolated", source.path(), ".", now)
+                .unwrap();
+        let empty_target = acquire_explicit_cargo_target_in(
+            root.path(),
+            "isolated",
+            source.path(),
+            "empty-generated-target",
+            now,
+        )
+        .unwrap();
+        fs::create_dir_all(empty_target.target_dir()).unwrap();
+        let absolute_target = acquire_explicit_cargo_target_in(
+            root.path(),
+            "compatibility",
+            source.path(),
+            &absolute.path().display().to_string(),
+            now,
+        )
+        .unwrap();
+        assert_eq!(source_target.target_dir(), &source.path().join("."));
+        assert_eq!(absolute_target.target_dir(), absolute.path());
+        assert_eq!(
+            empty_target.target_dir(),
+            &source.path().join("empty-generated-target")
+        );
+        drop(source_target);
+        drop(empty_target);
+        drop(absolute_target);
+        for entry in fs::read_dir(root.path()).unwrap() {
+            write_last_used(
+                &entry.unwrap().path(),
+                now.checked_sub(Duration::from_secs(61)).unwrap(),
+            )
+            .unwrap();
+        }
+        let stale = store(root.path(), "managed", 3, Duration::from_secs(61), now);
+        let mut cleanup_options = options(root.path(), true, now);
+        cleanup_options.max_bytes = 100;
+        let output = cleanup_shared_cargo_targets(cleanup_options).unwrap();
+        assert_eq!(output.applied_count, 1);
+        assert_eq!(output.inventory_bytes, 19);
+        assert_eq!(output.storage.managed_bytes, 0);
+        assert_eq!(output.storage.protected_bytes, 0);
+        assert!(!stale.exists());
+        assert!(source.path().join("Cargo.toml").exists());
+        assert!(absolute.path().join("artifact").exists());
     }
 }

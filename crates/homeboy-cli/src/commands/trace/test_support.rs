@@ -1,13 +1,6 @@
 //! Shared fixtures for `homeboy trace` tests.
 
-use super::test_fixture::{write_trace_extension, write_trace_rig, TRACE_FIXTURE_EXTENSION_ID};
-use super::workload::trace_workload_scenario_id;
 use super::*;
-use crate::test_support::with_isolated_home;
-use homeboy::core::component::ScopedExtensionConfig;
-use homeboy::rig::{self, ComponentSpec, RigSpec};
-use std::{collections::HashMap, fs};
-
 pub(super) fn trace_args_for_rig(rig_id: &str, component_id: &str, scenario_id: &str) -> TraceArgs {
     TraceArgs {
         command: None,

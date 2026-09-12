@@ -50,8 +50,8 @@ use super::work_job::{
 use crate::agent_task_lifecycle;
 
 pub const AGENT_TASK_COOK_JOB_TYPE: &str = "agent-task-cook";
-pub const AGENT_TASK_COOK_JOB_VERSION: u32 = 1;
-const AGENT_TASK_COOK_JOB_SCHEMA: &str = "homeboy/agent-task-cook-job/v1";
+pub const AGENT_TASK_COOK_JOB_VERSION: u32 = 2;
+const AGENT_TASK_COOK_JOB_SCHEMA: &str = "homeboy/agent-task-cook-job/v2";
 
 /// How often supervision re-reads durable cook state and child liveness.
 const SUPERVISION_POLL: Duration = Duration::from_millis(250);
@@ -78,6 +78,11 @@ pub struct AgentTaskCookJobRequest {
     /// Initial Cook jobs retain the Cook id as their owner identity.
     #[serde(default)]
     pub supervisor_id: Option<String>,
+    /// Unique launcher generation for an initial detached Cook. A replacement
+    /// launcher supervises a different child and therefore owns a distinct
+    /// immutable controller job request.
+    #[serde(default)]
+    pub launcher_id: Option<String>,
     /// The retry run this supervisor is allowed to observe. Unlike the Cook
     /// alias, it never advances when a later retry becomes the index latest.
     #[serde(default)]
@@ -115,6 +120,21 @@ impl AgentTaskCookJob {
         if request.cook_id.trim().is_empty() {
             return Err(invalid_cook_job("cook jobs require a durable cook id"));
         }
+        if request.pinned_retry_run_id.is_none()
+            && request
+                .launcher_id
+                .as_deref()
+                .is_none_or(|launcher_id| launcher_id.trim().is_empty())
+        {
+            return Err(invalid_cook_job(
+                "initial cook jobs require a non-empty launcher generation",
+            ));
+        }
+        if request.pinned_retry_run_id.is_some() && request.launcher_id.is_some() {
+            return Err(invalid_cook_job(
+                "retry cook jobs cannot carry a launcher generation",
+            ));
+        }
         if request.child_pid == 0 {
             return Err(invalid_cook_job(
                 "cook jobs require the detached child's process id",
@@ -133,21 +153,24 @@ impl AgentTaskCookJob {
             ));
         }
         let run_id = request.pinned_retry_run_id.clone();
+        let idempotency_key = request.launcher_id.as_ref().map_or_else(
+            || {
+                format!(
+                    "agent-task-cook:{}",
+                    request
+                        .pinned_retry_run_id
+                        .as_deref()
+                        .unwrap_or_else(|| request
+                            .supervisor_id
+                            .as_deref()
+                            .unwrap_or(&request.cook_id))
+                )
+            },
+            |launcher_id| format!("agent-task-cook-launch:{}:{launcher_id}", request.cook_id),
+        );
         Ok(Self {
             schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
-            // The cook id is already unique and is the durable identity of this
-            // work, so replaying a submit converges on one job rather than
-            // creating a second supervisor for the same child.
-            idempotency_key: format!(
-                "agent-task-cook:{}",
-                request
-                    .pinned_retry_run_id
-                    .as_deref()
-                    .unwrap_or_else(|| request
-                        .supervisor_id
-                        .as_deref()
-                        .unwrap_or(&request.cook_id))
-            ),
+            idempotency_key,
             request,
             phase: WorkJobPhase::Queued,
             run_id,
@@ -307,12 +330,28 @@ impl WorkJobHandler for CookWorkHandler {
         if job.phase == WorkJobPhase::Completed {
             return Ok(());
         }
-        let run_id = job
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        if let Some(run_id) = job.request.pinned_retry_run_id.as_deref() {
+            return agent_task_lifecycle::cancel_run_in_store(
+                &lifecycle_store,
+                run_id,
+                Some("controller job cancelled"),
+            )
+            .map(|_| ());
+        }
+        let launcher_id = job
             .request
-            .pinned_retry_run_id
+            .launcher_id
             .as_deref()
-            .unwrap_or(&job.request.cook_id);
-        agent_task_lifecycle::cancel_run(run_id, Some("controller job cancelled")).map(|_| ())
+            .expect("validated initial job launcher generation");
+        agent_task_lifecycle::cancel_claimed_detached_cook_in_store(
+            &lifecycle_store,
+            &job.request.cook_id,
+            launcher_id,
+            Some("controller job cancelled"),
+        )
+        .map(|_| ())
     }
 }
 
@@ -337,7 +376,7 @@ impl CookWorkHandler {
 
             // Publish the attempt id exactly once, as soon as the cook has one.
             if job.run_id.is_none() {
-                if let Some(run_id) = latest_run_id(&job.request.cook_id) {
+                if let Some(run_id) = latest_run_id_for_job(&job.request) {
                     job.run_id = Some(run_id);
                     handle.checkpoint(job.to_checkpoint()?)?;
                     handle.progress(job.progress_projection())?;
@@ -428,12 +467,20 @@ impl AgentTaskCookJob {
     fn observe_terminal(&mut self, run_id: Option<String>) -> Result<Value> {
         let run_id = run_id
             .or_else(|| self.request.pinned_retry_run_id.clone())
-            .or_else(|| latest_run_id(&self.request.cook_id));
+            .or_else(|| latest_run_id_for_job(&self.request));
         if run_id.is_none() {
-            agent_task_lifecycle::fail_detached_cook_handoff_parent(
-                &self.request.cook_id,
-                "detached Cook exited before materializing its first attempt",
-            )?;
+            if let Some(launcher_id) = self.request.launcher_id.as_deref() {
+                let lifecycle_store =
+                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                agent_task_lifecycle::fail_supervised_detached_cook_handoff_parent_in_store(
+                    &lifecycle_store,
+                    &self.request.cook_id,
+                    launcher_id,
+                    self.request.child_pid,
+                    &self.request.child_start_identity,
+                    "detached Cook exited before materializing its first attempt",
+                )?;
+            }
         } else if let Some(run_id) = run_id.as_deref() {
             let lifecycle_store =
                 agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
@@ -479,14 +526,19 @@ impl AgentTaskCookJob {
     }
 }
 
-/// The attempt id the cook published, if it has reached durable submission.
-fn latest_run_id(cook_id: &str) -> Option<String> {
-    if !agent_task_lifecycle::cook_index_exists(cook_id).unwrap_or(false) {
+fn latest_run_id_for_job(request: &AgentTaskCookJobRequest) -> Option<String> {
+    let launcher_id = request.launcher_id.as_deref()?;
+    let parent = agent_task_lifecycle::exact_record(&request.cook_id).ok()?;
+    let handoff = &parent.metadata["detached_cook_handoff"];
+    if handoff["launcher_id"] != launcher_id
+        || handoff["state"] != "redirected"
+        || handoff["admission_state"] != "materialized"
+    {
         return None;
     }
-    agent_task_lifecycle::cook_index(cook_id)
-        .ok()
-        .map(|index| index.latest_run_id)
+    let run_id = handoff["attempt_run_id"].as_str()?.to_string();
+    agent_task_lifecycle::exact_record(&run_id).ok()?;
+    Some(run_id)
 }
 
 fn retry_child_failure(request: &AgentTaskCookJobRequest) -> Error {
@@ -650,12 +702,9 @@ pub fn register_cook_work_handler() {
     });
 }
 
-/// Build the durable submit payload for one detached cook.
-///
-/// Lives here rather than in the launcher so the wire shape and the driver that
-/// parses it cannot drift apart.
-pub fn cook_job_submission(
+pub fn cook_job_submission_for_launcher(
     cook_id: &str,
+    launcher_id: Option<&str>,
     child_pid: u32,
     child_start_identity: &ProcessStartIdentity,
 ) -> Result<Value> {
@@ -665,6 +714,7 @@ pub fn cook_job_submission(
         child_pid,
         child_start_identity: child_start_identity.clone(),
         supervisor_id: None,
+        launcher_id: launcher_id.map(str::to_string),
         pinned_retry_run_id: None,
         child_session_ref: None,
     })?;
@@ -690,6 +740,7 @@ pub fn cook_retry_job_submission(
         child_pid,
         child_start_identity: child_start_identity.clone(),
         supervisor_id: Some(run_id.to_string()),
+        launcher_id: None,
         pinned_retry_run_id: Some(run_id.to_string()),
         child_session_ref: Some(child_session_ref.to_string()),
     })?;
@@ -729,7 +780,8 @@ mod tests {
 
     fn submission(cook_id: &str, pid: u32) -> Value {
         register_cook_work_handler();
-        cook_job_submission(cook_id, pid, &IDENTITY).expect("build cook job submission")
+        cook_job_submission_for_launcher(cook_id, Some("test-launcher"), pid, &IDENTITY)
+            .expect("build cook job submission")
     }
 
     #[test]
@@ -789,6 +841,89 @@ mod tests {
             .expect("submission carries a request")
     }
 
+    #[test]
+    fn checkpoint_without_launcher_generation_is_rejected() {
+        let mut checkpoint = request_of("legacy-cook-job", 4242);
+        checkpoint["request"]
+            .as_object_mut()
+            .expect("request object")
+            .remove("launcher_id");
+
+        AgentTaskCookJob::parse(checkpoint).expect_err("reject generation-less initial job");
+    }
+
+    #[test]
+    fn launcher_generation_contract_uses_a_new_wire_version() {
+        let checkpoint = request_of("versioned-cook-job", 4242);
+
+        assert_eq!(AGENT_TASK_COOK_JOB_VERSION, 2);
+        assert_eq!(checkpoint["schema"], "homeboy/agent-task-cook-job/v2");
+
+        let mut prior = checkpoint;
+        prior["schema"] = json!("homeboy/agent-task-cook-job/v1");
+        AgentTaskCookJob::parse(prior).expect_err("reject incompatible v1 checkpoint");
+    }
+
+    #[test]
+    fn stale_launcher_job_cannot_follow_a_replacement_attempt() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-replaced-launcher";
+            let attempt_run_id = "cook-replaced-launcher-attempt-1";
+            let store = test_lifecycle_store();
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                .expect("persist parent");
+            let plan =
+                crate::agent_task_scheduler::AgentTaskPlan::new("replacement-attempt", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(attempt_run_id))
+                .expect("persist replacement attempt");
+            store
+                .mutate_record(cook_id, |record| {
+                    record.metadata["detached_cook_handoff"]["state"] = json!("redirected");
+                    record.metadata["detached_cook_handoff"]["admission_state"] =
+                        json!("materialized");
+                    record.metadata["detached_cook_handoff"]["launcher_id"] =
+                        json!("replacement-launcher");
+                    record.metadata["detached_cook_handoff"]["attempt_run_id"] =
+                        json!(attempt_run_id);
+                    true
+                })
+                .expect("bind replacement generation");
+
+            let stale = AgentTaskCookJob::parse(
+                cook_job_submission_for_launcher(cook_id, Some("stale-launcher"), 1, &IDENTITY)
+                    .expect("stale submission")["request"]["request"]
+                    .clone(),
+            )
+            .expect("parse stale job");
+            let replacement = AgentTaskCookJob::parse(
+                cook_job_submission_for_launcher(
+                    cook_id,
+                    Some("replacement-launcher"),
+                    2,
+                    &IDENTITY,
+                )
+                .expect("replacement submission")["request"]["request"]
+                    .clone(),
+            )
+            .expect("parse replacement job");
+            assert_eq!(latest_run_id_for_job(&stale.request), None);
+            assert_eq!(
+                latest_run_id_for_job(&replacement.request).as_deref(),
+                Some(attempt_run_id)
+            );
+            CookWorkHandler
+                .cancel(&stale.to_checkpoint().expect("stale checkpoint"))
+                .expect("stale cancellation is a no-op");
+            assert_eq!(
+                store
+                    .read_record(attempt_run_id)
+                    .expect("read replacement attempt")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+        });
+    }
+
     fn work_request_of(cook_id: &str, pid: u32) -> Value {
         submission(cook_id, pid)
             .get("request")
@@ -806,7 +941,7 @@ mod tests {
         assert_eq!(submission["version"], WORK_JOB_VERSION);
         assert_eq!(
             submission["idempotency_key"],
-            "agent-task-cook:cook-round-trip"
+            "agent-task-cook-launch:cook-round-trip:test-launcher"
         );
         assert_eq!(submission["request"]["work_type"], AGENT_TASK_COOK_JOB_TYPE);
         assert_eq!(
@@ -832,10 +967,9 @@ mod tests {
             .expect("public projection");
     }
 
-    /// The cook id is the durable identity of this work, so a replayed submit
-    /// must converge on one supervisor rather than spawn a second.
+    /// One launcher generation owns one immutable supervisor submission.
     #[test]
-    fn the_idempotency_key_is_the_cook_id() {
+    fn the_idempotency_key_is_the_launcher_generation() {
         assert_eq!(
             submission("cook-same", 1)["idempotency_key"],
             submission("cook-same", 2)["idempotency_key"],
@@ -1088,11 +1222,24 @@ mod tests {
     fn an_unfinished_cook_terminalizes_as_failed() {
         with_isolated_home(|_| {
             let cook_id = "cook-never-submitted";
-            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-                &test_lifecycle_store(),
+            let store = test_lifecycle_store();
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                .expect("persist handoff parent");
+            agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                &store,
                 cook_id,
+                "test-launcher",
             )
-            .expect("persist handoff parent");
+            .expect("claim parent");
+            agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
+                &store,
+                cook_id,
+                "test-launcher",
+                4242,
+                IDENTITY,
+                "test-supervisor",
+            )
+            .expect("publish supervision");
             let mut job =
                 AgentTaskCookJob::parse(request_of(cook_id, 4242)).expect("parse request");
             job.phase = WorkJobPhase::Supervising;
@@ -1136,11 +1283,15 @@ mod tests {
     fn cancelling_a_supervised_job_terminates_the_detached_child() {
         with_isolated_home(|_| {
             let cook_id = "cook-driver-cancel";
-            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-                &test_lifecycle_store(),
+            let store = test_lifecycle_store();
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                .expect("persist handoff parent");
+            agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                &store,
                 cook_id,
+                "cancel-launcher",
             )
-            .expect("persist handoff parent");
+            .expect("claim handoff parent");
             let child = std::process::Command::new("sh")
                 .args(["-c", "sleep 30"])
                 .spawn()
@@ -1148,16 +1299,23 @@ mod tests {
             let start_identity = homeboy_core::process::process_start_identity(child.id())
                 .expect("inspect fixture")
                 .expect("fixture has a start identity");
-            agent_task_lifecycle::record_detached_cook_handoff_child_in_store(
-                &test_lifecycle_store(),
+            agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
+                &store,
                 cook_id,
+                "cancel-launcher",
                 child.id(),
                 start_identity.clone(),
+                "cancel-supervisor",
             )
-            .expect("persist detached child identity");
+            .expect("persist detached supervision");
 
-            let submission = cook_job_submission(cook_id, child.id(), &start_identity)
-                .expect("build submission");
+            let submission = cook_job_submission_for_launcher(
+                cook_id,
+                Some("cancel-launcher"),
+                child.id(),
+                &start_identity,
+            )
+            .expect("build submission");
 
             CookWorkHandler
                 .cancel(&submission["request"]["request"])
@@ -1297,6 +1455,7 @@ mod tests {
                 child_pid: u32::MAX,
                 child_start_identity: IDENTITY,
                 supervisor_id: Some(run_id.to_string()),
+                launcher_id: None,
                 pinned_retry_run_id: Some(run_id.to_string()),
                 child_session_ref: Some(session_ref.to_string()),
             })

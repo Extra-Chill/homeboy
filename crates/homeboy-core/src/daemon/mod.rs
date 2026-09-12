@@ -1813,6 +1813,9 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
         });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_queued_retries();
+        });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
@@ -2359,6 +2362,17 @@ where
         ("POST", "/v1/control-plane/runs") => {
             match authorize_control_plane_write(body, &broker_auth) {
                 Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", "/v1/control-plane/provider-effects/reconcile") => {
+            match authorize_control_plane_write(body, &broker_auth).and_then(|body| {
+                let request = serde_json::from_value::<homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest>(
+                    body.ok_or_else(|| Error::validation_invalid_argument("body", "provider-effect reconciliation requires a JSON request body", None, None))?,
+                ).map_err(|error| Error::validation_invalid_argument("body", error.to_string(), None, None))?;
+                Ok(crate::control_plane::reconcile_deployment_provider_effect(&request))
+            }) {
+                Ok(response) => daemon_endpoint_response("control_plane.provider_effects.reconcile", serde_json::to_value(response).unwrap_or(serde_json::Value::Null)),
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
         }
@@ -4599,6 +4613,42 @@ mod tests {
             smoke_store.save().expect("smoke auth store");
             authorize_control_plane_write(Some(json!({})), &unauthenticated)
                 .expect_err("loopback smoke grant cannot submit durable work");
+        });
+    }
+
+    #[test]
+    fn provider_effect_reconcile_http_matches_the_canonical_service_response() {
+        crate::test_support::with_isolated_home(|_| {
+            let request = homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest {
+                schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA.to_string(),
+                api_version: homeboy_extension_contract::api::v1::EXTENSION_API_V1,
+                effect_id: homeboy_control_plane_contract::EffectId("missing-effect".to_string()),
+                request_digest: "digest".to_string(),
+                recovery_fence: 1,
+                result: homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderResult {
+                    exit_code: 0,
+                    evidence: json!({"provider":"verified"}),
+                    error: None,
+                },
+                authoritative_evidence: json!({"provider_job":"verified-42"}),
+            };
+            let direct = crate::control_plane::reconcile_deployment_provider_effect(&request);
+            let response = route_with_body(
+                "POST",
+                "/v1/control-plane/provider-effects/reconcile",
+                Some(serde_json::to_value(&request).expect("request JSON")),
+                &JobStore::default(),
+            );
+
+            assert_eq!(response.status_code, 200);
+            assert_eq!(
+                response.body["endpoint"],
+                "control_plane.provider_effects.reconcile"
+            );
+            assert_eq!(
+                response.body["body"],
+                serde_json::to_value(direct).expect("response JSON")
+            );
         });
     }
 

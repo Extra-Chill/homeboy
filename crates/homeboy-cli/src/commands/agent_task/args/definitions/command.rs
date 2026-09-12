@@ -383,11 +383,16 @@ mod cook_continue_tests {
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Maximum matching durable runs to return.
-    #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
+    #[arg(
+        long = "limit",
+        value_name = "N",
+        value_parser = positive_discovery_limit,
+        conflicts_with = "full"
+    )]
     pub limit: Option<usize>,
-    /// Continue at this zero-based offset. Reuse every filter from the prior page.
-    #[arg(long, value_name = "N", conflicts_with = "full")]
-    pub cursor: Option<usize>,
+    /// Opaque continuation from the preceding page. Reuse every filter from the prior page.
+    #[arg(long, value_name = "CURSOR", conflicts_with = "full")]
+    pub cursor: Option<String>,
     /// Restrict results to this repository identity.
     #[arg(long)]
     pub repo: Option<String>,
@@ -409,6 +414,9 @@ pub struct ListArgs {
     /// Restrict results to records owned by this parent run or group.
     #[arg(long = "parent-id")]
     pub parent_id: Option<String>,
+    /// Restrict results to the recorded worktree branch.
+    #[arg(long)]
+    pub branch: Option<String>,
     /// Return every matching record. This is intentionally explicit because
     /// discovery defaults to a finite agent-facing page.
     #[arg(long)]
@@ -428,10 +436,13 @@ pub struct ActiveArgs {
         conflicts_with_all = ["full", "reconcile"]
     )]
     pub limit: Option<usize>,
-    /// Continue at this zero-based offset from the prior active page. Cannot be
+    /// Opaque continuation from the prior active page. Cannot be
     /// combined with `--full` or fleet-wide `--reconcile`.
-    #[arg(long, value_name = "N", conflicts_with_all = ["full", "reconcile"])]
-    pub cursor: Option<usize>,
+    #[arg(long, value_name = "CURSOR", conflicts_with_all = ["full", "reconcile"])]
+    pub cursor: Option<String>,
+    /// Restrict active runs to the recorded worktree branch.
+    #[arg(long, conflicts_with = "reconcile")]
+    pub branch: Option<String>,
     /// Return every matching record. This is intentionally explicit because
     /// discovery defaults to a finite agent-facing page and cannot scope
     /// fleet-wide `--reconcile`.
@@ -478,7 +489,7 @@ impl From<ListArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ListArgs) -> Self {
         Self {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
-            cursor: args.cursor.unwrap_or_default(),
+            cursor: 0,
             repo: args.repo,
             workspace: args.worktree,
             task_url: args.task_url,
@@ -486,6 +497,7 @@ impl From<ListArgs> for AgentTaskDiscoveryOptions {
             state: args.state,
             placement: args.run_placement,
             parent_id: args.parent_id,
+            branch: args.branch,
         }
     }
 }
@@ -493,7 +505,8 @@ impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ActiveArgs) -> Self {
         Self {
             limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
-            cursor: args.cursor.unwrap_or_default(),
+            cursor: 0,
+            branch: args.branch,
             ..Default::default()
         }
     }

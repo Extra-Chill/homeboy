@@ -91,7 +91,9 @@ mod store_init_tests {
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 12);
+        // 12 historical tables plus control_plane_resources and
+        // control_plane_resource_aliases, which own canonical action identity.
+        assert_eq!(status.table_count, 14);
     }
 
     #[test]
@@ -105,7 +107,9 @@ mod store_init_tests {
 
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 12);
+        // Reasserted after a second initialization: the control-plane resource
+        // tables are created once and idempotent re-init adds nothing.
+        assert_eq!(status.table_count, 14);
     }
 
     #[test]

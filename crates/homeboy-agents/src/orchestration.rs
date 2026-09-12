@@ -9,36 +9,44 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
     AttemptCursor, AttemptId, ControlPlaneAction, ControlPlaneActionAcknowledgement,
-    ControlPlaneActionAvailability, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-    ControlPlaneActionRequest, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
+    ControlPlaneActionAvailability, ControlPlaneActionFence, ControlPlaneActionIntent,
+    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+    ControlPlaneActionResource, ControlPlaneAdmissionRetry, ControlPlaneAdmissionRetryDisposition,
     ControlPlaneAttempt, ControlPlaneAttemptListRequest, ControlPlaneAttemptPage,
     ControlPlaneBlocker, ControlPlaneCancelDisposition, ControlPlaneCancelParameters,
-    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneError, ControlPlaneErrorClass,
+    ControlPlaneCancelResult, ControlPlaneCapabilities, ControlPlaneEffectAudit,
+    ControlPlaneEffectExecutionState, ControlPlaneEffectState, ControlPlaneEffectStatus,
+    ControlPlaneEffectTerminal, ControlPlaneError, ControlPlaneErrorClass,
     ControlPlaneEventAppendRequest, ControlPlaneEventRetention, ControlPlaneEventSource,
     ControlPlaneEvidenceRef, ControlPlaneExecution, ControlPlaneExecutionPage,
     ControlPlaneLiveness, ControlPlaneLocation, ControlPlaneMission,
     ControlPlaneMissionListRequest, ControlPlaneMissionPage, ControlPlaneOperation,
-    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneReference,
+    ControlPlaneOwner, ControlPlaneProviderSummary, ControlPlaneRef, ControlPlaneReference,
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
     ControlPlaneRunPlacementSelected, ControlPlaneRunReview, ControlPlaneRunReviewRequest,
     ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
     ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EventCursor, ExecutionId, MissionCursor,
-    MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId,
+    MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
+    CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
-    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_STATUS_SCHEMA,
+    CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA,
+    CONTROL_PLANE_REARM_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
-    ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
+    ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
+    ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
@@ -47,11 +55,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::agent_task_lifecycle::{
-    canonical_control_plane_identities, claim_operation_with_intent_in_store,
-    complete_cook_operation_in_store, lifecycle_action_eligibility, now_timestamp,
-    operation_claim_in_store, operation_lease_is_active_in_store, resolve_run_id_in_store,
+    canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-    CanonicalControlPlaneIdentities, ClaimOutcome,
+    CanonicalControlPlaneIdentities,
 };
 use crate::agent_task_schedule::AgentTaskPlan;
 
@@ -1566,10 +1572,69 @@ impl OrchestrationService<LifecycleStoreLookup> {
         self.execute_action_with_delegates(
             requested_id,
             request,
-            |parameters| default_retry(requested_id.as_str(), parameters),
-            || default_resume(requested_id.as_str()),
-            default_promote,
+            |run_id, parameters, _intent| default_retry(run_id, parameters),
+            |run_id, _intent| default_resume(run_id),
+            |promotion, _intent| default_promote(promotion),
         )
+    }
+
+    /// Read the durable lifecycle-owned effect record. A missing record is
+    /// `not_started`; malformed terminal evidence is `unknown`, never success.
+    pub fn effect_status(
+        &self,
+        _requested_id: &RunId,
+        effect_id: &EffectId,
+    ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+        let observation = self
+            .lookup
+            .store
+            .open_observation_initialized()
+            .map_err(map_lifecycle_error)?;
+        let effect = observation
+            .control_plane_effect_status(effect_id)
+            .map_err(map_lifecycle_error)?;
+        let mut status = ControlPlaneEffectStatus {
+            schema: CONTROL_PLANE_EFFECT_STATUS_SCHEMA.to_string(),
+            effect_id: effect_id.clone(),
+            state: ControlPlaneEffectExecutionState::NotStarted,
+            acknowledgement: None,
+            message: None,
+        };
+        let Some(effect) = effect else {
+            return Ok(status);
+        };
+        if effect.recovery_required {
+            status.state = ControlPlaneEffectExecutionState::Unknown;
+            status.message = Some(
+                "legacy action claim requires authoritative reconciliation before redispatch"
+                    .to_string(),
+            );
+            return Ok(status);
+        }
+        match effect.state {
+            homeboy_control_plane_contract::ControlPlaneEffectState::Pending
+            | homeboy_control_plane_contract::ControlPlaneEffectState::Leased => {
+                status.state = ControlPlaneEffectExecutionState::Running;
+            }
+            homeboy_control_plane_contract::ControlPlaneEffectState::Terminal => match effect
+                .terminal
+            {
+                Some(terminal) => {
+                    status.state =
+                        if terminal.acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
+                            ControlPlaneEffectExecutionState::Failed
+                        } else {
+                            ControlPlaneEffectExecutionState::Succeeded
+                        };
+                    status.acknowledgement = Some(terminal.acknowledgement);
+                }
+                None => {
+                    status.state = ControlPlaneEffectExecutionState::Unknown;
+                    status.message = Some("terminal effect has no acknowledgement".to_string());
+                }
+            },
+        }
+        Ok(status)
     }
 
     fn execute_action_with_delegates<F, R, P>(
@@ -1582,511 +1647,736 @@ impl OrchestrationService<LifecycleStoreLookup> {
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
     where
         F: FnOnce(
+            &str,
             &ControlPlaneRetryParameters,
+            &ControlPlaneActionRequest,
         )
             -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
-        R: FnOnce() -> homeboy_core::Result<
+        R: FnOnce(
+            &str,
+            &ControlPlaneActionRequest,
+        ) -> homeboy_core::Result<
             crate::agent_task_service::AgentTaskRunResult<
                 crate::agent_task_schedule::AgentTaskAggregate,
             >,
         >,
         P: FnOnce(
             &crate::agent_task_service::AgentTaskPromotionRequest,
+            &ControlPlaneActionRequest,
         )
             -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
-        let resolved = resolve_run_id_in_store(&self.lookup.store, requested_id.as_str())
+        // Quarantine and Rearm mutate one exact queued record, so an alias that
+        // moves between attempts cannot name their target. Reconcile is scope
+        // aware by contract and expands a Cook alias to its members, so it
+        // keeps accepting one.
+        let exact_mutation = matches!(
+            request.action,
+            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
+        );
+        if matches!(
+            request.action,
+            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
+        ) && self
+            .lookup
+            .store
+            .read_cook_index(requested_id.as_str())
+            .is_ok()
+        {
+            return Err(ControlPlaneError::invalid_argument(
+                "this mutation requires an exact durable run id; Cook aliases are not accepted",
+            ));
+        }
+        let observation = self
+            .lookup
+            .store
+            .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
+        // Action admission resolves aliases from the transactional projection.
+        // Filesystem Cook indexes remain compatibility reads and cannot broaden
+        // a mutation target when they are absent or unreadable.
+        let projected = observation
+            .control_plane_resource_projection("agent_task_run", requested_id.as_str())
+            .map_err(map_lifecycle_error)?;
+        let resolved = match projected {
+            Some(projection)
+                if exact_mutation && projection.resource_id != requested_id.as_str() =>
+            {
+                return Err(ControlPlaneError::invalid_argument(
+                    "this mutation requires an exact durable run id; Cook aliases are not accepted",
+                ));
+            }
+            // Reconcile is scope aware and its callers expand a Cook group into
+            // exact members before acting. Retargeting an exact member onto the
+            // alias owner would give one attempt every member's claim and leave
+            // the others unreconciled, so an existing record wins here and the
+            // alias is followed only when the id is nothing but an alias.
+            Some(projection)
+                if request.action == ControlPlaneAction::Reconcile
+                    && observation
+                        .control_plane_resource_projection_exact(
+                            "agent_task_run",
+                            requested_id.as_str(),
+                        )
+                        .map_err(map_lifecycle_error)?
+                        .is_some() =>
+            {
+                requested_id.as_str().to_string()
+            }
+            Some(projection) => projection.resource_id,
+            None => requested_id.as_str().to_string(),
+        };
         let record = self
             .lookup
             .store
             .read_record(&resolved)
             .map_err(map_lifecycle_error)?;
+        // Admission is fenced by the projection committed with the lifecycle
+        // record. The filesystem record is now a compatibility read for the
+        // domain effect, never the authority deciding whether it may start.
+        let accepted_at = now_timestamp();
+        let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+            serde_json::to_vec(request)
+                .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?
+                .as_slice(),
+        );
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(
+                    RunId::new(&record.run_id)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                ),
+                run: RunId::new(&record.run_id)
+                    .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+                original_alias: (requested_id.as_str() != record.run_id)
+                    .then(|| requested_id.as_str().to_string()),
+            },
+            request: request.clone(),
+            request_digest,
+            accepted_at,
+        };
+        let version = record
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| record.submitted_at.clone());
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: version,
+            eligible: action_unavailability(&record, request.action).is_none(),
+            reason: action_unavailability(&record, request.action),
+        };
+        let idempotency_digest =
+            homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
+        let admission = observation
+            .enqueue_control_plane_action_intent(
+                &intent,
+                &fence,
+                "agent_task_run",
+                &idempotency_digest,
+            )
+            .map_err(map_lifecycle_error)?;
+        let effect = match admission {
+            homeboy_core::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
+            | homeboy_core::observation::store::ControlPlaneEffectAdmission::Duplicate(effect) => {
+                effect
+            }
+        };
+        if effect.state == ControlPlaneEffectState::Terminal {
+            return effect
+                .terminal
+                .map(|terminal| terminal.acknowledgement)
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable("terminal action effect has no acknowledgement")
+                });
+        }
         let operation_key = format!(
             "control-plane-action:{}:{}",
             action_name(request.action),
-            request.idempotency_key
+            request.effect_id.0
         );
-        let intent = serde_json::to_value(request)
-            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-        match claim_operation_with_intent_in_store(
-            &self.lookup.store,
-            &resolved,
-            &operation_key,
-            ACTION_LEASE,
-            &intent,
-        )
-        .map_err(map_lifecycle_error)?
-        {
-            ClaimOutcome::AlreadyCompleted(result) => {
-                let acknowledgement = serde_json::from_value(result).map_err(|error| {
-                    ControlPlaneError::unavailable(format!("stored action result: {error}"))
-                })?;
-                ensure_action_events_in_store(
-                    &self.lookup.store,
-                    &record,
-                    request,
-                    &operation_key,
-                    &acknowledgement,
-                )?;
-                Ok(acknowledgement)
-            }
-            ClaimOutcome::LeaseHeld => {
-                if operation_lease_is_active_in_store(&self.lookup.store, &resolved, &operation_key)
+        if effect.lease_fence == 0 {
+            append_action_event_in_store(
+                &self.lookup.store,
+                &record,
+                request,
+                &operation_key,
+                "action.accepted",
+                &effect.intent.accepted_at,
+                serde_json::json!({
+                    "operation_digest": action_operation_digest(&operation_key),
+                    "action": request.action,
+                    "acknowledgement": format!(
+                        "{}:action:{}:{}",
+                        record.run_id,
+                        action_name(request.action),
+                        request.idempotency_key
+                    ),
+                    "actor": request.actor,
+                    "expected_updated_at": request.expected_updated_at,
+                    "confirmed": request.confirmed,
+                    "parameters": request.parameters,
+                }),
+            )?;
+        }
+        let owner = format!("agent-task:{}", std::process::id());
+        let now = Utc::now();
+        let expires_at =
+            (now + chrono::Duration::seconds(ACTION_LEASE.as_secs() as i64)).to_rfc3339();
+        let normal_lease = observation
+            .lease_control_plane_effect_by_id(
+                &request.effect_id,
+                &owner,
+                &now.to_rfc3339(),
+                &expires_at,
+            )
+            .map_err(map_lifecycle_error)?;
+        let (lease, recovering) = match normal_lease {
+            Some(lease) => (lease, false),
+            None => (
+                observation
+                    .claim_control_plane_effect_recovery_by_id(
+                        &request.effect_id,
+                        &owner,
+                        &now.to_rfc3339(),
+                        &expires_at,
+                    )
                     .map_err(map_lifecycle_error)?
-                {
-                    return Err(ControlPlaneError::unavailable(
-                        "this idempotent action is already in progress",
-                    ));
-                }
-                let recovered = recover_interrupted_action_acknowledgement(
-                    &self.lookup.store,
-                    &record,
-                    request,
-                    &operation_key,
-                )?;
-                complete_cook_operation_in_store(
-                    &self.lookup.store,
-                    &resolved,
-                    &operation_key,
-                    serde_json::to_value(&recovered).map_err(|error| {
-                        ControlPlaneError::unavailable(format!(
-                            "serialize recovered action result: {error}"
-                        ))
+                    .ok_or_else(|| {
+                        ControlPlaneError::unavailable("action effect is already leased")
                     })?,
+                true,
+            ),
+        };
+        let accepted_at = lease.intent.accepted_at.clone();
+        if recovering {
+            let recovered = recover_interrupted_action_acknowledgement(
+                &self.lookup.store,
+                &record,
+                request,
+                &accepted_at,
+            )?;
+            observation
+                .terminalize_control_plane_effect(
+                    &request.effect_id,
+                    lease.lease_fence,
+                    &ControlPlaneEffectTerminal {
+                        schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+                        completed_at: recovered.completed_at.clone(),
+                        acknowledgement: recovered.clone(),
+                        audit: ControlPlaneEffectAudit {
+                            schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+                            observed_at: now_timestamp(),
+                            evidence: serde_json::json!({
+                                "recovery_disposition": "reconciled_expired_effect_lease",
+                                "operation_key": operation_key,
+                            }),
+                        },
+                    },
                 )
                 .map_err(map_lifecycle_error)?;
-                let stored =
-                    operation_claim_in_store(&self.lookup.store, &resolved, &operation_key)
-                        .map_err(map_lifecycle_error)?
-                        .and_then(|claim| claim.result)
-                        .ok_or_else(|| {
-                            ControlPlaneError::unavailable(
-                                "recovered action acknowledgement was not persisted",
-                            )
-                        })?;
-                let acknowledgement = serde_json::from_value(stored).map_err(|error| {
-                    ControlPlaneError::unavailable(format!(
-                        "stored recovered action result: {error}"
-                    ))
-                })?;
-                ensure_action_events_in_store(
-                    &self.lookup.store,
-                    &record,
-                    request,
-                    &operation_key,
-                    &acknowledgement,
-                )?;
-                Ok(acknowledgement)
-            }
-            ClaimOutcome::Acquired => {
-                let accepted_at =
-                    operation_claim_in_store(&self.lookup.store, &resolved, &operation_key)
-                        .map_err(map_lifecycle_error)?
-                        .and_then(|claim| claim.accepted_at)
-                        .ok_or_else(|| {
-                            ControlPlaneError::unavailable(
-                                "action claim has no durable acceptance timestamp",
-                            )
-                        })?;
-                let acknowledgement = format!(
-                    "{}:action:{}:{}",
-                    record.run_id,
-                    action_name(request.action),
-                    request.idempotency_key
-                );
-                append_action_event_in_store(
-                    &self.lookup.store,
-                    &record,
-                    request,
-                    &operation_key,
-                    "action.accepted",
-                    &accepted_at,
-                    serde_json::json!({
-                        "operation_digest": action_operation_digest(&operation_key),
-                        "action": request.action,
-                        "acknowledgement": acknowledgement,
-                        "actor": request.actor,
-                        "expected_updated_at": request.expected_updated_at,
-                        "confirmed": request.confirmed,
-                        "parameters": request.parameters,
-                    }),
-                )?;
-                let (outcome, resource, result, message) = if request
-                    .expected_updated_at
-                    .as_ref()
-                    .is_some_and(|expected| record.updated_at.as_ref() != Some(expected))
-                {
-                    (
-                        ControlPlaneActionOutcome::Failed,
-                        project_record(&record, None)?,
-                        ControlPlaneActionPayload::empty(),
-                        Some("run changed since the supplied precondition".to_string()),
+            ensure_action_events_in_store(
+                &self.lookup.store,
+                &record,
+                request,
+                &operation_key,
+                &recovered,
+            )?;
+            return Ok(recovered);
+        }
+        let acknowledgement = format!(
+            "{}:action:{}:{}",
+            record.run_id,
+            action_name(request.action),
+            request.idempotency_key
+        );
+        let (outcome, resource, result, message) = if request
+            .expected_updated_at
+            .as_ref()
+            .is_some_and(|expected| record.updated_at.as_ref() != Some(expected))
+        {
+            (
+                ControlPlaneActionOutcome::Failed,
+                project_record(&record, None)?,
+                ControlPlaneActionPayload::empty(),
+                Some("run changed since the supplied precondition".to_string()),
+            )
+        } else if let Some(reason) = action_unavailability(&record, request.action) {
+            (
+                ControlPlaneActionOutcome::Failed,
+                project_record(&record, None)?,
+                ControlPlaneActionPayload::empty(),
+                Some(reason),
+            )
+        } else {
+            match request.action {
+                ControlPlaneAction::Cancel if record.state.is_terminal() => (
+                    ControlPlaneActionOutcome::AlreadySatisfied,
+                    project_record(&record, None)?,
+                    cancel_result_payload(cancel_result_for_record(
+                        &record,
+                        Duration::ZERO,
+                        0,
+                        None,
+                    )),
+                    Some("run is already terminal".to_string()),
+                ),
+                ControlPlaneAction::Cancel => {
+                    let parameters: ControlPlaneCancelParameters = serde_json::from_value(
+                        request.parameters.data.clone(),
                     )
-                } else {
-                    match request.action {
-                        ControlPlaneAction::Cancel if record.state.is_terminal() => (
-                            ControlPlaneActionOutcome::AlreadySatisfied,
-                            project_record(&record, None)?,
-                            cancel_result_payload(cancel_result_for_record(
-                                &record,
-                                Duration::ZERO,
-                                0,
+                    .map_err(|error| {
+                        ControlPlaneError::invalid_argument(format!("cancel parameters: {error}"))
+                    })?;
+                    match crate::agent_task_lifecycle::cancel_run_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                        parameters.reason.as_deref(),
+                    ) {
+                        Ok(cancelled) => {
+                            let (observed, result) = self.converge_cancellation(&cancelled);
+                            (
+                                ControlPlaneActionOutcome::Succeeded,
+                                project_record(&observed, None)?,
+                                cancel_result_payload(result),
                                 None,
-                            )),
-                            Some("run is already terminal".to_string()),
-                        ),
-                        ControlPlaneAction::Cancel => {
-                            let parameters: ControlPlaneCancelParameters = serde_json::from_value(
-                                request.parameters.data.clone(),
                             )
-                            .map_err(|error| {
-                                ControlPlaneError::invalid_argument(format!(
-                                    "cancel parameters: {error}"
-                                ))
+                        }
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Reconcile => {
+                    let operation_intent = serde_json::to_value(request)
+                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+                    match crate::agent_task_lifecycle::claim_operation_with_intent_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                        &operation_key,
+                        ACTION_LEASE,
+                        &operation_intent,
+                    ) {
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::Acquired) => {}
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)) => {
+                            return Err(ControlPlaneError::unavailable(
+                                "reconciliation completed without its control-plane acknowledgement; recover the effect before redispatch",
+                            ));
+                        }
+                        Ok(crate::agent_task_lifecycle::ClaimOutcome::LeaseHeld) => {
+                            return Err(ControlPlaneError::unavailable(
+                                "reconciliation action is already leased; recover the effect before redispatch",
+                            ));
+                        }
+                        Err(error) => return Err(map_lifecycle_error(error)),
+                    }
+                    match crate::agent_task_service::reconcile_run_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                        false,
+                    ) {
+                        Ok(report) => {
+                            let claim_result = serde_json::to_value(&report).map_err(|error| {
+                                ControlPlaneError::invalid_argument(error.to_string())
                             })?;
-                            match crate::agent_task_lifecycle::cancel_run_in_store(
+                            crate::agent_task_lifecycle::complete_cook_operation_in_store(
                                 &self.lookup.store,
-                                requested_id.as_str(),
-                                parameters.reason.as_deref(),
-                            ) {
-                                Ok(cancelled) => {
-                                    let (observed, result) = self.converge_cancellation(&cancelled);
-                                    (
-                                        ControlPlaneActionOutcome::Succeeded,
-                                        project_record(&observed, None)?,
-                                        cancel_result_payload(result),
-                                        None,
-                                    )
-                                }
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
-                            }
+                                &resolved,
+                                &operation_key,
+                                claim_result,
+                            )
+                            .map_err(map_lifecycle_error)?;
+                            let current = self
+                                .lookup
+                                .store
+                                .read_record(&resolved)
+                                .map_err(map_lifecycle_error)?;
+                            let outcome = if report.failed > 0 {
+                                ControlPlaneActionOutcome::Failed
+                            } else if report.reconciled == 0 {
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            } else {
+                                ControlPlaneActionOutcome::Succeeded
+                            };
+                            (
+                                outcome,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: report.schema.to_string(),
+                                    data: serde_json::to_value(report).unwrap_or_default(),
+                                },
+                                None,
+                            )
                         }
-                        ControlPlaneAction::Reconcile => {
-                            match crate::agent_task_service::reconcile_run_in_store(
-                                &self.lookup.store,
-                                requested_id.as_str(),
-                                false,
-                            ) {
-                                Ok(report) => {
-                                    let current = self
-                                        .lookup
-                                        .store
-                                        .read_record(&resolved)
-                                        .map_err(map_lifecycle_error)?;
-                                    let outcome = if report.failed > 0 {
-                                        ControlPlaneActionOutcome::Failed
-                                    } else if report.reconciled == 0 {
-                                        ControlPlaneActionOutcome::AlreadySatisfied
-                                    } else {
-                                        ControlPlaneActionOutcome::Succeeded
-                                    };
-                                    (
-                                        outcome,
-                                        project_record(&current, None)?,
-                                        ControlPlaneActionPayload {
-                                            schema: report.schema.to_string(),
-                                            data: serde_json::to_value(report).unwrap_or_default(),
-                                        },
-                                        None,
-                                    )
-                                }
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
-                            }
-                        }
-                        ControlPlaneAction::PlacementUpdate => {
-                            let parameters: ControlPlanePlacementUpdateParameters =
-                                serde_json::from_value(request.parameters.data.clone()).map_err(
-                                    |error| {
-                                        ControlPlaneError::invalid_argument(format!(
-                                            "placement update parameters: {error}"
-                                        ))
-                                    },
-                                )?;
-                            let updated = (|| -> homeboy_core::Result<_> {
-                                let updated = crate::agent_task_lifecycle::update_unmaterialized_cook_placement_in_store(
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::PlacementUpdate => {
+                    let parameters: ControlPlanePlacementUpdateParameters = serde_json::from_value(
+                        request.parameters.data.clone(),
+                    )
+                    .map_err(|error| {
+                        ControlPlaneError::invalid_argument(format!(
+                            "placement update parameters: {error}"
+                        ))
+                    })?;
+                    let updated = (|| -> homeboy_core::Result<_> {
+                        let updated = crate::agent_task_lifecycle::update_unmaterialized_cook_placement_in_store(
                                     &self.lookup.store,
                                     &resolved,
                                     &parameters.placement,
                                     &request.actor,
                                 )?;
-                                let reconciliation = crate::agent_task_service::reconcile_unmaterialized_cook_admission(
-                                    &resolved,
-                                )?;
-                                let current = self.lookup.store.read_record(&resolved)?;
-                                Ok((updated, current, reconciliation))
-                            })();
-                            match updated {
-                                Ok((_updated, current, reconciliation)) => (
-                                    ControlPlaneActionOutcome::Succeeded,
-                                    project_record(&current, None)?,
-                                    ControlPlaneActionPayload {
-                                        schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA
-                                            .to_string(),
-                                        data: serde_json::json!({
-                                            "schema": CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
-                                            "run_id": current.run_id,
-                                            "placement": parameters.placement,
-                                            "reconciliation": reconciliation,
-                                            "preserved_identity": true,
-                                        }),
-                                    },
-                                    None,
-                                ),
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
-                            }
-                        }
-                        ControlPlaneAction::Retry => {
-                            let mut parameters: ControlPlaneRetryParameters =
-                                serde_json::from_value(request.parameters.data.clone()).map_err(
-                                    |error| {
-                                        ControlPlaneError::invalid_argument(format!(
-                                            "retry parameters: {error}"
-                                        ))
-                                    },
-                                )?;
-                            parameters.new_run_id =
-                                Some(retry_action_run_id(&record, request, &parameters));
-                            match retry(&parameters) {
-                                Ok(retry) => {
-                                    let outcome = if retry.created {
-                                        ControlPlaneActionOutcome::Succeeded
-                                    } else {
-                                        ControlPlaneActionOutcome::AlreadySatisfied
-                                    };
-                                    (
-                                        outcome,
-                                        project_record(&retry.record, None)?,
-                                        ControlPlaneActionPayload {
-                                            schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
-                                            data: serde_json::json!({
-                                                "record": retry.record,
-                                                "runnable": retry.run,
-                                                "created": retry.created,
-                                            }),
-                                        },
-                                        None,
-                                    )
-                                }
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
-                            }
-                        }
-                        ControlPlaneAction::Promote => {
-                            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
-                                serde_json::from_value(request.parameters.data.clone()).map_err(
-                                    |error| {
-                                        ControlPlaneError::invalid_argument(format!(
-                                            "promote parameters: {error}"
-                                        ))
-                                    },
-                                )?;
-                            match promote(&parameters) {
-                                Ok(report) => {
-                                    let current = self
-                                        .lookup
-                                        .store
-                                        .read_record(&resolved)
-                                        .map_err(map_lifecycle_error)?;
-                                    let mut result =
-                                        serde_json::to_value(&report).unwrap_or_default();
-                                    result["handoff"] = promotion_handoff(&report);
-                                    if !parameters.dry_run {
-                                        result["recorded_on_run"] = serde_json::json!({
-                                            "run_id": current.run_id,
-                                            "metadata_key": "latest_promotion",
-                                        });
-                                    }
-                                    (
-                                        ControlPlaneActionOutcome::Succeeded,
-                                        project_record(&current, None)?,
-                                        ControlPlaneActionPayload {
-                                            schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
-                                            data: result,
-                                        },
-                                        None,
-                                    )
-                                }
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
-                            }
-                        }
-                        ControlPlaneAction::Resume
-                            if record
-                                .metadata
-                                .get("unmaterialized_cook_admission")
-                                .is_some_and(serde_json::Value::is_object) =>
-                        {
-                            if record.state.is_terminal() {
-                                let terminal_error = record
-                                    .metadata
-                                    .get("cancel_reason")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        record.metadata["unmaterialized_cook_admission"]["reason"]
-                                            .as_str()
-                                            .map(str::to_string)
-                                    });
-                                (
-                                    ControlPlaneActionOutcome::AlreadySatisfied,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload {
-                                        schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
-                                        data: serde_json::json!({
-                                            "schema": "homeboy/unmaterialized-cook-resume/v1",
-                                            "status": record.metadata["unmaterialized_cook_admission"]["state"],
-                                            "run_id": record.run_id,
-                                            "idempotent": true,
-                                            "terminal": true,
-                                            "terminal_state": record.state,
-                                            "error": terminal_error,
-                                        }),
-                                    },
-                                    None,
-                                )
+                        let reconciliation =
+                            crate::agent_task_service::reconcile_unmaterialized_cook_admission(
+                                &resolved,
+                            )?;
+                        let current = self.lookup.store.read_record(&resolved)?;
+                        Ok((updated, current, reconciliation))
+                    })();
+                    match updated {
+                        Ok((_updated, current, reconciliation)) => (
+                            ControlPlaneActionOutcome::Succeeded,
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload {
+                                schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA.to_string(),
+                                data: serde_json::json!({
+                                    "schema": CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
+                                    "run_id": current.run_id,
+                                    "placement": parameters.placement,
+                                    "reconciliation": reconciliation,
+                                    "preserved_identity": true,
+                                }),
+                            },
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Retry => {
+                    let mut parameters: ControlPlaneRetryParameters = serde_json::from_value(
+                        request.parameters.data.clone(),
+                    )
+                    .map_err(|error| {
+                        ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
+                    })?;
+                    parameters.new_run_id =
+                        Some(retry_action_run_id(&record, request, &parameters));
+                    match retry(&resolved, &parameters, request) {
+                        Ok(retry) => {
+                            let outcome = if retry.created {
+                                ControlPlaneActionOutcome::Succeeded
                             } else {
-                                let resumed = (|| -> homeboy_core::Result<_> {
-                                    crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
-                                        requested_id.as_str(),
-                                    )?;
-                                    let reconciliation = crate::agent_task_service::reconcile_unmaterialized_cook_admission(
-                                        requested_id.as_str(),
-                                    )?;
-                                    let current = self.lookup.store.read_record(&resolved)?;
-                                    Ok((current, reconciliation))
-                                })();
-                                match resumed {
-                                    Ok((current, reconciliation)) => (
-                                        ControlPlaneActionOutcome::Succeeded,
-                                        project_record(&current, None)?,
-                                        ControlPlaneActionPayload {
-                                            schema: "homeboy/unmaterialized-cook-resume/v1"
-                                                .to_string(),
-                                            data: serde_json::json!({
-                                                "schema": "homeboy/unmaterialized-cook-resume/v1",
-                                                "status": current.metadata["unmaterialized_cook_admission"]["state"],
-                                                "run_id": requested_id,
-                                                "idempotent": true,
-                                                "reconciliation": reconciliation,
-                                            }),
-                                        },
-                                        None,
-                                    ),
-                                    Err(error) => (
-                                        ControlPlaneActionOutcome::Failed,
-                                        project_record(&record, None)?,
-                                        ControlPlaneActionPayload::empty(),
-                                        Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                    ),
-                                }
-                            }
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            };
+                            (
+                                outcome,
+                                project_record(&retry.record, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
+                                    data: serde_json::json!({
+                                        "record": retry.record,
+                                        "runnable": retry.run,
+                                        "created": retry.created,
+                                    }),
+                                },
+                                None,
+                            )
                         }
-                        ControlPlaneAction::Resume => {
-                            let needs_transport_recovery =
-                                crate::agent_task_service::terminal_transport_recovery_required(
-                                    requested_id.as_str(),
-                                );
-                            let resumed = (|| -> homeboy_core::Result<_> {
-                                if needs_transport_recovery {
-                                    crate::agent_task_service::recover_terminal_transport_proxy_evidence(
-                                        requested_id.as_str(),
-                                    )?;
-                                }
-                                let result = resume()?;
-                                if needs_transport_recovery {
-                                    crate::agent_task_service::reconcile_terminal_artifact_projection(
-                                        requested_id.as_str(),
-                                    )?;
-                                }
-                                let current = self.lookup.store.read_record(&resolved)?;
-                                Ok((result, current))
-                            })();
-                            match resumed {
-                                Ok((result, current)) => (
-                                    if record.state.is_terminal() {
-                                        ControlPlaneActionOutcome::AlreadySatisfied
-                                    } else {
-                                        ControlPlaneActionOutcome::Succeeded
-                                    },
-                                    project_record(&current, None)?,
-                                    ControlPlaneActionPayload {
-                                        schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
-                                        data: serde_json::json!({
-                                            "aggregate": result.value,
-                                            "exit_code": result.exit_code,
-                                        }),
-                                    },
-                                    None,
-                                ),
-                                Err(error) => (
-                                    ControlPlaneActionOutcome::Failed,
-                                    project_record(&record, None)?,
-                                    ControlPlaneActionPayload::empty(),
-                                    Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                                ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Quarantine => {
+                    let parameters: ControlPlaneQuarantineParameters = serde_json::from_value(
+                        request.parameters.data.clone(),
+                    )
+                    .map_err(|error| {
+                        ControlPlaneError::invalid_argument(format!(
+                            "quarantine parameters: {error}"
+                        ))
+                    })?;
+                    match crate::agent_task_lifecycle::quarantine_queued_run_exact_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                        &parameters.reason,
+                    ) {
+                        Ok(current) => (
+                            ControlPlaneActionOutcome::Succeeded,
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload {
+                                schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
+                                data: serde_json::json!({ "record": current }),
+                            },
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Rearm => {
+                    match crate::agent_task_lifecycle::rearm_quarantined_run_in_store(
+                        &self.lookup.store,
+                        &resolved,
+                    ) {
+                        Ok(current) => (
+                            ControlPlaneActionOutcome::Succeeded,
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload {
+                                schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
+                                data: serde_json::json!({ "record": current }),
+                            },
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Promote => {
+                    let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
+                        serde_json::from_value(request.parameters.data.clone()).map_err(
+                            |error| {
+                                ControlPlaneError::invalid_argument(format!(
+                                    "promote parameters: {error}"
+                                ))
+                            },
+                        )?;
+                    match promote(&parameters, request) {
+                        Ok(report) => {
+                            let current = self
+                                .lookup
+                                .store
+                                .read_record(&resolved)
+                                .map_err(map_lifecycle_error)?;
+                            let mut result = serde_json::to_value(&report).unwrap_or_default();
+                            result["handoff"] = promotion_handoff(&report);
+                            if !parameters.dry_run {
+                                result["recorded_on_run"] = serde_json::json!({
+                                    "run_id": current.run_id,
+                                    "metadata_key": "latest_promotion",
+                                });
                             }
+                            (
+                                ControlPlaneActionOutcome::Succeeded,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
+                                    data: result,
+                                },
+                                None,
+                            )
+                        }
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+                ControlPlaneAction::Resume
+                    if record
+                        .metadata
+                        .get("unmaterialized_cook_admission")
+                        .is_some_and(serde_json::Value::is_object) =>
+                {
+                    if record.state.is_terminal() {
+                        let terminal_error = record
+                            .metadata
+                            .get("cancel_reason")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| {
+                                record.metadata["unmaterialized_cook_admission"]["reason"]
+                                    .as_str()
+                                    .map(str::to_string)
+                            });
+                        (
+                            ControlPlaneActionOutcome::AlreadySatisfied,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload {
+                                schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                                data: serde_json::json!({
+                                    "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                    "status": record.metadata["unmaterialized_cook_admission"]["state"],
+                                    "run_id": record.run_id,
+                                    "idempotent": true,
+                                    "terminal": true,
+                                    "terminal_state": record.state,
+                                    "error": terminal_error,
+                                }),
+                            },
+                            None,
+                        )
+                    } else {
+                        let resumed = (|| -> homeboy_core::Result<_> {
+                            crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
+                                requested_id.as_str(),
+                            )?;
+                            let reconciliation =
+                                crate::agent_task_service::reconcile_unmaterialized_cook_admission(
+                                    requested_id.as_str(),
+                                )?;
+                            let current = self.lookup.store.read_record(&resolved)?;
+                            Ok((current, reconciliation))
+                        })();
+                        match resumed {
+                            Ok((current, reconciliation)) => (
+                                ControlPlaneActionOutcome::Succeeded,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                                    data: serde_json::json!({
+                                        "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                        "status": current.metadata["unmaterialized_cook_admission"]["state"],
+                                        "run_id": requested_id,
+                                        "idempotent": true,
+                                        "reconciliation": reconciliation,
+                                    }),
+                                },
+                                None,
+                            ),
+                            Err(error) => (
+                                ControlPlaneActionOutcome::Failed,
+                                project_record(&record, None)?,
+                                ControlPlaneActionPayload::empty(),
+                                Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            ),
                         }
                     }
-                };
-                let result = ControlPlaneActionAcknowledgement {
-                    schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
-                    acknowledgement,
-                    run: RunId::new(&record.run_id)
-                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
-                    action: request.action,
-                    idempotency_key: request.idempotency_key.clone(),
-                    actor: request.actor.clone(),
-                    accepted_at,
-                    completed_at: now_timestamp(),
-                    outcome,
-                    resource,
-                    result,
-                    message,
-                };
-                complete_cook_operation_in_store(
-                    &self.lookup.store,
-                    &resolved,
-                    &operation_key,
-                    serde_json::to_value(&result).map_err(|error| {
-                        ControlPlaneError::unavailable(format!("serialize action result: {error}"))
-                    })?,
-                )
-                .map_err(map_lifecycle_error)?;
-                ensure_action_events_in_store(
-                    &self.lookup.store,
-                    &record,
-                    request,
-                    &operation_key,
-                    &result,
-                )?;
-                Ok(result)
+                }
+                ControlPlaneAction::Resume => {
+                    let needs_transport_recovery =
+                        crate::agent_task_service::terminal_transport_recovery_required(
+                            requested_id.as_str(),
+                        );
+                    let terminal_projection_recovery = record.state.is_terminal()
+                        && record.runner_id().is_some()
+                        && record.runner_job_id().is_some();
+                    let resumed = (|| -> homeboy_core::Result<_> {
+                        if terminal_projection_recovery {
+                            crate::agent_task_service::reconcile_terminal_artifact_projection(
+                                &resolved,
+                            )?;
+                            let result = crate::agent_task_service::terminal_run_result(&resolved)?
+                                .ok_or_else(|| {
+                                    homeboy_core::Error::internal_unexpected(
+                                        "terminal transport recovery has no terminal result",
+                                    )
+                                })?;
+                            let current = self.lookup.store.read_record(&resolved)?;
+                            return Ok((result, current));
+                        }
+                        if needs_transport_recovery {
+                            crate::agent_task_service::recover_terminal_transport_proxy_evidence(
+                                requested_id.as_str(),
+                            )?;
+                        }
+                        let result = resume(&resolved, request)?;
+                        if needs_transport_recovery {
+                            crate::agent_task_service::reconcile_terminal_artifact_projection(
+                                requested_id.as_str(),
+                            )?;
+                        }
+                        let current = self.lookup.store.read_record(&resolved)?;
+                        Ok((result, current))
+                    })();
+                    match resumed {
+                        Ok((result, current)) => (
+                            if record.state.is_terminal() {
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            } else {
+                                ControlPlaneActionOutcome::Succeeded
+                            },
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload {
+                                schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                                data: serde_json::json!({
+                                    "aggregate": result.value,
+                                    "exit_code": result.exit_code,
+                                }),
+                            },
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                        ),
+                    }
+                }
             }
-        }
+        };
+        let result = ControlPlaneActionAcknowledgement {
+            schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+            acknowledgement,
+            run: RunId::new(&record.run_id)
+                .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+            action: request.action,
+            idempotency_key: request.idempotency_key.clone(),
+            actor: request.actor.clone(),
+            accepted_at,
+            completed_at: now_timestamp(),
+            outcome,
+            resource,
+            result,
+            message,
+        };
+        observation
+            .terminalize_control_plane_effect(
+                &request.effect_id,
+                lease.lease_fence,
+                &ControlPlaneEffectTerminal {
+                    schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+                    completed_at: result.completed_at.clone(),
+                    acknowledgement: result.clone(),
+                    audit: ControlPlaneEffectAudit {
+                        schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+                        observed_at: now_timestamp(),
+                        evidence: serde_json::json!({
+                            "recovery_disposition": "terminal_acknowledgement_persisted",
+                            "operation_key": operation_key,
+                        }),
+                    },
+                },
+            )
+            .map_err(map_lifecycle_error)?;
+        ensure_action_events_in_store(
+            &self.lookup.store,
+            &record,
+            request,
+            &operation_key,
+            &result,
+        )?;
+        Ok(result)
     }
 }
 
@@ -2104,26 +2394,48 @@ fn retry_action_run_id(
     })
 }
 
+/// The read projection is advisory, but an unavailable action must still be
+/// rejected by the mutation service. This check is deliberately after the
+/// idempotency claim: a failed request gets one durable terminal receipt rather
+/// than an orphaned in-progress claim or a second caller-specific result.
+fn action_unavailability(
+    record: &AgentTaskRunRecord,
+    action: ControlPlaneAction,
+) -> Option<String> {
+    // These actions have explicit idempotent terminal dispositions below.
+    if matches!(
+        action,
+        ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
+    ) {
+        return None;
+    }
+    if action == ControlPlaneAction::Resume
+        && record.state.is_terminal()
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+    {
+        // This is an idempotent evidence/artifact reprojection, not execution
+        // resume. The Resume branch below performs only that recovery first.
+        return None;
+    }
+    let report = lifecycle_action_eligibility(record, None);
+    let eligibility = report
+        .actions
+        .into_iter()
+        .find(|entry| entry.action == action)?;
+    (eligibility.availability == ControlPlaneActionAvailability::Unavailable)
+        .then_some(eligibility.reason)
+}
+
 fn recover_interrupted_action_acknowledgement(
     store: &AgentTaskLifecycleStore,
     original: &AgentTaskRunRecord,
     request: &ControlPlaneActionRequest,
-    operation_key: &str,
+    accepted_at: &str,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
     let current = store
         .read_record(&original.run_id)
         .map_err(map_lifecycle_error)?;
-    let claim = operation_claim_in_store(store, &original.run_id, operation_key)
-        .map_err(map_lifecycle_error)?
-        .ok_or_else(|| ControlPlaneError::unavailable("interrupted action claim is missing"))?;
-    let accepted_at = claim
-        .accepted_at
-        .or_else(|| {
-            action_accepted_at(store, &original.run_id, operation_key)
-                .ok()
-                .flatten()
-        })
-        .unwrap_or(claim.leased_at);
     let failed = |message: &str| {
         Ok((
             ControlPlaneActionOutcome::Failed,
@@ -2196,6 +2508,30 @@ fn recover_interrupted_action_acknowledgement(
                 )?
             }
         }
+        ControlPlaneAction::Quarantine if current.metadata.get("queue_quarantine").is_some() => (
+            ControlPlaneActionOutcome::Succeeded,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
+                data: serde_json::json!({ "record": current, "recovered": true }),
+            },
+            Some("recovered from the durable quarantine marker".to_string()),
+        ),
+        ControlPlaneAction::Quarantine => failed(
+            "quarantine was interrupted after acceptance without a durable quarantine marker; no second mutation was attempted",
+        )?,
+        ControlPlaneAction::Rearm if current.metadata.get("queue_quarantine").is_none() => (
+            ControlPlaneActionOutcome::Succeeded,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
+                data: serde_json::json!({ "record": current, "recovered": true }),
+            },
+            Some("recovered from the durable rearm state".to_string()),
+        ),
+        ControlPlaneAction::Rearm => failed(
+            "rearm was interrupted after acceptance without authoritative completion evidence; no second mutation was attempted",
+        )?,
         ControlPlaneAction::Resume
             if current
                 .metadata
@@ -2317,7 +2653,7 @@ fn recover_interrupted_action_acknowledgement(
         action: request.action,
         idempotency_key: request.idempotency_key.clone(),
         actor: request.actor.clone(),
-        accepted_at,
+        accepted_at: accepted_at.to_string(),
         completed_at: now_timestamp(),
         outcome,
         resource,
@@ -2400,31 +2736,6 @@ fn action_event_receipt_exists(
     store
         .open_observation_initialized()
         .and_then(|observation| observation.control_plane_event_receipt_exists(&run, &digest))
-        .map_err(map_lifecycle_error)
-}
-
-fn action_accepted_at(
-    store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    operation_key: &str,
-) -> Result<Option<String>, ControlPlaneError> {
-    let run = RunId::new(run_id)
-        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-    let operation_digest = action_operation_digest(operation_key);
-    store
-        .open_observation_initialized()
-        .and_then(|observation| observation.control_plane_event_stream(&run))
-        .map(|events| {
-            events.and_then(|events| {
-                events
-                    .into_iter()
-                    .find(|event| {
-                        event.kind == "action.accepted"
-                            && event.data["operation_digest"] == operation_digest
-                    })
-                    .and_then(|event| event.occurred_at)
-            })
-        })
         .map_err(map_lifecycle_error)
 }
 
@@ -3074,6 +3385,8 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
+        ControlPlaneAction::Quarantine => "quarantine",
+        ControlPlaneAction::Rearm => "rearm",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
     }
@@ -3296,15 +3609,19 @@ pub fn execute_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || default_resume(run_id),
-        default_promote,
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
+/// `run` is the caller's execution intent, not part of the immutable retry
+/// intent: the action always reserves the successor, and this decides whether
+/// the acknowledgement reports it as runnable for the caller to dispatch.
 pub fn execute_retry_action_from_current_environment_with_preflight<F>(
     run_id: &str,
     request: &ControlPlaneActionRequest,
+    run: bool,
     preflight: F,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
@@ -3313,17 +3630,17 @@ where
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| {
+        |resolved, parameters, _intent| {
             crate::agent_task_service::retry_with_preflight(
-                run_id,
+                resolved,
                 parameters.new_run_id.as_deref(),
-                true,
+                run,
                 parameters.force,
                 &preflight,
             )
         },
-        || default_resume(run_id),
-        default_promote,
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -3335,9 +3652,9 @@ pub fn execute_resume_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || crate::agent_task_service::resume(run_id.to_string(), executor),
-        default_promote,
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| crate::agent_task_service::resume(resolved.to_string(), executor),
+        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -3349,9 +3666,9 @@ pub fn execute_promotion_action_from_current_environment(
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
-        |parameters| default_retry(run_id, parameters),
-        || default_resume(run_id),
-        |promotion| {
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        |resolved, _intent| default_resume(resolved),
+        |promotion, _intent| {
             crate::agent_task_service::execute_promotion_with_progress(promotion.clone(), progress)
         },
     )
@@ -3366,15 +3683,21 @@ fn execute_action_from_current_environment_with_delegates<F, R, P>(
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
     F: FnOnce(
+        &str,
         &ControlPlaneRetryParameters,
+        &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult>,
-    R: FnOnce() -> homeboy_core::Result<
+    R: FnOnce(
+        &str,
+        &ControlPlaneActionRequest,
+    ) -> homeboy_core::Result<
         crate::agent_task_service::AgentTaskRunResult<
             crate::agent_task_schedule::AgentTaskAggregate,
         >,
     >,
     P: FnOnce(
         &crate::agent_task_service::AgentTaskPromotionRequest,
+        &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
     let requested_id = RunId::new(run_id).map_err(|error| {
@@ -3412,11 +3735,23 @@ fn default_retry(
     run_id: &str,
     parameters: &ControlPlaneRetryParameters,
 ) -> homeboy_core::Result<crate::agent_task_service::AgentTaskRetryServiceResult> {
-    crate::agent_task_service::retry(
+    let route = parameters.provider_route.as_ref().map(|route| {
+        crate::agent_task_service::CookProviderRouteOverride {
+            backend: route.backend.clone(),
+            selector: route.selector.clone(),
+            model: route.model.clone(),
+            allow_provider_rotation: route.allow_provider_rotation,
+            provider_rotations: route.provider_rotations,
+        }
+    });
+    // The action reserves the successor; dispatching it is the caller's own
+    // step, so a CLI that runs the retry itself is not raced by this delegate.
+    crate::agent_task_service::retry_with_provider_route_override(
         run_id,
         parameters.new_run_id.as_deref(),
-        true,
+        false,
         parameters.force,
+        route.unwrap_or_default(),
     )
 }
 
@@ -5016,24 +5351,16 @@ impl ControlPlaneProvider for RegisteredProvider {
                             && eligibility.availability == ControlPlaneActionAvailability::Available
                     })
                 });
-                if !available {
-                    if let Some(acknowledgement) =
-                        homeboy_core::control_plane::replay_delegated_action(
-                            &observation,
-                            requested_id,
-                            request,
-                        )?
-                    {
-                        return Ok(acknowledgement);
-                    }
-                    return Err(ControlPlaneError::invalid_argument(format!(
-                        "control-plane action is unavailable for run {requested_id}"
-                    )));
-                }
                 return homeboy_core::control_plane::execute_delegated_action(
                     &observation,
                     &record,
                     request,
+                    "observation_run",
+                    record.finished_at.as_deref().unwrap_or(&record.started_at),
+                    available,
+                    (!available).then(|| {
+                        format!("control-plane action is unavailable for run {requested_id}")
+                    }),
                     || {
                         let current = observation
                             .get_run(requested_id.as_str())
@@ -5057,6 +5384,17 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store))
             .execute_action(requested_id, request)
     }
+
+    fn effect_status(
+        &self,
+        requested_id: &RunId,
+        effect_id: &EffectId,
+    ) -> Result<ControlPlaneEffectStatus, ControlPlaneError> {
+        let store = AgentTaskLifecycleStore::from_environment()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        OrchestrationService::new(LifecycleStoreLookup::new(store))
+            .effect_status(requested_id, effect_id)
+    }
 }
 
 /// Register the orchestration service as the HTTP control-plane provider.
@@ -5076,30 +5414,31 @@ mod tests {
         RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
-        claim_operation_with_intent_in_store, operation_claim_in_store, AgentTaskArtifactRef,
-        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunTask,
-        ClaimOutcome, ClaimState,
+        AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
+        AgentTaskRunTask,
     };
     use crate::agent_task_schedule::AgentTaskPlan;
     use crate::agent_tasks::AgentTaskState;
     use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionOutcome,
-        ControlPlaneActionPayload, ControlPlaneActionRequest,
+        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionFence,
+        ControlPlaneActionIntent, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, ControlPlaneActionResource,
         ControlPlaneAdmissionRetryDisposition, ControlPlaneAttemptListRequest,
-        ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneErrorClass,
-        ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventSource,
-        ControlPlaneEvidenceRef, ControlPlaneMissionListRequest, ControlPlaneOperation,
-        ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneRunListRequest,
-        ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-        ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EventCursor, EventId,
-        ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
-        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneCancelDisposition, ControlPlaneCancelResult, ControlPlaneEffectExecutionState,
+        ControlPlaneErrorClass, ControlPlaneEvent, ControlPlaneEventAppendRequest,
+        ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneMissionListRequest,
+        ControlPlaneOperation, ControlPlaneRef, ControlPlaneReferenceRegistration,
+        ControlPlaneReferenceType, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
+        ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
+        ControlPlaneTaskListRequest, EffectId, EventCursor, EventId, ExecutionId, MissionId,
+        ReferenceId, RunCursor, RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
+        CONTROL_PLANE_ACTION_FENCE_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -5126,25 +5465,58 @@ mod tests {
         let operation_key = format!(
             "control-plane-action:{}:{}",
             super::action_name(request.action),
-            request.idempotency_key
+            request.effect_id.0
         );
-        let intent = serde_json::to_value(request).expect("action intent");
-        assert_eq!(
-            claim_operation_with_intent_in_store(
-                &service.lookup.store,
-                run.as_str(),
-                &operation_key,
-                super::ACTION_LEASE,
+        let accepted_at = super::now_timestamp();
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run: run.clone(),
+                original_alias: None,
+            },
+            request: request.clone(),
+            request_digest: homeboy_engine_primitives::content_hash::sha256_hex(
+                serde_json::to_vec(request)
+                    .expect("request bytes")
+                    .as_slice(),
+            ),
+            accepted_at: accepted_at.clone(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: record
+                .updated_at
+                .clone()
+                .unwrap_or_else(|| record.submitted_at.clone()),
+            eligible: true,
+            reason: None,
+        };
+        let observation = service
+            .lookup
+            .store
+            .open_observation_initialized()
+            .expect("observation");
+        observation
+            .enqueue_control_plane_action_intent(
                 &intent,
+                &fence,
+                "agent_task_run",
+                &homeboy_engine_primitives::content_hash::sha256_hex(
+                    request.idempotency_key.as_bytes(),
+                ),
             )
-            .expect("action claim"),
-            ClaimOutcome::Acquired
-        );
-        let accepted_at =
-            operation_claim_in_store(&service.lookup.store, run.as_str(), &operation_key)
-                .expect("read action claim")
-                .and_then(|claim| claim.accepted_at)
-                .expect("durable accepted timestamp");
+            .expect("enqueue action effect");
+        observation
+            .lease_control_plane_effect_by_id(
+                &request.effect_id,
+                "interrupted-test-owner",
+                "2000-01-01T00:00:00Z",
+                "2000-01-01T00:00:01Z",
+            )
+            .expect("lease action effect")
+            .expect("leased action effect");
         super::append_action_event_in_store(
             &service.lookup.store,
             &record,
@@ -5169,22 +5541,6 @@ mod tests {
         )
         .expect("accepted receipt");
         effect();
-        service
-            .lookup
-            .store
-            .mutate_record(run.as_str(), |record| {
-                let claim = record.metadata["cook_operation_claims"]
-                    .as_array_mut()
-                    .and_then(|claims| {
-                        claims
-                            .iter_mut()
-                            .find(|claim| claim["operation_key"] == json!(operation_key.as_str()))
-                    })
-                    .expect("action claim");
-                claim["owner_pid"] = json!(u32::MAX);
-                true
-            })
-            .expect("simulate dead action owner");
         operation_key
     }
 
@@ -6443,6 +6799,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-request-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "cancel-request-1".to_string(),
                 actor: "test".to_string(),
@@ -6517,6 +6874,7 @@ mod tests {
             );
 
             let stale = ControlPlaneActionRequest {
+                effect_id: EffectId("test:cancel-request-stale".to_string()),
                 idempotency_key: "cancel-request-stale".to_string(),
                 expected_updated_at: Some("2025-12-31T23:59:59Z".to_string()),
                 ..conflicting
@@ -6542,6 +6900,7 @@ mod tests {
 
             let reconcile = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:reconcile-request-1".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "reconcile-request-1".to_string(),
                 actor: "test".to_string(),
@@ -6588,6 +6947,53 @@ mod tests {
     }
 
     #[test]
+    fn effect_status_survives_restart_and_preserves_the_immutable_request() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:status-succeeded".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "status-succeeded".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop" }),
+                },
+                confirmed: true,
+            };
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            assert_eq!(
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("not started")
+                    .state,
+                ControlPlaneEffectExecutionState::NotStarted
+            );
+            let first = service
+                .execute_action(&run, &request)
+                .expect("first action");
+            drop(service);
+
+            let restarted = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let status = restarted
+                .effect_status(&run, &request.effect_id)
+                .expect("restarted status");
+            assert_eq!(status.state, ControlPlaneEffectExecutionState::Succeeded);
+            assert_eq!(status.acknowledgement, Some(first.clone()));
+            assert_eq!(
+                restarted
+                    .execute_action(&run, &request)
+                    .expect("duplicate replay"),
+                first
+            );
+        });
+    }
+
+    #[test]
     fn accepted_cancel_returns_the_converged_resource_and_replays_without_waiting_again() {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
@@ -6601,6 +7007,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-converges-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "cancel-converges-1".to_string(),
                 actor: "test".to_string(),
@@ -6642,6 +7049,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-cancel-1".to_string()),
                 action: ControlPlaneAction::Cancel,
                 idempotency_key: "interrupted-cancel-1".to_string(),
                 actor: "test".to_string(),
@@ -6652,7 +7060,7 @@ mod tests {
                 },
                 confirmed: true,
             };
-            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+            let _operation_key = interrupt_action_after_effect(&service, &run, &request, || {
                 crate::agent_task_lifecycle::cancel_run_in_store(
                     &store,
                     run.as_str(),
@@ -6665,19 +7073,19 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted cancel");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
             assert_eq!(recovered.resource.state, ControlPlaneRunState::Cancelled);
             assert_eq!(
-                operation_claim_in_store(&store, run.as_str(), &operation_key)
-                    .expect("claim")
-                    .expect("claim exists")
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("effect status")
                     .state,
-                ClaimState::Completed
+                ControlPlaneEffectExecutionState::Succeeded
             );
             assert_eq!(
                 service
@@ -6710,6 +7118,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-resume-1".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "interrupted-resume-1".to_string(),
                 actor: "test".to_string(),
@@ -6718,14 +7127,17 @@ mod tests {
                 confirmed: false,
             };
             let effect_count = Cell::new(0);
-            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+            let _operation_key = interrupt_action_after_effect(&service, &run, &request, || {
                 effect_count.set(effect_count.get() + 1);
             });
-            let accepted_at = operation_claim_in_store(&store, run.as_str(), &operation_key)
-                .expect("claim")
-                .expect("claim exists")
-                .accepted_at
-                .expect("accepted timestamp");
+            let accepted_at = store
+                .open_observation_initialized()
+                .expect("observation")
+                .control_plane_effect_status(&request.effect_id)
+                .expect("effect status")
+                .expect("effect")
+                .intent
+                .accepted_at;
             for index in 0..100 {
                 let mut filler = event_append_request();
                 filler.idempotency_key = format!("interrupted-resume-filler-{index}");
@@ -6743,12 +7155,12 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| {
                         effect_count.set(effect_count.get() + 1);
                         panic!("resume delegate must not run")
                     },
-                    |_| panic!("promote delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("terminal interrupted resume acknowledgement");
             assert_eq!(effect_count.get(), 1);
@@ -6759,11 +7171,11 @@ mod tests {
                 .as_deref()
                 .is_some_and(|message| message.contains("no second execution")));
             assert_eq!(
-                operation_claim_in_store(&store, run.as_str(), &operation_key)
-                    .expect("claim")
-                    .expect("claim exists")
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("effect status")
                     .state,
-                ClaimState::Completed
+                ControlPlaneEffectExecutionState::Failed
             );
             assert_eq!(
                 service
@@ -6798,6 +7210,7 @@ mod tests {
             let retry_run_id = "interrupted-retry-successor";
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-retry-1".to_string()),
                 action: ControlPlaneAction::Retry,
                 idempotency_key: "interrupted-retry-1".to_string(),
                 actor: "test".to_string(),
@@ -6811,7 +7224,7 @@ mod tests {
                 },
                 confirmed: true,
             };
-            let operation_key = interrupt_action_after_effect(&service, &run, &request, || {
+            let _operation_key = interrupt_action_after_effect(&service, &run, &request, || {
                 let mut successor = record(retry_run_id);
                 successor.metadata["retry_of"] = json!(AGENT_TASK_RUN);
                 store.write_record(&successor).expect("durable successor");
@@ -6821,9 +7234,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted retry");
             assert_eq!(
@@ -6834,11 +7247,11 @@ mod tests {
             assert_eq!(recovered.result.data["record"]["run_id"], retry_run_id);
             assert_eq!(recovered.result.data["recovered"], true);
             assert_eq!(
-                operation_claim_in_store(&store, run.as_str(), &operation_key)
-                    .expect("claim")
-                    .expect("claim exists")
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("effect status")
                     .state,
-                ClaimState::Completed
+                ControlPlaneEffectExecutionState::Succeeded
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
@@ -6856,6 +7269,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:interrupted-promote-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "interrupted-promote-1".to_string(),
                 actor: "test".to_string(),
@@ -6901,9 +7315,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted promotion");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
@@ -6942,6 +7356,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:explicit-reconcile-1".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "explicit-reconcile-1".to_string(),
                 actor: "test".to_string(),
@@ -6981,6 +7396,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:maximum-idempotency-key".to_string()),
                 action: ControlPlaneAction::Reconcile,
                 idempotency_key: "k".repeat(128),
                 actor: "test".to_string(),
@@ -7023,6 +7439,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:resume-request-1".to_string()),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "resume-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7034,18 +7451,20 @@ mod tests {
             let execute = || {
                 let executions = std::rc::Rc::clone(&executions);
                 let aggregate = aggregate.clone();
+                let expected_intent = request.clone();
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    move || {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    move |_, intent| {
+                        assert_eq!(intent, &expected_intent);
                         executions.set(executions.get() + 1);
                         Ok(crate::agent_task_service::AgentTaskRunResult {
                             value: aggregate,
                             exit_code: 0,
                         })
                     },
-                    |_| panic!("promote delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
             };
 
@@ -7072,6 +7491,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:promote-request-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "promote-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7093,9 +7513,9 @@ mod tests {
                 .execute_action_with_delegates(
                     &run,
                     &malformed,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    |_| panic!("promote delegate must not run"),
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect_err("malformed parameters");
             assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
@@ -7105,9 +7525,9 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    move |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    move |_, _| {
                         executions.set(executions.get() + 1);
                         Err(homeboy_core::Error::internal_unexpected(
                             "promotion fixture failed",
@@ -7134,6 +7554,7 @@ mod tests {
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:promote-handoff-request-1".to_string()),
                 action: ControlPlaneAction::Promote,
                 idempotency_key: "promote-request-1".to_string(),
                 actor: "test".to_string(),
@@ -7167,9 +7588,9 @@ mod tests {
                 service.execute_action_with_delegates(
                     &run,
                     &request,
-                    |_| panic!("retry delegate must not run"),
-                    || panic!("resume delegate must not run"),
-                    move |_| {
+                    |_, _, _| panic!("retry delegate must not run"),
+                    |_, _| panic!("resume delegate must not run"),
+                    move |_, _| {
                         executions.set(executions.get() + 1);
                         Ok(report)
                     },

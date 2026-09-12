@@ -829,12 +829,10 @@ mod tests {
     use super::*;
     use crate::test_support::local_client;
     use homeboy_core::component::VersionTarget;
-    use homeboy_core::server::SshClient;
     use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
     use homeboy_extension_contract::{
         DeployArchiveInstallPolicy, DeployRequiredHeader, DeployVerification, ExtensionManifest,
     };
-    use std::collections::HashMap;
     use std::fs;
     use std::io::Write;
 
