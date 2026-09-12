@@ -3766,6 +3766,14 @@ fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
         .or_else(|| {
             args.repository_identity
                 .as_ref()
+                .and_then(|identity| identity.get("component_id"))
+                .and_then(Value::as_str)
+                .filter(|component| !component.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            args.repository_identity
+                .as_ref()
                 .and_then(|identity| identity.get("repository_name"))
                 .and_then(Value::as_str)
                 .filter(|repository| !repository.trim().is_empty())
@@ -3892,7 +3900,11 @@ pub(crate) fn resolve_cook_destination(
         Some(head) => head,
         None => derived_cook_branch(&task_url)?,
     };
-    args.to_worktree = Some(format!("{repo}@{}", slugify_cook_branch(&head)));
+    let handle_repository = cook_component_id(&args).unwrap_or(repo);
+    args.to_worktree = Some(format!(
+        "{handle_repository}@{}",
+        slugify_cook_branch(&head)
+    ));
     if args.head.is_none() {
         args.head = Some(head);
     }
@@ -4518,33 +4530,22 @@ fn cook_component_id(args: &AgentTaskCookArgs) -> Option<&str> {
 fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
-    if let Some(component) =
-        homeboy::core::component::inventory::registered_primary_by_id(repository_name)?
-    {
-        return Ok(vec![component]);
+    let repository_name = normalize_repository_name(repository_name);
+    let primary_matches = cook_components_matching_repository_name(
+        homeboy::core::component::inventory::registered_primary()?,
+        &repository_name,
+    );
+    if !primary_matches.is_empty() {
+        if primary_matches.len() > 1 {
+            return Err(repository_component_identity_ambiguity_error(
+                repository_name,
+                &primary_matches,
+            ));
+        }
+        return Ok(primary_matches);
     }
     let components = homeboy::core::component::inventory::registered_base()?;
-    if let Some(component) = components
-        .iter()
-        .find(|component| component.id == repository_name)
-        .cloned()
-    {
-        return Ok(vec![component]);
-    }
-    let repository_name = normalize_repository_name(repository_name);
-    let matches = components
-        .into_iter()
-        .filter(|component| {
-            component
-                .aliases
-                .iter()
-                .any(|alias| normalize_repository_name(alias) == repository_name)
-                || component
-                    .remote_url
-                    .as_deref()
-                    .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
-        })
-        .collect::<Vec<_>>();
+    let matches = cook_components_matching_repository_name(components, &repository_name);
     if matches.len() > 1 {
         return Err(repository_component_identity_ambiguity_error(
             repository_name,
@@ -4554,13 +4555,35 @@ fn cook_components_for_repository_name(
     Ok(matches)
 }
 
+fn cook_components_matching_repository_name(
+    components: Vec<homeboy::core::component::Component>,
+    repository_name: &str,
+) -> Vec<homeboy::core::component::Component> {
+    components
+        .into_iter()
+        .filter(|component| {
+            normalize_repository_name(&component.id) == repository_name
+                || component
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_repository_name(alias) == repository_name)
+                || component
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
+        })
+        .collect()
+}
+
 fn cook_registered_component_by_id(
     component_id: &str,
 ) -> homeboy::core::Result<Option<homeboy::core::component::Component>> {
-    Ok(
+    if let Some(component) =
         homeboy::core::component::inventory::registered_primary_by_id(component_id)?
-            .or(homeboy::core::component::registered_by_id(component_id)?),
-    )
+    {
+        return Ok(Some(component));
+    }
+    homeboy::core::component::registered_by_id(component_id)
 }
 
 fn select_cook_repository_identity(

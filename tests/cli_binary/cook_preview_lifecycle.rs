@@ -186,6 +186,16 @@ fn unscoped_preview_uses_the_primary_component_despite_missing_project_shadows()
                 primary.to_str().expect("primary path"),
             ],
         );
+        run_homeboy(
+            home.path(),
+            [
+                "component",
+                "set",
+                "primary",
+                "--json",
+                r#"{"aliases":["primary-alias"],"remote_url":"https://github.com/example/primary-repository.git"}"#,
+            ],
+        );
         for project in projects {
             let shadow = repository.path().join(project);
             std::fs::create_dir_all(&shadow).expect("create project shadow");
@@ -211,48 +221,50 @@ fn unscoped_preview_uses_the_primary_component_despite_missing_project_shadows()
             std::fs::remove_dir(shadow).expect("remove project shadow");
         }
 
-        let output = Command::new(homeboy_bin())
-            .args([
-                "agent-task",
-                "cook",
-                "--repo",
-                "primary",
-                "--task-url",
-                "https://example.test/issues/14591",
-                "--head",
-                "fix/14591-primary-selection",
-                "--base",
-                "main",
-                "--backend",
-                "fixture",
-                "--prompt",
-                "Preserve the primary component selection.",
-                "--preview",
-                "--no-finalize",
-            ])
-            .env("HOME", home.path())
-            .env("XDG_CONFIG_HOME", home.path().join(".config"))
-            .env("XDG_DATA_HOME", home.path().join(".local/share"))
-            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
-            .output()
-            .expect("run Cook preview");
+        for repo in ["primary", "primary-alias", "primary-repository"] {
+            let output = Command::new(homeboy_bin())
+                .args([
+                    "agent-task",
+                    "cook",
+                    "--repo",
+                    repo,
+                    "--task-url",
+                    "https://example.test/issues/14591",
+                    "--head",
+                    "fix/14591-primary-selection",
+                    "--base",
+                    "main",
+                    "--backend",
+                    "fixture",
+                    "--prompt",
+                    "Preserve the primary component selection.",
+                    "--preview",
+                    "--no-finalize",
+                ])
+                .env("HOME", home.path())
+                .env("XDG_CONFIG_HOME", home.path().join(".config"))
+                .env("XDG_DATA_HOME", home.path().join(".local/share"))
+                .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+                .output()
+                .expect("run Cook preview");
 
-        assert_eq!(
-            output.status.code(),
-            Some(0),
-            "stdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
-        assert_eq!(
-            preview["data"]["resolved"]["repository_identity"]["component_cwd"],
-            "."
-        );
-        assert_eq!(
-            preview["data"]["resolved"]["repository_identity"]["component_id"],
-            "primary"
-        );
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "repo {repo}; stdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
+            assert_eq!(
+                preview["data"]["resolved"]["repository_identity"]["component_cwd"],
+                "."
+            );
+            assert_eq!(
+                preview["data"]["resolved"]["repository_identity"]["component_id"],
+                "primary"
+            );
+        }
     }
 }
 
