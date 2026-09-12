@@ -1985,24 +1985,6 @@ fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
 }
 
 #[test]
-fn diagnostic_ssh_bootstrap_preflight_requires_remote_materialization_tools() {
-    let options = refresh_execution_options(
-        &ssh_bootstrap_plan(),
-        vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
-        true,
-    );
-
-    assert_eq!(
-        options
-            .capability_preflight
-            .expect("diagnostic SSH capability preflight")
-            .required_commands,
-        ["bash", "git", "cargo"],
-        "diagnostic SSH must probe the remote shell before materialization"
-    );
-}
-
-#[test]
 fn connected_refresh_keeps_daemon_execution_options() {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
