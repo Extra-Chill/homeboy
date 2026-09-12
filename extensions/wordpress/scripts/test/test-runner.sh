@@ -375,6 +375,48 @@ homeboy_wordpress_test_environment() {
     }
 }
 
+# Resolve declared validation dependencies into the same environment contract
+# the booted-WordPress backend publishes: a JSON roster plus one variable per
+# dependency slug. A standalone smoke that needs a cross-plugin checkout can
+# then read it from the declaration instead of an ambient caller-supplied path.
+homeboy_wordpress_standalone_dependency_environment() {
+    local helper="${HOMEBOY_RUNTIME_VALIDATION_DEPENDENCIES:-${SCRIPT_DIR}/../lib/validation-dependencies.sh}"
+
+    STANDALONE_DEPENDENCY_ROOTS_JSON="{}"
+    STANDALONE_DEPENDENCY_ENV_NAMES=()
+    STANDALONE_DEPENDENCY_ENV_VALUES=()
+
+    [ -f "$helper" ] || return 0
+    if ! type homeboy_export_validation_dependency_paths >/dev/null 2>&1; then
+        # shellcheck source=/dev/null
+        source "$helper" || return 0
+    fi
+    type homeboy_export_validation_dependency_paths >/dev/null 2>&1 || return 0
+    homeboy_export_validation_dependency_paths "$PLUGIN_PATH" >/dev/null 2>&1 || true
+    [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ] || return 0
+
+    local dependency_path dependency_slug legacy_name
+    while IFS= read -r dependency_path; do
+        [ -n "$dependency_path" ] || continue
+        [ -d "$dependency_path" ] || continue
+        if type homeboy_get_validation_dependency_slug >/dev/null 2>&1; then
+            dependency_slug="$(homeboy_get_validation_dependency_slug "$dependency_path" || basename "$dependency_path")"
+        else
+            dependency_slug="$(basename "$dependency_path")"
+        fi
+        case "$dependency_slug" in
+            ''|*[!A-Za-z0-9._-]*) continue ;;
+        esac
+        STANDALONE_DEPENDENCY_ROOTS_JSON="$(jq -nc --argjson roots "$STANDALONE_DEPENDENCY_ROOTS_JSON" --arg slug "$dependency_slug" --arg root "$dependency_path" '$roots + {($slug): $root}')"
+        legacy_name="$(printf '%s' "$dependency_slug" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9_' '_')_PATH"
+        case "$legacy_name" in
+            PATH_*|_PATH|PATH) continue ;;
+        esac
+        STANDALONE_DEPENDENCY_ENV_NAMES+=("$legacy_name")
+        STANDALONE_DEPENDENCY_ENV_VALUES+=("$dependency_path")
+    done <<< "$HOMEBOY_WORDPRESS_DEPENDENCY_PATHS"
+}
+
 homeboy_wordpress_run_standalone_php_smoke_files() {
     local smoke_files_raw="$1"
     local php_bin="${HOMEBOY_PHP_BIN:-php}"
@@ -387,6 +429,15 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
     echo "  Backend: standalone-php"
 
+    homeboy_wordpress_standalone_dependency_environment
+    local dependency_env=()
+    local dependency_index
+    for dependency_index in "${!STANDALONE_DEPENDENCY_ENV_NAMES[@]}"; do
+        dependency_env+=("${STANDALONE_DEPENDENCY_ENV_NAMES[$dependency_index]}=${STANDALONE_DEPENDENCY_ENV_VALUES[$dependency_index]}")
+        echo "  Dependency: ${STANDALONE_DEPENDENCY_ENV_NAMES[$dependency_index]}=${STANDALONE_DEPENDENCY_ENV_VALUES[$dependency_index]}"
+    done
+    dependency_env+=("HOMEBOY_WORDPRESS_DEPENDENCY_ROOTS_JSON=${STANDALONE_DEPENDENCY_ROOTS_JSON}")
+
     while IFS= read -r smoke_file; do
         [ -n "$smoke_file" ] || continue
         if ! smoke_abs="$(homeboy_wordpress_rel_test_file "$smoke_file")"; then
@@ -395,7 +446,7 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
         fi
         rel_path="$smoke_abs"
         echo "PHP_SMOKE_BEGIN:${rel_path}"
-        if "$php_bin" "${PLUGIN_PATH}/${rel_path}"; then
+        if env "${dependency_env[@]}" "$php_bin" "${PLUGIN_PATH}/${rel_path}"; then
             echo "PHP_SMOKE_OK:${rel_path}"
             passed=$((passed + 1))
         else
