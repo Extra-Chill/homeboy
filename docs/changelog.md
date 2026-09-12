@@ -4,6 +4,30 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.0] - 2026-09-12
+
+### Added
+- route provider effect reconciliation
+- add idempotent provider effects
+- route agent tasks through effect outbox
+- persist action resource authority
+- persist action effect identities
+- add transactional action outbox
+
+### Fixed
+- validate attempts against the canonical index
+- persist whole index and report retry outcomes
+- resolve canonical and alias identities deterministically
+- make action effects transactional
+- reconcile ambiguous provider effects
+- use canonical effect authority
+- finalize control-plane recovery
+- recover expired effect leases
+- bind delegates to canonical runs
+- make control actions durable
+- replay durable queued retries
+- canonicalize control-plane actions
+
 ## [0.372.3] - 2026-09-11
 
 ### Changed
