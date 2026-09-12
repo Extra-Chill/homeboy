@@ -6,13 +6,14 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    immutable_replay_snapshot, materialize_snapshot_piped, materialize_snapshot_stage,
-    register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
-    snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
-    synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
-    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    excludes_with_links_to_excluded_targets, immutable_replay_snapshot, materialize_snapshot_piped,
+    materialize_snapshot_stage, register_after_snapshot_directory_discovery_hook,
+    snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
+    snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_hash_v1, workspace_content_manifest_and_hash_for_policy,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -2149,6 +2150,46 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
     )
     .expect("snapshot preacceptance reaches provider execution");
     assert!(provider_marker.is_file());
+}
+
+#[test]
+#[cfg(unix)]
+fn snapshot_staging_drops_links_whose_target_the_excludes_remove() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let guidance = source.join("wp-content/lib/example/policies");
+    fs::create_dir_all(&guidance).expect("guidance directory");
+    fs::write(guidance.join("AGENTS.md"), "guidance\n").expect("guidance target");
+    fs::write(guidance.join("keep.md"), "kept\n").expect("sibling file");
+    // Resolves in the source; the exclude removes it from the stage, so staging
+    // the link unchanged would deliver a link pointing at nothing.
+    symlink("AGENTS.md", guidance.join("CLAUDE.md")).expect("guidance link");
+    let declared = vec!["**/AGENTS.md".to_string()];
+
+    let excludes = excludes_with_links_to_excluded_targets(&source, &declared);
+    let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, &source, &staged_source)
+        .expect("source and staged manifests agree");
+
+    let staged_link = staged_source.join("wp-content/lib/example/policies/CLAUDE.md");
+    assert!(
+        staged_link.symlink_metadata().is_err(),
+        "a link whose target the excludes remove is kept out of the stage instead of dangling"
+    );
+    assert_eq!(
+        fs::read_to_string(staged_source.join("wp-content/lib/example/policies/keep.md"))
+            .expect("staged sibling"),
+        "kept\n",
+        "the rest of the tree still stages"
+    );
 }
 
 #[test]
