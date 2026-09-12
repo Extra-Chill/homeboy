@@ -2157,11 +2157,13 @@ pub(super) fn validate_cook_index_attempt_in_store(
 ) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    let path = store.cook_index_path(&cook_id);
-    if !path.exists() {
+    // SQLite owns the Cook index. The filesystem copy is a derived projection
+    // this module writes best effort and deliberately exercises failing, so
+    // reading it here would skip validation whenever that write was lost and
+    // reject a valid attempt whenever it went stale.
+    let Some(index) = projected_cook_index_in_store(store, &cook_id)? else {
         return Ok(());
-    }
-    let index: AgentTaskCookIndex = read_json(&path)?;
+    };
     if index.cook_id != cook_id {
         return Err(Error::validation_invalid_argument(
             "cook_id",
