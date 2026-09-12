@@ -1232,6 +1232,37 @@ fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_sele
 }
 
 #[test]
+fn lifecycle_routing_does_not_initialize_unrelated_historical_cook_indexes() {
+    crate::test_support::with_isolated_home(|_| {
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "readonly-owner-routing",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "readonly-owner-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "resolve lifecycle ownership without startup migration"
+            }))
+            .expect("task")],
+        );
+        let run_id = "readonly-owner-run";
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("controller-local record");
+
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let unrelated_index = store.cook_index_path("unrelated-corrupt-cook");
+        std::fs::create_dir_all(unrelated_index.parent().expect("Cook index parent"))
+            .expect("create unrelated Cook directory");
+        std::fs::write(&unrelated_index, "{").expect("write corrupt historical Cook index");
+
+        let cli = Cli::try_parse_from(["homeboy", "agent-task", "status", run_id, "--exact"])
+            .expect("status command parses");
+        assert!(
+            controller_owns_agent_task_lifecycle_command(&cli).expect("owner resolves read-only"),
+            "an unrelated historical projection must not break exact lifecycle routing"
+        );
+    });
+}
+
+#[test]
 fn every_generated_next_action_command_round_trips_to_the_record_owner() {
     // A generated next action that walks the operator back into the failure it
     // was printed to resolve is worse than no guidance at all (#11599). Each of

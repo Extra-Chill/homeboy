@@ -6017,13 +6017,14 @@ pub fn run_record_exists_readonly_in_store(
     lifecycle_store.record_exists_readonly(&sanitize_run_id(run_id))
 }
 
-/// `run_record_exists_resolved` against explicitly injected durable lifecycle
-/// roots.
+/// Non-initializing resolved existence check against explicitly injected
+/// durable lifecycle roots. Routing must not run startup migration while
+/// deciding which machine owns a read-only command.
 pub fn run_record_exists_resolved_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<bool> {
-    lifecycle_store.record_exists(&resolve_run_id_in_store(lifecycle_store, run_id)?)
+    lifecycle_store.record_exists_readonly(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
 
 // The ambient `mark_resuming()` shim that used to sit here is gone. The resume

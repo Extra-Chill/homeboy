@@ -265,14 +265,12 @@ impl AgentTaskLifecycleStore {
             {
                 continue;
             }
-            let run = observation.get_run(&index.latest_run_id)?.ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "cook_index",
-                    "Cook index latest attempt has no canonical lifecycle record",
-                    Some(index.latest_run_id.clone()),
-                    None,
-                )
-            })?;
+            let Some(run) = observation.get_run(&index.latest_run_id)? else {
+                // Historical Cook indexes are derived compatibility projections.
+                // An orphan cannot restore authority and must not block unrelated
+                // canonical lifecycle records from opening.
+                continue;
+            };
             let record = record_from_run(&run)?;
             let projection = agent_task_resource_projection(self, &record, Some(&index))?;
             observation.upsert_control_plane_resource_projection(&projection)?;

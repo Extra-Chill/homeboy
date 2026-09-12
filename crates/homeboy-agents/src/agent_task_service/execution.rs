@@ -1146,6 +1146,24 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    terminal_run_result_for_record(record, true)
+}
+
+/// Read terminal evidence without consulting runner authority. Daemon job
+/// reconciliation calls this while runner status itself is being resolved.
+pub(crate) fn persisted_terminal_run_result(
+    run_id: &str,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    terminal_run_result_for_record(record, false)
+}
+
+fn terminal_run_result_for_record(
+    record: agent_task_lifecycle::AgentTaskRunRecord,
+    recover_missing_aggregate: bool,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -1160,7 +1178,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
 
     let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
         Ok(aggregate) => aggregate,
-        Err(_) => {
+        Err(_) if recover_missing_aggregate => {
             // A terminal Lab result may have been persisted before its typed
             // aggregate projection. Reconcile only that recorded terminal
             // evidence; never resume or rerun the provider for this path.
@@ -1180,6 +1198,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         )
             })?
         }
+        Err(error) => return Err(error),
     };
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
