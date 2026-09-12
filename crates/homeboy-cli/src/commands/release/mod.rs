@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
 use homeboy::core::component;
+use homeboy::core::plan::PlanStepStatus;
+use homeboy::core::quality::{build_quality_steps, QualityPlanOptions};
 use homeboy::core::scope::{self, Scope};
 use homeboy_deploy::{self as deploy, ReleaseStateStatus};
 use homeboy_release::release::{
@@ -876,12 +878,25 @@ fn run_portable_preflight_with(
     let mut gate_results = Vec::new();
     let mut evidence_refs = Vec::new();
     let mut resolved_runner_id = None;
-    for gate in ["audit", "lint", "test"] {
-        if skip_all || skipped.iter().any(|skip| skip == gate) {
+    let quality_steps = build_quality_steps(
+        &QualityPlanOptions::release_preflight(component_id, skip_all).with_granular_skips(skipped),
+    );
+    for step in quality_steps {
+        let gate = step.id.strip_prefix("preflight.").ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "release preflight quality step has invalid ID '{}'",
+                step.id
+            ))
+        })?;
+        if step.status == PlanStepStatus::Disabled {
             gate_results.push(ReleaseReadinessGateResult {
                 gate: gate.to_string(),
                 status: "skipped".to_string(),
-                reason: Some("--skip-checks".to_string()),
+                reason: step
+                    .inputs
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
                 source_sha: Some(commit.clone()),
                 runner_id: None,
                 evidence_refs: Vec::new(),
@@ -2540,7 +2555,13 @@ jobs:
         .expect("preflight should complete")
         .expect("lab preflight is enabled");
 
-        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "test"]);
+        assert_eq!(*dispatcher.calls.borrow(), vec!["test"]);
+        assert_eq!(readiness.gate_results[0].gate, "audit");
+        assert_eq!(readiness.gate_results[0].status, "skipped");
+        assert_eq!(
+            readiness.gate_results[0].reason.as_deref(),
+            Some("no-release-audit-policy")
+        );
         assert_eq!(readiness.gate_results[1].gate, "lint");
         assert_eq!(readiness.gate_results[1].status, "skipped");
         assert!(release::readiness_is_valid(&readiness));
@@ -2564,7 +2585,7 @@ jobs:
         .expect("dispatch failure is retained as a gate result")
         .expect("lab preflight is enabled");
 
-        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "lint", "test"]);
+        assert_eq!(*dispatcher.calls.borrow(), vec!["lint", "test"]);
         let lint = readiness
             .gate_results
             .iter()
@@ -2659,7 +2680,7 @@ jobs:
         assert!(readiness
             .gate_results
             .iter()
-            .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
+            .filter(|gate| gate.status == "passed")
             .all(|gate| gate.provenance.as_ref() == Some(&child_provenance)));
     }
 
