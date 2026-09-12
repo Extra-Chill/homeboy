@@ -16,6 +16,8 @@ use homeboy_core::daemon::runner_exec_driver::{
 use homeboy_core::error::Result;
 use homeboy_core::runner_job_execution_context::RunnerJobExecutionContext;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
+use homeboy_runner_contract::RunnerExecutionEnvelope;
+use uuid::Uuid;
 
 use super::execution::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
@@ -27,6 +29,12 @@ struct DaemonPreparedPlan {
     plan: PreparedRunnerProcess,
     extension_env_providers: Vec<String>,
     authoritative_run_id: Option<String>,
+    staged: Option<DaemonStagedPlan>,
+}
+
+struct DaemonStagedPlan {
+    envelope: RunnerExecutionEnvelope,
+    workspace: Option<super::worker::StagedWorkspaceDirectory>,
 }
 
 /// The runner layer's `RunnerExecDriver`. Registered with core at startup.
@@ -34,80 +42,42 @@ pub struct RunnerDaemonExecDriver;
 
 impl RunnerExecDriver for RunnerDaemonExecDriver {
     fn prepare(&self, request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec> {
-        let runner: Option<Runner> = match request.runner {
-            Some(value) => Some(serde_json::from_value(value).map_err(|err| {
-                homeboy_core::error::Error::validation_invalid_argument(
-                    "runner",
-                    format!("invalid runner descriptor in exec request: {err}"),
-                    None,
-                    None,
-                )
-            })?),
-            None => None,
-        };
-        let secret_env_plan: Option<SecretEnvPlan> = match request.secret_env_plan {
-            Some(Value::Null) | None => None,
-            Some(value) => Some(serde_json::from_value(value).map_err(|err| {
-                homeboy_core::error::Error::validation_invalid_argument(
-                    "secret_env_plan",
-                    format!("invalid secret env plan in exec request: {err}"),
-                    None,
-                    None,
-                )
-            })?),
-        };
+        prepare_daemon_exec(request, None)
+    }
 
-        let provider_secret_names = request
-            .extension_env_providers
-            .iter()
-            .map(|id| homeboy_core::extension::invoke::declared_secret_names(id))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let secret_env_plan = super::execution::runner_exec_secret_env_plan(
-            &request.command,
-            None,
-            &provider_secret_names,
-            &request.env,
-            secret_env_plan,
-        );
-        let authoritative_run_id = request.authoritative_run_id;
-        let plan = prepare_daemon_local_process(RunnerProcessRequest {
-            runner_id: request.runner_id,
-            runner,
-            cwd: request.cwd,
-            project_id: request.project_id,
-            command: request.command,
-            env: request.env,
-            secret_env_names: request.secret_env_names,
-            secret_env_plan: Some(secret_env_plan),
-            capture_patch: request.capture_patch,
-            raw_exec: request.raw_exec,
-            source_snapshot: request.source_snapshot,
-            require_paths: request.require_paths,
-            validate_require_paths_on_host: request.validate_require_paths_on_host,
+    fn prepare_staged(
+        &self,
+        mut request: RunnerExecPrepareRequest,
+        job_id: Uuid,
+        envelope: &RunnerExecutionEnvelope,
+    ) -> Result<PreparedDaemonExec> {
+        // The sealed submission is the source authority. Only the runner driver
+        // may derive its workspace location after extracting and verifying it.
+        let mut materialized_envelope = envelope.clone();
+        let workspace = super::worker::materialize_staged_source_artifact(
+            &request.runner_id,
+            &job_id.to_string(),
+            &mut materialized_envelope,
+        )?;
+        super::worker::verify_staged_workspace_before_execution(
+            &request.runner_id,
+            &materialized_envelope,
+            workspace.as_ref(),
+        )?;
+        let dispatch = materialized_envelope.dispatch.as_ref().ok_or_else(|| {
+            homeboy_core::error::Error::internal_unexpected(
+                "staged runner job has no execution dispatch",
+            )
         })?;
-        Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
-            runner_id: plan.runner.id.clone(),
-            cwd: plan.cwd.clone(),
-            command: plan.command.clone(),
-            env: plan.env.clone(),
-            secret_env_names: plan.secret_env_names.clone(),
-            source_snapshot: plan.source_snapshot.clone(),
-            require_paths: plan.require_paths.clone(),
-            concurrency_limit: plan.runner.settings.concurrency_limit,
-            heartbeat_only_stall: plan.runner.settings.heartbeat_only_stall.clone(),
-            // This is a durable declaration, not provider output. The provider
-            // itself is resolved only after the authenticated context arrives
-            // at `execute`.
-            extension_env_provenance: serde_json::json!({ "providers": request.extension_env_providers.clone() }),
-            plan_token: Arc::new(DaemonPreparedPlan {
-                plan,
-                extension_env_providers: request.extension_env_providers,
-                authoritative_run_id,
+        request.cwd = dispatch.cwd.clone();
+        request.source_snapshot = dispatch.source_snapshot.clone();
+        prepare_daemon_exec(
+            request,
+            Some(DaemonStagedPlan {
+                envelope: materialized_envelope,
+                workspace,
             }),
-        }))
+        )
     }
 
     fn execute(
@@ -119,94 +89,206 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
         require_child_identity_acknowledgement: bool,
         child_started: Option<ExecChildStarted>,
     ) -> Result<DaemonExecOutput> {
-        let base = prepared
-            .plan_token()
-            .downcast_ref::<DaemonPreparedPlan>()
-            .ok_or_else(|| {
-                homeboy_core::error::Error::internal_unexpected(
-                    "runner exec driver received a plan it did not prepare",
-                )
-            })?;
-
-        // The daemon may have mutated `prepared.env` (e.g. injecting the child
-        // reservation id) between prepare and execute, so run with that env.
-        if execution_context.verify_integrity().is_err()
-            || execution_context.runner_id() != prepared.runner_id
-            || execution_context.runtime_id()
-                != prepared
-                    .command
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or_default()
-        {
-            return Err(homeboy_core::error::Error::validation_invalid_argument(
-                "execution_context",
-                "daemon execution context does not match the accepted runner job",
-                Some(prepared.runner_id.clone()),
-                Some(vec![
-                    "Claim a fresh runner job through the controller before retrying.".to_string(),
-                ]),
-            ));
-        }
-        let mut plan = base.plan.clone();
-        plan.env = prepared.env.clone();
-        // Provider adapters execute only after the daemon supplied the verified
-        // typed context. No environment value participates in this decision.
-        let contributions = super::execution::resolve_provider_env_with_execution_context(
+        execute_daemon_exec(
+            prepared,
             execution_context,
-            &base.extension_env_providers,
-            std::path::Path::new(&plan.cwd),
-            &plan.env,
-            base.authoritative_run_id.as_deref(),
-        )?;
-        for contribution in &contributions {
-            for (key, value) in &contribution.public_env {
-                plan.env.insert(key.clone(), value.clone());
-            }
-        }
-        let diagnostic_hints = super::execution::apply_explicit_runner_exec_run_id_env(
-            &mut plan.env,
-            base.authoritative_run_id.as_deref(),
-        )
-        .into_iter()
-        .collect();
-        let extension_env_provenance = serde_json::to_value(&contributions).map_err(|err| {
-            homeboy_core::error::Error::internal_json(
-                err.to_string(),
-                Some("serialize extension env provenance".to_string()),
-            )
-        })?;
-
-        let output = execute_runner_process_until_cancelled_with_progress(
-            &plan,
             is_cancelled,
             progress_sink,
             require_child_identity_acknowledgement,
             child_started,
-            #[cfg(unix)]
-            None,
-        )?;
-        let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
-            output.stdout,
-            output.stderr,
-            &plan.env,
-            &plan.secret_env_names,
-        );
-
-        Ok(DaemonExecOutput {
-            stdout,
-            stderr,
-            exit_code: output.exit_code,
-            metrics: output
-                .metrics
-                .and_then(|metrics| serde_json::to_value(metrics).ok()),
-            capture: output
-                .capture
-                .and_then(|capture| serde_json::to_value(capture).ok()),
-            extension_env_provenance,
-            diagnostic_hints,
-        })
+        )
     }
+}
+
+fn prepare_daemon_exec(
+    request: RunnerExecPrepareRequest,
+    staged: Option<DaemonStagedPlan>,
+) -> Result<PreparedDaemonExec> {
+    let runner: Option<Runner> = match request.runner {
+        Some(value) => Some(serde_json::from_value(value).map_err(|err| {
+            homeboy_core::error::Error::validation_invalid_argument(
+                "runner",
+                format!("invalid runner descriptor in exec request: {err}"),
+                None,
+                None,
+            )
+        })?),
+        None => None,
+    };
+    let secret_env_plan: Option<SecretEnvPlan> = match request.secret_env_plan {
+        Some(Value::Null) | None => None,
+        Some(value) => Some(serde_json::from_value(value).map_err(|err| {
+            homeboy_core::error::Error::validation_invalid_argument(
+                "secret_env_plan",
+                format!("invalid secret env plan in exec request: {err}"),
+                None,
+                None,
+            )
+        })?),
+    };
+
+    let provider_secret_names = request
+        .extension_env_providers
+        .iter()
+        .map(|id| homeboy_core::extension::invoke::declared_secret_names(id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let secret_env_plan = super::execution::runner_exec_secret_env_plan(
+        &request.command,
+        None,
+        &provider_secret_names,
+        &request.env,
+        secret_env_plan,
+    );
+    let authoritative_run_id = request.authoritative_run_id;
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        runner_id: request.runner_id,
+        runner,
+        cwd: request.cwd,
+        project_id: request.project_id,
+        command: request.command,
+        env: request.env,
+        secret_env_names: request.secret_env_names,
+        secret_env_plan: Some(secret_env_plan),
+        capture_patch: request.capture_patch,
+        raw_exec: request.raw_exec,
+        source_snapshot: request.source_snapshot,
+        require_paths: request.require_paths,
+        validate_require_paths_on_host: request.validate_require_paths_on_host,
+    })?;
+    Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
+        runner_id: plan.runner.id.clone(),
+        cwd: plan.cwd.clone(),
+        command: plan.command.clone(),
+        env: plan.env.clone(),
+        secret_env_names: plan.secret_env_names.clone(),
+        source_snapshot: plan.source_snapshot.clone(),
+        require_paths: plan.require_paths.clone(),
+        concurrency_limit: plan.runner.settings.concurrency_limit,
+        heartbeat_only_stall: plan.runner.settings.heartbeat_only_stall.clone(),
+        // This is a durable declaration, not provider output. The provider
+        // itself is resolved only after the authenticated context arrives
+        // at `execute`.
+        extension_env_provenance: serde_json::json!({ "providers": request.extension_env_providers.clone() }),
+        plan_token: Arc::new(DaemonPreparedPlan {
+            plan,
+            extension_env_providers: request.extension_env_providers,
+            authoritative_run_id,
+            staged,
+        }),
+    }))
+}
+
+fn execute_daemon_exec(
+    prepared: &PreparedDaemonExec,
+    execution_context: &RunnerJobExecutionContext,
+    is_cancelled: ExecCancellationProbe,
+    progress_sink: Option<ExecProgressSink>,
+    require_child_identity_acknowledgement: bool,
+    child_started: Option<ExecChildStarted>,
+) -> Result<DaemonExecOutput> {
+    let base = prepared
+        .plan_token()
+        .downcast_ref::<DaemonPreparedPlan>()
+        .ok_or_else(|| {
+            homeboy_core::error::Error::internal_unexpected(
+                "runner exec driver received a plan it did not prepare",
+            )
+        })?;
+
+    // The daemon may have mutated `prepared.env` (e.g. injecting the child
+    // reservation id) between prepare and execute, so run with that env.
+    if execution_context.verify_integrity().is_err()
+        || execution_context.runner_id() != prepared.runner_id
+        || execution_context.runtime_id()
+            != prepared
+                .command
+                .first()
+                .map(String::as_str)
+                .unwrap_or_default()
+    {
+        return Err(homeboy_core::error::Error::validation_invalid_argument(
+            "execution_context",
+            "daemon execution context does not match the accepted runner job",
+            Some(prepared.runner_id.clone()),
+            Some(vec![
+                "Claim a fresh runner job through the controller before retrying.".to_string(),
+            ]),
+        ));
+    }
+    let mut plan = base.plan.clone();
+    plan.env = prepared.env.clone();
+    if let Some(staged) = &base.staged {
+        // Revalidate immediately before providers can inspect the workspace or
+        // a child can be spawned. The retained descriptor remains authoritative
+        // while capacity admission waits.
+        super::worker::verify_staged_workspace_before_execution(
+            &prepared.runner_id,
+            &staged.envelope,
+            staged.workspace.as_ref(),
+        )?;
+    }
+    // Provider adapters execute only after the daemon supplied the verified
+    // typed context. No environment value participates in this decision.
+    let contributions = super::execution::resolve_provider_env_with_execution_context(
+        execution_context,
+        &base.extension_env_providers,
+        std::path::Path::new(&plan.cwd),
+        &plan.env,
+        base.authoritative_run_id.as_deref(),
+    )?;
+    for contribution in &contributions {
+        for (key, value) in &contribution.public_env {
+            plan.env.insert(key.clone(), value.clone());
+        }
+    }
+    let diagnostic_hints = super::execution::apply_explicit_runner_exec_run_id_env(
+        &mut plan.env,
+        base.authoritative_run_id.as_deref(),
+    )
+    .into_iter()
+    .collect();
+    let extension_env_provenance = serde_json::to_value(&contributions).map_err(|err| {
+        homeboy_core::error::Error::internal_json(
+            err.to_string(),
+            Some("serialize extension env provenance".to_string()),
+        )
+    })?;
+
+    let output = execute_runner_process_until_cancelled_with_progress(
+        &plan,
+        is_cancelled,
+        progress_sink,
+        require_child_identity_acknowledgement,
+        child_started,
+        #[cfg(unix)]
+        base.staged
+            .as_ref()
+            .and_then(|staged| staged.workspace.as_ref())
+            .map(super::worker::StagedWorkspaceDirectory::fd),
+    )?;
+    let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
+        output.stdout,
+        output.stderr,
+        &plan.env,
+        &plan.secret_env_names,
+    );
+
+    Ok(DaemonExecOutput {
+        stdout,
+        stderr,
+        exit_code: output.exit_code,
+        metrics: output
+            .metrics
+            .and_then(|metrics| serde_json::to_value(metrics).ok()),
+        capture: output
+            .capture
+            .and_then(|capture| serde_json::to_value(capture).ok()),
+        extension_env_provenance,
+        diagnostic_hints,
+    })
 }
 
 /// Register the runner daemon-exec driver with core. Called once at startup.

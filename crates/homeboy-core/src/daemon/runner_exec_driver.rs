@@ -24,6 +24,8 @@ use crate::error::{Error, Result};
 use crate::runner_job_execution_context::RunnerJobExecutionContext;
 use crate::server::HeartbeatOnlyStallPolicy;
 use crate::source_snapshot::SourceSnapshot;
+use homeboy_runner_contract::RunnerExecutionEnvelope;
+use uuid::Uuid;
 
 /// Everything the driver needs to build a runner process plan. Mirrors the
 /// daemon's `ExecRequest`, but carries the runner descriptor as raw JSON so no
@@ -155,6 +157,20 @@ pub trait RunnerExecDriver: Send + Sync {
     /// Prepare a runner process plan from the exec request.
     fn prepare(&self, request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec>;
 
+    /// Prepare a sealed staged submission. Drivers that own staged source
+    /// materialization override this so the daemon never accepts a caller-owned
+    /// workspace path as execution authority.
+    fn prepare_staged(
+        &self,
+        _request: RunnerExecPrepareRequest,
+        _job_id: Uuid,
+        _envelope: &RunnerExecutionEnvelope,
+    ) -> Result<PreparedDaemonExec> {
+        Err(Error::internal_unexpected(
+            "runner exec driver does not support staged direct execution",
+        ))
+    }
+
     /// Execute a prepared runner child, driving it with the daemon's
     /// cancellation, progress, and child-identity callbacks.
     ///
@@ -209,6 +225,15 @@ homeboy_engine_primitives::provider_registry_arc! {
 /// Prepare a runner process via the registered driver (or the no-op driver).
 pub(crate) fn prepare_exec(request: RunnerExecPrepareRequest) -> Result<PreparedDaemonExec> {
     active_driver().prepare(request)
+}
+
+/// Prepare a sealed staged runner process via the registered driver.
+pub(crate) fn prepare_staged_exec(
+    request: RunnerExecPrepareRequest,
+    job_id: Uuid,
+    envelope: &RunnerExecutionEnvelope,
+) -> Result<PreparedDaemonExec> {
+    active_driver().prepare_staged(request, job_id, envelope)
 }
 
 /// Execute a prepared runner child via the registered driver. The registry lock
