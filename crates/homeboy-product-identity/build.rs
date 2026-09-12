@@ -21,6 +21,8 @@ fn main() {
         "cargo:rustc-env=HOMEBOY_PRODUCT_VERSION={}",
         root_package_version(&manifest)
     );
+    println!("cargo:rerun-if-env-changed=HOMEBOY_PRODUCT_GIT_COMMIT");
+    println!("cargo:rerun-if-env-changed=HOMEBOY_PRODUCT_GIT_DIRTY");
     emit_git_identity(root);
 }
 
@@ -89,6 +91,9 @@ fn emit_git_identity(root: &Path) {
             "cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={}",
             provenance.dirty
         );
+    } else if let Some((commit, dirty)) = source_snapshot_identity() {
+        println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
+        println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_DIRTY={dirty}");
     } else {
         if let Some(commit) = git_output(root, &["rev-parse", "HEAD"]) {
             println!("cargo:rustc-env=HOMEBOY_PRODUCT_GIT_COMMIT={commit}");
@@ -99,6 +104,19 @@ fn emit_git_identity(root: &Path) {
                 if status.is_empty() { "false" } else { "true" }
             );
         }
+    }
+}
+
+fn source_snapshot_identity() -> Option<(String, &'static str)> {
+    let commit = env::var("HOMEBOY_PRODUCT_GIT_COMMIT").ok()?;
+    let dirty = env::var("HOMEBOY_PRODUCT_GIT_DIRTY").ok()?;
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    match dirty.as_str() {
+        "false" => Some((commit, "false")),
+        "true" => Some((commit, "true")),
+        _ => None,
     }
 }
 

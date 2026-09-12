@@ -234,6 +234,9 @@ enum RigCommand {
         /// Explicitly refresh an existing matching rig install. Refuses user-owned conflicts.
         #[arg(long, alias = "force")]
         reinstall: bool,
+        /// Copy a local package into durable rig registry storage instead of linking it.
+        #[arg(long)]
+        copy_local_source: bool,
     },
     /// Update rigs installed from git-backed rig packages
     Update {
@@ -406,7 +409,8 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
             id,
             all,
             reinstall,
-        } => install(&source, id.as_deref(), all, reinstall),
+            copy_local_source,
+        } => install(&source, id.as_deref(), all, reinstall, copy_local_source),
         RigCommand::Update { rig_id, all } => update(rig_id.as_deref(), all),
         RigCommand::Sources { command } => sources::run(command),
         RigCommand::App { command } => app(config_root, command),
@@ -543,10 +547,12 @@ fn install(
     id: Option<&str>,
     all: bool,
     _reinstall: bool,
+    copy_local_source: bool,
 ) -> CmdResult<RigCommandOutput> {
     // Boundary: one `homeboy rig install` is one unit of work (#7505).
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
-    let result = rig::install(roots.config(), source, id, all)?;
+    let result =
+        rig::install_with_local_source_copy(roots.config(), source, id, all, copy_local_source)?;
     Ok((
         RigCommandOutput::Install(RigInstallOutput {
             command: "rig.install",
