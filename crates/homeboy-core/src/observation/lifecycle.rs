@@ -29,6 +29,32 @@ impl ActiveObservation {
         Self::start(record).ok()
     }
 
+    /// Reopen a durable running observation in a detached worker.
+    pub fn resume(run_id: &str) -> crate::Result<Self> {
+        let store = ObservationStore::open_initialized()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            crate::Error::validation_invalid_argument(
+                "run_id",
+                "run record not found",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        if run.status != RunStatus::Running.as_str() {
+            return Err(crate::Error::validation_invalid_argument(
+                "run_id",
+                "only a running observation can be resumed",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        Ok(Self {
+            initial_metadata: run.metadata_json.clone(),
+            store,
+            run,
+        })
+    }
+
     pub fn store(&self) -> &ObservationStore {
         &self.store
     }
@@ -126,6 +152,17 @@ pub fn running_status_note(run: &RunRecord) -> Option<String> {
 
     if run_has_active_remote_job(run) {
         return None;
+    }
+
+    if run
+        .metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(serde_json::Value::as_str)
+        == Some("transferring")
+    {
+        return Some(
+            "detached worker ownership transfer is pending until its handoff deadline".to_string(),
+        );
     }
 
     let Some(owner_pid) = run_owner_pid(run) else {
@@ -241,6 +278,15 @@ mod tests {
             "lab": { "remote_job_status": "running" }
         }));
         assert!(running_status_note(&active_remote).is_none());
+
+        let transferring = running_run(serde_json::json!({
+            "homeboy_run_owner": { "pid": u32::MAX },
+            "homeboy_ownership_handoff": { "state": "transferring" }
+        }));
+        assert!(running_status_note(&transferring)
+            .as_deref()
+            .expect("transfer status note")
+            .contains("ownership transfer is pending"));
     }
 
     #[test]

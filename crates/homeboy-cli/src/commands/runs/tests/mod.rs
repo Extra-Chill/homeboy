@@ -884,10 +884,15 @@ fn runs_dossier_loads_artifacts_for_a_durable_run_label() {
 }
 
 #[test]
-fn run_show_reads_owned_dead_running_run_without_mutating_it() {
+fn run_show_reconciles_its_requested_dead_owner_beyond_the_fleet_limit() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");
+        for index in 0..1001 {
+            store
+                .import_run(&dead_owned_run(&format!("other-dead-owned-run-{index}")))
+                .expect("import unrelated stale fixture");
+        }
         store
             .import_run(&dead_owned_run("dead-owned-run"))
             .expect("import stale fixture");
@@ -895,8 +900,14 @@ fn run_show_reads_owned_dead_running_run_without_mutating_it() {
         let RunsOutput::Show(output) = output else {
             panic!("expected show output");
         };
-        assert_eq!(output.run.summary.status, "running");
-        assert!(output.run.metadata.get("homeboy_reconciled").is_none());
+        assert_eq!(output.run.summary.status, "stale");
+        assert!(output.run.metadata.get("homeboy_reconciled").is_some());
+
+        let stored = store
+            .get_run("dead-owned-run")
+            .expect("read selected run")
+            .expect("selected run");
+        assert_eq!(stored.status, "stale");
     });
 }
 

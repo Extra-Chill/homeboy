@@ -92,7 +92,7 @@ impl WatchPoller for StorePoller<'_> {
 
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
         let run = runs_service::require_run(self.store, run_id)?;
-        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(self.store, &run);
+        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);
         let run = runs_service::require_run(self.store, run_id)?;
         reconcile::reconcile_owned_stale_running_run(self.store, &run)?;
         runs_service::require_run(self.store, run_id)
@@ -135,6 +135,14 @@ fn is_terminal_status(status: &str) -> bool {
     RunStatus::from_label(status)
         .map(RunStatus::is_terminal)
         .unwrap_or(true)
+}
+
+#[cfg(test)]
+pub(crate) fn poll_once_for_test(
+    store: &ObservationStore,
+    run_id: &str,
+) -> homeboy::core::Result<RunRecord> {
+    StorePoller { store }.poll(run_id)
 }
 
 /// Map a terminal run status to a process exit code: `pass`/`skipped` succeed,

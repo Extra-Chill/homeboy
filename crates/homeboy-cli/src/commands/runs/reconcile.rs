@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
-    run_has_active_remote_job, run_owner_pid, runs_service, ObservationStore, RunListFilter,
-    RunRecord, RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
+    run_has_active_remote_job, run_owner_pid, runs_service, NewRunRecord, ObservationStore,
+    RunListFilter, RunRecord, RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use homeboy::core::process::pid_is_running;
 
@@ -114,15 +114,39 @@ pub(crate) fn reconcile_owned_stale_running_run(
     if run.status != RunStatus::Running.as_str() {
         return Ok(None);
     }
+    if store.expire_running_run_handoff(&run.id)?.is_some() {
+        return Ok(None);
+    }
+    if handoff_is_transferring(run) {
+        return Ok(None);
+    }
+    let remote_status = match runs_service::selected_mirrored_daemon_job_status(run) {
+        Ok(status) => status,
+        Err(_) => return Ok(None),
+    };
+    // A focused read must not turn an unavailable runner probe into stale
+    // evidence. Fleet reconciliation still applies its bounded orphan policy;
+    // this path changes a single selected mirror only on explicit terminal
+    // evidence.
+    if runner_backed_run(run) && remote_status.is_none() {
+        return Ok(None);
+    }
     Ok(reconcile_orphaned_running_runs_with_remote_status(
         store,
         vec![run.clone()],
         false,
         pid_is_running,
-        runs_service::selected_mirrored_daemon_job_status,
+        |_| Ok(remote_status.clone()),
     )?
     .into_iter()
     .next())
+}
+
+fn handoff_is_transferring(run: &RunRecord) -> bool {
+    run.metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(Value::as_str)
+        == Some("transferring")
 }
 
 fn reconcile_orphaned_running_runs<F>(
@@ -156,6 +180,14 @@ where
 {
     let mut reconciled = Vec::new();
     for run in &running {
+        // Match focused watch reconciliation: a pending detached handoff owns
+        // the row until it is accepted or its durable deadline settles it.
+        if !dry_run && store.expire_running_run_handoff(&run.id)?.is_some() {
+            continue;
+        }
+        if handoff_is_transferring(run) {
+            continue;
+        }
         // An unavailable or malformed runner answer cannot prove terminality.
         // Leave the row running rather than falling back to daemon-PID or age
         // heuristics that could contradict live remote work.
@@ -166,13 +198,11 @@ where
         else {
             continue;
         };
-        reconciled.push(reconcile_orphaned_running_run(
-            store,
-            run,
-            reason,
-            remote_job_status,
-            dry_run,
-        )?);
+        if let Some(summary) =
+            reconcile_orphaned_running_run(store, run, reason, remote_job_status, dry_run)?
+        {
+            reconciled.push(summary);
+        }
     }
     Ok(reconciled)
 }
@@ -191,12 +221,12 @@ fn reconcile_orphaned_running_run(
     reason: &str,
     remote_job_status: Option<String>,
     dry_run: bool,
-) -> homeboy::core::Result<ReconciledRunSummary> {
+) -> homeboy::core::Result<Option<ReconciledRunSummary>> {
     let owner_pid = run_owner_pid(run);
     if !dry_run {
         // Candidate selection is entirely local. Refresh only a selected row,
         // never the unrelated running mirrors that happen to share the store.
-        runs_service::refresh_selected_mirrored_daemon_evidence(store, run);
+        runs_service::refresh_selected_mirrored_daemon_evidence(run);
     }
     let artifact_count = if dry_run {
         store.list_artifacts(&run.id)?.len()
@@ -224,28 +254,33 @@ fn reconcile_orphaned_running_run(
                 .as_deref()
                 .expect("terminal status is present"),
         );
-        let refreshed = store
-            .finish_running_run(&run.id, status, Some(metadata))?
-            .or_else(|| store.get_run(&run.id).ok().flatten());
+        let Some(refreshed) =
+            store.finish_running_run_if_metadata(&run.id, status, metadata, &run.metadata_json)?
+        else {
+            return Ok(None);
+        };
         (
-            refreshed
-                .as_ref()
-                .and_then(|run| RunStatus::from_label(&run.status))
-                .unwrap_or(status),
-            refreshed.and_then(|run| run.finished_at),
+            RunStatus::from_label(&refreshed.status).unwrap_or(status),
+            refreshed.finished_at,
         )
     } else {
         let metadata =
             with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
-        (
-            RunStatus::Stale,
-            store
-                .finish_run(&run.id, RunStatus::Stale, Some(metadata))?
-                .finished_at,
-        )
+        (RunStatus::Stale, {
+            let Some(refreshed) = store.finish_running_run_if_metadata(
+                &run.id,
+                RunStatus::Stale,
+                metadata,
+                &run.metadata_json,
+            )?
+            else {
+                return Ok(None);
+            };
+            refreshed.finished_at
+        })
     };
 
-    Ok(ReconciledRunSummary {
+    Ok(Some(ReconciledRunSummary {
         id: run.id.clone(),
         kind: run.kind.clone(),
         previous_status: run.status.clone(),
@@ -256,7 +291,7 @@ fn reconcile_orphaned_running_run(
         reason: reason.to_string(),
         artifact_count,
         remote_job_status,
-    })
+    }))
 }
 
 fn reconciliation_reason<F>(
@@ -272,9 +307,10 @@ where
         Some("failed") => Some("runner_job_failed"),
         Some("cancelled") => Some("runner_job_cancelled"),
         Some("queued" | "running") => None,
-        Some("not_found") => {
-            stale_running_reason(run, pid_is_alive).map(|_| "daemon_job_not_found")
-        }
+        // A focused runner read can fail over to a generation that no longer
+        // retains the job. Absence from that projection is not terminal
+        // evidence; preserve the local mirror until a terminal status arrives.
+        Some("not_found") => None,
         Some(_) => None,
         None => stale_running_reason(run, pid_is_alive),
     }
@@ -775,6 +811,36 @@ mod tests {
         });
     }
 
+    #[test]
+    fn missing_runner_job_status_remains_fail_closed() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let mut run = phantom_handoff_run(
+                "missing-runner-job",
+                minutes_ago(RUNNER_BACKED_RUNNING_STALE_THRESHOLD_MINUTES + 60),
+            );
+            run.metadata_json["homeboy_run_owner"] = serde_json::json!({ "pid": u32::MAX });
+            store.import_run(&run).expect("import runner-backed run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                vec![run],
+                false,
+                |_| false,
+                |_| Ok(Some("not_found".to_string())),
+            )
+            .expect("missing runner job remains fail closed");
+            let unchanged = store
+                .get_run("missing-runner-job")
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(unchanged.status, RunStatus::Running.as_str());
+        });
+    }
+
     /// The leak this closes from the other end: a lost handoff leaves a row
     /// whose `remote_job_status` nothing will ever correct and whose runner job
     /// id used to buy it a permanent exemption. Past the ceiling it becomes
@@ -808,6 +874,50 @@ mod tests {
             assert_eq!(reconciled[0].reason, "runner_backed_run_exceeded_exemption");
             assert_eq!(updated.status, "stale");
             assert!(updated.finished_at.is_some());
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_settles_expired_handoffs_before_stale_owner_classification() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                        .build(),
+                    "expired-fleet-handoff".to_string(),
+                )
+                .expect("running review");
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    u32::MAX,
+                    chrono::Utc::now() - chrono::Duration::seconds(1),
+                )
+                .expect("begin expired handoff");
+
+            let reconciled = reconcile_orphaned_running_runs(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+            )
+            .expect("fleet reconcile");
+            let settled = store.get_run(&run.id).expect("read").expect("run");
+
+            assert!(reconciled.is_empty());
+            assert_eq!(settled.status, RunStatus::Error.as_str());
+            assert_eq!(
+                settled.metadata_json["homeboy_ownership_handoff"]["state"],
+                "failed"
+            );
+            assert_eq!(
+                settled.metadata_json["homeboy_reconciled"],
+                Value::Null,
+                "handoff expiry must not be overwritten as a generic stale run"
+            );
         });
     }
 
@@ -965,6 +1075,44 @@ mod tests {
             assert!(reconciled[0].finished_at.is_none());
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
+        });
+    }
+
+    #[test]
+    fn fleet_reconcile_does_not_report_a_cas_lost_row_as_reconciled() {
+        with_isolated_home(|_home| {
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                ))
+                .expect("run");
+
+            let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                &store,
+                running_runs(&store, 1000).expect("runs"),
+                false,
+                |_| false,
+                |selected| {
+                    store
+                        .update_run_metadata(
+                            &selected.id,
+                            serde_json::json!({ "concurrent_progress": true }),
+                        )
+                        .expect("deterministically replace selected metadata");
+                    Ok(None)
+                },
+            )
+            .expect("fleet reconcile");
+
+            assert!(reconciled.is_empty());
+            let current = store.get_run(&run.id).expect("read").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(current.metadata_json["concurrent_progress"], true);
         });
     }
 

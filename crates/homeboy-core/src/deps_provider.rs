@@ -1,4 +1,5 @@
 use crate::component::Component;
+use crate::cooperative_control::CooperativeControl;
 use crate::deps::{
     DependencyCommandResult, DependencyInstallOutput, DependencyInstallOutputKind,
     DependencyPackage, DependencyUpdateResult,
@@ -172,12 +173,16 @@ impl DependencyProvider {
         &self,
         component: &Component,
         path: &Path,
+        control: &CooperativeControl,
     ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        if control.is_cancelled() {
+            return Ok(None);
+        }
         let context = DependencyProviderContext { component, path };
         match self {
-            DependencyProvider::Manifest(provider) => provider.hydration_plan(context),
-            DependencyProvider::Adapter(provider) => provider.hydration_plan(context),
-            DependencyProvider::Extension(provider) => provider.hydration_plan(context),
+            DependencyProvider::Manifest(provider) => provider.hydration_plan(context, control),
+            DependencyProvider::Adapter(provider) => provider.hydration_plan(context, control),
+            DependencyProvider::Extension(provider) => provider.hydration_plan(context, control),
             // Component-owned ecosystems can declare this standalone contract
             // through the local manifest provider. Do not invoke legacy deps
             // scripts speculatively: they may not support planning actions.
@@ -190,7 +195,8 @@ pub(crate) fn resolve_dependency_providers(
     component: &Component,
     path: &Path,
 ) -> Result<Vec<DependencyProvider>> {
-    let providers = resolve_dependency_providers_optional(component, path)?;
+    let control = CooperativeControl::unbounded();
+    let providers = resolve_dependency_providers_optional_with_control(component, path, &control)?;
 
     if providers.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -216,6 +222,19 @@ pub(crate) fn resolve_dependency_providers_optional(
     component: &Component,
     path: &Path,
 ) -> Result<Vec<DependencyProvider>> {
+    let control = CooperativeControl::unbounded();
+    resolve_dependency_providers_optional_with_control(component, path, &control)
+}
+
+/// Cooperative provider discovery used by deadline-bound callers.
+pub(crate) fn resolve_dependency_providers_optional_with_control(
+    component: &Component,
+    path: &Path,
+    control: &CooperativeControl,
+) -> Result<Vec<DependencyProvider>> {
+    if control.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let mut providers = Vec::new();
 
     let local_adapter_providers = AdapterDependencyProvider::load_local(path)?;
@@ -251,6 +270,9 @@ pub(crate) fn resolve_dependency_providers_optional(
         .map(|extensions| !extensions.is_empty())
         .unwrap_or(false)
     {
+        if control.is_cancelled() {
+            return Ok(Vec::new());
+        }
         if let Some(context) = crate::extension::resolve::resolve_execution_context_if_available(
             component,
             ExtensionCapability::Deps,
@@ -398,7 +420,11 @@ impl AdapterDependencyProvider {
     fn hydration_plan(
         &self,
         _context: DependencyProviderContext<'_>,
+        control: &CooperativeControl,
     ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        if control.is_cancelled() {
+            return Ok(None);
+        }
         let manager = self.adapter.package_manager();
         if manager.package_identity.is_some() && self.adapter.packages()?.is_empty() {
             return Ok(None);
@@ -882,7 +908,11 @@ impl ManifestDependencyProvider {
     fn hydration_plan(
         &self,
         context: DependencyProviderContext<'_>,
+        control: &CooperativeControl,
     ) -> Result<Option<DependencyProviderHydrationPlan>> {
+        if control.is_cancelled() {
+            return Ok(None);
+        }
         let Some(install) = self.manifest.commands.install.as_ref() else {
             return Ok(None);
         };
@@ -1255,16 +1285,54 @@ impl ExtensionDependencyProvider {
     fn hydration_plan(
         &self,
         context: DependencyProviderContext<'_>,
+        control: &CooperativeControl,
     ) -> Result<Option<DependencyProviderHydrationPlan>> {
-        let status = self.status(DependencyProviderStatusRequest {
-            context,
-            package_filter: None,
-        })?;
+        if control.is_cancelled() {
+            return Ok(None);
+        }
+        let status = self.status_controlled(
+            DependencyProviderStatusRequest {
+                context,
+                package_filter: None,
+            },
+            control,
+        )?;
         let args = vec!["install-command".to_string()];
-        let output = self.run(context.component, context.path, &args)?;
+        if control.is_cancelled() {
+            return Ok(None);
+        }
+        let output = self.run_controlled(context.component, context.path, &args, control)?;
         let plan: ExtensionInstallCommandOutput =
             parse_extension_output(&output.stdout, "deps install-command")?;
         hydration_plan_from_extension_output(status.package_manager, context.path, plan)
+    }
+
+    fn status_controlled(
+        &self,
+        request: DependencyProviderStatusRequest<'_>,
+        control: &CooperativeControl,
+    ) -> Result<ProviderDependencyStatus> {
+        if control.is_cancelled() {
+            return Err(Error::internal_unexpected(
+                "extension dependency provider cancelled before status discovery",
+            ));
+        }
+        let mut args = vec!["status".to_string()];
+        if let Some(package_filter) = request.package_filter {
+            args.push(package_filter.to_string());
+        }
+        let output = self.run_controlled(
+            request.context.component,
+            request.context.path,
+            &args,
+            control,
+        )?;
+        let status: ExtensionStatusOutput = parse_extension_output(&output.stdout, "deps status")?;
+        Ok(ProviderDependencyStatus {
+            package_manager: status.package_manager,
+            dependency_identities: status.dependency_identities,
+            packages: status.packages,
+        })
     }
 }
 
@@ -1280,6 +1348,22 @@ impl ExtensionDependencyProvider {
             component,
             Some(path.display().to_string()),
             args,
+        )
+    }
+
+    fn run_controlled(
+        &self,
+        component: &Component,
+        path: &Path,
+        args: &[String],
+        control: &CooperativeControl,
+    ) -> Result<crate::component_script_provider::ComponentScriptOutput> {
+        crate::component_script_provider::run_with_context_controlled(
+            &self.context,
+            component,
+            Some(path.display().to_string()),
+            args,
+            control,
         )
     }
 }
@@ -1570,6 +1654,7 @@ mod tests {
             _passthrough: bool,
             _extra_env: &[(String, String)],
             _script_args: &[String],
+            _control: &CooperativeControl,
         ) -> Result<ComponentScriptOutput> {
             unreachable!("extension dependency providers use their resolved context")
         }
@@ -1580,6 +1665,7 @@ mod tests {
             _component: &Component,
             _path_override: Option<String>,
             script_args: &[String],
+            _control: &CooperativeControl,
         ) -> Result<ComponentScriptOutput> {
             self.output(script_args)
         }
@@ -1668,11 +1754,15 @@ esac
             .unwrap();
         assert_eq!(status.package_manager, "fixture");
 
+        let control = CooperativeControl::unbounded();
         let plan = provider
-            .hydration_plan(DependencyProviderContext {
-                component: &component,
-                path: &component_path,
-            })
+            .hydration_plan(
+                DependencyProviderContext {
+                    component: &component,
+                    path: &component_path,
+                },
+                &control,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(

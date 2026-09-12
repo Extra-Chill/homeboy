@@ -1832,6 +1832,7 @@ fn active_runner_job_run_summary_if_durable(job: ActiveRunnerJobSummary) -> Opti
 
 fn show_run(store: &ObservationStore, run_id: &str, job_store: &JobStore) -> Result<RunDetail> {
     reconcile_stale_running_runs_for_read(store)?;
+    reconcile_stale_running_run_for_read(store, run_id)?;
     if let Some(run) = store.get_run(run_id)? {
         if let Some(job) = active_runner_job_for_durable_run(job_store, run_id) {
             if run.status != RunStatus::Running.as_str() || run_claims_other_runner_job(&run, &job)
@@ -1909,31 +1910,120 @@ fn reconcile_stale_running_runs_for_read(store: &ObservationStore) -> Result<()>
         limit: Some(1000),
         ..RunListFilter::default()
     })? {
+        // A detached worker owns a transferring row through its durable
+        // deadline, even when the launcher is gone. Settle an expired handoff
+        // before considering generic stale-owner evidence.
+        if store.expire_running_run_handoff(&run.id)?.is_some() {
+            continue;
+        }
+        if run
+            .metadata_json
+            .pointer("/homeboy_ownership_handoff/state")
+            .and_then(Value::as_str)
+            == Some("transferring")
+        {
+            continue;
+        }
         let Some(reason) = api_stale_running_reason(&run) else {
             continue;
         };
         let metadata = api_reconcile_metadata(&run, reason);
-        store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?;
+        let _ = store.finish_running_run_if_metadata(
+            &run.id,
+            RunStatus::Stale,
+            metadata,
+            &run.metadata_json,
+        )?;
     }
 
     Ok(())
 }
 
+/// An exact-id read must reconcile that row even when it falls beyond the
+/// bounded fleet scan used by list reads.
+fn reconcile_stale_running_run_for_read(store: &ObservationStore, run_id: &str) -> Result<()> {
+    let Some(run) = store.get_run(run_id)? else {
+        return Ok(());
+    };
+    if run.status != RunStatus::Running.as_str() {
+        return Ok(());
+    }
+    if store.expire_running_run_handoff(run_id)?.is_some() || handoff_is_transferring(&run) {
+        return Ok(());
+    }
+    let Some(reason) = api_stale_running_reason(&run) else {
+        return Ok(());
+    };
+    let metadata = api_reconcile_metadata(&run, reason);
+    let _ = store.finish_running_run_if_metadata(
+        run_id,
+        RunStatus::Stale,
+        metadata,
+        &run.metadata_json,
+    )?;
+    Ok(())
+}
+
+fn handoff_is_transferring(run: &RunRecord) -> bool {
+    run.metadata_json
+        .pointer("/homeboy_ownership_handoff/state")
+        .and_then(Value::as_str)
+        == Some("transferring")
+}
+
 fn api_stale_running_reason(run: &RunRecord) -> Option<&'static str> {
+    let remote_status = crate::observation::runs_service::selected_mirrored_daemon_job_status(run)
+        .ok()
+        .flatten();
+    api_stale_running_reason_at(run, chrono::Utc::now(), remote_status.as_deref())
+}
+
+/// HTTP reads preserve positive runner liveness, but persisted status is only
+/// a cache: a current probe wins and unrefreshable active evidence expires.
+fn api_stale_running_reason_at(
+    run: &RunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+    remote_status: Option<&str>,
+) -> Option<&'static str> {
+    if crate::observation::run_has_active_remote_job(run) {
+        match remote_status {
+            Some("queued" | "running") => return None,
+            Some("succeeded" | "failed" | "cancelled") => return Some("runner_job_terminal"),
+            // A probe that answers without naming an active or terminal job —
+            // `not_found`, say — is evidence the exemption no longer describes
+            // anything, so it expires after the same bounded 24-hour window CLI
+            // reconciliation uses. An absent probe is not that evidence: with no
+            // answer at all, the record's own active remote status stands and a
+            // read must not retire it.
+            Some(_) if api_runner_evidence_expired(run, now) => {
+                return Some("runner_backed_run_exceeded_exemption")
+            }
+            _ => return None,
+        }
+    }
     if let Some(owner_pid) = run_owner_pid(run) {
         return (!crate::process::pid_is_running(owner_pid)).then_some("owner_process_not_running");
     }
 
-    api_ownerless_running_is_stale(run).then_some("owner_metadata_missing")
+    api_ownerless_running_is_stale_at(run, now).then_some("owner_metadata_missing")
 }
 
-fn api_ownerless_running_is_stale(run: &RunRecord) -> bool {
+fn api_ownerless_running_is_stale_at(run: &RunRecord, now: chrono::DateTime<chrono::Utc>) -> bool {
     chrono::DateTime::parse_from_rfc3339(&run.started_at)
         .map(|started_at| {
-            chrono::Utc::now()
-                .signed_duration_since(started_at.with_timezone(&chrono::Utc))
+            now.signed_duration_since(started_at.with_timezone(&chrono::Utc))
                 .num_minutes()
                 >= OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES
+        })
+        .unwrap_or(false)
+}
+
+fn api_runner_evidence_expired(run: &RunRecord, now: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&run.started_at)
+        .map(|started_at| {
+            now.signed_duration_since(started_at.with_timezone(&chrono::Utc))
+                .num_hours()
+                >= 24
         })
         .unwrap_or(false)
 }
@@ -1988,6 +2078,66 @@ fn parse_job_id(job_id: &str) -> Result<Uuid> {
             None,
         )
     })
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    fn runner_backed_run(started_at: &str) -> RunRecord {
+        RunRecord {
+            id: "runner-backed".to_string(),
+            kind: "review".to_string(),
+            component_id: None,
+            started_at: started_at.to_string(),
+            finished_at: None,
+            status: RunStatus::Running.as_str().to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({
+                "homeboy_run_owner": { "pid": u32::MAX },
+                "lab": { "remote_job_status": "running" },
+            }),
+        }
+    }
+
+    #[test]
+    fn active_runner_probe_preserves_old_remote_work() {
+        let run = runner_backed_run("2026-01-01T00:00:00Z");
+        let now = "2026-03-01T00:00:00Z".parse().expect("clock");
+
+        assert_eq!(
+            api_stale_running_reason_at(&run, now, Some("running")),
+            None
+        );
+    }
+
+    #[test]
+    fn lost_runner_liveness_expires_from_a_deterministic_clock() {
+        let run = runner_backed_run("2026-01-01T00:00:00Z");
+        let recent = "2026-01-01T23:59:59Z".parse().expect("recent clock");
+        let expired = "2026-01-02T00:00:00Z".parse().expect("expired clock");
+
+        assert_eq!(api_stale_running_reason_at(&run, recent, None), None);
+        assert_eq!(
+            api_stale_running_reason_at(&run, expired, Some("not_found")),
+            Some("runner_backed_run_exceeded_exemption")
+        );
+    }
+
+    #[test]
+    fn terminal_runner_probe_overrides_persisted_running_status() {
+        let run = runner_backed_run("2026-01-01T00:00:00Z");
+        let now = "2026-01-01T00:00:01Z".parse().expect("clock");
+
+        assert_eq!(
+            api_stale_running_reason_at(&run, now, Some("succeeded")),
+            Some("runner_job_terminal")
+        );
+    }
 }
 
 fn enqueue_analysis_job(

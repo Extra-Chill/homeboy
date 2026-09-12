@@ -2261,6 +2261,169 @@ fn runs_list_reconciles_old_ownerless_running_records_before_responding() {
 }
 
 #[test]
+fn runs_list_preserves_old_runner_backed_records_with_active_remote_status() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut run = sample_imported_running_run("agent-task", "homeboy", "homeboy-lab");
+        run.id = "active-remote-run".to_string();
+        run.metadata_json = serde_json::json!({
+            "homeboy_run_owner": { "pid": u32::MAX },
+            "lab": { "remote_job_status": "running" },
+        });
+        store.import_run(&run).expect("import active runner run");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/runs?status=running".to_string(),
+            body: None,
+        })
+        .expect("runs list");
+
+        assert_eq!(response.body["runs"].as_array().expect("runs").len(), 1);
+        assert_eq!(
+            store
+                .get_run("active-remote-run")
+                .expect("get run")
+                .expect("run exists")
+                .status,
+            RunStatus::Running.as_str()
+        );
+    });
+}
+
+#[test]
+fn show_run_reconciles_the_requested_old_row_beyond_the_fleet_read_limit() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut requested = sample_imported_running_run("review", "homeboy", "old-requested");
+        requested.id = "0000-requested-old-run".to_string();
+        requested.metadata_json = serde_json::json!({ "source": "legacy-runner" });
+        store.import_run(&requested).expect("import requested run");
+        for index in 0..1000 {
+            let mut run = sample_imported_running_run("review", "homeboy", "fleet-blocker");
+            run.id = format!("blocker-{index:04}");
+            run.metadata_json =
+                serde_json::json!({ "homeboy_run_owner": { "pid": std::process::id() } });
+            store.import_run(&run).expect("import fleet row");
+        }
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}", requested.id),
+            body: None,
+        })
+        .expect("show requested run");
+
+        assert_eq!(response.body["run"]["status"], RunStatus::Stale.as_str());
+        assert_eq!(
+            store
+                .get_run(&requested.id)
+                .expect("read requested run")
+                .expect("requested run")
+                .status,
+            RunStatus::Stale.as_str()
+        );
+    });
+}
+
+#[test]
+fn runs_list_preserves_a_live_transferring_ownership_handoff() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run_with_id(
+                NewRunRecord::builder("review")
+                    .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                    .build(),
+                "live-http-handoff".to_string(),
+            )
+            .expect("running review");
+        let deadline = chrono::Utc::now() + chrono::Duration::minutes(1);
+        store
+            .begin_running_run_handoff(&run.id, u32::MAX, deadline)
+            .expect("begin live handoff");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: "/runs?status=running".to_string(),
+            body: None,
+        })
+        .expect("runs list");
+        let stored = store
+            .get_run(&run.id)
+            .expect("get run")
+            .expect("run exists");
+
+        assert_eq!(response.body["runs"][0]["id"], run.id);
+        assert_eq!(
+            response.body["runs"][0]["status"],
+            RunStatus::Running.as_str()
+        );
+        assert_eq!(stored.status, RunStatus::Running.as_str());
+        assert_eq!(
+            stored.metadata_json["homeboy_ownership_handoff"]["state"],
+            "transferring"
+        );
+        assert_eq!(
+            stored.metadata_json["homeboy_ownership_handoff"]["deadline_unix_ms"],
+            deadline.timestamp_millis()
+        );
+    });
+}
+
+#[test]
+fn show_run_settles_an_expired_transferring_ownership_handoff() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run_with_id(
+                NewRunRecord::builder("review")
+                    .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                    .build(),
+                "expired-http-handoff".to_string(),
+            )
+            .expect("running review");
+        store
+            .begin_running_run_handoff(
+                &run.id,
+                u32::MAX,
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+            )
+            .expect("begin expired handoff");
+
+        let response = http_api::handle(HttpApiRequest {
+            method: HttpMethod::Get,
+            path: format!("/runs/{}", run.id),
+            body: None,
+        })
+        .expect("show run");
+        let stored = store
+            .get_run(&run.id)
+            .expect("get run")
+            .expect("run exists");
+
+        let error = "detached worker did not acknowledge ownership before the handoff deadline";
+        assert_eq!(response.body["run"]["status"], RunStatus::Error.as_str());
+        assert_eq!(
+            response.body["run"]["metadata"]["homeboy_ownership_handoff"]["state"],
+            "failed"
+        );
+        assert_eq!(response.body["run"]["metadata"]["error"], error);
+        assert_eq!(stored.status, RunStatus::Error.as_str());
+        assert!(stored.finished_at.is_some());
+        assert_eq!(stored.metadata_json["error"], error);
+        assert_eq!(
+            stored.metadata_json["homeboy_reconciled"],
+            serde_json::Value::Null
+        );
+    });
+}
+
+#[test]
 fn artifact_content_serves_encoded_artifact_store_locator() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
