@@ -623,6 +623,7 @@ impl AgentTaskScheduleSupport {
     pub(super) fn record_resource_wait(
         task: &mut ScheduledTask,
         running: &[RunningTask],
+        resource_budget: &AgentTaskResourceBudget,
         events: &mut Vec<AgentTaskProgressEvent>,
     ) {
         let Some((key, blocker_task_id)) = resource_is_busy(task, running) else {
@@ -646,12 +647,19 @@ impl AgentTaskScheduleSupport {
         if !should_record {
             return;
         }
+        // The dispatch loop only records resource waits for its front task.
+        let queue_position = 1;
+        let active_units = super::resources::active_resource_units(running);
+        let budget = resource_budget
+            .max_active_units
+            .map(|maximum| format!("active_units={active_units}/{maximum}"))
+            .unwrap_or_else(|| format!("active_units={active_units}/unbounded"));
         events.push(event(
             &task.request.task_id,
             AgentTaskState::Blocked,
             task.attempt,
             Some(format!(
-                "waiting for exclusive resource '{}' held by '{}' ({} ms elapsed)",
+                "waiting for exclusive resource '{}' held by '{}' (queue_position={queue_position}; {budget}; {} ms elapsed)",
                 key,
                 blocker_task_id,
                 wait.started_at.elapsed().as_millis()
@@ -1388,6 +1396,14 @@ impl AgentTaskScheduleSupport {
             }
         }
         if let Some(overrides) = entry.provider_config.as_object() {
+            if overrides.contains_key("client_context") {
+                if !request.metadata.is_object() {
+                    request.metadata = Value::Object(serde_json::Map::new());
+                }
+                // A rotation route explicitly owns its replacement context.
+                request.metadata["provider_readiness_generated_fanout_context"] =
+                    Value::Bool(false);
+            }
             if !overrides.is_empty() {
                 if !executor.config.is_object() {
                     executor.config = Value::Object(serde_json::Map::new());

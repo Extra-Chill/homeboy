@@ -36,6 +36,9 @@ mod status_support;
 /// Shared daemon lifecycle for newly submitted orchestration work.
 mod work_job;
 
+/// The promotion request is defined once in `agent_task_promotion`; the service
+/// layer re-exports it so existing importers keep one canonical type.
+pub use crate::agent_task_promotion::AgentTaskPromotionRequest;
 pub use cook::*;
 pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderActivity};
 pub use cook_adoption::*;

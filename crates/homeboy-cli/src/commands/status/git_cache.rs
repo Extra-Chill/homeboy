@@ -215,12 +215,12 @@ fn fetch_origin_tags(path: &str, timer: &StatusTimer) {
     let Some(remaining) = timer.remaining() else {
         return;
     };
-    let _ = git::run_git_with_env_timeout(
+    let _ = git::fetch_remote_tracking_refs_until(
         std::path::Path::new(path),
         &["fetch", "--tags", "--quiet"],
         "status fetch origin tags",
         &[],
-        remaining.min(STATUS_FETCH_TIMEOUT),
+        std::time::Instant::now() + remaining.min(STATUS_FETCH_TIMEOUT),
     );
 }
 

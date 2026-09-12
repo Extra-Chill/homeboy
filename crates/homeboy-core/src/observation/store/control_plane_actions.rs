@@ -1,7 +1,24 @@
-use homeboy_control_plane_contract::{ControlPlaneActionAcknowledgement, RunId};
+use homeboy_control_plane_contract::{
+    ControlPlaneActionAcknowledgement, ControlPlaneActionFence, ControlPlaneActionIntent,
+    ControlPlaneEffectState, ControlPlaneEffectTerminal, EffectId, RunId,
+};
 use rusqlite::{params, OptionalExtension};
 
 use super::*;
+
+/// Domain-neutral action authority. The domain owns the interpretation of
+/// state and eligibility; the store owns identity, alias uniqueness, and the
+/// transaction that fences action admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneResourceProjection {
+    pub resource_type: String,
+    pub resource_id: String,
+    pub version: String,
+    pub state: String,
+    pub aliases: Vec<String>,
+    pub eligibility: serde_json::Value,
+    pub provenance: serde_json::Value,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPlaneActionClaim {
@@ -11,7 +28,708 @@ pub enum ControlPlaneActionClaim {
     Completed(ControlPlaneActionAcknowledgement),
 }
 
+/// Authoritative persisted state for one effect. `Leased` deliberately says
+/// only that a worker may have crossed the external-effect crash window; it is
+/// not evidence that the effect happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneEffectStatus {
+    pub state: ControlPlaneEffectState,
+    pub intent: ControlPlaneActionIntent,
+    pub fence: ControlPlaneActionFence,
+    pub lease_fence: u64,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub terminal: Option<ControlPlaneEffectTerminal>,
+    /// A pre-outbox claim crossed an unknown external-effect window. It is
+    /// deliberately non-leaseable until its domain reconciles it.
+    pub recovery_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlPlaneEffectAdmission {
+    Enqueued(ControlPlaneEffectStatus),
+    Duplicate(ControlPlaneEffectStatus),
+}
+
 impl ObservationStore {
+    /// Repair the pre-release migration state where an already-recorded schema
+    /// version omitted the resource authority tables. Normal initialization
+    /// creates them in migration 24; this guard makes an interrupted or skewed
+    /// historical database recover before it serves an action decision.
+    fn ensure_control_plane_resource_authority(&self) -> Result<()> {
+        self.connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS control_plane_resources (resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, version TEXT NOT NULL, state TEXT NOT NULL, eligibility_json TEXT NOT NULL DEFAULT '{}', provenance_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(resource_type, resource_id));
+             CREATE TABLE IF NOT EXISTS control_plane_resource_aliases (resource_type TEXT NOT NULL, alias TEXT NOT NULL, resource_id TEXT NOT NULL, PRIMARY KEY(resource_type, alias), FOREIGN KEY(resource_type, resource_id) REFERENCES control_plane_resources(resource_type, resource_id));
+             CREATE INDEX IF NOT EXISTS idx_control_plane_resource_aliases_target ON control_plane_resource_aliases(resource_type, resource_id);"
+        ).map_err(sqlite_error("ensure control-plane resource authority"))
+    }
+
+    /// Atomically replace a related set of resource projections. This is used
+    /// when an alias moves between resources: readers observe either the old
+    /// owner or the new owner, never a filesystem-derived intermediate state.
+    pub fn replace_control_plane_resource_projections(
+        &self,
+        projections: &[ControlPlaneResourceProjection],
+    ) -> Result<()> {
+        self.ensure_control_plane_resource_authority()?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error(
+                "begin control-plane resource projection replacement",
+            ))?;
+        let result = (|| {
+            for projection in projections {
+                self.connection.execute(
+                    "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+                    params![projection.resource_type, projection.resource_id],
+                ).map_err(sqlite_error("clear replaced control-plane resource aliases"))?;
+            }
+            for projection in projections {
+                let eligibility = serde_json::to_string(&projection.eligibility)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?;
+                let provenance = serde_json::to_string(&projection.provenance)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?;
+                self.connection.execute(
+                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+                    params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+                ).map_err(sqlite_error("replace control-plane resource projection"))?;
+                for alias in &projection.aliases {
+                    self.connection.execute(
+                        "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                        params![projection.resource_type, alias, projection.resource_id],
+                    ).map_err(sqlite_error("claim replaced control-plane resource alias"))?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error(
+                    "commit control-plane resource projection replacement",
+                )),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Replace one resource's canonical projection and its complete alias set.
+    /// Alias collisions fail rather than silently changing an action target.
+    pub fn upsert_control_plane_resource_projection(
+        &self,
+        projection: &ControlPlaneResourceProjection,
+    ) -> Result<()> {
+        self.ensure_control_plane_resource_authority()?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane resource projection"))?;
+        let result = self.upsert_control_plane_resource_projection_in_transaction(projection);
+        match result {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error("commit control-plane resource projection")),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn upsert_control_plane_resource_projection_in_transaction(
+        &self,
+        projection: &ControlPlaneResourceProjection,
+    ) -> Result<()> {
+        let eligibility = serde_json::to_string(&projection.eligibility)
+            .map_err(|e| Error::internal_json(e.to_string(), None))?;
+        let provenance = serde_json::to_string(&projection.provenance)
+            .map_err(|e| Error::internal_json(e.to_string(), None))?;
+        self.connection.execute(
+            "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+            params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+        ).map_err(sqlite_error("upsert control-plane resource projection"))?;
+        self.connection.execute(
+            "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+            params![projection.resource_type, projection.resource_id],
+        ).map_err(sqlite_error("clear control-plane resource aliases"))?;
+        for alias in &projection.aliases {
+            self.connection.execute(
+                "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                params![projection.resource_type, alias, projection.resource_id],
+            ).map_err(sqlite_error("claim control-plane resource alias"))?;
+        }
+        Ok(())
+    }
+
+    /// Canonical lookup that never follows a movable alias. Writers that
+    /// rebuild one record's projection use this so an alias naming the same
+    /// string cannot make them read, and then overwrite, another resource.
+    pub fn control_plane_resource_projection_exact(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<Option<ControlPlaneResourceProjection>> {
+        self.ensure_control_plane_resource_authority()?;
+        let row: Option<(String, String, String, String)> = self.connection.query_row(
+            "SELECT version, state, eligibility_json, provenance_json FROM control_plane_resources WHERE resource_type = ?1 AND resource_id = ?2",
+            params![resource_type, resource_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional().map_err(sqlite_error("read exact control-plane resource projection"))?;
+        let Some((version, state, eligibility, provenance)) = row else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT alias FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY alias",
+        ).map_err(sqlite_error("prepare exact control-plane resource aliases"))?;
+        let aliases: Vec<String> = statement
+            .query_map(params![resource_type, resource_id], |row| row.get(0))
+            .map_err(sqlite_error("read exact control-plane resource aliases"))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite_error("decode exact control-plane resource aliases"))?;
+        drop(statement);
+        Ok(Some(ControlPlaneResourceProjection {
+            resource_type: resource_type.to_string(),
+            resource_id: resource_id.to_string(),
+            version,
+            state,
+            aliases,
+            eligibility: serde_json::from_str(&eligibility)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            provenance: serde_json::from_str(&provenance)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+        }))
+    }
+
+    pub fn control_plane_resource_projection(
+        &self,
+        resource_type: &str,
+        id_or_alias: &str,
+    ) -> Result<Option<ControlPlaneResourceProjection>> {
+        self.ensure_control_plane_resource_authority()?;
+        let row: Option<(String, String, String, String, String)> = self.connection.query_row(
+            // A movable alias and a canonical id can name the same string: a
+            // detached Cook publishes its handoff parent under the Cook id and
+            // aliases that id onto the latest attempt. The alias is the Cook
+            // contract, so resolve it first and keep the answer deterministic
+            // instead of returning whichever row the scan reached first.
+            "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) ORDER BY CASE WHEN a.alias = ?2 THEN 0 ELSE 1 END, r.resource_id LIMIT 1",
+            params![resource_type, id_or_alias],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional().map_err(sqlite_error("read control-plane resource projection"))?;
+        row.map(|(resource_id, version, state, eligibility, provenance)| {
+            Ok(ControlPlaneResourceProjection {
+                resource_type: resource_type.to_string(),
+                resource_id,
+                version,
+                state,
+                aliases: self.resource_aliases(resource_type, id_or_alias)?,
+                eligibility: serde_json::from_str(&eligibility)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?,
+                provenance: serde_json::from_str(&provenance)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            })
+        })
+        .transpose()
+    }
+
+    fn resource_aliases(&self, resource_type: &str, id_or_alias: &str) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.alias FROM control_plane_resource_aliases a JOIN control_plane_resources r ON r.resource_type = a.resource_type AND r.resource_id = a.resource_id WHERE a.resource_type = ?1 AND r.resource_id = COALESCE((SELECT resource_id FROM control_plane_resource_aliases WHERE resource_type = ?1 AND alias = ?2), ?2) ORDER BY a.alias"
+        ).map_err(sqlite_error("prepare control-plane resource aliases"))?;
+        let aliases = statement
+            .query_map(params![resource_type, id_or_alias], |row| row.get(0))
+            .map_err(sqlite_error("read control-plane resource aliases"))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite_error("decode control-plane resource aliases"))?;
+        Ok(aliases)
+    }
+
+    /// Transaction boundary: verify the durable run version and eligibility,
+    /// then persist the immutable intent and pending outbox row together.
+    pub fn enqueue_control_plane_action_intent(
+        &self,
+        intent: &ControlPlaneActionIntent,
+        fence: &ControlPlaneActionFence,
+        resource_type: &str,
+        idempotency_digest: &str,
+    ) -> Result<ControlPlaneEffectAdmission> {
+        self.enqueue_control_plane_action_intent_inner(
+            intent,
+            fence,
+            resource_type,
+            idempotency_digest,
+            None,
+        )
+    }
+
+    /// Atomically publish a resource projection with the immutable action
+    /// intent that relies on it. A caller can never expose action eligibility
+    /// without the corresponding outbox effect.
+    pub fn enqueue_control_plane_action_intent_with_projection(
+        &self,
+        intent: &ControlPlaneActionIntent,
+        fence: &ControlPlaneActionFence,
+        projection: &ControlPlaneResourceProjection,
+        idempotency_digest: &str,
+    ) -> Result<ControlPlaneEffectAdmission> {
+        self.enqueue_control_plane_action_intent_inner(
+            intent,
+            fence,
+            &projection.resource_type,
+            idempotency_digest,
+            Some(projection),
+        )
+    }
+
+    fn enqueue_control_plane_action_intent_inner(
+        &self,
+        intent: &ControlPlaneActionIntent,
+        fence: &ControlPlaneActionFence,
+        resource_type: &str,
+        idempotency_digest: &str,
+        projection: Option<&ControlPlaneResourceProjection>,
+    ) -> Result<ControlPlaneEffectAdmission> {
+        self.ensure_control_plane_resource_authority()?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane action intent admission"))?;
+        let result = (|| {
+            if let Some(existing) = self.effect_status(&intent.effect_id)? {
+                if existing.intent.request_digest != intent.request_digest {
+                    return Err(Error::validation_invalid_argument(
+                        "effect_id",
+                        "effect id was already used with different action intent",
+                        None,
+                        None,
+                    ));
+                }
+                return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
+            if let Some(projection) = projection {
+                if projection.resource_id != intent.resource.run.as_str()
+                    || projection.version != fence.resource_updated_at
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "projection",
+                        "action projection does not match its immutable intent fence",
+                        Some(intent.resource.run.to_string()),
+                        None,
+                    ));
+                }
+                self.upsert_control_plane_resource_projection_in_transaction(projection)?;
+            }
+            if !fence.eligible {
+                return Err(Error::validation_invalid_argument(
+                    "action",
+                    fence
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "action is not eligible".to_string()),
+                    None,
+                    None,
+                ));
+            }
+            // The intent already names its canonical run, so the fence is
+            // checked against that run's own projection. Following an alias
+            // here would compare one record's precondition against another
+            // record's version and reject a legitimate action.
+            let projection = self.control_plane_resource_projection_exact(
+                resource_type,
+                intent.resource.run.as_str(),
+            )?;
+            let Some(projection) = projection else {
+                return Err(Error::validation_invalid_argument(
+                    "run_id",
+                    "canonical control-plane resource not found",
+                    Some(intent.resource.run.to_string()),
+                    None,
+                ));
+            };
+            let updated_at = projection.version.clone();
+            if updated_at != fence.resource_updated_at {
+                return Err(Error::validation_invalid_argument(
+                    "expected_updated_at",
+                    "run changed since the supplied eligibility fence",
+                    Some(updated_at),
+                    None,
+                ));
+            }
+            // The domain adapter evaluates the typed eligibility payload while
+            // constructing `fence`. Core persists it but deliberately does not
+            // interpret product-specific action names or availability states.
+            if let Some(existing) =
+                self.effect_status_by_idempotency(intent.resource.run.as_str(), idempotency_digest)?
+            {
+                if existing.intent.request_digest != intent.request_digest {
+                    return Err(Error::validation_invalid_argument(
+                        "idempotency_key",
+                        "idempotency key was already used with different action intent",
+                        None,
+                        None,
+                    ));
+                }
+                return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
+            let encoded_intent = serde_json::to_string(intent)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let encoded_fence = serde_json::to_string(fence)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            self.connection.execute(
+                "INSERT INTO control_plane_action_claims(run_id, idempotency_digest, request_digest, state, owner_pid, accepted_at, intent_json, fence_json, effect_id, outbox_state) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, 'pending')",
+                params![intent.resource.run.as_str(), idempotency_digest, intent.request_digest, std::process::id(), intent.accepted_at, encoded_intent, encoded_fence, intent.effect_id.0],
+            ).map_err(sqlite_error("persist control-plane action intent and outbox"))?;
+            self.effect_status(&intent.effect_id)?
+                .ok_or_else(|| {
+                    Error::internal_unexpected("persisted action intent was not readable")
+                })
+                .map(ControlPlaneEffectAdmission::Enqueued)
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit control-plane action intent admission"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Transaction boundary: select a pending or expired lease, increment its
+    /// fence, and persist the new owner before returning it to the worker.
+    pub fn lease_control_plane_effect(
+        &self,
+        owner: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect lease"))?;
+        let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
+            let effect: Option<String> = self.connection.query_row(
+                "SELECT effect_id FROM control_plane_action_claims WHERE outbox_state = 'pending' ORDER BY accepted_at, effect_id LIMIT 1", [], |row| row.get(0),
+            ).optional().map_err(sqlite_error("select leaseable control-plane effect"))?;
+            let Some(effect) = effect else {
+                return Ok(None);
+            };
+            self.connection.execute(
+                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1",
+                params![effect, owner, expires_at],
+            ).map_err(sqlite_error("lease control-plane effect"))?;
+            self.effect_status(&EffectId(effect))
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit control-plane effect lease"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Lease one known effect, rather than globally selecting the next pending
+    /// effect. Workers can therefore recover only the effect they were asked to
+    /// reconcile without racing unrelated action execution.
+    pub fn lease_control_plane_effect_by_id(
+        &self,
+        effect_id: &EffectId,
+        owner: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin targeted control-plane effect lease"))?;
+        let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1 AND outbox_state = 'pending'",
+                params![effect_id.0, owner, expires_at],
+            ).map_err(sqlite_error("lease targeted control-plane effect"))?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            self.effect_status(effect_id)
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit targeted control-plane effect lease"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Claim an effect already fenced into recovery without making it normally
+    /// leaseable again. The caller may only reconcile durable evidence; it must
+    /// never redispatch the external operation.
+    pub fn claim_control_plane_effect_recovery_by_id(
+        &self,
+        effect_id: &EffectId,
+        owner: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect recovery claim"))?;
+        let result = (|| {
+            self.expire_leased_effects_to_recovery_required(now)?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET outbox_state = 'leased', lease_owner = ?2, lease_fence = lease_fence + 1, lease_expires_at = ?3 WHERE effect_id = ?1 AND outbox_state = 'recovery_required'",
+                params![effect_id.0, owner, expires_at],
+            ).map_err(sqlite_error("claim control-plane effect recovery"))?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            self.effect_status(effect_id)
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit control-plane effect recovery claim"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Transaction boundary: a matching lease fence records terminal outcome,
+    /// acknowledgement, and audit evidence as one durable fact.
+    pub fn terminalize_control_plane_effect(
+        &self,
+        effect_id: &EffectId,
+        lease_fence: u64,
+        terminal: &ControlPlaneEffectTerminal,
+    ) -> Result<ControlPlaneEffectStatus> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect terminalization"))?;
+        let result = (|| {
+            let encoded = serde_json::to_string(terminal)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let audit = serde_json::to_string(&terminal.audit)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET state = 'completed', outbox_state = 'terminal', terminal_json = ?3, audit_json = ?4, acknowledgement_json = ?5, completed_at = ?6 WHERE effect_id = ?1 AND outbox_state = 'leased' AND lease_fence = ?2",
+                params![effect_id.0, lease_fence, encoded, audit, serde_json::to_string(&terminal.acknowledgement).map_err(|e| Error::internal_json(e.to_string(), None))?, terminal.completed_at],
+            ).map_err(sqlite_error("terminalize control-plane effect"))?;
+            if changed != 1 {
+                return Err(Error::validation_invalid_argument(
+                    "lease_fence",
+                    "control-plane effect lease is stale or terminal",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            self.effect_status(effect_id)?.ok_or_else(|| {
+                Error::internal_unexpected("terminal control-plane effect was not readable")
+            })
+        })();
+        match result {
+            Ok(value) => {
+                self.connection
+                    .execute_batch("COMMIT")
+                    .map_err(sqlite_error("commit control-plane effect terminalization"))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    /// Reconcile an ambiguous external-effect crash window. The caller supplies
+    /// authoritative domain evidence; this store verifies the immutable intent
+    /// digest and recovery fence before atomically recording its terminal fact.
+    /// An identical replay is idempotent, while every stale or changed fact
+    /// remains a conflict and cannot make the effect leaseable again.
+    pub fn reconcile_control_plane_effect(
+        &self,
+        effect_id: &EffectId,
+        request_digest: &str,
+        recovery_fence: u64,
+        terminal: &ControlPlaneEffectTerminal,
+    ) -> Result<ControlPlaneEffectStatus> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin control-plane effect reconciliation"))?;
+        let result = (|| {
+            let existing = self.effect_status(effect_id)?.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "effect_id",
+                    "control-plane effect not found",
+                    Some(effect_id.0.clone()),
+                    None,
+                )
+            })?;
+            if existing.intent.request_digest != request_digest {
+                return Err(Error::validation_invalid_argument(
+                    "request_digest",
+                    "reconciliation evidence does not match the immutable effect intent",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            if let Some(ref current) = existing.terminal {
+                if current == terminal {
+                    return Ok(existing);
+                }
+                return Err(Error::validation_invalid_argument(
+                    "effect_id",
+                    "effect is already terminal with different authoritative evidence",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            if !existing.recovery_required || existing.lease_fence != recovery_fence {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_fence",
+                    "effect is not in the requested recovery state or its recovery fence is stale",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            let encoded = serde_json::to_string(terminal)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let audit = serde_json::to_string(&terminal.audit)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?;
+            let changed = self.connection.execute(
+                "UPDATE control_plane_action_claims SET state = 'completed', outbox_state = 'terminal', terminal_json = ?4, audit_json = ?5, acknowledgement_json = ?6, completed_at = ?7 WHERE effect_id = ?1 AND outbox_state = 'recovery_required' AND lease_fence = ?2 AND request_digest = ?3",
+                params![effect_id.0, recovery_fence, request_digest, encoded, audit, serde_json::to_string(&terminal.acknowledgement).map_err(|e| Error::internal_json(e.to_string(), None))?, terminal.completed_at],
+            ).map_err(sqlite_error("reconcile control-plane effect terminalization"))?;
+            if changed != 1 {
+                return Err(Error::validation_invalid_argument(
+                    "recovery_fence",
+                    "control-plane effect recovery state changed before terminalization",
+                    Some(effect_id.0.clone()),
+                    None,
+                ));
+            }
+            self.effect_status(effect_id)?.ok_or_else(|| {
+                Error::internal_unexpected("reconciled control-plane effect was not readable")
+            })
+        })();
+        match result {
+            Ok(value) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error("commit control-plane effect reconciliation"))
+                .map(|_| value),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn control_plane_effect_status(
+        &self,
+        effect_id: &EffectId,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        self.effect_status(effect_id)
+    }
+
+    /// An expired lease crossed an external-effect crash window. It is not safe
+    /// to hand it to another worker: a domain reconciler must provide provider
+    /// evidence before it can become terminal.
+    pub fn expire_control_plane_effect_leases(&self, now: &str) -> Result<()> {
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(sqlite_error("begin expired control-plane effect recovery"))?;
+        let result = self.expire_leased_effects_to_recovery_required(now);
+        match result {
+            Ok(()) => self
+                .connection
+                .execute_batch("COMMIT")
+                .map_err(sqlite_error("commit expired control-plane effect recovery")),
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn expire_leased_effects_to_recovery_required(&self, now: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE control_plane_action_claims SET outbox_state = 'recovery_required', lease_owner = NULL, lease_expires_at = NULL WHERE outbox_state = 'leased' AND lease_expires_at <= ?1",
+            [now],
+        ).map_err(sqlite_error("mark expired control-plane effect recovery required"))?;
+        Ok(())
+    }
+
+    fn effect_status_by_idempotency(
+        &self,
+        run: &str,
+        idempotency_digest: &str,
+    ) -> Result<Option<ControlPlaneEffectStatus>> {
+        let effect: Option<String> = self.connection.query_row("SELECT effect_id FROM control_plane_action_claims WHERE run_id = ?1 AND idempotency_digest = ?2", params![run, idempotency_digest], |row| row.get(0)).optional().map_err(sqlite_error("read control-plane idempotency claim"))?;
+        effect
+            .map(EffectId)
+            .map_or(Ok(None), |id| self.effect_status(&id))
+    }
+
+    fn effect_status(&self, effect_id: &EffectId) -> Result<Option<ControlPlaneEffectStatus>> {
+        let row: Option<(String, String, String, u64, Option<String>, Option<String>, Option<String>)> = self.connection.query_row(
+            "SELECT intent_json, fence_json, outbox_state, lease_fence, lease_owner, lease_expires_at, terminal_json FROM control_plane_action_claims WHERE effect_id = ?1", [&effect_id.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        ).optional().map_err(sqlite_error("read control-plane effect status"))?;
+        let Some((intent, fence, state, lease_fence, lease_owner, lease_expires_at, terminal)) =
+            row
+        else {
+            return Ok(None);
+        };
+        Ok(Some(ControlPlaneEffectStatus {
+            state: match state.as_str() {
+                "pending" => ControlPlaneEffectState::Pending,
+                "leased" => ControlPlaneEffectState::Leased,
+                "terminal" => ControlPlaneEffectState::Terminal,
+                "recovery_required" => ControlPlaneEffectState::Leased,
+                _ => {
+                    return Err(Error::internal_unexpected(
+                        "invalid control-plane effect state",
+                    ))
+                }
+            },
+            intent: serde_json::from_str(&intent)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            fence: serde_json::from_str(&fence)
+                .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            lease_fence,
+            lease_owner,
+            lease_expires_at,
+            terminal: terminal
+                .map(|value| {
+                    serde_json::from_str(&value)
+                        .map_err(|e| Error::internal_json(e.to_string(), None))
+                })
+                .transpose()?,
+            recovery_required: state == "recovery_required",
+        }))
+    }
     pub fn existing_control_plane_action(
         &self,
         run: &RunId,
@@ -35,7 +753,7 @@ impl ObservationStore {
         if stored_digest != request_digest {
             return Err(Error::validation_invalid_argument(
                 "idempotency_key",
-                "control-plane action idempotency key was already used for different input",
+                "idempotency key was already used with different action intent",
                 None,
                 None,
             ));
@@ -101,7 +819,7 @@ impl ObservationStore {
                 if stored_digest != request_digest {
                     return Err(Error::validation_invalid_argument(
                         "idempotency_key",
-                        "control-plane action idempotency key was already used for different input",
+                        "idempotency key was already used with different action intent",
                         None,
                         None,
                     ));
@@ -232,9 +950,23 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneRun,
-        CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+        ControlPlaneAction, ControlPlaneActionFence, ControlPlaneActionIntent,
+        ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+        ControlPlaneActionResource, ControlPlaneEffectAudit, ControlPlaneEffectState,
+        ControlPlaneEffectTerminal, ControlPlaneRef, ControlPlaneRun, EffectId,
+        CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
+        CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
     };
+
+    fn seed_agent_task_resource(store: &ObservationStore, run: &str, version: &str) {
+        store.upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
+            resource_type: "agent_task_run".to_string(), resource_id: run.to_string(),
+            version: version.to_string(), state: "queued".to_string(), aliases: vec![run.to_string()],
+            eligibility: serde_json::json!({"actions":[{"action":"resume","availability":"available"}]}),
+            provenance: serde_json::json!({"source":"test"}),
+        }).unwrap();
+    }
 
     #[test]
     fn action_claim_replays_one_immutable_acknowledgement() {
@@ -308,5 +1040,324 @@ mod tests {
                 .unwrap(),
             ControlPlaneActionClaim::Recover { .. }
         ));
+    }
+
+    #[test]
+    fn outbox_admission_reclaim_fence_and_terminal_acknowledgement_are_durable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        seed_agent_task_resource(&store, "run-1", "now");
+        let run = RunId::new("run-1").unwrap();
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: EffectId("effect-1".to_string()),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run: run.clone(),
+                original_alias: Some("legacy-run-1".to_string()),
+            },
+            request: ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("effect-1".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "key".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            },
+            request_digest: "b".repeat(64),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: "now".to_string(),
+            eligible: true,
+            reason: None,
+        };
+        assert!(matches!(
+            store
+                .enqueue_control_plane_action_intent(
+                    &intent,
+                    &fence,
+                    "agent_task_run",
+                    &"a".repeat(64)
+                )
+                .unwrap(),
+            ControlPlaneEffectAdmission::Enqueued(_)
+        ));
+        drop(store);
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        assert!(matches!(
+            store
+                .enqueue_control_plane_action_intent(
+                    &intent,
+                    &fence,
+                    "agent_task_run",
+                    &"a".repeat(64)
+                )
+                .unwrap(),
+            ControlPlaneEffectAdmission::Duplicate(_)
+        ));
+        let first = store
+            .lease_control_plane_effect_by_id(
+                &intent.effect_id,
+                "worker-1",
+                "2026-01-01T00:00:01Z",
+                "2026-01-01T00:00:02Z",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.state, ControlPlaneEffectState::Leased);
+        assert!(store
+            .lease_control_plane_effect_by_id(
+                &intent.effect_id,
+                "worker-2",
+                "2026-01-01T00:00:03Z",
+                "2026-01-01T00:00:04Z",
+            )
+            .unwrap()
+            .is_none());
+        let reclaimed = store
+            .claim_control_plane_effect_recovery_by_id(
+                &intent.effect_id,
+                "reconciler-2",
+                "2026-01-01T00:00:03Z",
+                "2026-01-01T00:00:04Z",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reclaimed.lease_fence, first.lease_fence + 1);
+        let acknowledgement = ControlPlaneActionAcknowledgement {
+            schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
+            acknowledgement: "ack".to_string(),
+            run: run.clone(),
+            action: ControlPlaneAction::Resume,
+            idempotency_key: "key".to_string(),
+            actor: "test".to_string(),
+            accepted_at: intent.accepted_at.clone(),
+            completed_at: "2026-01-01T00:00:04Z".to_string(),
+            outcome: ControlPlaneActionOutcome::Succeeded,
+            resource: ControlPlaneRun::new(run),
+            result: ControlPlaneActionPayload::empty(),
+            message: None,
+        };
+        let terminal = ControlPlaneEffectTerminal {
+            schema: CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA.to_string(),
+            completed_at: acknowledgement.completed_at.clone(),
+            acknowledgement,
+            audit: ControlPlaneEffectAudit {
+                schema: CONTROL_PLANE_EFFECT_AUDIT_SCHEMA.to_string(),
+                observed_at: "2026-01-01T00:00:04Z".to_string(),
+                evidence: serde_json::json!({"reconciled": true}),
+            },
+        };
+        assert!(
+            store
+                .terminalize_control_plane_effect(&intent.effect_id, first.lease_fence, &terminal)
+                .is_err(),
+            "stale lease must not terminalize"
+        );
+        let terminalized = store
+            .terminalize_control_plane_effect(&intent.effect_id, reclaimed.lease_fence, &terminal)
+            .unwrap();
+        assert_eq!(terminalized.state, ControlPlaneEffectState::Terminal);
+        assert_eq!(terminalized.terminal, Some(terminal));
+    }
+
+    #[test]
+    fn projection_and_intent_roll_back_together_when_alias_admission_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running'), ('run-2', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
+                resource_type: "agent_task_run".to_string(),
+                resource_id: "run-2".to_string(),
+                version: "now".to_string(),
+                state: "queued".to_string(),
+                aliases: vec!["occupied".to_string()],
+                eligibility: serde_json::json!({}),
+                provenance: serde_json::json!({}),
+            })
+            .unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("effect-atomic".to_string()),
+            action: ControlPlaneAction::Resume,
+            idempotency_key: "atomic".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: false,
+        };
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run,
+                original_alias: None,
+            },
+            request,
+            request_digest: "d".repeat(64),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: "v1".to_string(),
+            eligible: true,
+            reason: None,
+        };
+        let projection = ControlPlaneResourceProjection {
+            resource_type: "agent_task_run".to_string(),
+            resource_id: "run-1".to_string(),
+            version: "v1".to_string(),
+            state: "queued".to_string(),
+            aliases: vec!["occupied".to_string()],
+            eligibility: serde_json::json!({}),
+            provenance: serde_json::json!({}),
+        };
+
+        assert!(store
+            .enqueue_control_plane_action_intent_with_projection(
+                &intent,
+                &fence,
+                &projection,
+                &"e".repeat(64),
+            )
+            .is_err());
+        assert!(store
+            .control_plane_resource_projection("agent_task_run", "run-1")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .control_plane_effect_status(&intent.effect_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn concurrent_admission_has_one_enqueued_effect_and_one_duplicate() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        seed_agent_task_resource(&store, "run-1", "now");
+        drop(store);
+        let run = RunId::new("run-1").unwrap();
+        let intent = ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: EffectId("effect-race".to_string()),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run,
+                original_alias: None,
+            },
+            request: ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("effect-race".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "race".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            },
+            request_digest: "c".repeat(64),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let fence = ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: "now".to_string(),
+            eligible: true,
+            reason: None,
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let mut joins = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let intent = intent.clone();
+            let fence = fence.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                let store = ObservationStore::open_initialized_at(path).unwrap();
+                barrier.wait();
+                store
+                    .enqueue_control_plane_action_intent(
+                        &intent,
+                        &fence,
+                        "agent_task_run",
+                        &"d".repeat(64),
+                    )
+                    .unwrap()
+            }));
+        }
+        let outcomes = joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ControlPlaneEffectAdmission::Enqueued(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ControlPlaneEffectAdmission::Duplicate(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn resource_projection_reassigns_aliases_only_after_the_old_owner_releases_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        let first = ControlPlaneResourceProjection {
+            resource_type: "example".to_string(),
+            resource_id: "one".to_string(),
+            version: "v1".to_string(),
+            state: "queued".to_string(),
+            aliases: vec!["one".to_string(), "shared".to_string()],
+            eligibility: serde_json::json!({}),
+            provenance: serde_json::json!({"source":"test"}),
+        };
+        store
+            .upsert_control_plane_resource_projection(&first)
+            .unwrap();
+        let mut second = first.clone();
+        second.resource_id = "two".to_string();
+        second.aliases = vec!["two".to_string(), "shared".to_string()];
+        assert!(store
+            .upsert_control_plane_resource_projection(&second)
+            .is_err());
+        let mut released = first.clone();
+        released.aliases = vec!["one".to_string()];
+        released.version = "v2".to_string();
+        store
+            .upsert_control_plane_resource_projection(&released)
+            .unwrap();
+        store
+            .upsert_control_plane_resource_projection(&second)
+            .unwrap();
+        assert_eq!(
+            store
+                .control_plane_resource_projection("example", "shared")
+                .unwrap()
+                .unwrap()
+                .resource_id,
+            "two"
+        );
     }
 }

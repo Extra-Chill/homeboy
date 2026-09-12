@@ -20,6 +20,16 @@ pub fn lifecycle_action_eligibility(
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan);
+    let quarantine = if record.state == AgentTaskRunState::Queued {
+        available("queued run can be quarantined before admission")
+    } else {
+        unavailable("quarantine requires an exact queued run")
+    };
+    let rearm = if record.metadata.get("queue_quarantine").is_some() {
+        available("durable quarantine marker can be removed")
+    } else {
+        unavailable("run is not quarantined")
+    };
     let promotion = if matches!(
         record.state,
         AgentTaskRunState::Succeeded
@@ -69,6 +79,22 @@ pub fn lifecycle_action_eligibility(
             action(
                 ControlPlaneAction::Retry,
                 retry,
+                ControlPlaneActionConfirmation::Required,
+                Vec::new(),
+                true,
+                "agent_task_run",
+            ),
+            action(
+                ControlPlaneAction::Quarantine,
+                quarantine,
+                ControlPlaneActionConfirmation::Required,
+                vec!["reason"],
+                true,
+                "agent_task_run",
+            ),
+            action(
+                ControlPlaneAction::Rearm,
+                rearm,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
                 true,
@@ -150,6 +176,24 @@ fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, 
 fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
+    }
+    if super::has_pending_detached_cook_handoff(record)
+        && matches!(
+            record.metadata["detached_cook_handoff"]["admission_state"].as_str(),
+            Some("pre_supervisor") | None
+        )
+    {
+        return unavailable(
+            "pre-supervisor Cook admission has no replayable request; rerun the original Cook invocation to reclaim a dead or expired launcher",
+        );
+    }
+    if record.state.is_terminal()
+        && record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+    {
+        return available(
+            "terminal runner evidence may be reprojected idempotently without reopening execution",
+        );
     }
     match record.state {
         AgentTaskRunState::Queued => {
@@ -305,7 +349,26 @@ mod tests {
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
-            assert_eq!(report.actions.len(), 6);
+            // Naming the contract rather than counting it: a bare length made
+            // every legitimate action addition look like a regression without
+            // saying which action changed.
+            assert_eq!(
+                report
+                    .actions
+                    .iter()
+                    .map(|entry| entry.action)
+                    .collect::<Vec<_>>(),
+                vec![
+                    ControlPlaneAction::Cancel,
+                    ControlPlaneAction::Resume,
+                    ControlPlaneAction::PlacementUpdate,
+                    ControlPlaneAction::Retry,
+                    ControlPlaneAction::Quarantine,
+                    ControlPlaneAction::Rearm,
+                    ControlPlaneAction::Promote,
+                    ControlPlaneAction::Reconcile,
+                ]
+            );
             if state.is_terminal() {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),

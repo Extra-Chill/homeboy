@@ -8,14 +8,14 @@ use homeboy_core::extension::bench::artifact::BenchArtifact;
 use homeboy_core::extension::bench::result_types::BenchRunMetadata;
 use homeboy_core::extension::bench::{BenchRunExecution, BenchRunWorkflowResult};
 
-use super::tests::{bench_args, bench_results, XdgGuard};
+use super::tests::{bench_args, bench_results};
 use super::{finish_success, start, BenchObservationStart};
 use crate::test_support::with_isolated_home;
 
 #[test]
 fn bench_observation_reports_missing_and_blocked_artifacts() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         fs::write(run_dir.path().join("promoted.json"), b"{}").expect("promoted artifact");
@@ -120,7 +120,7 @@ fn bench_observation_reports_missing_and_blocked_artifacts() {
 #[test]
 fn bench_observation_keeps_retained_artifact_when_public_alias_returns_404() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let public_alias = serve_public_alias(404);
         let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
         std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", &public_alias);
@@ -211,7 +211,7 @@ fn serve_public_alias(status: u16) -> String {
 #[test]
 fn bench_observation_rejects_url_only_artifacts_as_terminal_evidence() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let mut results = bench_results("homeboy", "cold", 42.0);
@@ -272,7 +272,7 @@ fn bench_observation_rejects_url_only_artifacts_as_terminal_evidence() {
 #[test]
 fn bench_observation_promotes_required_directory_with_tree_identity() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
         let directory = run_dir.path().join("artifacts/visual");
@@ -339,7 +339,7 @@ fn bench_observation_promotes_required_directory_with_tree_identity() {
 #[test]
 fn bench_observation_resolves_shared_state_mount_artifacts() {
     with_isolated_home(|home| {
-        let _xdg = XdgGuard::unset();
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let run_dir = RunDir::create().expect("run dir");
         fs::write(run_dir.step_file(run_dir::files::BENCH_RESULTS), b"{}").expect("results");
 

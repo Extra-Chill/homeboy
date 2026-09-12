@@ -1,4 +1,7 @@
 pub(crate) mod binding;
+#[cfg(test)]
+mod test_support;
+
 mod content_manifest;
 mod effect;
 mod execution;
@@ -703,6 +706,9 @@ pub fn run_multi(
                             "Mutation already applied in the resumed deploy run; reverify with 'homeboy deploy --project {} --check'",
                             project_id
                         )
+                    }
+                    lifecycle::DeployTargetStatus::Unknown => {
+                        "Deployment dispatch is recovery-required after an interrupted process; reconcile authoritative provider evidence before retrying".to_string()
                     }
                     _ => "Already succeeded in the resumed deploy run".to_string(),
                 }),

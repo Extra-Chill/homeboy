@@ -167,7 +167,6 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
 pub struct LocalControllerJobClient {
     endpoint: String,
-    lease_id: String,
     client: reqwest::blocking::Client,
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
@@ -284,7 +283,6 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", endpoint.address),
-            lease_id: endpoint.lease_id,
             client,
             _admission_guard: None,
         })
@@ -301,7 +299,6 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
-            lease_id: daemon.lease_id,
             client,
             _admission_guard: admission_guard,
         })
@@ -311,16 +308,6 @@ impl LocalControllerJobClient {
         Ok(generation_store::endpoint_for_job(job_id)?
             .map(|endpoint| format!("http://{}", endpoint.address))
             .unwrap_or_else(|| self.endpoint.clone()))
-    }
-
-    fn retire_if_drained(&self, job: &crate::api_jobs::Job) -> Result<()> {
-        if !job.status.is_terminal() {
-            return Ok(());
-        }
-        if let Some(endpoint) = generation_store::complete_job(&job.id.to_string())? {
-            control::stop_drained_generation(&endpoint)?;
-        }
-        Ok(())
     }
 
     /// Persist a cancellation request and return the daemon's current job
@@ -408,9 +395,6 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
-        // The accepted durable record must be pinned before any later start or
-        // response boundary can expose a rotation to the caller.
-        generation_store::record_job(&job.id.to_string(), &self.lease_id)?;
         let disposition = match daemon_endpoint_payload(&value)
             .and_then(|payload| payload.pointer("/submission/disposition"))
             .and_then(serde_json::Value::as_str)
@@ -497,7 +481,6 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
-        self.retire_if_drained(&job)?;
         Ok(job)
     }
 
@@ -1591,6 +1574,10 @@ where
     generation_store::seed(&state)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
+    // If this process died after the durable job-store admission but before its
+    // registry write or HTTP response, rebuild the binding from the job's
+    // lease. Replays remain idempotent and retain the original owner.
+    rebuild_generation_job_ownership(&job_store)?;
     // A restart cannot resume the thread that owned a pre-spawn reservation.
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
@@ -1611,8 +1598,11 @@ where
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
-    let orchestration_reconciler =
-        spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
+    let orchestration_reconciler = spawn_orchestration_reconciler(
+        job_store.clone(),
+        state.lease_id.clone(),
+        orchestration_shutdown_rx,
+    );
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
@@ -1648,6 +1638,19 @@ where
     let _ = orchestration_reconciler.join();
     let _ = upload_reaper.join();
     serve_result.map(|()| state)
+}
+
+fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
+    for job in job_store.list() {
+        let Some(lease_id) = job.daemon_lease_id.as_deref() else {
+            continue;
+        };
+        generation_store::record_job(&job.id.to_string(), lease_id)?;
+        if job.status.is_terminal() {
+            generation_store::mark_job_terminal(&job.id.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Environment variable overriding the completion-notifier poll interval in
@@ -1776,6 +1779,7 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 /// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(
     job_store: JobStore,
+    serving_lease_id: String,
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -1785,7 +1789,7 @@ fn spawn_orchestration_reconciler(
             let _ = shutdown.recv();
             return;
         };
-        orchestration_tick_loop(job_store, interval, shutdown)
+        orchestration_tick_loop(job_store, serving_lease_id, interval, shutdown)
     })
 }
 
@@ -1798,6 +1802,7 @@ fn spawn_orchestration_reconciler(
 /// processes the daemon owner lock already guarantees a single ticker.
 fn orchestration_tick_loop(
     job_store: JobStore,
+    serving_lease_id: String,
     interval: std::time::Duration,
     shutdown: mpsc::Receiver<()>,
 ) {
@@ -1808,11 +1813,30 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
         });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_queued_retries();
+        });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
         isolated_tick(|| {
             let _ = job_store.reconcile_terminal_linked_daemon_jobs();
+        });
+        // Generation retirement is lifecycle work, not a read-side effect. A
+        // failed lease stop leaves its identity and completed job routes durable
+        // so this existing reconciliation loop can retry on the next pass.
+        isolated_tick(|| {
+            for job in job_store
+                .list()
+                .into_iter()
+                .filter(|job| job.status.is_terminal())
+            {
+                let _ = generation_store::mark_job_terminal(&job.id.to_string());
+            }
+            let _ = generation_store::reconcile_drained_generations(
+                &serving_lease_id,
+                control::stop_drained_generation,
+            );
         });
         if shutdown.recv_timeout(interval).is_ok() {
             return;
@@ -2168,7 +2192,25 @@ where
             Err(err) => error_response(400, err),
         },
         ("POST", "/controller/jobs") => {
-            match with_daemon_job_admission(|| enqueue_controller_job(body, job_store)) {
+            match with_daemon_job_admission(|| {
+                let body = enqueue_controller_job(body, job_store)?;
+                let job_id = body
+                    .pointer("/job/id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("controller admission has no job id")
+                    })?;
+                let lease_id = body
+                    .pointer("/job/daemon_lease_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|lease_id| !lease_id.is_empty())
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("controller admission has no daemon lease owner")
+                    })?;
+                heartbeat_lease()?;
+                generation_store::record_job(job_id, lease_id)?;
+                Ok(body)
+            }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
                 Err(err) => error_response(400, err),
             }
@@ -2320,6 +2362,17 @@ where
         ("POST", "/v1/control-plane/runs") => {
             match authorize_control_plane_write(body, &broker_auth) {
                 Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", "/v1/control-plane/provider-effects/reconcile") => {
+            match authorize_control_plane_write(body, &broker_auth).and_then(|body| {
+                let request = serde_json::from_value::<homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest>(
+                    body.ok_or_else(|| Error::validation_invalid_argument("body", "provider-effect reconciliation requires a JSON request body", None, None))?,
+                ).map_err(|error| Error::validation_invalid_argument("body", error.to_string(), None, None))?;
+                Ok(crate::control_plane::reconcile_deployment_provider_effect(&request))
+            }) {
+                Ok(response) => daemon_endpoint_response("control_plane.provider_effects.reconcile", serde_json::to_value(response).unwrap_or(serde_json::Value::Null)),
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
         }
@@ -4564,6 +4617,42 @@ mod tests {
     }
 
     #[test]
+    fn provider_effect_reconcile_http_matches_the_canonical_service_response() {
+        crate::test_support::with_isolated_home(|_| {
+            let request = homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest {
+                schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA.to_string(),
+                api_version: homeboy_extension_contract::api::v1::EXTENSION_API_V1,
+                effect_id: homeboy_control_plane_contract::EffectId("missing-effect".to_string()),
+                request_digest: "digest".to_string(),
+                recovery_fence: 1,
+                result: homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderResult {
+                    exit_code: 0,
+                    evidence: json!({"provider":"verified"}),
+                    error: None,
+                },
+                authoritative_evidence: json!({"provider_job":"verified-42"}),
+            };
+            let direct = crate::control_plane::reconcile_deployment_provider_effect(&request);
+            let response = route_with_body(
+                "POST",
+                "/v1/control-plane/provider-effects/reconcile",
+                Some(serde_json::to_value(&request).expect("request JSON")),
+                &JobStore::default(),
+            );
+
+            assert_eq!(response.status_code, 200);
+            assert_eq!(
+                response.body["endpoint"],
+                "control_plane.provider_effects.reconcile"
+            );
+            assert_eq!(
+                response.body["body"],
+                serde_json::to_value(direct).expect("response JSON")
+            );
+        });
+    }
+
+    #[test]
     fn control_plane_reference_registration_paths_are_write_scoped() {
         for path in [
             "/v1/control-plane/runs/run-1/artifacts",
@@ -4715,7 +4804,6 @@ mod tests {
                 .expect("connect existing job");
 
             assert_eq!(client.endpoint, format!("http://{owner_address}"));
-            assert_eq!(client.lease_id, "draining");
             assert_eq!(
                 client.status(&job_id.to_string()).expect("read old job").id,
                 job_id
@@ -4911,7 +4999,12 @@ mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
             let job_store = JobStore::default();
             let handle = std::thread::spawn(move || {
-                super::orchestration_tick_loop(job_store, Duration::from_secs(300), rx);
+                super::orchestration_tick_loop(
+                    job_store,
+                    "test-serving-lease".to_string(),
+                    Duration::from_secs(300),
+                    rx,
+                );
             });
 
             std::thread::sleep(Duration::from_millis(50));
@@ -4923,6 +5016,50 @@ mod tests {
                 start.elapsed() < Duration::from_secs(10),
                 "shutdown must not wait out the poll interval, took {:?}",
                 start.elapsed()
+            );
+        });
+    }
+
+    #[test]
+    fn restart_rebuilds_existing_job_ownership_from_the_durable_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let old = DaemonState {
+                schema: DAEMON_LEASE_SCHEMA.to_string(),
+                lease_id: "old-lease".to_string(),
+                startup_token: "old".to_string(),
+                address: "127.0.0.1:1001".to_string(),
+                pid: 1,
+                state_path: paths::daemon_state_file()
+                    .expect("state path")
+                    .display()
+                    .to_string(),
+                started_at: "now".to_string(),
+                last_seen_at: "now".to_string(),
+                build_identity: build_identity::current(),
+                binary_sha256: None,
+                runtime_paths: DaemonRuntimeSnapshot {
+                    loaded_at: "now".to_string(),
+                    paths: Vec::new(),
+                },
+            };
+            let replacement = DaemonState {
+                lease_id: "replacement-lease".to_string(),
+                address: "127.0.0.1:1002".to_string(),
+                ..old.clone()
+            };
+            generation_store::seed(&old).expect("seed old generation");
+            generation_store::activate(&replacement).expect("activate replacement");
+
+            let store = JobStore::default().with_daemon_lease(old.lease_id.clone());
+            let job = store.create("restart-recovery");
+            rebuild_generation_job_ownership(&store).expect("rebuild durable ownership");
+
+            assert_eq!(
+                generation_store::endpoint_for_job(&job.id.to_string())
+                    .expect("route job")
+                    .expect("old owner")
+                    .lease_id,
+                old.lease_id
             );
         });
     }

@@ -2234,14 +2234,18 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     let authoritative_generation_count = generation_inventory
         .iter()
         .find(|generation| generation.admission_owner)
-        .and_then(|generation| generation.observed_active_job_count);
+        .filter(|generation| generation.active_job_count_authoritative)
+        .map(|generation| generation.active_job_count);
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, _) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
+        (None, Some(direct_daemon_active_jobs))
+            if authoritative_generation_count
+                .is_some_and(|count| count != direct_daemon_active_jobs) =>
+        {
             Some(RunnerActiveJobError {
-                code: "active_job_count_inconsistent".to_string(),
+                code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
-                    "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger reports {}",
+                    "selected daemon reports {direct_daemon_active_jobs} active job(s), but its authoritative generation ledger retains {}",
                     authoritative_generation_count.expect("guarded by is_some_and")
                 ),
             })
@@ -2804,9 +2808,6 @@ pub(super) fn active_jobs_before_daemon_replacement_in_roots(
     if !report.connected {
         return Ok(Vec::new());
     }
-    if authoritative_zero_active_jobs(&report) {
-        return Ok(Vec::new());
-    }
     if report.active_job_state != RunnerActiveJobState::Available {
         let mut error = Error::validation_invalid_argument(
             "reconnect",
@@ -2829,6 +2830,9 @@ pub(super) fn active_jobs_before_daemon_replacement_in_roots(
             Some(runner_id.to_string()),
             Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
         ));
+    }
+    if authoritative_zero_active_jobs(&report) {
+        return Ok(Vec::new());
     }
     Ok(report.active_jobs)
 }
@@ -3229,8 +3233,6 @@ fn orphaned_child_run_job(runner_id: &str, run: RunSummary) -> ActiveRunnerJobSu
         lifecycle: None,
         durable_run_id: Some(run.id),
         stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
-        lifecycle_state: Some("recoverable_orphan".to_string()),
-        retryable: Some(true),
         active_child_count: None,
         active_cell_count: None,
     }

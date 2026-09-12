@@ -164,6 +164,35 @@ fn remote_default_artifact_root_rejects_empty_home() {
 }
 
 #[test]
+fn remote_artifact_store_availability_contract_handles_existing_missing_and_unusable_roots() {
+    let root = tempfile::tempdir().expect("artifact fixture root");
+    let existing = root.path().join("existing");
+    std::fs::create_dir(&existing).expect("existing artifact root");
+    let missing = root.path().join("missing");
+    let unusable_parent = root.path().join("not-a-directory");
+    std::fs::write(&unusable_parent, "not a directory").expect("unusable artifact parent");
+
+    assert!(artifact_store_contract_succeeds(&existing));
+    assert!(artifact_store_contract_succeeds(&missing));
+    // A non-directory cannot be an artifact root or a writable parent for one.
+    assert!(!artifact_store_contract_succeeds(&unusable_parent));
+    assert!(!artifact_store_contract_succeeds(
+        &unusable_parent.join("child")
+    ));
+}
+
+fn artifact_store_contract_succeeds(path: &std::path::Path) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(probes::remote_artifact_store_available_command(
+            &path.display().to_string(),
+        ))
+        .status()
+        .expect("run artifact-store availability contract")
+        .success()
+}
+
+#[test]
 fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
     let runner = Runner {
         id: "lab".to_string(),
@@ -350,6 +379,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         live_daemon_job_count: 0,
         retained_durable_job_count: 0,
         unresolved_retained_projection_count: 0,
+        retained_job_inconsistency: None,
         admission_blocking_job_ids: Vec::new(),
         unresolved_job_owners: Vec::new(),
         unresolved_generation_ids: Vec::new(),

@@ -77,6 +77,26 @@ pub(crate) fn run_command_output(
                         crate::commands::agent_task::AgentTaskCommand::Cook(cook_args) => cook_args,
                         _ => unreachable!("Cook output branch has a Cook command"),
                     };
+                    if let Err(error) =
+                        crate::commands::agent_task::run::preflight_cook_execution_request(
+                            cook_args,
+                            Some(provenance),
+                        )
+                    {
+                        let result = Err(error);
+                        let _ = lease.finish(
+                            &result,
+                            2,
+                            &crate::commands::utils::response::CommandIdentity::with_operation(
+                                "agent-task",
+                                "cook",
+                            ),
+                            None,
+                        );
+                        return CommandRun::from_stdout_result(result, 2)
+                            .with_command(spec.name)
+                            .with_output_file_already_written();
+                    }
                     let cook_id = cook_args
                         .dispatch
                         .run_id
@@ -110,8 +130,21 @@ pub(crate) fn run_command_output(
                         Some(&cook_id),
                         Some("durable Cook submission is preparing"),
                     ) {
-                        return CommandRun::from_stdout_result(Err(error), 2)
-                            .with_command(spec.name);
+                        let result: homeboy::core::Result<Value> =
+                            terminalize_cook_output_bootstrap_failure(&cook_id, &error)
+                                .and(Err(error));
+                        let _ = lease.finish(
+                            &result,
+                            2,
+                            &crate::commands::utils::response::CommandIdentity::with_operation(
+                                "agent-task",
+                                "cook",
+                            ),
+                            None,
+                        );
+                        return CommandRun::from_stdout_result(result, 2)
+                            .with_command(spec.name)
+                            .with_output_file_already_written();
                     }
                     let progress =
                         |phase: &str,
@@ -298,6 +331,23 @@ pub(crate) fn run_command_output(
     run.with_command(spec.name)
 }
 
+fn terminalize_cook_output_bootstrap_failure(
+    cook_id: &str,
+    error: &homeboy::core::Error,
+) -> homeboy::core::Result<()> {
+    let store =
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let plan = store.read_controller_plan(cook_id)?;
+    homeboy::agents::agent_task_lifecycle::record_pre_execution_failure_in_store(
+        &store,
+        cook_id,
+        &plan,
+        "output_bootstrap",
+        error,
+    )?;
+    Ok(())
+}
+
 fn runs_show_command_run((output_file_result, exit_code): JsonRun) -> CommandRun {
     let stdout_result = output_file_result
         .clone()
@@ -471,6 +521,10 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
         "warnings": warnings,
         "evidence_refs": evidence_refs,
         "failure": failure,
+        // An incomplete release already knows how to finish itself. Dropping
+        // this is what reported a recovered-but-unpublished release as an
+        // unexplained failure while holding the exact command (#14577).
+        "continuation_command": result.get("continuation_command").and_then(Value::as_str).map(bounded_release_text),
         "full_command": format!("homeboy release {} --full", bounded_release_text(result.get("component_id").and_then(Value::as_str).unwrap_or("<component>"))),
         "output": output_file.map(bounded_release_text),
     });
@@ -1141,6 +1195,36 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_bootstrap_failure_terminalizes_the_persisted_cook_parent() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-output-bootstrap-failure";
+            let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+            homeboy::agents::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &store, cook_id,
+            )
+            .expect("persist Cook parent");
+            let error = homeboy::core::Error::internal_io(
+                "progress write failed",
+                Some("output envelope".to_string()),
+            );
+
+            terminalize_cook_output_bootstrap_failure(cook_id, &error)
+                .expect("terminalize bootstrap parent");
+
+            let record = store.read_record(cook_id).expect("read Cook parent");
+            assert_eq!(
+                record.state,
+                homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["phase"],
+                "output_bootstrap"
+            );
+        });
+    }
 
     #[test]
     fn runs_show_stdout_is_compact_while_output_file_payload_stays_lossless() {

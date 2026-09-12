@@ -1277,17 +1277,6 @@ pub fn refresh_homeboy_binary_in_roots(
     ))
 }
 
-fn acquire_runner_binary_promotion(
-    runner_id: &str,
-    candidate_commit: &str,
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-        candidate_commit,
-    )
-}
-
 /// [`acquire_runner_binary_promotion`] against an explicitly injected root.
 ///
 /// The promotion lease store is machine-global by default, so an isolated
@@ -1302,19 +1291,6 @@ fn acquire_runner_binary_promotion_in_roots(
         runner_id,
         candidate_commit,
         super::lab_selection::emit_runtime_promotion_wait,
-    )
-}
-
-fn acquire_runner_binary_promotion_with(
-    runner_id: &str,
-    candidate_commit: &str,
-    progress: impl FnMut(homeboy_core::runtime_promotion::RuntimePromotionWaitEvent),
-) -> Result<homeboy_core::runtime_promotion::RuntimePromotionLease> {
-    acquire_runner_binary_promotion_with_in_root(
-        &homeboy_core::paths::runtime_promotion_dir()?,
-        runner_id,
-        candidate_commit,
-        progress,
     )
 }
 
@@ -1893,17 +1869,6 @@ fn refresh_execution_route(
         Some(runner.id.clone()),
         admission.summary.next_action.clone().map(|action| vec![action]),
     ))
-}
-
-/// Refresh is a mutation path, so it first settles the generation ledger and
-/// then derives route selection from that exact post-reconcile status. The
-/// later pre-rotation job probe remains the fail-closed check for work that
-/// appears while materialization is in progress.
-fn reconciled_refresh_admission(runner_id: &str) -> Result<super::RunnerAdmissionSnapshot> {
-    reconciled_refresh_admission_in_roots(
-        &homeboy_core::paths::PathRoots::from_environment()?,
-        runner_id,
-    )
 }
 
 /// [`reconciled_refresh_admission`] against an explicitly injected root.
@@ -3168,10 +3133,7 @@ fn refresh_reconnect_failure_with_message(
 
 fn build_local_homeboy_binary(
     source_path: Option<&Path>,
-) -> Result<(
-    PathBuf,
-    Option<homeboy_core::cleanup::SharedCargoTargetLease>,
-)> {
+) -> Result<(PathBuf, Option<homeboy_core::cleanup::ManagedCargoTarget>)> {
     let source_path = match source_path {
         Some(path) => path.to_path_buf(),
         None => {
@@ -3187,10 +3149,11 @@ fn build_local_homeboy_binary(
             None,
         ));
     }
-    let target = homeboy_core::cleanup::acquire_shared_cargo_target(&format!(
-        "runner-refresh:{}",
-        source_path.display()
-    ))?;
+    let mut target = homeboy_core::cleanup::acquire_managed_cargo_target(
+        &format!("runner-refresh:{}", source_path.display()),
+        &source_path,
+        None,
+    )?;
     let status = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy", "--manifest-path"])
         .arg(&manifest)
@@ -3207,6 +3170,7 @@ fn build_local_homeboy_binary(
             None,
         ));
     }
+    target.publish()?;
     Ok((target.target_dir().join("release/homeboy"), Some(target)))
 }
 
@@ -3392,7 +3356,7 @@ fn build_runner_source_snapshot(
 
 fn source_snapshot_build_script(snapshot: &PreparedRunnerSourceSnapshot) -> String {
     format!(
-        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else rm -rf -- \"$slot\"; mkdir -p \"$slot/source\"; tar -xf \"$archive\" -C \"$slot/source\"; [ -f \"$slot/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; {{ IFS= read -r commit_line && IFS= read -r dirty_line && ! IFS= read -r extra; }} < \"$slot/source/.homeboy-source-snapshot\" || {{ echo source_snapshot_missing_provenance >&2; exit 1; }}; source_commit=${{commit_line#git_commit=}}; source_dirty=${{dirty_line#git_dirty=}}; test \"$source_commit\" != \"$commit_line\" && test \"$source_dirty\" != \"$dirty_line\" && test ${{#source_commit}} = 40 && {{ test \"$source_dirty\" = false || test \"$source_dirty\" = true; }} || {{ echo source_snapshot_invalid_provenance >&2; exit 1; }}; HOMEBOY_PRODUCT_GIT_COMMIT=\"$source_commit\" HOMEBOY_PRODUCT_GIT_DIRTY=\"$source_dirty\" cargo build --release --bin homeboy --manifest-path \"$slot/source/Cargo.toml\" --target-dir \"$slot/target\"; install -m 0755 \"$slot/target/release/homeboy\" \"$slot/homeboy.tmp\"; mv -f \"$slot/homeboy.tmp\" \"$slot/homeboy\"; printf '%s' \"$expected\" > \"$slot/.source-sha256\"; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
+        "set -eu\narchive={archive}\nexpected={expected}\nslot={slot}\ntrap 'rm -f -- \"$archive\"' EXIT\nhash() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\n[ \"$(hash \"$archive\")\" = \"$expected\" ] || {{ echo source_snapshot_hash_mismatch >&2; exit 1; }}\nif [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then binary_sha=$(hash \"$slot/homeboy\"); else attempt=\"$slot.attempt.$$.${{RANDOM:-0}}\"; next=\"$slot.next.$$.${{RANDOM:-0}}\"; trap 'rm -f -- \"$archive\" \"$next\"; rm -rf -- \"$attempt\"' EXIT; mkdir -p \"$attempt/source\"; tar -xf \"$archive\" -C \"$attempt/source\"; [ -f \"$attempt/source/Cargo.toml\" ] || {{ echo source_snapshot_missing_manifest >&2; exit 1; }}; {{ IFS= read -r commit_line && IFS= read -r dirty_line && ! IFS= read -r extra; }} < \"$attempt/source/.homeboy-source-snapshot\" || {{ echo source_snapshot_missing_provenance >&2; exit 1; }}; source_commit=${{commit_line#git_commit=}}; source_dirty=${{dirty_line#git_dirty=}}; test \"$source_commit\" != \"$commit_line\" && test \"$source_dirty\" != \"$dirty_line\" && test ${{#source_commit}} = 40 && {{ test \"$source_dirty\" = false || test \"$source_dirty\" = true; }} || {{ echo source_snapshot_invalid_provenance >&2; exit 1; }}; HOMEBOY_PRODUCT_GIT_COMMIT=\"$source_commit\" HOMEBOY_PRODUCT_GIT_DIRTY=\"$source_dirty\" cargo build --release --bin homeboy --manifest-path \"$attempt/source/Cargo.toml\" --target-dir \"$attempt/target\"; install -m 0755 \"$attempt/target/release/homeboy\" \"$attempt/homeboy\"; printf '%s' \"$expected\" > \"$attempt/.source-sha256\"; if [ -e \"$slot\" ] && [ ! -L \"$slot\" ]; then if [ -f \"$slot/.source-sha256\" ] && [ \"$(cat \"$slot/.source-sha256\")\" = \"$expected\" ] && [ -x \"$slot/homeboy\" ]; then rm -rf -- \"$attempt\"; else echo source_snapshot_slot_invalid >&2; exit 1; fi; else ln -s \"$attempt\" \"$next\"; mv -f \"$next\" \"$slot\"; fi; binary_sha=$(hash \"$slot/homeboy\"); fi\n[ \"$(dd if=\"$slot/homeboy\" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\" = 7f454c46 ] || {{ echo runner_native_build_not_elf >&2; exit 1; }}\nprintf 'HOMEBOY_DEV_SOURCE_SHA256=%s\\nHOMEBOY_DEV_BINARY_SHA256=%s\\nHOMEBOY_DEV_BINARY_PATH=%s\\n' \"$expected\" \"$binary_sha\" \"$slot/homeboy\"\n",
         archive = quote_path(&snapshot.remote_archive),
         expected = quote_path(&snapshot.sha256),
         slot = quote_path(&snapshot.build_slot),

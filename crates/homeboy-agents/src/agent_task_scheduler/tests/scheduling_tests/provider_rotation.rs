@@ -507,6 +507,70 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn fallback_client_context_clears_generated_fanout_readiness_provenance() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].metadata = json!({
+            "provider_readiness_generated_fanout_context": true
+        });
+        plan.tasks[0].executor.config = json!({
+            "client_context": {"fanout": {"cook_id": "generated-child"}}
+        });
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback-backend".to_string()),
+            provider_config: json!({
+                "client_context": {"account": "caller-owned-fallback"}
+            }),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[1].executor.config["client_context"]["account"],
+            "caller-owned-fallback"
+        );
+        assert_eq!(
+            observed[1].metadata["provider_readiness_generated_fanout_context"],
+            false
+        );
+    }
+
+    #[test]
+    fn fallback_without_client_context_retains_generated_fanout_readiness_provenance() {
+        let executor = RotationScriptedExecutor::new(vec![provider_failure(), success()]);
+        let observed = Arc::clone(&executor.observed);
+        let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+        let mut plan = plan_with_tasks(1);
+        plan.tasks[0].metadata = json!({
+            "provider_readiness_generated_fanout_context": true
+        });
+        plan.tasks[0].executor.config = json!({
+            "client_context": {"fanout": {"cook_id": "generated-child"}}
+        });
+        plan.options.rotation = Some(rotation_policy(vec![AgentTaskProviderRotationEntry {
+            backend: Some("fallback-backend".to_string()),
+            provider_config: json!({"provider": "fallback-provider"}),
+            ..Default::default()
+        }]));
+        enable_rotation(&mut plan);
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        let observed = observed.lock().expect("observed requests");
+        assert_eq!(
+            observed[1].metadata["provider_readiness_generated_fanout_context"],
+            true
+        );
+    }
+
+    #[test]
     fn timeout_candidate_converges_before_failed_rotation() {
         retained_timeout_candidate_converges_before_rotation();
     }

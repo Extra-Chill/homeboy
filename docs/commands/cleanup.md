@@ -22,7 +22,7 @@ homeboy cleanup artifacts --min-age-days 7
 homeboy cleanup artifacts --apply
 ```
 
-Use `--sort size` to review the largest artifacts first, `--limit N` to bound the reported or removed candidates after sorting, and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream.
+Use `--sort size` to rank the inspected artifacts by size and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream. With `--all-worktrees`, `--limit N` bounds declaration inspections for either sort order and returns a filter-bound cursor when more inventory remains; resume it with `--cursor` and the same eligibility filters. A deadline interrupted while measuring one large directory records an opaque, checksummed reference to its repository-bound durable frontier, so the next pass continues measuring the declaration without putting every pending path in the command line. Size order is therefore largest-first within that bounded page, not a claim about uninspected worktrees. A dry-run continuation remains a dry run; add `--apply` explicitly when ready to remove candidates.
 
 The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, a per-worktree `worktrees` roll-up, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes, files Git tracks at all (a repository that commits its generated output keeps it), or untracked work that Git does not ignore.
 
@@ -71,6 +71,8 @@ homeboy cleanup --include shared-cargo-targets --apply
 ```
 
 `retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. The output's `storage` object records the resolved root, backing filesystem, free bytes/inodes, reserves, managed bytes, protected bytes, and cleanup command. Configure a dedicated root with `cargo_target_root` or `HOMEBOY_CARGO_TARGET_ROOT`; when the root moves, `storage.legacy_discovery_command` explicitly inventories the historical store rather than silently orphaning it. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
+
+Managed runs with an explicit `CARGO_TARGET_DIR` appear in this inventory at their actual path with a caller-owned retention reason and active lease state. Homeboy keeps that lifecycle state under its managed root and never deletes the explicit path, including source-tree targets. Raw Cargo commands run outside Homeboy are not intercepted; use a managed component capability run when lifecycle visibility is required.
 
 ## Runtime Temp
 

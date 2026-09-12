@@ -396,7 +396,7 @@ fn ensure_resolved_commit_is_available(
         identity.requested_ref,
         identity.resolved_sha
     );
-    git::run_git_with_env_timeout(
+    git::fetch_remote_tracking_refs_until(
         source_root,
         &[
             "fetch",
@@ -407,7 +407,7 @@ fn ensure_resolved_commit_is_available(
         ],
         "fetch preflighted exact deploy ref",
         &transport_env,
-        REMOTE_REF_QUERY_TIMEOUT,
+        std::time::Instant::now() + REMOTE_REF_QUERY_TIMEOUT,
     )
     .map_err(|error| remote_transport_error(&remote, &component.id, &error))?;
     let fetched = git::run_git(

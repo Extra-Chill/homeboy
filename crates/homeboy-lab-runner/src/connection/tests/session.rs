@@ -1160,9 +1160,17 @@ fn dirty_controller_preserves_a_runner_side_daemon_recovery() {
         "active_daemon_control_plane_version != job_command_binary_version"
     );
     let actions = warning.safe_recovery_actions();
-    assert!(
-        actions.is_empty(),
-        "the active daemon does not verify this recovery target"
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].args,
+        [
+            "runner",
+            "refresh-homeboy",
+            "homeboy-lab",
+            "--ref",
+            "1e63f1ae0369",
+            "--reconnect",
+        ]
     );
     assert!(!warning.message.contains("upgrade --force"));
 }
@@ -1460,8 +1468,8 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
         "homeboy-lab",
         "0.228.13".to_string(),
         "0.228.13".to_string(),
-        Some("homeboy 0.228.13+same".to_string()),
-        Some("homeboy 0.228.13+same".to_string()),
+        Some("homeboy 0.228.13+1e63f1ae0369".to_string()),
+        Some("homeboy 0.228.13+1e63f1ae0369".to_string()),
     )
     .with_runtime_paths(
         "homeboy-lab",
@@ -1477,7 +1485,7 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
     assert!(warning.message.contains("runtime paths are stale"));
     assert_eq!(
         warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref same --reconnect"]
+        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
     );
 }
 
@@ -2200,7 +2208,7 @@ fn child_run_matching_accepts_durable_run_id_or_command_reference() {
 }
 
 #[test]
-fn orphaned_child_run_job_reports_stale_retryable_runner_state() {
+fn orphaned_child_run_job_reports_stale_runner_state() {
     let job = orphaned_child_run_job("homeboy-lab", sample_run_summary("run-child-1"));
 
     assert_eq!(job.runner_id, "homeboy-lab");
@@ -2212,8 +2220,6 @@ fn orphaned_child_run_job_reports_stale_retryable_runner_state() {
         job.stale_reason.as_deref(),
         Some("child_run_running_without_active_runner_job")
     );
-    assert_eq!(job.lifecycle_state.as_deref(), Some("recoverable_orphan"));
-    assert_eq!(job.retryable, Some(true));
 }
 
 #[test]

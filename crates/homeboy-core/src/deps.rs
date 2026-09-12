@@ -161,6 +161,15 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
+    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy)
+}
+
+fn hydrate_declared_dependencies_unlocked(
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
     let Ok(mut component) = component::resolve_effective(None, Some(&path_arg), None) else {
         return Ok(Vec::new());

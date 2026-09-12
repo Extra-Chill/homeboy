@@ -46,6 +46,10 @@ pub struct RunnerWorkspaceSyncOptions {
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
     pub allow_dirty_lab_workspace: bool,
+    /// Explicit validation-dependency selection from the command settings.
+    /// `None` preserves manifest discovery; `Some`, including an empty list,
+    /// replaces it for this invocation.
+    pub validation_dependency_ids: Option<Vec<String>>,
     /// Opaque job-owned token folded into the deterministic remote workspace
     /// path so two distinct executions at the same source HEAD never share a
     /// mutable remote checkout.

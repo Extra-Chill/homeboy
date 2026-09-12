@@ -211,12 +211,14 @@ pub(crate) fn disconnect_with_session_in_roots(
         let authoritative_session = match reconcile_authoritative_idle_stale_generations(
             runner_id,
             &retained_generations,
+            &authoritative_status,
         ) {
             Ok(session) => session,
             Err(error) => {
                 return partial_disconnect_report(runner_id, session.clone().into(), error.message)
             }
         };
+        let authoritative_rebind = authoritative_session.is_some();
         if let Some(authoritative_session) = authoritative_session {
             *session = authoritative_session.clone();
         }
@@ -231,7 +233,14 @@ pub(crate) fn disconnect_with_session_in_roots(
         let mut unresolved = Vec::new();
         for generation in generations {
             if generation.mode == RunnerTunnelMode::DirectSsh {
-                if let Err(error) = disconnect_remote_daemon(&generation, force) {
+                let stop = if authoritative_rebind {
+                    // A rebound lease belongs to the SSH authority, while this
+                    // retained session's local tunnel targets an older generation.
+                    verify_remote_daemon_stopped(&generation, force)
+                } else {
+                    disconnect_remote_daemon(&generation, force)
+                };
+                if let Err(error) = stop {
                     unresolved.push(serde_json::json!({
                         "lease_id": generation.remote_daemon_lease_id,
                         "pid": generation.remote_daemon_pid,
@@ -328,6 +337,7 @@ fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::R
 fn reconcile_authoritative_idle_stale_generations(
     runner_id: &str,
     generations: &[RunnerSession],
+    status: &remote_daemon::RemoteDaemonStatus,
 ) -> Result<Option<RunnerSession>> {
     let Some(persisted_leases) = eligible_stale_generation_leases(generations) else {
         return Ok(None);
@@ -335,22 +345,24 @@ fn reconcile_authoritative_idle_stale_generations(
     if persisted_leases.is_empty() {
         return Ok(None);
     }
-    let status = probe_authoritative_daemon_status(runner_id)?;
     let Some(lease_id) =
-        remote_daemon::authoritative_idle_lease_for_stale_generations(&status, &persisted_leases)
+        remote_daemon::authoritative_idle_lease_for_stale_generations(status, &persisted_leases)
             .map_err(|error| {
-            Error::validation_invalid_argument(
-                "disconnect",
-                format!("{error}; stale generations were retained"),
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?
+                Error::validation_invalid_argument(
+                    "disconnect",
+                    format!("{error}; stale generations were retained"),
+                    Some(runner_id.to_string()),
+                    None,
+                )
+            })?
     else {
         return Ok(None);
     };
-    let daemon = status.daemon.expect("authoritative lease requires daemon");
-    Ok(rebind_idle_generation_owner(generations, &daemon, lease_id))
+    let daemon = status
+        .daemon
+        .as_ref()
+        .expect("authoritative lease requires daemon");
+    Ok(rebind_idle_generation_owner(generations, daemon, lease_id))
 }
 
 pub(in crate::connection) fn rebind_idle_generation_owner(
@@ -796,32 +808,7 @@ mod tests {
     use std::sync::{atomic::Ordering, Arc};
     use std::thread;
 
-    fn direct_ssh_session(lease_id: &str) -> RunnerSession {
-        RunnerSession {
-            runner_id: "homeboy-lab".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some("homeboy-lab".to_string()),
-            controller_id: None,
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:49152".to_string()),
-            local_port: Some(49153),
-            local_url: Some("http://127.0.0.1:49153".to_string()),
-            tunnel_pid: Some(1234),
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(4242),
-            remote_daemon_lease_id: Some(lease_id.to_string()),
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some("homeboy test+abc123".to_string()),
-            connected_at: Utc::now().to_rfc3339(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
-        }
-    }
-
+    pub(crate) use crate::test_support::direct_ssh_session;
     fn remote_daemon_status(
         reachable: bool,
         active_jobs: usize,
@@ -918,6 +905,33 @@ mod tests {
             .expect("same snapshot accepts a stale persisted lease"),
             Some("lease-live".to_string())
         );
+    }
+
+    #[test]
+    fn stale_generation_reconcile_uses_the_same_idle_observation_as_rotation() {
+        let stale = direct_ssh_session("lease-stale");
+        let mut idle = remote_daemon_status(true, 0, "lease-live", 4242, None);
+        idle.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::AuthoritativelyIdle;
+
+        let rebound =
+            reconcile_authoritative_idle_stale_generations("homeboy-lab", &[stale], &idle)
+                .expect("the idle observation reconciles stale ownership")
+                .expect("a different live lease is rebound");
+        assert_eq!(
+            rebound.remote_daemon_lease_id.as_deref(),
+            Some("lease-live")
+        );
+
+        let mut active = idle;
+        active.active_jobs = 1;
+        active.work_evidence = remote_daemon::RemoteDaemonWorkEvidence::ActiveOrUnresolved(1);
+        let error = reconcile_authoritative_idle_stale_generations(
+            "homeboy-lab",
+            &[direct_ssh_session("lease-stale")],
+            &active,
+        )
+        .expect_err("active user work must still reject rotation");
+        assert!(error.message.contains("zero typed active jobs"));
     }
 
     #[test]

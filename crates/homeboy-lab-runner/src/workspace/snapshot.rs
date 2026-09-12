@@ -810,6 +810,64 @@ pub(super) fn is_excluded(
     })
 }
 
+/// Extend `excludes` with links whose target the same excludes remove.
+///
+/// Such a link resolves in the source but arrives in the stage pointing at
+/// nothing, because its target was never staged. Materializing it instead is
+/// not an option: that turns a link into a regular file, and
+/// `validate_snapshot_stability` compares the source and staged manifests
+/// entry-for-entry and rejects the changed kind as a mixed snapshot.
+///
+/// Excluding the link keeps both manifests agreeing — neither lists it — and
+/// keeps the dangling entry out of the stage entirely.
+///
+/// Links resolving outside the root are left alone; staging materializes those
+/// on purpose, and they are not dangling.
+pub(super) fn excludes_with_links_to_excluded_targets(
+    root: &Path,
+    excludes: &[String],
+) -> Vec<String> {
+    let mut expanded = excludes.to_vec();
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_excluded(root, &path, &expanded, &[]) {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !kind.is_symlink() {
+                continue;
+            }
+            // Unresolvable in the source too: already dangling, and outside
+            // what snapshot exclusions caused.
+            let Ok(target) = fs::canonicalize(&path) else {
+                continue;
+            };
+            if !target.starts_with(root) || !is_excluded(root, &target, excludes, &[]) {
+                continue;
+            }
+            if let Ok(relative) = path.strip_prefix(root) {
+                // Root-anchored so the link is matched by its exact path rather
+                // than by its file name anywhere in the tree.
+                expanded.push(format!("./{}", relative.display()));
+            }
+        }
+    }
+
+    expanded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,6 +2084,9 @@ pub(super) fn materialize_snapshot_piped_before(
     // Complete the controller-side archive staging before starting the target
     // command. In particular, an SSH target must never observe a partial or
     // second read of a controller workspace whose overlay artifacts changed.
+    // Resolve this once, before anything reads the tree: every manifest and the
+    // staging archive must apply the identical exclude set or they disagree.
+    let excludes = &excludes_with_links_to_excluded_targets(local_path, excludes);
     let source_manifest = snapshot_stable_manifest(local_path, excludes).map_err(|error| {
         snapshot_construction_failure(
             "workspace_snapshot",
@@ -2345,7 +2406,10 @@ fn materialize_snapshot_stage_before(
         stage = shell::quote_arg(&stage_source.display().to_string()),
         root = shell::quote_arg(&local_path.display().to_string()),
         resolve = shell::quote_arg(&format!(
-            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\") || exit; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
+            // A dangling link resolves to nothing. Leave it staged as-is and keep
+            // going: exiting non-zero here fails the find, and with it the whole
+            // staging command.
+            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\" 2>/dev/null) || exit 0; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
             tar_exclude_args(&archive_excludes)
         )),
     );
@@ -2491,9 +2555,10 @@ fn snapshot_construction_failure(
         .unwrap_or(serde_json::Value::Null);
     error.details["reason"] = serde_json::json!(reason);
     error.details["recovery"] = serde_json::json!({
-        "owner": "homeboy_snapshot_staging",
-        "action": "rebuild_snapshot_staging_and_replay_cook",
-        "command": "homeboy agent-task retry <run-id> --run",
+        "owner": "durable_lifecycle",
+        "action": "project_lifecycle_recovery",
+        "reason": "No safe in-place recovery is known until the durable lifecycle owner evaluates this failed snapshot record.",
+        "remediation": "Correct the controller-side snapshot inputs, then start the replacement lifecycle run selected by its owner.",
     });
     error
 }

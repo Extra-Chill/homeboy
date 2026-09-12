@@ -739,6 +739,55 @@ fn prefer_cwd_for_component(
 /// configuration. A worktree manifest owns only the fields it explicitly
 /// declares, so it can intentionally override that contract without losing the
 /// canonical defaults required to run the checkout.
+/// Overlay a registered component with its own checkout's `homeboy.json`.
+///
+/// A registry entry is a point-in-time copy written when the component was
+/// registered. Any setting added to the checkout's manifest afterwards is
+/// invisible to consumers that resolve by id from outside the checkout —
+/// notably `homeboy release`, while `homeboy review` run inside the checkout
+/// sees the current manifest through `prefer_cwd_for_component`. That
+/// divergence silently changes behavior: extension `secret_env_projections`
+/// whose `when` condition reads a manifest-declared setting evaluate against
+/// the stale snapshot, declare no required secrets, and let a gate spawn its
+/// child without them (#14449).
+///
+/// Checkout-owned configuration therefore wins here exactly as it does for a
+/// matched worktree. A registration whose `local_path` is missing, unreadable,
+/// manifest-less, or owned by a different component id keeps the registry
+/// snapshot: those are legacy machine-local registrations, not checkout-owned
+/// configuration.
+fn overlay_registered_local_checkout(
+    config_root: Option<&Path>,
+    component_id: &str,
+    registered: Component,
+) -> Result<Component> {
+    if registered.local_path.trim().is_empty() {
+        return Ok(registered);
+    }
+
+    let checkout = Path::new(&registered.local_path);
+    if !checkout.is_dir() {
+        return Ok(registered);
+    }
+
+    let Some(discovered) = try_discover_from_portable(checkout)? else {
+        return Ok(registered);
+    };
+    if discovered.id != component_id {
+        return Ok(registered);
+    }
+
+    let Some(portable) = read_portable_config(checkout)? else {
+        return Ok(registered);
+    };
+
+    let mut component = overlay_portable_component_config(&registered, portable)?;
+    component.id = component_id.to_string();
+    component.local_path = registered.local_path.clone();
+    resolve_remote_path_at(config_root, &mut component);
+    Ok(component)
+}
+
 fn portable_component_for_checkout(
     config_root: Option<&Path>,
     component_id: &str,
@@ -1444,7 +1493,8 @@ fn resolve_effective_inner(
                     ]),
                 ));
             }
-            load_at(config_root, id)
+            let registered = load_at(config_root, id)?;
+            overlay_registered_local_checkout(config_root, id, registered)
         }
     } else {
         if let Some(path) = path_override {

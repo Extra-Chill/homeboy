@@ -4,6 +4,7 @@ use super::super::expand::expand_vars;
 use super::super::spec::{GitOp, RigSpec};
 use super::component::resolve_component_path;
 use homeboy_core::error::{Error, Result};
+use std::time::{Duration, Instant};
 
 pub(super) fn run_git_step(
     rig: &RigSpec,
@@ -29,7 +30,18 @@ pub(super) fn run_git_step(
     }
     let arg_refs: Vec<&str> = full_args.iter().map(String::as_str).collect();
 
-    let output = homeboy_core::git::execute_git_for_release(&path, &arg_refs).map_err(|e| {
+    let output = if matches!(op, GitOp::Fetch | GitOp::Pull) {
+        homeboy_core::git::run_git_remote_tracking_operation_until(
+            std::path::Path::new(&path),
+            &arg_refs,
+            &format!("rig git {}", full_args[0]),
+            Instant::now() + Duration::from_secs(30),
+        )
+    } else {
+        homeboy_core::git::execute_git_for_release(&path, &arg_refs)
+            .map_err(|error| Error::git_command_failed(error.to_string()))
+    }
+    .map_err(|e| {
         Error::rig_pipeline_failed(
             &rig.id,
             "git",

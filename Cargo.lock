@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.371.0"
+version = "0.373.1"
 dependencies = [
  "base64",
  "chrono",
@@ -979,6 +979,7 @@ dependencies = [
  "chrono",
  "glob",
  "glob-match",
+ "homeboy-control-plane-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension-contract",
@@ -1001,6 +1002,7 @@ dependencies = [
 name = "homeboy-engine-primitives"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "homeboy-error",
  "homeboy-paths",
  "inventory",

@@ -88,6 +88,7 @@ pub mod controller_runtime;
 pub use homeboy_lifecycle_contract::cook_status;
 pub mod daemon;
 pub mod deps;
+pub mod duration;
 pub mod engine;
 pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
@@ -205,6 +206,7 @@ pub(crate) mod transient_workspace_policy;
 #[doc(hidden)]
 pub mod test_support;
 pub mod update_check_cache;
+pub mod validation;
 pub mod validation_progress;
 pub mod workspace_claim;
 pub mod workspace_snapshot;

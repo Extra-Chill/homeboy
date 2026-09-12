@@ -821,11 +821,15 @@ pub(crate) struct PreparedRunnerProcess {
     pub require_paths: Vec<String>,
 }
 
+/// The daemon's JSON response envelope.
+///
+/// Every daemon endpoint answers in this shape, so it is declared once here
+/// rather than restated per caller.
 #[derive(Debug, Deserialize)]
-pub(super) struct DaemonEnvelope {
-    pub(super) success: bool,
-    pub(super) data: Option<Value>,
-    pub(super) error: Option<Value>,
+pub(crate) struct DaemonEnvelope {
+    pub(crate) success: bool,
+    pub(crate) data: Option<Value>,
+    pub(crate) error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1384,7 +1388,11 @@ fn allows_idle_stale_daemon_refresh(
         .capability_preflight
         .as_ref()
         .is_some_and(|preflight| preflight.command == "runner.refresh-homeboy")
-        && (crate::connection::authoritative_zero_active_jobs(status)
+        && ((crate::connection::authoritative_zero_active_jobs(status)
+            && status
+                .active_job_error
+                .as_ref()
+                .is_none_or(|error| error.code != "retained_active_job_count_inconsistent"))
             || (status.active_job_state == RunnerActiveJobState::Available
                 && status.active_job_source == Some(RunnerActiveJobSource::DirectDaemon)
                 && status.active_job_count == 0

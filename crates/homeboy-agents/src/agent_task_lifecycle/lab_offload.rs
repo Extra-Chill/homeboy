@@ -769,11 +769,76 @@ pub(crate) fn record_detached_lab_run_with_submission_in_store(
         )
         .unwrap_or(Value::Null),
     );
+    record_pending_dispatch_acceptance_receipt(
+        metadata,
+        &run_id,
+        input.runner_id,
+        input.runner_job_id,
+        &accepted_at,
+    )?;
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     lifecycle_store.write_record(&record)?;
     Ok(record)
+}
+
+/// The runner daemon is the authority that accepts a detached dispatch. Bind a
+/// retry receipt in this same record write, rather than trusting the controller
+/// dispatcher to record an acknowledgement after the handoff has returned.
+fn record_pending_dispatch_acceptance_receipt(
+    metadata: &mut serde_json::Map<String, Value>,
+    run_id: &str,
+    runner_id: &str,
+    runner_job_id: &str,
+    accepted_at: &str,
+) -> Result<()> {
+    let operation_keys = metadata
+        .get("cook_operation_claims")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|claim| {
+            claim["state"] == json!("running")
+                && claim["intent"]["schema"] == json!("homeboy/cook-dispatch-intent/v1")
+                && claim["intent"]["run_id"] == json!(run_id)
+                && claim["intent"]["operation_key"] == claim["operation_key"]
+        })
+        .filter_map(|claim| claim["operation_key"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    if operation_keys.len() > 1 {
+        return Err(Error::internal_unexpected(
+            "accepted Lab handoff has multiple pending retry dispatch intents",
+        ));
+    }
+    let Some(operation_key) = operation_keys.first() else {
+        return Ok(());
+    };
+    let receipts = metadata
+        .entry("cook_dispatch_acceptance_receipts".to_string())
+        .or_insert_with(|| json!([]));
+    let Some(receipts) = receipts.as_array_mut() else {
+        return Err(Error::internal_unexpected(
+            "dispatch acceptance receipt ledger is not an array",
+        ));
+    };
+    if receipts
+        .iter()
+        .any(|receipt| receipt["operation_key"] == json!(operation_key))
+    {
+        return Ok(());
+    }
+    receipts.push(json!({
+        "schema": "homeboy/cook-dispatch-acceptance-receipt/v1",
+        "operation_key": operation_key,
+        "accepted_at": accepted_at,
+        "receipt": {
+            "accepted_by": "runner_daemon",
+            "runner_id": runner_id,
+            "runner_job_id": runner_job_id,
+        },
+    }));
+    Ok(())
 }
 
 /// Persist the controller-owned Lab proxy inside an explicitly rooted store.

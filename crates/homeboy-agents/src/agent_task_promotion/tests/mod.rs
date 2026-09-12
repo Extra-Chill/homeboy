@@ -9,8 +9,8 @@ use super::apply::{AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace};
 
 use super::promote::promote_with_provider;
 use super::types::{
-    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionOptions,
-    AgentTaskPromotionReport,
+    AgentTaskPromotionCommandCapture, AgentTaskPromotionCommandReport, AgentTaskPromotionReport,
+    AgentTaskPromotionRequest,
 };
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{
@@ -339,7 +339,7 @@ pub(super) fn promote_recoverable_patch_count(
         ..Default::default()
     };
     let result = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -374,8 +374,8 @@ pub(super) fn git(cwd: &Path, args: &[&str]) {
     );
 }
 
-pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionOptions {
-    AgentTaskPromotionOptions {
+pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionRequest {
+    AgentTaskPromotionRequest {
         source: "{}".to_string(),
         source_run_id: None,
         source_path: None,
@@ -399,7 +399,7 @@ pub(super) fn adopted_commit_options(
     base: String,
     candidate_ref: String,
     gates: VerifyGateOptions,
-) -> AgentTaskPromotionOptions {
+) -> AgentTaskPromotionRequest {
     let source_path = temp.path().join("adoption-outcome.json");
     let source = serde_json::json!({
         "schema": AGENT_TASK_OUTCOME_SCHEMA,
@@ -409,7 +409,7 @@ pub(super) fn adopted_commit_options(
     })
     .to_string();
     std::fs::write(&source_path, &source).expect("write adoption outcome");
-    AgentTaskPromotionOptions {
+    AgentTaskPromotionRequest {
         source,
         source_run_id: Some("adoption-run".to_string()),
         source_path: Some(source_path),

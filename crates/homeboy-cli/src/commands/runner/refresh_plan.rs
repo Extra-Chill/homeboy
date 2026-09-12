@@ -861,9 +861,13 @@ mod tests {
         assert_eq!(handoff.execution_record.runner_id, "lab-runner");
         assert_eq!(handoff.execution_record.status, "planned");
         assert_eq!(
-            handoff.execution_record.remote_run_id.as_deref(),
+            handoff.execution_record.mirror_run_id.as_deref(),
             Some("matrix-refresh-1")
         );
+        let execution_record =
+            serde_json::to_value(&handoff.execution_record).expect("serialize handoff record");
+        assert_eq!(execution_record["mirror_run_id"], "matrix-refresh-1");
+        assert!(execution_record.get("remote_run_id").is_none());
         assert_eq!(handoff.execution_record.artifact_refs.len(), 2);
         assert_eq!(
             handoff.execution_record.artifact_refs[0].path.as_deref(),

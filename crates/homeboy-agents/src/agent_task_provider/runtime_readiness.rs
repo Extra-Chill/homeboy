@@ -378,17 +378,32 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     deadline_unix_ms: Option<u64>,
 ) -> Result<ProviderReadinessInvocationResult> {
+    readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        cache,
+        deadline_unix_ms,
+        false,
+    )
+}
+
+pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+    generated_fanout_context: bool,
+) -> Result<ProviderReadinessInvocationResult> {
+    let started = Instant::now();
     ensure_readiness_deadline("probe", deadline_unix_ms)?;
-    let base_key = readiness_request_key(provider, config)?;
-    ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
-    let credential_identity = credential_env
-        .iter()
-        .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
-        .collect::<Vec<_>>();
-    let request_key = content_hash::sha256_hex(
-        &serde_json::to_vec(&(base_key, credential_identity))
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-    );
+    let request_key = readiness_cache_identity_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        generated_fanout_context,
+    )?;
     ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
     let mut registered_waiter = false;
     loop {
@@ -409,6 +424,18 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                 if !registered_waiter {
                     *state.waiters.entry(request_key.clone()).or_default() += 1;
                     registered_waiter = true;
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "provider_id": provider.id,
+                            "backend": provider.backend,
+                            "state": "waiting",
+                            "elapsed_ms": started.elapsed().as_millis(),
+                            "cache": "shared_wait",
+                            "deadline_unix_ms": deadline_unix_ms,
+                        })
+                    );
                 }
                 let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
                     release_cache_waiter(&mut state, &request_key);
@@ -444,6 +471,18 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                         return Err(error);
                     }
                     let result = result.clone();
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "event": "provider_readiness_progress",
+                            "provider_id": provider.id,
+                            "backend": provider.backend,
+                            "state": "cache_hit",
+                            "elapsed_ms": started.elapsed().as_millis(),
+                            "cache": "hit",
+                            "deadline_unix_ms": deadline_unix_ms,
+                        })
+                    );
                     if registered_waiter {
                         release_cache_waiter(&mut state, &request_key);
                         cache.shared.changed.notify_all();
@@ -528,10 +567,23 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
         .unwrap_or(u64::MAX);
         let shared = Arc::clone(&cache.shared);
         let probe_request_key = request_key.clone();
+        eprintln!(
+            "{}",
+            json!({
+                "event": "provider_readiness_progress",
+                "provider_id": provider.id,
+                "backend": provider.backend,
+                "state": "started",
+                "elapsed_ms": started.elapsed().as_millis(),
+                "cache": "miss",
+                "deadline_unix_ms": deadline_unix_ms,
+            })
+        );
         drop(state);
         let spawn_result = std::thread::Builder::new()
             .name("provider-readiness-probe".to_string())
             .spawn(move || {
+                let started = Instant::now();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_readiness_probe_with_gate(
                         &provider,
@@ -543,6 +595,19 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
                     )
                 }))
                 .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
+
+                eprintln!(
+                    "{}",
+                    json!({
+                        "event": "provider_readiness_progress",
+                        "provider_id": provider.id,
+                        "backend": provider.backend,
+                        "state": if result.is_ok() { "completed" } else { "failed" },
+                        "elapsed_ms": started.elapsed().as_millis(),
+                        "cache": "miss",
+                        "deadline_unix_ms": deadline_unix_ms,
+                    })
+                );
 
                 if deadline_limited
                     && result
@@ -581,7 +646,66 @@ pub(crate) fn readiness_request_key(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
 ) -> Result<String> {
-    let mut environment = provider
+    readiness_request_key_for_generated_fanout_context(provider, config, false)
+}
+
+/// Child-specific fanout identity is orchestration metadata rather than a
+/// provider readiness input. Keep the shared fanout context and all caller
+/// values, including an explicit provider-config `client_context`.
+fn normalize_generated_fanout_client_context(provider_config: &mut serde_json::Map<String, Value>) {
+    let Some(fanout) = provider_config
+        .get_mut("client_context")
+        .and_then(Value::as_object_mut)
+        .and_then(|context| context.get_mut("fanout"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if fanout.get("semantics") != Some(&Value::String("batch_cook".to_string())) {
+        return;
+    }
+    for field in [
+        "cook_id",
+        "to_worktree",
+        "head",
+        "workspace_materialization",
+    ] {
+        fanout.remove(field);
+    }
+}
+
+/// The complete process-local readiness cache identity. Callers that coalesce
+/// readiness work must use this rather than approximating a provider route.
+pub(crate) fn readiness_cache_identity_for_generated_fanout_context(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    generated_fanout_context: bool,
+) -> Result<String> {
+    let base_key = readiness_request_key_for_generated_fanout_context(
+        provider,
+        config,
+        generated_fanout_context,
+    )?;
+    let credential_identity = credential_env
+        .iter()
+        .map(|(name, value)| (name, content_hash::sha256_hex(value.as_bytes())))
+        .collect::<Vec<_>>();
+    let encoded = serde_json::to_vec(&(base_key, credential_identity))
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(content_hash::sha256_hex(&encoded))
+}
+
+fn readiness_request_key_for_generated_fanout_context(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    generated_fanout_context: bool,
+) -> Result<String> {
+    let mut provider_config = config.as_object().cloned().unwrap_or_default();
+    if generated_fanout_context {
+        normalize_generated_fanout_client_context(&mut provider_config);
+    }
+    let environment = provider
         .readiness_invocation
         .as_ref()
         .and_then(|invocation| invocation.extra.get("env_allowlist"))
@@ -590,9 +714,10 @@ pub(crate) fn readiness_request_key(
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_string)
+        .chain(super::credential_readiness::provider_required_secret_env_names(provider))
+        .chain(["PATH".to_string(), "HOME".to_string()])
         .collect::<Vec<_>>();
-    environment.extend(super::credential_readiness::provider_required_secret_env_names(provider));
-    environment.extend(["PATH".to_string(), "HOME".to_string()]);
+    let mut environment = environment;
     environment.sort();
     environment.dedup();
     let environment = environment
@@ -608,7 +733,7 @@ pub(crate) fn readiness_request_key(
         "provider_id": provider.id,
         "runtime_path": provider.runtime_path,
         "invocation": provider.readiness_invocation,
-        "effective_config": config,
+        "effective_config": provider_config,
         "environment": environment,
     });
     let encoded = serde_json::to_vec(&value)
@@ -781,6 +906,96 @@ mod tests {
 
         assert_eq!(first.cache_key, second.cache_key);
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn explicit_provider_config_client_contexts_do_not_share_fanout_readiness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        for account in ["first", "second"] {
+            assert!(
+                readiness_verdict(
+                    &provider,
+                    &json!({
+                        "model": "ready",
+                        "client_context": { "account": account },
+                    }),
+                    &mut cache,
+                )
+                .expect("readiness verdict")
+                .ready
+            );
+        }
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+    }
+
+    #[test]
+    fn generated_fanout_child_identity_deduplicates_readiness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        for (cook_id, to_worktree) in [("first", "homeboy@first"), ("second", "homeboy@second")] {
+            assert!(
+                readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+                    &provider,
+                    &json!({
+                        "model": "ready",
+                        "client_context": {
+                            "fanout": {
+                                "id": "shared-fanout",
+                                "semantics": "batch_cook",
+                                "cook_id": cook_id,
+                                "to_worktree": to_worktree,
+                                "head": format!("fanout/{cook_id}"),
+                                "workspace_materialization": [{ "child": cook_id }],
+                            },
+                        },
+                    }),
+                    &[],
+                    &mut cache,
+                    None,
+                    true,
+                )
+                .expect("readiness verdict")
+                .ready
+            );
+        }
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn caller_fanout_shape_without_the_internal_marker_remains_distinct() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        for cook_id in ["first", "second"] {
+            assert!(
+                readiness_verdict(
+                    &provider,
+                    &json!({
+                        "model": "ready",
+                        "client_context": { "fanout": {
+                            "id": "shared-fanout", "semantics": "batch_cook",
+                            "cook_id": cook_id,
+                        }},
+                    }),
+                    &mut cache,
+                )
+                .expect("readiness verdict")
+                .ready
+            );
+        }
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
     }
 
     #[test]
@@ -1009,21 +1224,37 @@ mod tests {
         let script = root.path().join("owner-different-deadlines.js");
         std::fs::write(
             &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),200);",
+            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}})),1000);",
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
         let mut cache = ProviderRuntimeReadinessCache::default();
 
-        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
-        let error = readiness_verdict_with_credentials_and_deadline(
-            &provider,
-            &json!({"model":"same"}),
-            &[],
-            &mut cache,
-            Some(short_deadline),
-        )
-        .expect_err("short probe owner must time out locally");
+        let short_deadline = crate::agent_task_timeout::now_unix_ms() + 300;
+        let short_provider = provider.clone();
+        let mut short_cache = cache.clone();
+        let short = std::thread::spawn(move || {
+            readiness_verdict_with_credentials_and_deadline(
+                &short_provider,
+                &json!({"model":"same"}),
+                &[],
+                &mut short_cache,
+                Some(short_deadline),
+            )
+        });
+        let start_deadline = Instant::now() + Duration::from_secs(2);
+        while !count.exists() {
+            assert!(Instant::now() < start_deadline, "short probe did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            crate::agent_task_timeout::now_unix_ms() < short_deadline,
+            "short deadline expired before its probe started"
+        );
+        let error = short
+            .join()
+            .expect("short probe owner")
+            .expect_err("short probe owner must time out locally");
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 

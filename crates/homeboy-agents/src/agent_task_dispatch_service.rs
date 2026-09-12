@@ -100,6 +100,9 @@ pub struct DispatchCoreInputs {
     pub provider_config: Option<String>,
     /// Opaque client context JSON object, `@file`, or `-` for stdin.
     pub client_context: Option<String>,
+    /// Internal provenance for Homeboy-generated batch fanout context. This is
+    /// retained in task metadata and is never included in provider config.
+    pub generated_fanout_context: bool,
     /// Total provider executions per task, including the first attempt.
     /// `None` means the caller did not ask for a value, so the configured
     /// provider rotation gets to fund its own reachability (#11082).

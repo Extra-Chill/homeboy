@@ -776,9 +776,11 @@ impl RemoteRunnerStagingTransport for ProductionRunnerStagingTransport {
     }
 
     fn supports_capability(&self, capability: &str) -> bool {
-        self.capabilities
-            .iter()
-            .any(|candidate| candidate == capability)
+        self.session.mode == RunnerTunnelMode::Reverse
+            && self
+                .capabilities
+                .iter()
+                .any(|candidate| candidate == capability)
     }
 
     fn stage_durable(
@@ -1369,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn production_staging_requests_propagate_paired_bearer_tokens_across_transports() {
+    fn production_staging_refuses_direct_and_submits_reverse_with_paired_bearer_tokens() {
         let request = envelope();
         let receipt = RemoteRunnerStagingReceipt {
             schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
@@ -1386,7 +1388,7 @@ mod tests {
             },
         };
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 4);
+        let endpoint = staging_endpoint(receipt.clone(), seen.clone(), 3);
         let broker_token = "paired-staging-token".to_string();
         let direct_session = production_session(RunnerTunnelMode::DirectSsh, &endpoint);
         assert!(
@@ -1404,10 +1406,9 @@ mod tests {
             ],
             broker_token: Some(broker_token.clone()),
         };
-        assert_eq!(
-            submit_remote_runner_staging(&mut direct, &request).expect("direct"),
-            receipt
-        );
+        let error = submit_remote_runner_staging(&mut direct, &request)
+            .expect_err("direct staging has no staged-source consumer");
+        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
 
         let reverse_session = production_session(RunnerTunnelMode::Reverse, &endpoint);
         assert!(
@@ -1437,7 +1438,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "/runner/staging/capabilities",
-                "/runner/staging",
                 "/runner/staging/capabilities",
                 "/runner/staging",
             ]

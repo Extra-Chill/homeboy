@@ -308,6 +308,7 @@ pub(super) fn sync_lab_offload_rigs(
                         git_fetch_refs: Vec::new(),
                         snapshot_includes: Vec::new(),
                         allow_dirty_lab_workspace: false,
+                        validation_dependency_ids: None,
                         run_isolation_token: None,
                     },
                 )?

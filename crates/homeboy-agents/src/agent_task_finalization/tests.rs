@@ -2815,7 +2815,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
         .to_string();
         std::fs::write(outcome.path(), &source).expect("write adoption outcome");
         let promotion = crate::agent_task_promotion::promote_with_checkpoint(
-            crate::agent_task_promotion::AgentTaskPromotionOptions {
+            crate::agent_task_promotion::AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some(run_id.to_string()),
                 source_path: Some(outcome.path().to_path_buf()),

@@ -24,69 +24,15 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-struct XdgGuard {
-    prior: Option<String>,
-}
-
-struct EnvGuard {
-    key: &'static str,
-    prior: Option<String>,
-}
-
-impl XdgGuard {
-    fn unset() -> Self {
-        let prior = std::env::var("XDG_DATA_HOME").ok();
-        std::env::remove_var("XDG_DATA_HOME");
-        Self { prior }
-    }
-}
-
-impl Drop for XdgGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-    }
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prior }
-    }
-
-    /// Clear a variable for the guard's lifetime.
-    ///
-    /// Needed for the XDG-layout assertions below: `with_isolated_home` sets
-    /// `HOMEBOY_DATA_DIR`, and `homeboy_data()` checks it *before* consulting
-    /// `XDG_DATA_HOME` -- so an `XdgGuard` alone cannot reach the path it is
-    /// setting up. Same drift documented in #11919.
-    fn unset(key: &'static str) -> Self {
-        let prior = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, prior }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 mod store_init_tests {
     use super::*;
 
     #[test]
     fn test_status() {
         with_isolated_home(|home| {
-            let _xdg = XdgGuard::unset();
-            let _data_dir = EnvGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+            let _data_dir =
+                homeboy_core::test_support::EnvVarGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
 
             let status = store::status().expect("status");
 
@@ -122,7 +68,8 @@ mod store_init_tests {
     #[test]
     fn test_database_path() {
         with_isolated_home(|home| {
-            let _data_dir = EnvGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
+            let _data_dir =
+                homeboy_core::test_support::EnvVarGuard::unset(crate::paths::HOMEBOY_DATA_DIR_ENV);
 
             let path = store::database_path().expect("db path");
 
@@ -144,7 +91,9 @@ mod store_init_tests {
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 12);
+        // 12 historical tables plus control_plane_resources and
+        // control_plane_resource_aliases, which own canonical action identity.
+        assert_eq!(status.table_count, 14);
     }
 
     #[test]
@@ -158,7 +107,9 @@ mod store_init_tests {
 
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        assert_eq!(status.table_count, 12);
+        // Reasserted after a second initialization: the control-plane resource
+        // tables are created once and idempotent re-init adds nothing.
+        assert_eq!(status.table_count, 14);
     }
 
     #[test]
@@ -813,7 +764,7 @@ mod run_context_tests {
     #[test]
     fn start_run_records_subprocess_source_snapshot_metadata() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("init store");
             let snapshot = serde_json::json!({
                 "runner_id": "lab",
@@ -825,7 +776,10 @@ mod run_context_tests {
                 "sync_excludes": ["node_modules/"]
             });
 
-            let _env = EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, snapshot.to_string());
+            let _env = homeboy_core::test_support::EnvVarGuard::set(
+                SOURCE_SNAPSHOT_METADATA_ENV,
+                snapshot.to_string(),
+            );
             let run = store
                 .start_run(sample_run("test", "homeboy"))
                 .expect("start run");
@@ -837,7 +791,7 @@ mod run_context_tests {
     #[test]
     fn start_run_records_subprocess_lab_offload_metadata() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("init store");
             let lab = serde_json::json!({
                 "source": "automatic",
@@ -847,7 +801,10 @@ mod run_context_tests {
                 "fallback_reason": "runner connect timed out after 3s"
             });
 
-            let _env = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, lab.to_string());
+            let _env = homeboy_core::test_support::EnvVarGuard::set(
+                LAB_OFFLOAD_METADATA_ENV,
+                lab.to_string(),
+            );
             let run = store
                 .start_run(sample_run("test", "homeboy"))
                 .expect("start run");
@@ -859,14 +816,19 @@ mod run_context_tests {
     #[test]
     fn start_run_prefers_typed_context_over_subprocess_environment() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("init store");
             let env_snapshot = serde_json::json!({ "runner_id": "env" });
             let explicit_snapshot = serde_json::json!({ "runner_id": "typed" });
             let explicit_lab = serde_json::json!({ "status": "fallback", "source": "typed" });
-            let _env_snapshot =
-                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, env_snapshot.to_string());
-            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+            let _env_snapshot = homeboy_core::test_support::EnvVarGuard::set(
+                SOURCE_SNAPSHOT_METADATA_ENV,
+                env_snapshot.to_string(),
+            );
+            let _env_lab = homeboy_core::test_support::EnvVarGuard::set(
+                LAB_OFFLOAD_METADATA_ENV,
+                "{not json".to_string(),
+            );
 
             let run = store
                 .start_run(
@@ -886,11 +848,16 @@ mod run_context_tests {
     #[test]
     fn malformed_subprocess_environment_does_not_pollute_typed_context() {
         with_isolated_home(|_home| {
-            let _xdg = XdgGuard::unset();
+            let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("init store");
-            let _env_snapshot =
-                EnvGuard::set(SOURCE_SNAPSHOT_METADATA_ENV, "{not json".to_string());
-            let _env_lab = EnvGuard::set(LAB_OFFLOAD_METADATA_ENV, "{not json".to_string());
+            let _env_snapshot = homeboy_core::test_support::EnvVarGuard::set(
+                SOURCE_SNAPSHOT_METADATA_ENV,
+                "{not json".to_string(),
+            );
+            let _env_lab = homeboy_core::test_support::EnvVarGuard::set(
+                LAB_OFFLOAD_METADATA_ENV,
+                "{not json".to_string(),
+            );
 
             let run = store
                 .start_run_with_context(

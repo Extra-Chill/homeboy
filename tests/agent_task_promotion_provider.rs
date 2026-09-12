@@ -117,7 +117,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
     .to_string();
 
     let report = homeboy::agents::agent_task_promotion::promote(
-        homeboy::agents::agent_task_promotion::AgentTaskPromotionOptions {
+        homeboy::agents::agent_task_promotion::AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.clone()),
             source_path: None,

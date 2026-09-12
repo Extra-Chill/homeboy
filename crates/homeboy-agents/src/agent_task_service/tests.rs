@@ -926,7 +926,7 @@ fn persisted_timeout_candidate_is_admitted_for_continuation() {
 
         let source = serde_json::to_string(&aggregate).expect("serialize persisted aggregate");
         let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
-            &crate::agent_task_promotion::AgentTaskPromotionOptions {
+            &crate::agent_task_promotion::AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("service-timeout-candidate".to_string()),
                 source_path: Some(lifecycle_store.aggregate_path("service-timeout-candidate")),
@@ -976,7 +976,7 @@ fn service_normalizes_resolved_component_worktree_plan() {
 }
 
 #[test]
-fn service_materializes_component_worktree_before_provider_dispatch() {
+fn run_plan_record_run_id_preparation_preserves_component_worktree_branch_for_discovery() {
     with_isolated_home(|home| {
         let repo = home.path().join("fixture");
         create_git_repo(&repo);
@@ -1051,6 +1051,21 @@ fn service_materializes_component_worktree_before_provider_dispatch() {
             Some("fixture@fix-service-task")
         );
         assert!(Path::new(&record.worktree_path).is_dir());
+
+        // `run-plan --record-run-id` prepares the component worktree before
+        // submitting the lifecycle record, so discovery must retain its
+        // original branch after preparation clears `workspace.branch`.
+        let scoped = discover_runs_with_options(
+            AgentTaskDiscoveryFilter::All,
+            AgentTaskDiscoveryOptions {
+                branch: Some("fix/service-task".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("discover prepared durable run by branch");
+        assert_eq!(scoped.runs.len(), 1);
+        assert_eq!(scoped.runs[0].run_id, "service-materialized-worktree");
+        assert_eq!(scoped.runs[0].branch.as_deref(), Some("fix/service-task"));
     });
 }
 
@@ -2274,6 +2289,9 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
         .expect("ownerless runner record");
         let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId(
+                "test:reconcile-runner-claim-1".to_string(),
+            ),
             action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
             idempotency_key: "reconcile-runner-claim-1".to_string(),
             actor: "test".to_string(),
@@ -2294,7 +2312,7 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
                 .state,
             AgentTaskRunState::Cancelled
         );
-        let operation_key = format!("control-plane-action:reconcile:{}", request.idempotency_key);
+        let operation_key = format!("control-plane-action:reconcile:{}", request.effect_id.0);
         assert_eq!(
             agent_task_lifecycle::operation_claim(run_id, &operation_key)
                 .expect("operation claim")
@@ -2307,6 +2325,64 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
                 .expect("replayed reconciliation"),
             first
         );
+    });
+}
+
+#[test]
+fn control_plane_action_rejects_idempotency_key_intent_mismatch() {
+    with_isolated_home(|_| {
+        let run_id = "action-intent-mismatch";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("queued run");
+        let mut request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId("test:same-key".to_string()),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            idempotency_key: "same-key".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "reason": "first hold" }),
+            },
+            confirmed: true,
+        };
+        crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect("first action");
+        request.parameters.data = serde_json::json!({ "reason": "different hold" });
+        let error = crate::orchestration::execute_action_from_current_environment(run_id, &request)
+            .expect_err("key cannot be reused for another intent");
+        assert!(error.message.contains("different action intent"));
+    });
+}
+
+#[test]
+fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-quarantine-alias";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&attempt_id)).expect("queued attempt");
+        index_cook_attempt(cook_id, &attempt_id);
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId("test:alias-rejected".to_string()),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            idempotency_key: "alias-rejected".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({ "reason": "hold" }),
+            },
+            confirmed: true,
+        };
+        let error =
+            crate::orchestration::execute_action_from_current_environment(cook_id, &request)
+                .expect_err("Cook aliases are not exact quarantine targets");
+        assert!(error.message.contains("Cook aliases are not accepted"));
+        let attempt = agent_task_lifecycle::exact_record(&attempt_id).expect("unchanged attempt");
+        assert!(attempt.metadata.get("queue_quarantine").is_none());
     });
 }
 
@@ -3113,6 +3189,71 @@ fn upgrade_admission_ignores_terminal_records_with_stale_owner_metadata() {
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert!(admission.allows_controller_replacement());
         assert!(admission.blockers.is_empty());
+    });
+}
+
+#[test]
+fn upgrade_admission_ignores_a_runner_owned_attempt_of_a_terminal_cook() {
+    with_isolated_home(|_| {
+        for run_id in ["terminal-cook", "terminal-cook-attempt-1"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        }
+        agent_task_lifecycle::rewrite_record_for_test("terminal-cook", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Succeeded);
+        })
+        .expect("terminal cook stored");
+        // The attempt is stranded in `running` on a runner whose daemon
+        // restarted: runner reconcile retires generations without touching it
+        // and the durable reconciler leaves runner-owned records alone.
+        agent_task_lifecycle::rewrite_record_for_test("terminal-cook-attempt-1", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["cook_id"] = serde_json::json!("terminal-cook");
+            record.metadata["runner_id"] = serde_json::json!("lab");
+            record.metadata["runner_job_id"] = serde_json::json!("old-job");
+        })
+        .expect("stranded attempt stored");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            admission.allows_controller_replacement(),
+            "a terminal Cook is authoritative over its own attempts: {:?}",
+            admission.blockers
+        );
+        assert!(admission.blockers.is_empty());
+    });
+}
+
+#[test]
+fn upgrade_admission_still_blocks_an_attempt_whose_cook_is_not_terminal() {
+    with_isolated_home(|_| {
+        for run_id in ["live-cook", "live-cook-attempt-1"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+        }
+        agent_task_lifecycle::rewrite_record_for_test("live-cook-attempt-1", |record| {
+            record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
+            record.updated_at = None;
+            record.metadata["cook_id"] = serde_json::json!("live-cook");
+            record.metadata["runner_id"] = serde_json::json!("lab");
+            record.metadata["runner_job_id"] = serde_json::json!("old-job");
+        })
+        .expect("attempt stored");
+
+        let (records, health) = agent_task_lifecycle::read_records_with_health().expect("records");
+        let admission =
+            controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
+
+        assert!(
+            admission
+                .blockers
+                .iter()
+                .any(|blocker| blocker.run_id == "live-cook-attempt-1"),
+            "a non-terminal Cook proves nothing about its attempt: {:?}",
+            admission.blockers
+        );
     });
 }
 

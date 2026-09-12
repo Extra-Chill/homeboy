@@ -6,13 +6,14 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    immutable_replay_snapshot, materialize_snapshot_piped, materialize_snapshot_stage,
-    register_after_snapshot_directory_discovery_hook, snapshot_input_manifest,
-    snapshot_install_command, snapshot_overlay_install_command, snapshot_stable_manifest,
-    synthetic_checkout_value, validate_snapshot_stability, workspace_content_hash,
-    workspace_content_hash_algorithm, workspace_content_hash_for_policy, workspace_content_hash_v1,
-    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    excludes_with_links_to_excluded_targets, immutable_replay_snapshot, materialize_snapshot_piped,
+    materialize_snapshot_stage, register_after_snapshot_directory_discovery_hook,
+    snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
+    snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_hash_v1, workspace_content_manifest_and_hash_for_policy,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -139,6 +140,7 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         );
@@ -220,6 +222,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -361,6 +364,7 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
                 git_fetch_refs: vec![pinned_base.clone()],
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -438,6 +442,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -752,6 +757,7 @@ fn runner_snapshot_includes_override_generated_output_excludes() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -798,6 +804,7 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -842,6 +849,7 @@ fn runner_snapshot_rejects_source_runner_workspace_metadata_collision() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1024,6 +1032,7 @@ fn test_sync_workspace() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1100,6 +1109,7 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1221,6 +1231,7 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         };
         let (first, _) =
@@ -1266,6 +1277,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
                 git_fetch_refs: vec!["refs/heads/trunk".to_string()],
                 snapshot_includes: vec!["src/**".to_string()],
                 allow_dirty_lab_workspace: true,
+                validation_dependency_ids: None,
                 run_isolation_token: Some("run-123".to_string()),
             },
         )
@@ -1346,6 +1358,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1476,6 +1489,7 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )
@@ -1745,6 +1759,7 @@ fn snapshot_install_commands_parse_under_posix_shells() {
 #[test]
 fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     let source = tempfile::tempdir().expect("snapshot source");
+    let scratch = tempfile::tempdir().expect("snapshot scratch");
     let overlay = source.path().join("runtime-overlays");
     fs::create_dir_all(&overlay).expect("runtime overlay source");
     fs::write(overlay.join("runtime.js"), "runtime").expect("runtime artifact");
@@ -1754,7 +1769,7 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     // preserves the declaration identity and staging now fails before transport.
     let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
     fs::remove_dir_all(&overlay).expect("remove overlay after manifest creation");
-    let error = materialize_snapshot_stage(source.path(), &[], &manifest, None)
+    let error = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
         .expect_err("missing declared overlay must fail during local staging");
 
     assert_eq!(error.retryable, Some(false));
@@ -1772,7 +1787,16 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
         .is_some_and(|reason| reason.contains("tar: ./runtime-overlays: Cannot stat")));
     assert_eq!(
         error.details["recovery"]["action"],
-        "rebuild_snapshot_staging_and_replay_cook"
+        "project_lifecycle_recovery"
+    );
+    assert_eq!(error.details["recovery"]["owner"], "durable_lifecycle");
+    assert!(error.details["recovery"]["command"].is_null());
+    assert!(
+        fs::read_dir(scratch.path())
+            .expect("inspect scratch cleanup")
+            .next()
+            .is_none(),
+        "failed staging must not retain its scratch directory"
     );
 }
 
@@ -2142,6 +2166,46 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
 }
 
 #[test]
+#[cfg(unix)]
+fn snapshot_staging_drops_links_whose_target_the_excludes_remove() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    let guidance = source.join("wp-content/lib/example/policies");
+    fs::create_dir_all(&guidance).expect("guidance directory");
+    fs::write(guidance.join("AGENTS.md"), "guidance\n").expect("guidance target");
+    fs::write(guidance.join("keep.md"), "kept\n").expect("sibling file");
+    // Resolves in the source; the exclude removes it from the stage, so staging
+    // the link unchanged would deliver a link pointing at nothing.
+    symlink("AGENTS.md", guidance.join("CLAUDE.md")).expect("guidance link");
+    let declared = vec!["**/AGENTS.md".to_string()];
+
+    let excludes = excludes_with_links_to_excluded_targets(&source, &declared);
+    let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, &source, &staged_source)
+        .expect("source and staged manifests agree");
+
+    let staged_link = staged_source.join("wp-content/lib/example/policies/CLAUDE.md");
+    assert!(
+        staged_link.symlink_metadata().is_err(),
+        "a link whose target the excludes remove is kept out of the stage instead of dangling"
+    );
+    assert_eq!(
+        fs::read_to_string(staged_source.join("wp-content/lib/example/policies/keep.md"))
+            .expect("staged sibling"),
+        "kept\n",
+        "the rest of the tree still stages"
+    );
+}
+
+#[test]
 fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift() {
     let source = tempfile::tempdir().expect("source");
     let scratch = tempfile::tempdir().expect("admitted scratch");
@@ -2157,6 +2221,12 @@ fn snapshot_construction_failure_does_not_start_transport_or_accept_source_drift
     )
     .expect_err("construction failure must reject transport");
     assert_eq!(error.details["classification"], "snapshot_construction");
+    assert_eq!(error.details["recovery"]["owner"], "durable_lifecycle");
+    assert_eq!(
+        error.details["recovery"]["action"],
+        "project_lifecycle_recovery"
+    );
+    assert!(error.details["recovery"]["command"].is_null());
     assert!(
         !marker.path().exists(),
         "transport must not start after staging failure"
@@ -2264,6 +2334,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         };
 

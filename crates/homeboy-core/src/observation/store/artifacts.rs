@@ -2196,7 +2196,6 @@ mod tests {
     use crate::test_support::with_isolated_home;
     use std::collections::BTreeSet;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     /// The preflight gates every publication path, so a healthy filesystem must
     /// stay silently healthy. A capacity gate that fails closed on a machine

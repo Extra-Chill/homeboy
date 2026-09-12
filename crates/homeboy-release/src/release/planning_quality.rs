@@ -1048,6 +1048,64 @@ mod tests {
         });
     }
 
+    /// Release resolves its component from the persisted `homeboy.json` on the
+    /// release source (portable discovery over the registered snapshot), not
+    /// from CLI-passed settings. The declared-test-secret gate must therefore
+    /// evaluate `secret_env_projections` against settings that live only in
+    /// the component config file and fail closed with the same `test.secret_env`
+    /// error the review-test runner produces — before anything spawns. (#14449)
+    #[test]
+    fn validate_test_secret_env_resolves_projections_from_persisted_component_settings() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _guard = test_env_guard();
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("preflight-child-ran");
+            let _ = conditional_extension_test_component(
+                home.path(),
+                source.path(),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+            std::fs::write(
+                source.path().join("homeboy.json"),
+                r#"{
+                    "id": "fixture",
+                    "extensions": {
+                        "release-test-fixture": {
+                            "toolchain": "fixture",
+                            "settings": {
+                                "service": {
+                                    "mode": "remote",
+                                    "secret_env": {"token": "PROJECTED_RELEASE_SECRET"}
+                                }
+                            }
+                        }
+                    }
+                }"#,
+            )
+            .expect("persisted homeboy.json");
+            let component = homeboy_core::component::try_discover_from_portable(source.path())
+                .expect("portable discovery")
+                .expect("component from persisted config");
+            std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
+            std::env::remove_var("PROJECTED_RELEASE_SECRET");
+
+            let error = validate_test_secret_env(&component)
+                .expect_err("persisted-settings projection must gate the release");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            assert_eq!(error.details["field"], "test.secret_env");
+            assert!(error.message.contains("PROJECTED_RELEASE_SECRET"));
+            assert!(
+                !error.to_string().contains("available-static-secret"),
+                "resolved values must never reach the diagnostic"
+            );
+            assert!(
+                !marker.exists(),
+                "the gate must not spawn the extension test child"
+            );
+        });
+    }
+
     #[test]
     fn validate_test_secret_env_reports_resolvable_identities_by_name() {
         homeboy_core::test_support::with_isolated_home(|home| {

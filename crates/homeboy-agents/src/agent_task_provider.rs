@@ -93,11 +93,12 @@ pub use dispatchability::{
     preflight_plan_provider_dispatchability_without_runtime_with_providers,
     preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
-    AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
-    AgentTaskProviderDispatchability, AgentTaskProviderDispatchabilityCheck,
-    AgentTaskProviderDispatchabilityChecks, AgentTaskProviderDispatchabilityCredentialCheck,
-    AgentTaskProviderLiveInferenceReadiness, AgentTaskProviderOwner, AgentTaskProviderReadiness,
-    AgentTaskProviderReadinessScope, AgentTaskProviderRuntimeEvidence,
+    provider_runtime_readiness_cache_identity_for_plan, AgentTaskProviderConfigurationDiagnosis,
+    AgentTaskProviderCredentialStatus, AgentTaskProviderDispatchability,
+    AgentTaskProviderDispatchabilityCheck, AgentTaskProviderDispatchabilityChecks,
+    AgentTaskProviderDispatchabilityCredentialCheck, AgentTaskProviderLiveInferenceReadiness,
+    AgentTaskProviderOwner, AgentTaskProviderReadiness, AgentTaskProviderReadinessScope,
+    AgentTaskProviderRuntimeEvidence,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
@@ -114,10 +115,7 @@ pub use runtime_preflight_checks::{
     ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
     RuntimePreflightReadiness,
 };
-pub(crate) use runtime_readiness::{
-    effective_provider_config, readiness_request_key,
-    readiness_verdict_with_credentials_and_deadline,
-};
+pub(crate) use runtime_readiness::{effective_provider_config, readiness_request_key};
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };

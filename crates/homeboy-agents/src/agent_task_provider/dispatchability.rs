@@ -2,14 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     effective_provider_config, executor::effective_provider_for_request,
-    provider_credential_readiness, readiness_verdict_with_credentials_and_deadline,
-    resolve_provider_for_backend, runtime_readiness::provider_requires_live_auth_validation,
+    provider_credential_readiness, resolve_provider_for_backend,
+    runtime_readiness::provider_requires_live_auth_validation,
     validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
     ProviderRuntimeReadinessCache,
 };
 use crate::agent_task_scheduler::{
     AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
 };
+use homeboy_core::Error;
 use serde_json::Value;
 
 /// One redacted, precedence-ordered answer to whether a provider can accept
@@ -225,6 +226,7 @@ fn evaluate_provider_dispatchability_with_config_and_credentials(
         cache,
         runtime_evidence_out,
         None,
+        false,
     )
 }
 
@@ -243,6 +245,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     cache: &mut ProviderRuntimeReadinessCache,
     runtime_evidence_out: &mut Option<AgentTaskProviderRuntimeEvidence>,
     deadline_unix_ms: Option<u64>,
+    generated_fanout_context: bool,
 ) -> AgentTaskProviderDispatchability {
     let candidate_providers = catalog
         .providers()
@@ -353,15 +356,19 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         },
     };
     let mut runtime_remediation = Vec::new();
-    let (runtime, runtime_evidence) =
-        if probe_runtime && model_ready && credentials.dispatchable && configuration.ready {
-            let config = effective_provider_config(config, model);
-            match readiness_verdict_with_credentials_and_deadline(
+    let (runtime, runtime_evidence) = if probe_runtime
+        && model_ready
+        && credentials.dispatchable
+        && configuration.ready
+    {
+        let config = effective_provider_config(config, model);
+        match super::runtime_readiness::readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                 provider,
                 &config,
                 credential_env,
                 cache,
                 deadline_unix_ms,
+                generated_fanout_context,
             ) {
                 Ok(verdict) => {
                     let remediation = (!verdict.remediation.trim().is_empty())
@@ -428,15 +435,15 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     )
                 }
             }
-        } else {
-            (
-                AgentTaskProviderDispatchabilityCheck {
-                    ready: !probe_runtime,
-                    reason: (!probe_runtime).then_some("not requested".to_string()),
-                },
-                None,
-            )
-        };
+    } else {
+        (
+            AgentTaskProviderDispatchabilityCheck {
+                ready: !probe_runtime,
+                reason: (!probe_runtime).then_some("not requested".to_string()),
+            },
+            None,
+        )
+    };
     // `runtime.ready` alone conflates two very different situations: a
     // provider-declared probe actually ran and passed, versus no probe being
     // declared at all (in which case `run_provider_readiness_invocation`
@@ -885,6 +892,68 @@ pub(crate) fn evaluate_request_dispatchability(
     )
 }
 
+/// Returns the runtime-readiness cache identity for a plan's first selected
+/// route, using the same route candidate and secret normalization as admission.
+pub fn provider_runtime_readiness_cache_identity_for_plan(
+    catalog: &AgentTaskProviderCatalog,
+    plan: &AgentTaskPlan,
+) -> homeboy_core::Result<String> {
+    let task = plan.tasks.first().ok_or_else(|| {
+        Error::internal_unexpected("provider readiness identity requires a provider task")
+    })?;
+    let (mut request, _) =
+        AgentTaskScheduleSupport::provider_route_candidates(task, plan.options.rotation.as_ref())
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                Error::internal_unexpected("provider readiness identity requires a route")
+            })?;
+    let provider = effective_provider_for_request(&request, catalog.providers())
+        .map_err(|reason| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                reason,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                "no provider satisfies the effective route and required capabilities",
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let base_secret_env = request
+        .metadata
+        .get("provider_admission")
+        .and_then(|value| value.get("base_secret_env"))
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+        .unwrap_or_else(|| request.executor.secret_env.clone());
+    super::secrets::apply_provider_runner_secret_env_contract_for_request(
+        &mut request,
+        &provider,
+        &base_secret_env,
+    );
+    let credential_env = super::secrets::provider_request_credential_env(&request, &provider)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_runtime_readiness",
+                error.message,
+                Some(request.executor.backend.clone()),
+                None,
+            )
+        })?;
+    let config = effective_provider_config(&request.executor.config, request.executor.model());
+    super::runtime_readiness::readiness_cache_identity_for_generated_fanout_context(
+        &provider,
+        &config,
+        &credential_env,
+        task.metadata["provider_readiness_generated_fanout_context"] == true,
+    )
+}
+
 pub(crate) fn evaluate_request_dispatchability_with_credentials(
     catalog: &AgentTaskProviderCatalog,
     request: &crate::agent_task::AgentTaskRequest,
@@ -908,6 +977,7 @@ pub(crate) fn evaluate_request_dispatchability_with_credentials(
         cache,
         &mut runtime_evidence,
         request.limits.execution_deadline_unix_ms,
+        request.metadata["provider_readiness_generated_fanout_context"] == true,
     );
     EvaluatedRequestDispatchability {
         dispatchability,

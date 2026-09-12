@@ -12,7 +12,7 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
@@ -32,7 +32,7 @@ use crate::agent_task_promotion::{
     preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -42,9 +42,9 @@ use crate::agent_task_scheduler::AgentTaskAggregate;
 use homeboy_core::{config, Error, Result};
 
 use super::cook::{
-    canonical_candidate_finalization, canonical_cook_candidate, cook_finalization_is_pr_receipt,
-    review_form_attempt_is_ready_for_cook_continuation, AgentTaskCookAttemptReport,
-    AgentTaskCookReport, CookRequest,
+    canonical_candidate_finalization, canonical_cook_candidate, canonical_cook_candidate_in_store,
+    cook_finalization_is_pr_receipt, review_form_attempt_is_ready_for_cook_continuation,
+    AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
 use super::AgentTaskRunResult;
 
@@ -386,7 +386,7 @@ pub(crate) fn promote_attempt_in_store(
     };
     let observation_store = lifecycle_store.open_observation_initialized()?;
     promote_with_checkpoint_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
@@ -517,7 +517,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             Some(format!("serialize agent-task aggregate {run_id}")),
         )
     })?;
-    let promotion_options = AgentTaskPromotionOptions {
+    let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),
         source_path: Some(lifecycle_store.aggregate_path(run_id)),
@@ -654,7 +654,7 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
     else {
         return Ok(None);
     };
-    let promotion_options = AgentTaskPromotionOptions {
+    let promotion_options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some(run_id.to_string()),
         source_path,
@@ -1086,7 +1086,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let resumed = resume_promoted_patch_in_observation_store(
-                AgentTaskPromotionOptions {
+                AgentTaskPromotionRequest {
                     source,
                     source_run_id: Some(run_id.to_string()),
                     source_path,
@@ -1724,7 +1724,7 @@ fn verify_replacement_gates_owned(
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
@@ -2049,22 +2049,10 @@ fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint
         && checkpoint.pointer("/provenance/candidate") == promotion.provenance.get("candidate")
 }
 
-pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
-    agent_task_lifecycle::reconcile_status(run_id)
-        .map(|record| run_record_needs_execution(&record))
-        .unwrap_or(true)
-}
-
 pub(crate) fn attempt_needs_execution_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return attempt_needs_execution(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .map(|record| run_record_needs_execution(&record))
@@ -2083,30 +2071,10 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
     )
 }
 
-pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
-    agent_task_lifecycle::reconcile_status(run_id)
-        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
-        && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
-            !aggregate.outcomes.is_empty()
-                && aggregate.outcomes.iter().all(|outcome| {
-                    outcome
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
-                })
-        })
-}
-
 pub(crate) fn retryable_provider_discovery_failure_with_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> bool {
-    if lifecycle_store
-        .matches_current_environment()
-        .unwrap_or(false)
-    {
-        return retryable_provider_discovery_failure(run_id);
-    }
     lifecycle_store
         .read_record(run_id)
         .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
@@ -2226,10 +2194,39 @@ pub(crate) fn next_moving_base_recovery(
     recovery
 }
 
+#[cfg(test)]
 pub(crate) fn moving_base_recovery_from_promotion(
     cook_id: &str,
     run_id: &str,
     promotion: AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    moving_base_recovery_from_promotion_with_command(
+        cook_id,
+        run_id,
+        promotion,
+        super::cook_recovery_command(run_id, &["cook-continue", run_id]),
+    )
+}
+
+pub(crate) fn moving_base_recovery_from_promotion_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+    promotion: AgentTaskPromotionReport,
+) -> MovingBaseCookRecovery {
+    moving_base_recovery_from_promotion_with_command(
+        cook_id,
+        run_id,
+        promotion,
+        super::cook_recovery_command_in_store(lifecycle_store, run_id, &["cook-continue", run_id]),
+    )
+}
+
+fn moving_base_recovery_from_promotion_with_command(
+    cook_id: &str,
+    run_id: &str,
+    promotion: AgentTaskPromotionReport,
+    continuation: String,
 ) -> MovingBaseCookRecovery {
     MovingBaseCookRecovery {
         schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),
@@ -2245,7 +2242,7 @@ pub(crate) fn moving_base_recovery_from_promotion(
         blocker: String::new(),
         // This recovery belongs to one immutable Cook attempt. `run-next` is a
         // global scheduler operation and must never be offered as its recovery.
-        continuation: super::cook_recovery_command(run_id, &["cook-continue", run_id]),
+        continuation,
         base_movements: 0,
     }
 }
@@ -2393,7 +2390,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     let (source, source_path) = promotion_source_in_store(lifecycle_store, &recovery.run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let refreshed = resume_promoted_patch_in_observation_store(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some(recovery.run_id.clone()),
             source_path,
@@ -2710,17 +2707,26 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
             )
         })?
         .to_string();
-    let fetched = std::process::Command::new("git")
-        .args([
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &sha,
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let fetched = homeboy_core::git::with_remote_tracking_authority_until(
+        Path::new(path),
+        "materialize refreshed destination base",
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+        |remaining| {
+            homeboy_core::git::run_git_output_with_env_timeout(
+                Path::new(path),
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    &sha,
+                ],
+                "materialize refreshed destination base",
+                &[],
+                remaining,
+            )
+        },
+    )?;
     if !fetched.status.success() {
         return Err(Error::validation_invalid_argument(
             "base",
@@ -3141,7 +3147,9 @@ pub(crate) fn cook_finalization_options_with_stores(
             artifact_refs,
             attempt_summary,
             ai_tool: options.ai_disclosure.ai_tool.clone(),
-            ai_model: options.ai_disclosure.ai_model.clone(),
+            // Runtime rotation can select a fallback after the immutable Cook
+            // request was persisted. The dossier carries that terminal route.
+            ai_model: Some(review_dossier.ai_assistance.model.clone()),
             source_relationship: AgentTaskPrSourceRelationship::default(),
             verification: AgentTaskPrVerification {
                 targeted_checks_run,
@@ -3846,19 +3854,58 @@ mod no_change_recovery_tests {
 }
 
 pub(crate) fn canonical_cook_recovery_run_id(cook_id: &str) -> Option<String> {
-    let candidate =
-        canonical_cook_candidate(cook_id).filter(|candidate| candidate["incomplete"] != true)?;
+    canonical_cook_recovery_run_id_with_stores(None, cook_id)
+}
+
+pub(crate) fn canonical_cook_recovery_run_id_with_stores(
+    stores: Option<(
+        &super::cook_recipe::CookRecipeStore,
+        &agent_task_lifecycle::AgentTaskLifecycleStore,
+    )>,
+    cook_id: &str,
+) -> Option<String> {
+    let candidate = stores
+        .and_then(|(_, lifecycle)| canonical_cook_candidate_in_store(lifecycle, cook_id))
+        .or_else(|| {
+            stores
+                .is_none()
+                .then(|| canonical_cook_candidate(cook_id))
+                .flatten()
+        })
+        .filter(|candidate| candidate["incomplete"] != true)?;
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
     }
-    if let Ok(recipe) = super::cook_recipe::load_recipe(cook_id) {
+    let recipe = stores
+        .map(|(store, _)| store.load_recipe(cook_id))
+        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id));
+    if let Ok(recipe) = recipe {
         for attempt in recipe.attempts.iter().rev() {
-            let Ok(record) = agent_task_lifecycle::exact_record(&attempt.run_id) else {
+            let record = stores
+                .map(|(_, lifecycle)| lifecycle.read_record(&attempt.run_id))
+                .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id));
+            let Ok(record) = record else {
                 continue;
             };
-            if review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record).ok()?
-                && persisted_promotion_for_attempt(&attempt.run_id)
+            let review_form_ready = stores
+                .map(|(_, lifecycle)| {
+                    super::cook::review_form_attempt_is_ready_for_cook_continuation_in_store(
+                        lifecycle,
+                        &attempt.plan,
+                        &record,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record)
+                })
+                .ok()?;
+            if review_form_ready
+                && stores
+                    .map(|(_, lifecycle)| {
+                        persisted_promotion_for_attempt_in_store(lifecycle, &attempt.run_id)
+                    })
+                    .unwrap_or_else(|| persisted_promotion_for_attempt(&attempt.run_id))
                     .ok()
                     .flatten()
                     .is_some_and(|promotion| {
@@ -5566,6 +5613,17 @@ pub(crate) struct CookReportInput<'a> {
 }
 
 pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root().ok();
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok();
+    cook_report_with_stores(recipe_store.as_ref(), lifecycle_store.as_ref(), input)
+}
+
+pub(crate) fn cook_report_with_stores(
+    recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    input: CookReportInput<'_>,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
     let CookReportInput {
         cook_id,
         status,
@@ -5584,7 +5642,9 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
         !CookStatus::from_status(status).is_in_flight() || disposition == CookDisposition::InFlight,
         "cook exit reported in-flight status {status:?} but declared {disposition:?}"
     );
-    let history_run_ids = agent_task_lifecycle::cook_index(&cook_id)
+    let history_run_ids = lifecycle_store
+        .map(|store| store.read_cook_index(&cook_id))
+        .unwrap_or_else(|| agent_task_lifecycle::cook_index(&cook_id))
         .map(|index| {
             index
                 .attempts
@@ -5593,7 +5653,9 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|_| {
-            super::load_recipe(&cook_id)
+            recipe_store
+                .map(|store| store.load_recipe(&cook_id))
+                .unwrap_or_else(|| super::load_recipe(&cook_id))
                 .map(|recipe| {
                     recipe
                         .attempts
@@ -5607,7 +5669,9 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
         .filter(|run_id| !run_id.trim().is_empty())
         .map(str::to_string)
         .or_else(|| {
-            agent_task_lifecycle::cook_index(&cook_id)
+            lifecycle_store
+                .map(|store| store.read_cook_index(&cook_id))
+                .unwrap_or_else(|| agent_task_lifecycle::cook_index(&cook_id))
                 .ok()
                 .map(|index| index.latest_run_id)
         })
@@ -5615,7 +5679,9 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             // A recipe is persisted before its lifecycle record and Cook index. If
             // materialization fails in that window, its final immutable attempt is
             // still the only durable identity we can safely report.
-            super::load_recipe(&cook_id)
+            recipe_store
+                .map(|store| store.load_recipe(&cook_id))
+                .unwrap_or_else(|| super::load_recipe(&cook_id))
                 .ok()
                 .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
         });
@@ -5631,9 +5697,18 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             invocation_run_ids.push(run_id.to_string());
         }
     }
-    let selected_candidate = cook_selected_candidate_provenance(&cook_id, &invocation_run_ids);
+    let selected_candidate =
+        cook_selected_candidate_provenance(lifecycle_store, &cook_id, &invocation_run_ids);
     let failure_context = (exit_code != 0)
-        .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref(), status))
+        .then(|| {
+            cook_failure_context_with_stores(
+                recipe_store,
+                lifecycle_store,
+                &cook_id,
+                latest_run_id.as_deref(),
+                status,
+            )
+        })
         .flatten();
     AgentTaskRunResult {
         value: AgentTaskCookReport {
@@ -5654,9 +5729,96 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
             primary_failure: None,
             moving_base_recovery: None,
             failure_context,
+            report_stores: recipe_store
+                .zip(lifecycle_store)
+                .map(|(recipe, lifecycle)| (recipe.clone(), lifecycle.clone())),
         },
         exit_code,
     }
+}
+
+/// Rebind reports returned through `CookService` to its authoritative stores.
+/// Cook's legacy report constructors remain ambient entry points, but the public
+/// runtime owns explicit stores and must replace every derived durable projection
+/// before the result can be serialized or handed to a caller.
+pub(crate) fn bind_report_to_stores(
+    report: &mut AgentTaskCookReport,
+    recipe_store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    failure_context_required: bool,
+) {
+    report.history_run_ids = lifecycle_store
+        .read_cook_index(&report.cook_id)
+        .map(|index| {
+            index
+                .attempts
+                .into_iter()
+                .map(|attempt| attempt.run_id)
+                .collect()
+        })
+        .unwrap_or_else(|_| {
+            recipe_store
+                .load_recipe(&report.cook_id)
+                .map(|recipe| {
+                    recipe
+                        .attempts
+                        .into_iter()
+                        .map(|attempt| attempt.run_id)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+    if report.latest_run_id.is_none() {
+        report.latest_run_id = lifecycle_store
+            .read_cook_index(&report.cook_id)
+            .ok()
+            .map(|index| index.latest_run_id)
+            .or_else(|| {
+                recipe_store
+                    .load_recipe(&report.cook_id)
+                    .ok()
+                    .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
+            });
+    }
+    report.selected_candidate = cook_selected_candidate_provenance(
+        Some(lifecycle_store),
+        &report.cook_id,
+        &report.invocation_run_ids,
+    );
+    let enriched_failure_context = report.failure_context.take().filter(|context| {
+        matches!(
+            context.reason_code.as_str(),
+            "provider_timeout" | "review_form_timeout" | "provider_rotation_exhausted"
+        )
+    });
+    report.failure_context = failure_context_required
+        .then(|| {
+            cook_failure_context_with_stores(
+                Some(recipe_store),
+                Some(lifecycle_store),
+                &report.cook_id,
+                report.latest_run_id.as_deref(),
+                &report.status,
+            )
+        })
+        .flatten();
+    if let (Some(context), Some(enriched)) =
+        (report.failure_context.as_mut(), enriched_failure_context)
+    {
+        context.phase = enriched.phase;
+        context.reason_code = enriched.reason_code;
+        context.diagnostic = enriched.diagnostic;
+        if matches!(
+            context.reason_code.as_str(),
+            "provider_timeout" | "review_form_timeout"
+        ) {
+            context.recovery_legal = enriched.recovery_legal;
+            context.recovery_reason = enriched.recovery_reason;
+            context.legal_actions = enriched.legal_actions;
+            context.next_actions = enriched.next_actions;
+        }
+    }
+    report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
 }
 
 /// `select_cook_candidate` deliberately selects across the whole Cook index
@@ -5667,10 +5829,14 @@ pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<Agen
 /// recovery commands. The orchestrator could not previously tell the two apart.
 /// `invocation_scoped` states it explicitly. The selection itself is unchanged.
 fn cook_selected_candidate_provenance(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     cook_id: &str,
     invocation_run_ids: &[String],
 ) -> Option<Value> {
-    let selection = agent_task_lifecycle::select_cook_candidate(cook_id).ok()?;
+    let selection = lifecycle_store
+        .map(|store| store.select_cook_candidate(cook_id))
+        .unwrap_or_else(|| agent_task_lifecycle::select_cook_candidate(cook_id))
+        .ok()?;
     let mut value = serde_json::to_value(&selection).ok()?;
     value["invocation_scoped"] = serde_json::json!(
         !selection.run_id.is_empty()
@@ -5681,7 +5847,10 @@ fn cook_selected_candidate_provenance(
     if selection.incomplete || selection.run_id.is_empty() {
         return Some(value);
     }
-    let record = agent_task_lifecycle::exact_record(&selection.run_id).ok()?;
+    let record = lifecycle_store
+        .map(|store| store.read_record(&selection.run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::exact_record(&selection.run_id))
+        .ok()?;
     if let Some(promotion) = record.metadata.get("latest_promotion") {
         value["applied_promotion"] = serde_json::json!({
             "identity": promotion.pointer("/patch_artifact/sha256"),
@@ -5733,11 +5902,27 @@ pub fn cook_failure_context(
     latest_run_id: Option<&str>,
     status: &str,
 ) -> Option<super::AgentTaskCookFailureContext> {
-    let recipe = super::load_recipe(cook_id).ok()?;
+    cook_failure_context_with_stores(None, None, cook_id, latest_run_id, status)
+}
+
+fn cook_failure_context_with_stores(
+    recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    cook_id: &str,
+    latest_run_id: Option<&str>,
+    status: &str,
+) -> Option<super::AgentTaskCookFailureContext> {
+    let recipe = recipe_store
+        .map(|store| store.load_recipe(cook_id))
+        .unwrap_or_else(|| super::load_recipe(cook_id))
+        .ok()?;
     let chronological_latest_run_id = latest_run_id
         .map(str::to_string)
         .or_else(|| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))?;
-    let selection = agent_task_lifecycle::select_cook_candidate(cook_id).ok();
+    let selection = lifecycle_store
+        .map(|store| store.select_cook_candidate(cook_id))
+        .unwrap_or_else(|| agent_task_lifecycle::select_cook_candidate(cook_id))
+        .ok();
     let selected_run_id = selection
         .as_ref()
         .filter(|selection| !selection.incomplete && !selection.run_id.is_empty())
@@ -5746,7 +5931,10 @@ pub fn cook_failure_context(
     // operation on this invocation. Its legality, phase, diagnostics, and every
     // emitted command must therefore come from this exact durable record.
     let record_run_id = chronological_latest_run_id.as_str();
-    let record = agent_task_lifecycle::exact_record(record_run_id).ok();
+    let record = lifecycle_store
+        .map(|store| store.read_record(record_run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::exact_record(record_run_id))
+        .ok();
     let provider_executions_consumed = recipe
         .attempts
         .iter()
@@ -5754,7 +5942,12 @@ pub fn cook_failure_context(
         // Cook ID alias to its latest attempt, which can count that later
         // provider execution again when an earlier preflight failure used the
         // Cook ID as its run ID.
-        .filter_map(|attempt| agent_task_lifecycle::exact_record(&attempt.run_id).ok())
+        .filter_map(|attempt| {
+            lifecycle_store
+                .map(|store| store.read_record(&attempt.run_id))
+                .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id))
+                .ok()
+        })
         .map(|record| {
             record.metadata["provider_executions_consumed"]
                 .as_u64()
@@ -5771,10 +5964,16 @@ pub fn cook_failure_context(
         .map(|record| format!("{:?}", record.state))
         .unwrap_or_else(|| "recipe_persisted_without_lifecycle_record".to_string());
     let recovery_legal = record.is_some();
-    let promotion_claim =
-        agent_task_lifecycle::operation_claim(record_run_id, &format!("promote:{record_run_id}"))
-            .ok()
-            .flatten();
+    let promotion_claim = lifecycle_store
+        .map(|store| store.operation_claim(record_run_id, &format!("promote:{record_run_id}")))
+        .unwrap_or_else(|| {
+            agent_task_lifecycle::operation_claim(
+                record_run_id,
+                &format!("promote:{record_run_id}"),
+            )
+        })
+        .ok()
+        .flatten();
     let blocking_claim = promotion_claim.as_ref().and_then(|claim| {
         (claim.state == agent_task_lifecycle::ClaimState::Running)
             .then(|| serde_json::to_value(claim).unwrap_or(Value::Null))
@@ -5793,20 +5992,32 @@ pub fn cook_failure_context(
                 .and_then(Value::as_str)
         })
         .and_then(|sha| {
-            agent_task_lifecycle::operation_claim(
-                record_run_id,
-                &format!("finalize:{record_run_id}:{sha}"),
-            )
-            .ok()
-            .flatten()
+            lifecycle_store
+                .map(|store| {
+                    store.operation_claim(record_run_id, &format!("finalize:{record_run_id}:{sha}"))
+                })
+                .unwrap_or_else(|| {
+                    agent_task_lifecycle::operation_claim(
+                        record_run_id,
+                        &format!("finalize:{record_run_id}:{sha}"),
+                    )
+                })
+                .ok()
+                .flatten()
         })
         .or_else(|| {
-            agent_task_lifecycle::operation_claim(
-                record_run_id,
-                &format!("finalize:{record_run_id}"),
-            )
-            .ok()
-            .flatten()
+            lifecycle_store
+                .map(|store| {
+                    store.operation_claim(record_run_id, &format!("finalize:{record_run_id}"))
+                })
+                .unwrap_or_else(|| {
+                    agent_task_lifecycle::operation_claim(
+                        record_run_id,
+                        &format!("finalize:{record_run_id}"),
+                    )
+                })
+                .ok()
+                .flatten()
         });
     let finalization_diagnostic = finalization_claim
         .as_ref()
@@ -5849,7 +6060,9 @@ pub fn cook_failure_context(
                 })
             })
     });
-    let pre_provider_cause = agent_task_lifecycle::read_attempt_aggregate(record_run_id)
+    let pre_provider_cause = lifecycle_store
+        .map(|store| store.read_aggregate(record_run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(record_run_id))
         .ok()
         .and_then(|aggregate| {
             pre_provider_diagnostic_cause(
@@ -5959,24 +6172,34 @@ pub fn cook_failure_context(
                 record.as_ref(),
                 cook_id,
                 &chronological_latest_run_id,
+                record
+                    .as_ref()
+                    .map(super::cook_recovery_command_prefix_for_record),
             )
         })
         .unwrap_or_else(|| {
-            cook_recovery_actions(
+            cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
                 recovery_legal,
                 blocking_claim.is_some(),
-                record
-                    .as_ref()
-                    .is_some_and(|record| super::retry_admission(&record.run_id).is_ok()),
+                record.as_ref().is_some_and(|record| {
+                    lifecycle_store
+                        .map(|store| super::retry_admission_in_root(store, &record.run_id))
+                        .unwrap_or_else(|| super::retry_admission(&record.run_id))
+                        .is_ok()
+                }),
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 ambiguous_promotion_artifact_ids(
+                    lifecycle_store,
                     record_run_id,
                     promotion_diagnostic.as_ref(),
                     &recipe,
                 ),
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
+                record
+                    .as_ref()
+                    .map(super::cook_recovery_command_prefix_for_record),
             )
         });
     let promotion_provenance = promotion.cloned();
@@ -6065,6 +6288,7 @@ fn dirty_candidate_adoption_recovery_actions(
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     cook_id: &str,
     run_id: &str,
+    prefix: Option<String>,
 ) -> Option<CookRecoveryActions> {
     let record = record?;
     let task = recipe
@@ -6091,7 +6315,7 @@ fn dirty_candidate_adoption_recovery_actions(
         .as_str()?;
     let options = super::cook_recipe::reconstruct_adoption_options(recipe).ok()?;
     let model = options.ai_disclosure.ai_model?;
-    let prefix = super::cook_recovery_command_prefix(run_id);
+    let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
     let actions = vec![
         super::AgentTaskCookRecoveryAction {
             action: "commit_candidate".to_string(),
@@ -6126,6 +6350,7 @@ fn dirty_candidate_adoption_recovery_actions(
 /// promotion claim proves selection was the blocker, so a recovery command is
 /// executable rather than a replay of the known-invalid promotion.
 fn ambiguous_promotion_artifact_ids(
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     run_id: &str,
     diagnostic: Option<&Value>,
     recipe: &super::AgentTaskCookRecipe,
@@ -6144,7 +6369,10 @@ fn ambiguous_promotion_artifact_ids(
     if !is_ambiguous_selection {
         return Vec::new();
     }
-    let Ok(aggregate) = agent_task_lifecycle::read_attempt_aggregate(run_id) else {
+    let aggregate = lifecycle_store
+        .map(|store| store.read_aggregate(run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id));
+    let Ok(aggregate) = aggregate else {
         return Vec::new();
     };
     let Some(outcome) = aggregate.selected_outcome().or_else(|| {
@@ -6174,12 +6402,15 @@ fn ambiguous_promotion_artifact_ids(
     let Ok(recipe_options) = super::reconstruct_options(recipe) else {
         return Vec::new();
     };
-    let Ok((source, source_path)) = promotion_source(run_id) else {
+    let source = lifecycle_store
+        .map(|store| promotion_source_in_store(store, run_id))
+        .unwrap_or_else(|| promotion_source(run_id));
+    let Ok((source, source_path)) = source else {
         return Vec::new();
     };
     canonical_recoverable_patch_artifacts(
         outcome,
-        &AgentTaskPromotionOptions {
+        &AgentTaskPromotionRequest {
             source,
             source_run_id: Some(run_id.to_string()),
             source_path,
@@ -6188,7 +6419,11 @@ fn ambiguous_promotion_artifact_ids(
             task_base_sha: None,
             candidate_ref: None,
             to_worktree: recipe_options.workspace.to_worktree,
-            task_id: selected_candidate_task_id(run_id).ok().flatten(),
+            task_id: lifecycle_store
+                .map(|store| selected_candidate_task_id_in_store(store, run_id))
+                .unwrap_or_else(|| selected_candidate_task_id(run_id))
+                .ok()
+                .flatten(),
             artifact_id: None,
             dry_run: false,
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
@@ -6224,6 +6459,30 @@ fn cook_recovery_actions(
     ambiguous_artifact_ids: Vec<String>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
+    cook_recovery_actions_with_prefix(
+        status,
+        run_id,
+        recovery_legal,
+        blocking_claim,
+        retry_admitted,
+        exact_checkpoint_candidate_mismatch,
+        ambiguous_artifact_ids,
+        lab_runtime_recovery,
+        None,
+    )
+}
+
+fn cook_recovery_actions_with_prefix(
+    status: &str,
+    run_id: &str,
+    recovery_legal: bool,
+    blocking_claim: bool,
+    retry_admitted: bool,
+    exact_checkpoint_candidate_mismatch: bool,
+    ambiguous_artifact_ids: Vec<String>,
+    lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
+    prefix: Option<String>,
+) -> CookRecoveryActions {
     if !recovery_legal {
         return CookRecoveryActions {
             legal_actions: Vec::new(),
@@ -6244,20 +6503,22 @@ fn cook_recovery_actions(
         "gate_failed" | "no_op_gate_failed" => retry_admitted,
         _ => true,
     };
+    let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
+    let command = |args: &[&str]| super::cook_recovery_command_with_prefix(&prefix, args);
     let mut actions = vec![
         super::AgentTaskCookRecoveryAction {
             action: "status".to_string(),
-            command: super::cook_recovery_command(run_id, &["status", run_id]),
+            command: command(&["status", run_id]),
         },
         super::AgentTaskCookRecoveryAction {
             action: "diagnose".to_string(),
-            command: super::cook_recovery_command(run_id, &["diagnose", run_id]),
+            command: command(&["diagnose", run_id]),
         },
     ];
     if blocking_claim {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "reconcile".to_string(),
-            command: super::cook_recovery_command(run_id, &["reconcile", run_id, "--dry-run"]),
+            command: command(&["reconcile", run_id, "--dry-run"]),
         });
     }
     if exact_checkpoint_candidate_mismatch && retry_admitted {
@@ -6266,33 +6527,30 @@ fn cook_recovery_actions(
         // can safely continue against a diverged worktree.
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "fork_replacement".to_string(),
-            command: super::cook_recovery_command(run_id, &["retry", run_id, "--run"]),
+            command: command(&["retry", run_id, "--run"]),
         });
     } else if !ambiguous_artifact_ids.is_empty() {
         actions.extend(ambiguous_artifact_ids.into_iter().map(|artifact_id| {
             super::AgentTaskCookRecoveryAction {
                 action: "resume_with_artifact".to_string(),
-                command: super::cook_recovery_command(
+                command: command(&[
+                    "cook-continue",
                     run_id,
-                    &[
-                        "cook-continue",
-                        run_id,
-                        "--rearm",
-                        "--artifact-id",
-                        &artifact_id,
-                    ],
-                ),
+                    "--rearm",
+                    "--artifact-id",
+                    &artifact_id,
+                ]),
             }
         }));
     } else if status == "pre_execution_failure" && retry_admitted {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "retry".to_string(),
-            command: super::cook_recovery_command(run_id, &["retry", run_id, "--run"]),
+            command: command(&["retry", run_id, "--run"]),
         });
     } else if continuation_eligible {
         actions.push(super::AgentTaskCookRecoveryAction {
             action: "resume".to_string(),
-            command: super::cook_recovery_command(run_id, &["cook-continue", run_id]),
+            command: command(&["cook-continue", run_id]),
         });
     }
     let next_actions = actions.clone();

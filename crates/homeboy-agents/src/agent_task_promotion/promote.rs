@@ -4,7 +4,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -15,7 +15,8 @@ use crate::agent_task::{
 
 const CANONICAL_PATCH_CANDIDATE_LIMIT: usize = 16;
 const CANONICAL_PATCH_BYTES_TOTAL_LIMIT: u64 = 1024 * 1024;
-const DECLARED_BASE_GIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_DECLARED_BASE_GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const DECLARED_BASE_GIT_TIMEOUT_ENV: &str = "HOMEBOY_GIT_BASE_PREFLIGHT_TIMEOUT_SECS";
 const DECLARED_BASE_GIT_HEARTBEAT: Duration = Duration::from_secs(1);
 const PROXY_ENV_KEYS: [&str; 6] = [
     "HTTPS_PROXY",
@@ -48,7 +49,7 @@ pub(crate) use super::patch::{normalize_promotion_patch, validate_artifact_conte
 use super::tests::FakePromotionWorkspaceProvider;
 use super::types::{
     AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionSource,
+    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionSource,
     AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
     AGENT_TASK_PROMOTION_REPORT_SCHEMA,
 };
@@ -133,14 +134,14 @@ pub(crate) fn with_gate_supervision<T>(
     })
 }
 
-pub fn promote(options: AgentTaskPromotionOptions) -> Result<AgentTaskPromotionReport> {
+pub fn promote(options: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
     promote_with_checkpoint(options, |_| Ok(()))
 }
 
 /// Promote a patch while recording the recoverable post-apply boundary before
 /// dependency materialization or verification is attempted.
 pub fn promote_with_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     // One promotion is one unit of work, so the store it records against
@@ -165,7 +166,7 @@ pub fn promote_with_checkpoint(
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -187,7 +188,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
 /// The reverse apply check proves the original artifact remains in the candidate
 /// before any gate result is trusted.
 pub fn resume_promoted_patch(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<AgentTaskPromotionReport> {
@@ -207,7 +208,7 @@ pub fn resume_promoted_patch(
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -226,7 +227,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
 pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
@@ -245,7 +246,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
 }
 
 fn resume_promoted_patch_internal<'a>(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -374,7 +375,7 @@ struct PatchArtifactAdmission {
 fn patch_artifact_admission(
     artifact: &AgentTaskArtifact,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PatchArtifactAdmission> {
     let path = resolve_artifact_path(
@@ -403,7 +404,7 @@ fn patch_artifact_admission(
 
 pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let artifact = select_patch_artifact(outcome, options.artifact_id.as_deref())?;
@@ -412,7 +413,7 @@ pub(crate) fn preflight_patch_artifact_admission_in_observation_store(
 }
 
 fn resume_promoted_patch_admission(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -457,7 +458,7 @@ fn resume_promoted_patch_admission(
 }
 
 fn validate_resume_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
@@ -503,7 +504,7 @@ fn validate_resume_provenance(
 }
 
 fn validate_resume_candidate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     outcome: &AgentTaskOutcome,
@@ -704,7 +705,7 @@ fn verify_patch_is_present(
 #[cfg(test)]
 // Provider-injection seam: production promotes through `promote`.
 pub(crate) fn promote_with_provider(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
 ) -> Result<AgentTaskPromotionReport> {
     promote_with_provider_and_checkpoint(options, provider, &mut |_| Ok(()))
@@ -713,7 +714,7 @@ pub(crate) fn promote_with_provider(
 #[cfg(test)]
 // Checkpoint seam reached only by the promotion test shards.
 pub(super) fn promote_with_provider_and_checkpoint(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
@@ -728,7 +729,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -739,7 +740,7 @@ pub(super) fn promote_with_provider_in_observation_store(
 
 #[cfg(test)]
 pub(super) fn promote_with_provider_and_checkpoint_in_observation_store(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     provider: &mut FakePromotionWorkspaceProvider,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
@@ -849,7 +850,7 @@ fn verify_promotion_gate(
 }
 
 fn promote_with_provider_and_checkpoint_internal(
-    options: AgentTaskPromotionOptions,
+    options: AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskPromotionReport> {
@@ -1558,7 +1559,7 @@ pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
 }
 
 fn has_recoverable_candidate_provenance(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     artifact: &AgentTaskArtifact,
 ) -> bool {
@@ -1604,7 +1605,7 @@ struct RecoverableCandidatePromotionAdmission {
 fn recoverable_candidate_promotion_admission(
     source: &Value,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<RecoverableCandidatePromotionAdmission> {
     let artifact = select_recoverable_patch_artifact(outcome, options, observation_store)?;
@@ -1630,7 +1631,7 @@ fn recoverable_candidate_promotion_admission(
 }
 
 pub(crate) fn preflight_recoverable_candidate_promotion_in_observation_store(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     validate_workspace_handle(&options.to_worktree)?;
@@ -1737,22 +1738,27 @@ mod declared_base_tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn declared_base_transport_failure_is_retryable_and_preserves_redacted_proxy_requirements() {
+    fn write_git_fixture(dir: &Path, script: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let fixture_dir = tempfile::tempdir().expect("fixture directory");
-        let git = fixture_dir.path().join("git");
-        std::fs::write(
-            &git,
-            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access https://git-user:git-secret@proxy.example.test/repository: Failed to connect to proxy' >&2\nexit 1\n",
-        )
-        .expect("write Git fixture");
+        let git = dir.join("git");
+        std::fs::write(&git, script).expect("write Git fixture");
         let mut permissions = std::fs::metadata(&git)
             .expect("fixture metadata")
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&git, permissions).expect("make fixture executable");
+        git
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_transport_failure_is_retryable_and_preserves_redacted_proxy_requirements() {
+        let fixture_dir = tempfile::tempdir().expect("fixture directory");
+        let git = write_git_fixture(
+            fixture_dir.path(),
+            "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://proxy.example.test:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access https://git-user:git-secret@proxy.example.test/repository: Failed to connect to proxy' >&2\nexit 1\n",
+        );
 
         let error = capture_declared_base_with_git_and_timeout(
             fixture_dir.path(),
@@ -1762,7 +1768,7 @@ mod declared_base_tests {
                 "HTTPS_PROXY".to_string(),
                 "socks5://proxy.example.test:8080".to_string(),
             )],
-            Duration::from_millis(250),
+            Duration::from_secs(5),
         )
         .expect_err("transport failure");
 
@@ -1772,30 +1778,117 @@ mod declared_base_tests {
             error.details["git_base_preflight"]["retry_disposition"],
             "retryable_transport_failure"
         );
+        assert_eq!(error.details["git_base_preflight"]["subphase"], "ls-remote");
         assert_eq!(
             error.details["git_base_preflight"]["required_environment"],
             json!(["HTTPS_PROXY"])
         );
+        assert_eq!(error.details["git_base_preflight"]["proxy_detected"], true);
+        assert_eq!(error.details["git_base_preflight"]["proxy_forwarded"], true);
+        let stderr = error.details["git_base_preflight"]["git_stderr"]
+            .as_str()
+            .expect("sanitized git stderr");
+        assert!(stderr.contains("Failed to connect to proxy"));
+        assert!(error.message.contains("Failed to connect to proxy"));
         assert!(!error.message.contains("git-secret"));
         assert!(!error.message.contains("git-user"));
-        assert!(!error.details.to_string().contains("proxy.example.test"));
+        assert!(!stderr.contains("git-secret"));
+        assert!(!stderr.contains("git-user"));
+        assert!(!error.details.to_string().contains("git-secret"));
+        assert!(!error.message.contains("resolveing"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn declared_base_transport_preflight_respects_its_deadline() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn declared_base_timeout_surfaces_subphase_stderr_and_budget() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://git-user:git-secret@github.example.com/acme/repo.git",
+            ],
+        );
         let fixture_dir = tempfile::tempdir().expect("fixture directory");
-        let git = fixture_dir.path().join("git");
-        std::fs::write(&git, "#!/bin/sh\nsleep 2\n").expect("write Git fixture");
-        let mut permissions = std::fs::metadata(&git)
-            .expect("fixture metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&git, permissions).expect("make fixture executable");
+        let git_bin = write_git_fixture(
+            fixture_dir.path(),
+            "#!/bin/sh\necho 'fatal: unable to access https://git-user:git-secret@github.example.com/acme/repo.git: Connection timed out' >&2\nsleep 0.3\nexec sleep 10\n",
+        );
 
-        let started = std::time::Instant::now();
+        let started = Instant::now();
+        let error = capture_declared_base_with_git_and_timeout(
+            repo.path(),
+            Some("main"),
+            git_bin.to_str().expect("utf8 fixture path"),
+            &[],
+            Duration::from_millis(800),
+        )
+        .expect_err("bounded transport timeout");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(error.retryable, Some(true));
+        let preflight = &error.details["git_base_preflight"];
+        assert_eq!(preflight["phase"], "resolve");
+        assert_eq!(preflight["subphase"], "ls-remote");
+        assert_eq!(preflight["timeout_ms"], 800);
+        let elapsed_ms = preflight["elapsed_ms"].as_u64().expect("elapsed_ms");
+        assert!(elapsed_ms >= 300, "elapsed_ms={elapsed_ms}");
+        assert!(elapsed_ms < 3_000, "elapsed_ms={elapsed_ms}");
+        assert_eq!(preflight["base_ref"], "main");
+        assert_eq!(preflight["proxy_detected"], false);
+        assert_eq!(preflight["proxy_forwarded"], false);
+        let remote = preflight["remote"].as_str().expect("remote");
+        assert!(remote.contains("github.example.com/acme/repo.git"));
+        assert!(!remote.contains("git-secret"));
+        assert!(!remote.contains("git-user"));
+        let stderr = preflight["git_stderr"]
+            .as_str()
+            .expect("sanitized git stderr");
+        assert!(stderr.contains("Connection timed out"));
+        assert!(error.message.contains("Connection timed out"));
+        assert!(!stderr.contains("git-secret"));
+        assert!(!stderr.contains("git-user"));
+        assert!(error.message.contains("ls-remote"));
+        assert!(error.message.contains("800ms"));
+        assert!(!error.message.contains("resolveing"));
+        assert!(!error.message.contains("git-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_configured_deadline_allows_slower_healthy_resolve() {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        let fixture_dir = tempfile::tempdir().expect("fixture directory");
+        let git_bin = write_git_fixture(
+            fixture_dir.path(),
+            "#!/bin/sh\ncase \"$1\" in\nls-remote)\n  sleep 0.2\n  printf '%s\\n' '0123456789abcdef0123456789abcdef01234567\trefs/heads/main'\n  ;;\nfetch) ;;\nrev-parse) printf '%s\\n' '0123456789abcdef0123456789abcdef01234567' ;;\n*) exit 2 ;;\nesac\n",
+        );
+
+        let captured = capture_declared_base_with_git_and_timeout(
+            repo.path(),
+            Some("main"),
+            git_bin.to_str().expect("utf8 fixture path"),
+            &[],
+            Duration::from_millis(1_000),
+        )
+        .expect("healthy resolve within configured budget")
+        .expect("declared base");
+
+        assert_eq!(captured.base, "main");
+        assert_eq!(captured.sha, "0123456789abcdef0123456789abcdef01234567");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_configured_deadline_still_fires() {
+        let fixture_dir = tempfile::tempdir().expect("fixture directory");
+        let git = write_git_fixture(fixture_dir.path(), "#!/bin/sh\nsleep 2\n");
+
+        let started = Instant::now();
         let error = capture_declared_base_with_git_and_timeout(
             fixture_dir.path(),
             Some("main"),
@@ -1808,6 +1901,95 @@ mod declared_base_tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["git_base_preflight"]["timeout_ms"], 100);
+        assert_eq!(error.details["git_base_preflight"]["subphase"], "ls-remote");
+        let elapsed_ms = error.details["git_base_preflight"]["elapsed_ms"]
+            .as_u64()
+            .expect("elapsed_ms");
+        assert!(elapsed_ms >= 100, "elapsed_ms={elapsed_ms}");
+    }
+
+    #[test]
+    fn declared_base_git_timeout_honours_operator_override() {
+        let _guard =
+            homeboy_core::test_support::EnvVarGuard::set(DECLARED_BASE_GIT_TIMEOUT_ENV, "45");
+        assert_eq!(declared_base_git_timeout(), Duration::from_secs(45));
+        drop(_guard);
+        let _zero =
+            homeboy_core::test_support::EnvVarGuard::set(DECLARED_BASE_GIT_TIMEOUT_ENV, "0");
+        assert_eq!(
+            declared_base_git_timeout(),
+            DEFAULT_DECLARED_BASE_GIT_TIMEOUT
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_github_host_proxy_is_forwarded_to_spawned_git() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let _https = homeboy_core::test_support::EnvVarGuard::unset("HTTPS_PROXY");
+            let _https_lc = homeboy_core::test_support::EnvVarGuard::unset("https_proxy");
+            let _http = homeboy_core::test_support::EnvVarGuard::unset("HTTP_PROXY");
+            let _http_lc = homeboy_core::test_support::EnvVarGuard::unset("http_proxy");
+            let _all = homeboy_core::test_support::EnvVarGuard::unset("ALL_PROXY");
+            let _all_lc = homeboy_core::test_support::EnvVarGuard::unset("all_proxy");
+
+            let config_dir = home.path().join(".config/homeboy");
+            std::fs::create_dir_all(&config_dir).expect("config dir");
+            std::fs::write(
+                config_dir.join("homeboy.json"),
+                r#"{"github_hosts":{"github.example.com":{"proxy":"socks5://127.0.0.1:8080"}}}"#,
+            )
+            .expect("write host proxy config");
+            homeboy_core::defaults::reset_config_cache_for_test();
+
+            let repo = tempfile::tempdir().expect("repo");
+            git(repo.path(), &["init", "-b", "main"]);
+            git(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.example.com/acme/repo.git",
+                ],
+            );
+
+            let env = transport_environment(repo.path());
+            assert!(
+                env.contains(&(
+                    "HTTPS_PROXY".to_string(),
+                    "socks5://127.0.0.1:8080".to_string()
+                )),
+                "host proxy must be collected for git: {env:?}"
+            );
+
+            let fixture_dir = tempfile::tempdir().expect("fixture directory");
+            let git_bin = write_git_fixture(
+                fixture_dir.path(),
+                "#!/bin/sh\ntest \"$HTTPS_PROXY\" = socks5://127.0.0.1:8080 || exit 91\nprintf '%s\\n' 'fatal: unable to access https://github.example.com/acme/repo.git: Failed to connect to proxy' >&2\nexit 1\n",
+            );
+
+            let error = capture_declared_base_with_git_and_timeout(
+                repo.path(),
+                Some("main"),
+                git_bin.to_str().expect("utf8 fixture path"),
+                &env,
+                Duration::from_millis(250),
+            )
+            .expect_err("proxy-aware transport failure");
+
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(
+                error.details["git_base_preflight"]["retry_disposition"],
+                "retryable_transport_failure"
+            );
+            assert_eq!(error.details["git_base_preflight"]["proxy_detected"], true);
+            assert_eq!(error.details["git_base_preflight"]["proxy_forwarded"], true);
+            assert_ne!(
+                error.details["git_base_preflight"]["required_environment"],
+                json!([])
+            );
+        });
     }
 
     /// An SSH credential failure is transport evidence in its own right. It
@@ -1850,7 +2032,7 @@ mod declared_base_tests {
 }
 
 fn promote_committed_changes(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     checkpoint: &mut impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
     observation_store: &homeboy_core::observation::ObservationStore,
     source_kind: &str,
@@ -2071,7 +2253,7 @@ fn promote_committed_changes(
 /// Retain the controller-generated committed delta before its producer path can
 /// be cleaned up. Only an existing controller run may own this projection.
 pub(super) fn retain_committed_changes_artifact(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     patch: &str,
     sha256: &str,
@@ -2133,7 +2315,7 @@ pub(super) fn retain_committed_changes_artifact(
 }
 
 fn run_promotion_gates(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
     gate_workspace: Option<&Path>,
@@ -2329,7 +2511,7 @@ fn run_promotion_gates(
 }
 
 fn run_declared_promotion_test(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
@@ -2374,7 +2556,7 @@ fn run_declared_promotion_test(
     result
 }
 
-fn gate_workspace_path(options: &AgentTaskPromotionOptions, worktree_path: &Path) -> PathBuf {
+fn gate_workspace_path(options: &AgentTaskPromotionRequest, worktree_path: &Path) -> PathBuf {
     options
         .source_worktree_path
         .as_ref()
@@ -2593,7 +2775,7 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_promotion_gate(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
     index: usize,
     command: &str,
@@ -2728,7 +2910,7 @@ fn finish_promotion_gate_run_dir(run_dir: &homeboy_core::engine::run_dir::RunDir
 fn promotion_source(
     source_kind: &str,
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> AgentTaskPromotionSource {
     AgentTaskPromotionSource {
         kind: source_kind.to_string(),
@@ -2846,9 +3028,23 @@ pub(crate) fn capture_declared_base(
         worktree_path,
         base_ref,
         "git",
-        &transport_environment(),
-        DECLARED_BASE_GIT_TIMEOUT,
+        &transport_environment(worktree_path),
+        declared_base_git_timeout(),
     )
+}
+
+fn declared_base_git_timeout() -> Duration {
+    std::env::var(DECLARED_BASE_GIT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_DECLARED_BASE_GIT_TIMEOUT)
+}
+
+struct DeclaredBaseGitObservation {
+    output: Output,
+    elapsed: Duration,
 }
 
 fn capture_declared_base_with_git_and_timeout(
@@ -2875,16 +3071,19 @@ fn capture_declared_base_with_git_and_timeout(
         "resolve",
         timeout,
     )?;
-    if !observed.status.success() {
+    if !observed.output.status.success() {
         return Err(declared_base_git_failure(
+            worktree_path,
             base_ref,
             "resolve",
-            &observed.stderr,
+            "ls-remote",
+            &observed.output.stderr,
             environment,
             timeout,
+            observed.elapsed,
         ));
     }
-    let sha = String::from_utf8_lossy(&observed.stdout)
+    let sha = String::from_utf8_lossy(&observed.output.stdout)
         .split_whitespace()
         .next()
         .filter(|sha| !sha.is_empty())
@@ -2899,28 +3098,38 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
-    let fetch = run_declared_base_git(
+    let fetch = homeboy_core::git::with_remote_tracking_authority_until(
         worktree_path,
-        git,
-        &[
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "origin",
-            &sha,
-        ],
-        environment,
-        base_ref,
-        "fetch",
-        timeout,
+        "fetch declared promotion base",
+        Instant::now() + timeout,
+        |remaining| {
+            run_declared_base_git(
+                worktree_path,
+                git,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    &sha,
+                ],
+                environment,
+                base_ref,
+                "fetch",
+                remaining,
+            )
+        },
     )?;
-    if !fetch.status.success() {
+    if !fetch.output.status.success() {
         return Err(declared_base_git_failure(
+            worktree_path,
             base_ref,
             "fetch",
-            &fetch.stderr,
+            "fetch",
+            &fetch.output.stderr,
             environment,
             timeout,
+            fetch.elapsed,
         ));
     }
     let output = run_declared_base_git(
@@ -2932,7 +3141,7 @@ fn capture_declared_base_with_git_and_timeout(
         "verify",
         timeout,
     )?;
-    if !output.status.success() {
+    if !output.output.status.success() {
         return Err(Error::validation_invalid_argument(
             "base_ref",
             format!("could not resolve declared base `{base_ref}` before promotion gates"),
@@ -2942,20 +3151,82 @@ fn capture_declared_base_with_git_and_timeout(
     }
     Ok(Some(AgentTaskPromotionVerifiedBase {
         base: base_ref.to_string(),
-        sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        sha: String::from_utf8_lossy(&output.output.stdout)
+            .trim()
+            .to_string(),
     }))
 }
 
-fn transport_environment() -> Vec<(String, String)> {
-    PROXY_ENV_KEYS
-        .iter()
-        .filter_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|value| ((*key).to_string(), value))
+fn transport_environment(worktree_path: &Path) -> Vec<(String, String)> {
+    let mut env = homeboy_core::git::remote_origin_url(worktree_path)
+        .as_deref()
+        .and_then(git_remote_host)
+        .map(|host| {
+            homeboy_core::git::github_cli_env(
+                &host,
+                &homeboy_core::component::GithubConfig::default(),
+            )
         })
+        .unwrap_or_default();
+    for key in PROXY_ENV_KEYS {
+        if env
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(key))
+        {
+            continue;
+        }
+        if let Ok(value) = std::env::var(key).map(|value| value.trim().to_string()) {
+            if !value.is_empty() {
+                env.push(((*key).to_string(), value));
+            }
+        }
+    }
+    env
+}
+
+fn git_remote_host(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let authority = remote
+        .strip_prefix("https://")
+        .or_else(|| remote.strip_prefix("http://"))
+        .or_else(|| remote.strip_prefix("ssh://"))
+        .or_else(|| remote.split_once('@').map(|(_, value)| value))?;
+    let host = authority
+        .split('@')
+        .next_back()?
+        .split('/')
+        .next()?
+        .split(':')
+        .next()?
+        .trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+fn origin_remote_diagnostic(worktree_path: &Path) -> Option<String> {
+    homeboy_core::git::remote_origin_url(worktree_path)
+        .map(|url| redact_declared_base_git_diagnostic(&url))
+        .filter(|url| !url.is_empty())
+}
+
+fn proxy_env_keys(environment: &[(String, String)]) -> Vec<String> {
+    environment
+        .iter()
+        .filter(|(key, value)| {
+            !value.is_empty()
+                && PROXY_ENV_KEYS
+                    .iter()
+                    .any(|proxy| key.eq_ignore_ascii_case(proxy))
+        })
+        .map(|(key, _)| key.clone())
         .collect()
+}
+
+fn phase_gerund(phase: &str) -> &'static str {
+    match phase {
+        "fetch" => "fetching",
+        "verify" => "verifying",
+        _ => "resolving",
+    }
 }
 
 fn run_declared_base_git(
@@ -2966,7 +3237,9 @@ fn run_declared_base_git(
     base_ref: &str,
     phase: &str,
     timeout: Duration,
-) -> Result<Output> {
+) -> Result<DeclaredBaseGitObservation> {
+    let subphase = args.first().copied().unwrap_or(phase);
+    let started = Instant::now();
     let mut command = Command::new(git);
     command
         .args(args)
@@ -2974,17 +3247,19 @@ fn run_declared_base_git(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Make the controller-owned child boundary explicit. Durable evidence
-        // records only variable names, never proxy credentials or URLs.
         .envs(environment.iter().map(|(key, value)| (key, value)));
     homeboy_core::engine::command::isolate_process_tree(&mut command);
     let mut child = command.spawn().map_err(|error| {
         declared_base_transport_error(
+            worktree_path,
             base_ref,
             phase,
+            subphase,
             format!("could not start Git base preflight: {error}"),
             environment,
             timeout,
+            started.elapsed(),
+            None,
         )
     })?;
     let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
@@ -2997,45 +3272,72 @@ fn run_declared_base_git(
     )
     .map_err(|error| {
         declared_base_transport_error(
+            worktree_path,
             base_ref,
             phase,
+            subphase,
             format!("could not supervise Git base preflight: {error}"),
             environment,
             timeout,
+            started.elapsed(),
+            None,
         )
     })?;
+    let elapsed = started.elapsed();
     if supervised.termination
         != homeboy_core::engine::command::SupervisedCommandTermination::Completed
     {
+        let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(
+            &supervised.output.stderr,
+        ));
+        let mut problem = format!(
+            "Git base preflight `{subphase}` exceeded its deadline after {}ms (budget {}ms)",
+            elapsed.as_millis(),
+            timeout.as_millis()
+        );
+        if !stderr.is_empty() {
+            problem = format!("{problem}: {stderr}");
+        }
         return Err(declared_base_transport_error(
+            worktree_path,
             base_ref,
             phase,
-            format!(
-                "Git base preflight exceeded its {} second deadline",
-                timeout.as_secs()
-            ),
+            subphase,
+            problem,
             environment,
             timeout,
+            elapsed,
+            Some(stderr.as_str()).filter(|value| !value.is_empty()),
         ));
     }
-    Ok(supervised.output.into_output())
+    Ok(DeclaredBaseGitObservation {
+        output: supervised.output.into_output(),
+        elapsed,
+    })
 }
 
 fn declared_base_git_failure(
+    worktree_path: &Path,
     base_ref: &str,
     phase: &str,
+    subphase: &str,
     stderr: &[u8],
     environment: &[(String, String)],
     timeout: Duration,
+    elapsed: Duration,
 ) -> Error {
     let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(stderr));
     if is_git_transport_failure(&stderr) {
         return declared_base_transport_error(
+            worktree_path,
             base_ref,
             phase,
-            format!("Git base preflight failed: {stderr}"),
+            subphase,
+            format!("Git base preflight `{subphase}` failed: {stderr}"),
             environment,
             timeout,
+            elapsed,
+            Some(stderr.as_str()).filter(|value| !value.is_empty()),
         );
     }
     Error::validation_invalid_argument(
@@ -3052,28 +3354,49 @@ fn redact_declared_base_git_diagnostic(value: &str) -> String {
 }
 
 fn declared_base_transport_error(
+    worktree_path: &Path,
     base_ref: &str,
     phase: &str,
+    subphase: &str,
     problem: String,
     environment: &[(String, String)],
     timeout: Duration,
+    elapsed: Duration,
+    stderr: Option<&str>,
 ) -> Error {
     let names = environment.iter().map(|(key, _)| key).collect::<Vec<_>>();
+    let proxy_keys = proxy_env_keys(environment);
+    let proxy_present = !proxy_keys.is_empty();
+    let gerund = phase_gerund(phase);
     let mut error = Error::internal_unexpected(format!(
-        "transient Git transport failure while {phase}ing declared base `{base_ref}`: {problem}"
+        "transient Git transport failure while {gerund} declared base `{base_ref}`: {problem}"
     ))
     .with_retryable(true);
     error.details["field"] = Value::String("base_ref".to_string());
-    error.details["git_base_preflight"] = json!({
+    let git_stderr = stderr.unwrap_or("").to_string();
+    let mut preflight = json!({
         "schema": "homeboy/git-base-preflight/v1",
         "base_ref": base_ref,
         "phase": phase,
+        "subphase": subphase,
         "timeout_ms": timeout.as_millis() as u64,
+        "elapsed_ms": elapsed.as_millis() as u64,
         "retry_disposition": "retryable_transport_failure",
         "required_environment": names,
+        "proxy_detected": proxy_present,
+        "proxy_forwarded": proxy_present,
+        "git_stderr": git_stderr,
     });
+    if let Some(remote) = origin_remote_diagnostic(worktree_path) {
+        preflight["remote"] = Value::String(remote);
+    }
+    error.details["git_base_preflight"] = preflight;
     error.hints.push(homeboy_error::Hint {
-        message: "Retry Cook after restoring the controller's network/proxy environment; provider execution has not started.".to_string(),
+        message: if proxy_present {
+            "Retry Cook after restoring the controller's network/proxy environment; provider execution has not started.".to_string()
+        } else {
+            "Retry Cook after restoring the controller's network/proxy environment (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY or github_hosts.<host>.proxy); provider execution has not started.".to_string()
+        },
     });
     error
 }
@@ -3217,7 +3540,7 @@ fn promotion_notification_with_gate_summary(
     reason = "report construction keeps durable promotion evidence explicit"
 )]
 fn post_apply_report(
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     source_kind: &str,
     outcome: &AgentTaskOutcome,
     patch_artifact: AgentTaskPromotionArtifactRef,
@@ -3452,7 +3775,7 @@ pub(crate) fn select_patch_artifact(
 /// not turn one patch into a false review choice.
 fn select_recoverable_patch_artifact(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<AgentTaskArtifact> {
     let canonical =
@@ -3505,7 +3828,7 @@ pub struct CanonicalRecoverablePatchArtifacts {
 /// materialization, including controller projections and hydrated runner bytes.
 pub fn canonical_recoverable_patch_artifacts(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     // One call is one unit of work, so the store resolves once here rather
     // than at each projection lookup inside (#7505).
@@ -3515,7 +3838,7 @@ pub fn canonical_recoverable_patch_artifacts(
 
 pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     canonical_recoverable_patch_artifacts_internal(outcome, options, observation_store)
@@ -3523,7 +3846,7 @@ pub(crate) fn canonical_recoverable_patch_artifacts_in_observation_store(
 
 fn canonical_recoverable_patch_artifacts_internal(
     outcome: &AgentTaskOutcome,
-    options: &AgentTaskPromotionOptions,
+    options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<CanonicalRecoverablePatchArtifacts> {
     let mut candidates = outcome

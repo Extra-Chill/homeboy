@@ -4,6 +4,172 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.1] - 2026-09-12
+
+### Fixed
+- report an incomplete release and undo its tag
+- Fix staged dangling symlink identity
+
+## [0.373.0] - 2026-09-12
+
+### Added
+- route provider effect reconciliation
+- add idempotent provider effects
+- route agent tasks through effect outbox
+- persist action resource authority
+- persist action effect identities
+- add transactional action outbox
+
+### Fixed
+- validate attempts against the canonical index
+- persist whole index and report retry outcomes
+- resolve canonical and alias identities deterministically
+- make action effects transactional
+- reconcile ambiguous provider effects
+- use canonical effect authority
+- finalize control-plane recovery
+- recover expired effect leases
+- bind delegates to canonical runs
+- make control actions durable
+- replay durable queued retries
+- canonicalize control-plane actions
+
+## [0.372.3] - 2026-09-11
+
+### Changed
+- Name the blocker when a GitHub Release lookup cannot be answered
+- Push the release branch and its tag atomically
+
+## [0.372.2] - 2026-09-11
+
+### Fixed
+- make base preflight proxy-aware and diagnosable
+
+## [0.372.1] - 2026-09-11
+
+### Fixed
+- let a terminal Cook release its stranded attempts
+
+## [0.372.0] - 2026-09-11
+
+### Added
+- attribute the audit detectors phase with named spans and an unattributed-time self-check
+
+### Fixed
+- retain post-swap failure evidence
+- settle terminal generation jobs
+- probe lab artifact root
+- defer unresolved preview base
+- preserve terminal startup diagnosis
+- surface silent provider startup diagnostics
+
+## [0.371.9] - 2026-09-11
+
+### Changed
+- harden detached admission coverage
+- cover interrupted detached admission
+
+### Fixed
+- retain explicit Cargo target lifecycle
+- close detached admission races
+- recover interrupted detached admission
+- preserve rooted failure recovery
+- root recovery command routing
+- root finalization projections
+- preserve rooted continuation semantics
+- atomically publish detached supervision
+- fence detached admission ownership
+- bind reports to runtime stores
+- persist detached handoff admission
+- validate output before handoff
+- admit before workspace bootstrap
+
+## [0.371.8] - 2026-09-10
+
+### Changed
+- give each wire identifier one definition
+- Accept review options after actions
+
+### Fixed
+- Fix lifecycle-owned snapshot recovery projection
+
+## [0.371.7] - 2026-09-10
+
+### Changed
+- isolate execution provenance from the developer's installation
+
+## [0.371.6] - 2026-09-10
+
+### Changed
+- Make agent-task inspection scoped and bounded
+
+### Fixed
+- preflight deferred worktrees
+
+## [0.371.5] - 2026-09-10
+
+### Changed
+- reap fixture daemons during teardown
+
+### Fixed
+- report partial external storage inventory
+
+## [0.371.4] - 2026-09-10
+
+### Changed
+- build the ssh fixtures once
+- build the trace fixtures once per crate
+- build the runs fixture once
+- declare two copy-pasted helpers once
+
+### Fixed
+- fence retained count disagreement
+- block-comment openers take precedence over doc line prefixes
+- stop authoritative rebound through SSH
+
+## [0.371.3] - 2026-09-09
+
+### Changed
+- share the conservative shell arg quoter
+- one daemon response envelope
+- one env guard instead of nine hand-rolled copies
+- one promotion request type and one serialized shape
+- Make artifact cleanup bounded and resumable without skipping candidates
+
+### Fixed
+- rename the promotion request in its integration test
+
+## [0.371.2] - 2026-09-09
+
+### Fixed
+- overlay a registered component with its own checkout manifest
+- restore the test build by dropping an unrunnable authority test
+- expose pinned configured-daemon recovery
+- preserve reconcile failure blockers
+
+## [0.371.1] - 2026-09-09
+
+### Changed
+- one duration parser for every command surface
+- declare the extension root manifest once
+
+### Fixed
+- initialize pre-execution blocker metadata
+- bound fanout preview readiness admission
+- resolve secret_env_projections from component settings in preflight.test_secret_env
+- cover remaining fetch authority paths
+- restore the workspace build for detached staging blockers
+- stop reporting platform-split tests as shadowed coverage
+- complete remote tracking fetch authority
+- expose detached staging failures
+- reuse authoritative rotation observation
+- re-resolve binary after promotion
+- persist lifecycle registry ownership
+- keep preview provider readiness owned
+- serialize remote tracking fetches
+- canonicalize execution mirror run identity
+- remove derived job authority
+
 ## [0.371.0] - 2026-09-09
 
 ### Added

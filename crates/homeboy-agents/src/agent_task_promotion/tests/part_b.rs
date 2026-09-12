@@ -10,7 +10,7 @@ use super::super::promote::{
     promote_with_provider_and_checkpoint, promote_with_provider_in_observation_store,
     resume_promoted_patch, select_patch_artifact, validate_artifact_content,
 };
-use super::super::types::{AgentTaskPromotionOptions, AgentTaskPromotionStatus};
+use super::super::types::{AgentTaskPromotionRequest, AgentTaskPromotionStatus};
 use super::*;
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
@@ -230,7 +230,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
             ..Default::default()
         };
         let report = promote_with_provider_in_observation_store(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source: serde_json::to_string(&aggregate).expect("aggregate json"),
                 source_run_id: Some(run_id.to_string()),
                 source_path: None,
@@ -331,7 +331,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
             ..Default::default()
         };
         promote_with_provider_in_observation_store(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("follow-up-run".to_string()),
                 source_path: None,
@@ -422,7 +422,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("v2-run".to_string()),
             source_path: None,
@@ -492,7 +492,7 @@ fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -536,7 +536,7 @@ fn canonical_recoverable_candidates_reject_aggregate_byte_overflow() {
 
         let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
             &outcome,
-            &AgentTaskPromotionOptions {
+            &AgentTaskPromotionRequest {
                 source: source.to_string(),
                 source_run_id: Some("recoverable-run".to_string()),
                 source_path: Some(source_path),
@@ -601,7 +601,7 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
     };
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -639,7 +639,7 @@ fn promote_recoverable_candidate_keeps_same_patch_from_distinct_attempts() {
     };
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("recoverable-run".to_string()),
             source_path: Some(source_path),
@@ -742,7 +742,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run".to_string()),
             source_path: Some(source_path),
@@ -818,7 +818,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run".to_string()),
             source_path: Some(source_path),
@@ -885,7 +885,7 @@ fn adoption_scopes_a_rebased_two_file_candidate_to_its_parent() {
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
@@ -973,7 +973,7 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
@@ -1061,7 +1061,7 @@ fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
@@ -1115,7 +1115,7 @@ fn adoption_rejects_an_unrelated_historical_task_base() {
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("adopted-run".to_string()),
             source_path: Some(source_path),
@@ -1181,7 +1181,7 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
     let (source_path, source) = write_empty_patch_source(&temp);
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("run-two-commits".to_string()),
             source_path: Some(source_path),
@@ -1242,7 +1242,7 @@ fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
         let mut outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
-        let options = AgentTaskPromotionOptions {
+        let options = AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),
@@ -1283,7 +1283,7 @@ fn execution_revalidates_artifact_bytes_after_passing_preflight() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (source_path, source) = write_patch_source(&temp);
         let outcome: AgentTaskOutcome = serde_json::from_str(&source).expect("outcome JSON");
-        let options = AgentTaskPromotionOptions {
+        let options = AgentTaskPromotionRequest {
             source,
             source_run_id: None,
             source_path: Some(source_path),
@@ -1344,7 +1344,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
     git(&target, &["add", "."]);
     git(&target, &["commit", "-m", "candidate plus gate correction"]);
     let (source_path, source) = write_patch_source(&temp);
-    let options = AgentTaskPromotionOptions {
+    let options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some("run-8307".to_string()),
         source_path: Some(source_path),
@@ -1446,7 +1446,7 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
     let candidate = crate::agent_task_promotion::candidate_fingerprint(target.to_str().unwrap())
         .expect("legacy candidate");
     let (source_path, source) = write_patch_source(&temp);
-    let options = AgentTaskPromotionOptions {
+    let options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some("cook-9400-attempt-1".to_string()),
         source_path: Some(source_path),
@@ -1510,7 +1510,7 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
             .expect("candidate fingerprint");
     let (source_path, source) = write_patch_source(&temp);
-    let options = |rerun_completed_gates| AgentTaskPromotionOptions {
+    let options = |rerun_completed_gates| AgentTaskPromotionRequest {
         source: source.clone(),
         source_run_id: Some("run-9392".to_string()),
         source_path: Some(source_path.clone()),
@@ -1550,53 +1550,6 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(report.gate_results.len(), 1);
     assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
-}
-
-#[test]
-fn promotion_options_keep_flat_verify_gate_serialized_shape() {
-    // #4910: the shared VerifyGateOptions is `#[serde(flatten)]`-embedded so
-    // the historical flat `verify` / `private_verify` / `private_gate_reveal`
-    // keys must stay at the top level of the serialized options.
-    let options = AgentTaskPromotionOptions {
-        source: "source.json".to_string(),
-        source_run_id: Some("run-1".to_string()),
-        source_path: None,
-        source_worktree_path: None,
-        base_ref: None,
-        task_base_sha: None,
-        candidate_ref: None,
-        to_worktree: "repo@flatten".to_string(),
-        task_id: None,
-        artifact_id: None,
-        dry_run: false,
-        gates: VerifyGateOptions {
-            verify: vec!["cargo test".to_string()],
-            private_verify: vec!["cargo test --lib hidden".to_string()],
-            private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
-            ..Default::default()
-        },
-        provider_command: None,
-        provider_invocation: None,
-    };
-
-    let value = serde_json::to_value(&options).expect("serialize options");
-    assert_eq!(value["verify"], serde_json::json!(["cargo test"]));
-    assert_eq!(
-        value["private_verify"],
-        serde_json::json!(["cargo test --lib hidden"])
-    );
-    assert_eq!(
-        value["private_gate_reveal"],
-        serde_json::json!("summary_only")
-    );
-    assert!(
-        value.get("gates").is_none(),
-        "flattened gate fields must not nest under a `gates` key: {value}"
-    );
-
-    let round_trip: AgentTaskPromotionOptions =
-        serde_json::from_value(value).expect("deserialize flat options");
-    assert_eq!(round_trip, options);
 }
 
 #[test]
@@ -1648,7 +1601,7 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("ordered-fail-fast".to_string()),
             source_path: Some(source_path),
@@ -1740,7 +1693,7 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("zero-selected-cargo-gate".to_string()),
             source_path: Some(source_path),
@@ -1821,7 +1774,7 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("continue-all".to_string()),
             source_path: Some(source_path),
@@ -1906,7 +1859,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("typed-and-legacy-ids".to_string()),
             source_path: Some(source_path),
@@ -1968,7 +1921,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
     };
 
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("immutable-candidate-first-attempt".to_string()),
             source_path: Some(source_path),
@@ -2049,7 +2002,7 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
         };
 
         let report = promote_with_provider(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("nested-dependency-hydration".to_string()),
                 source_path: Some(source_path),
@@ -2124,7 +2077,7 @@ fn promotion_can_disable_candidate_dependency_hydration() {
         ..Default::default()
     };
     let report = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("disable-dependency-hydration".to_string()),
             source_path: Some(source_path),
@@ -2184,7 +2137,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         };
 
         let error = promote_with_provider(
-            AgentTaskPromotionOptions {
+            AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("setup-failure-no-gate-dispatch".to_string()),
                 source_path: Some(source_path),
@@ -2257,7 +2210,7 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
     };
 
     let error = promote_with_provider(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("missing-destination-tool".to_string()),
             source_path: Some(source_path),
@@ -2320,7 +2273,7 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
     };
 
     let error = promote_with_provider_and_checkpoint(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("immutable-candidate-checkpoint".to_string()),
             source_path: Some(source_path),
@@ -2370,7 +2323,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
             .expect("candidate fingerprint");
     let (source_path, source) = write_patch_source(&temp);
-    let options = AgentTaskPromotionOptions {
+    let options = AgentTaskPromotionRequest {
         source,
         source_run_id: Some("immutable-candidate-follow-up".to_string()),
         source_path: Some(source_path),
@@ -2440,7 +2393,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     };
     let mut checkpoint = None;
     let report = promote_with_provider_and_checkpoint(
-        AgentTaskPromotionOptions {
+        AgentTaskPromotionRequest {
             source,
             source_run_id: Some("gate-failure-run".to_string()),
             source_path: Some(source_path),
