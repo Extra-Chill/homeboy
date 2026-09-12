@@ -101,6 +101,12 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         *record = reconciled;
         return Ok(());
     }
+    if verified_pre_provider_cancellation(&reconciled, snapshot) {
+        project_terminal_runner_job_snapshot(&mut reconciled, snapshot);
+        lifecycle_store.write_record(&reconciled)?;
+        *record = reconciled;
+        return Ok(());
+    }
     match snapshot.job.status {
         homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
             reconciled.updated_at = Some(now_timestamp());
@@ -276,6 +282,52 @@ fn record_pending_runner_synchronization(
             "runner_job_status": snapshot.job.status,
         }),
     );
+}
+
+/// A cancelled daemon job has no inner aggregate when it was cancelled before
+/// the worker started. Require its complete queued-to-cancelled history so an
+/// incomplete terminal snapshot cannot erase provider work.
+fn verified_pre_provider_cancellation(
+    record: &AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> bool {
+    if snapshot.job.status != homeboy_core::api_jobs::JobStatus::Cancelled
+        || !record.has_accepted_lab_handoff()
+        || !record.provider_handles.is_empty()
+        || snapshot.job.target_runner_id.as_deref() != record.runner_id()
+        || snapshot.job.event_count != snapshot.events.len()
+        || snapshot.events.len() != 2
+    {
+        return false;
+    }
+
+    let mut queued_sequence = None;
+    let mut cancelled_sequence = None;
+    for event in &snapshot.events {
+        if event.job_id != snapshot.job.id
+            || event.kind != homeboy_core::api_jobs::JobEventKind::Status
+        {
+            return false;
+        }
+        match event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("status"))
+            .and_then(Value::as_str)
+        {
+            Some("queued") => queued_sequence = Some(event.sequence),
+            Some("cancelled") => cancelled_sequence = Some(event.sequence),
+            // A running status is positive evidence that this is not the
+            // pre-provider cancellation case.
+            Some("running") => return false,
+            _ => {}
+        }
+    }
+
+    matches!(
+        (queued_sequence, cancelled_sequence),
+        (Some(queued), Some(cancelled)) if queued < cancelled
+    )
 }
 
 fn project_terminal_runner_job_snapshot(
