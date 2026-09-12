@@ -1674,7 +1674,15 @@ fi
 # explicit diagnostic targets. The declaration uses the same classifier and
 # bounded host-PHP runner as changed scopes.
 homeboy_wordpress_collect_full_suite_standalone_php_files || exit $?
-homeboy_wordpress_collect_full_suite_wordpress_smoke_files || exit $?
+# A mixed changed-file scope reaches this tail for its PHPUnit half. Selecting
+# the manifest's WordPress half there would widen that review into a full-suite
+# run, so it is collected only when nothing narrowed this invocation.
+FULL_SUITE_WORDPRESS_SMOKE_FILES=""
+FULL_SUITE_WORDPRESS_SMOKE_SELECTED=0
+FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED=0
+if [ -z "${HOMEBOY_CHANGED_TEST_FILES:-}" ] && [ -z "$TARGET_FILE" ]; then
+    homeboy_wordpress_collect_full_suite_wordpress_smoke_files || exit $?
+fi
 full_suite_phpunit_root="$(homeboy_wordpress_full_suite_phpunit_root || true)"
 full_suite_phpunit_status=0
 if [ -n "$full_suite_phpunit_root" ]; then
@@ -1715,7 +1723,9 @@ if [ -n "$FULL_SUITE_WORDPRESS_SMOKE_FILES" ]; then
     full_suite_wordpress_smoke_failed="${full_suite_wordpress_smoke_failed:-0}"
     rm -f "$full_suite_wordpress_smoke_log"
 fi
-echo "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=$((FULL_SUITE_WORDPRESS_SMOKE_SELECTED + FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED)) selected=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} routed=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} excluded=${FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED}"
+if [ -z "${HOMEBOY_CHANGED_TEST_FILES:-}" ] && [ -z "$TARGET_FILE" ]; then
+    echo "FULL_SUITE_WORDPRESS_SMOKE_SUMMARY:candidates=$((FULL_SUITE_WORDPRESS_SMOKE_SELECTED + FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED)) selected=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} routed=${FULL_SUITE_WORDPRESS_SMOKE_SELECTED} excluded=${FULL_SUITE_WORDPRESS_SMOKE_EXCLUDED}"
+fi
 if [ "$full_suite_standalone_status" -eq 0 ] && [ "$full_suite_wordpress_smoke_status" -ne 0 ]; then
     full_suite_standalone_status="$full_suite_wordpress_smoke_status"
 fi
