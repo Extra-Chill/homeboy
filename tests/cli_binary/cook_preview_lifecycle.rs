@@ -166,6 +166,152 @@ fn stdin_prompt_preview_declares_replay_requirement() {
     );
 }
 
+#[test]
+fn unscoped_preview_uses_the_primary_component_despite_missing_project_shadows() {
+    for projects in [
+        ["shadow-first", "shadow-second"],
+        ["shadow-second", "shadow-first"],
+    ] {
+        let home = tempfile::tempdir().expect("home");
+        let repository = tempfile::tempdir().expect("repository");
+        let primary = repository.path().join("primary");
+        initialize_git_repository(&primary);
+
+        run_homeboy(
+            home.path(),
+            [
+                "component",
+                "create",
+                "--local-path",
+                primary.to_str().expect("primary path"),
+            ],
+        );
+        for project in projects {
+            let shadow = repository.path().join(project);
+            std::fs::create_dir_all(&shadow).expect("create project shadow");
+            std::fs::write(shadow.join("homeboy.json"), r#"{"id":"primary"}"#)
+                .expect("write project shadow component");
+            run_homeboy(home.path(), ["project", "create", project]);
+            run_homeboy(
+                home.path(),
+                [
+                    "project",
+                    "components",
+                    "set",
+                    project,
+                    "--json",
+                    &format!(
+                        r#"[{{"id":"primary","local_path":"{}"}}]"#,
+                        shadow.display()
+                    ),
+                ],
+            );
+            std::fs::remove_file(shadow.join("homeboy.json"))
+                .expect("remove project shadow component");
+            std::fs::remove_dir(shadow).expect("remove project shadow");
+        }
+
+        let output = Command::new(homeboy_bin())
+            .args([
+                "agent-task",
+                "cook",
+                "--repo",
+                "primary",
+                "--task-url",
+                "https://example.test/issues/14591",
+                "--head",
+                "fix/14591-primary-selection",
+                "--base",
+                "main",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "Preserve the primary component selection.",
+                "--preview",
+                "--no-finalize",
+            ])
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("XDG_DATA_HOME", home.path().join(".local/share"))
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("run Cook preview");
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let preview: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
+        assert_eq!(
+            preview["data"]["resolved"]["repository_identity"]["component_cwd"],
+            "."
+        );
+        assert_eq!(
+            preview["data"]["resolved"]["repository_identity"]["component_id"],
+            "primary"
+        );
+    }
+}
+
+fn run_homeboy<I, S>(home: &std::path::Path, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = Command::new(homeboy_bin())
+        .args(args)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run Homeboy setup command");
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn initialize_git_repository(path: &std::path::Path) {
+    std::fs::create_dir_all(path).expect("create primary repository");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "fixture@example.test"],
+        vec!["config", "user.name", "Fixture"],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git setup");
+        assert!(output.status.success(), "git setup failed");
+    }
+    std::fs::write(path.join("README.md"), "fixture\n").expect("write fixture");
+    let output = Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(path)
+        .output()
+        .expect("stage fixture");
+    assert!(output.status.success(), "stage fixture failed");
+    let output = Command::new("git")
+        .args(["commit", "--quiet", "-m", "fixture"])
+        .current_dir(path)
+        .output()
+        .expect("commit fixture");
+    assert!(output.status.success(), "commit fixture failed");
+    let output = Command::new("git")
+        .args(["branch", "-M", "main"])
+        .current_dir(path)
+        .output()
+        .expect("name fixture branch");
+    assert!(output.status.success(), "name fixture branch failed");
+}
+
 fn replay_flag_value<'a>(argv: &'a [Value], flag: &str) -> &'a str {
     let matches = argv
         .windows(2)
