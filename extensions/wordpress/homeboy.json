@@ -74,6 +74,7 @@
       "node tests/wp-codebox-database-service-smoke.mjs",
       "node tests/wp-codebox-native-database-canary.mjs",
       "bash scripts/test/full-suite-no-phpunit-smoke.sh",
+      "bash scripts/test/standalone-dependency-env-smoke.sh",
       "bash tests/js-test-framework-routing-smoke.sh",
       "node tests/codebox-client-boundary.test.js",
       "node tests/wp-codebox-fuzz-run-smoke.js",
