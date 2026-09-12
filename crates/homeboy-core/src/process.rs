@@ -1747,6 +1747,21 @@ fn linux_proc_is_same_owner(proc_entry: &std::path::Path) -> bool {
     std::fs::metadata(proc_entry).is_ok_and(|metadata| metadata.uid() == euid)
 }
 
+/// Whether a failed `/proc/<pid>/environ` read is a gap in owned-scope
+/// discovery.
+///
+/// `NotFound` is a process that exited mid-scan (#7505). `PermissionDenied` is
+/// unreadable only for a same-owner process; a foreign-owned process cannot
+/// carry this run's marker (#13128). Any other error stays fail-closed.
+#[cfg(target_os = "linux")]
+fn linux_environ_read_error_is_unreadable(kind: std::io::ErrorKind, same_owner: bool) -> bool {
+    match kind {
+        std::io::ErrorKind::NotFound => false,
+        std::io::ErrorKind::PermissionDenied => same_owner,
+        _ => true,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
     let entries = std::fs::read_dir("/proc").map_err(|error| {
@@ -1765,36 +1780,15 @@ fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
         };
         let environment = match std::fs::read(entry.path().join("environ")) {
             Ok(environment) => environment,
-            // A `/proc/<pid>` that disappears between `read_dir` and this read is
-            // a process that exited, which is the state cleanup is trying to
-            // reach — not a gap in discovery. Counting it as unreadable made the
-            // report `incomplete` whenever any unrelated process on the machine
-            // happened to exit mid-scan, which is constant under load and was
-            // reproducible as soon as tests ran concurrently (#7505).
-            //
-            // Permission denied on a process owned by another user is equally
-            // expected and equally uninformative. Homeboy spawns every scope
-            // member as this user, so a foreign-owned process cannot be
-            // carrying this run's marker. On a shared VPS or a GitHub-hosted
-            // runner practically every unrelated process is foreign-owned, so
-            // counting them reported hundreds of "unreadable" entries on a
-            // totally clean run (#13128). Only a same-owner process we still
-            // cannot read is a genuine gap in discovery.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                if error.kind() == std::io::ErrorKind::PermissionDenied
-                    && linux_proc_is_same_owner(&entry.path())
-                {
+            Err(error) => {
+                let kind = error.kind();
+                if linux_environ_read_error_is_unreadable(
+                    kind,
+                    kind == std::io::ErrorKind::PermissionDenied
+                        && linux_proc_is_same_owner(&entry.path()),
+                ) {
                     unreadable_environments += 1;
                 }
-                continue;
-            }
-            Err(_) => {
-                unreadable_environments += 1;
                 continue;
             }
         };
@@ -2000,47 +1994,68 @@ mod tests {
         assert!(clean_reaped_leader.warning.is_some());
     }
 
+    fn wait_for_scope_pids(scope: &str, expected: &[u32], bound: Duration) {
+        let deadline = Instant::now() + bound;
+        loop {
+            let discovered = linux_scope_pids(scope).expect("scope discovery").pids;
+            if discovered == expected {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "scope {scope} pids {discovered:?} did not become {expected:?} within {} ms",
+                    bound.as_millis()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct OwnedScopeChild(std::process::Child);
+
+    impl Drop for OwnedScopeChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[test]
     fn scope_discovery_ignores_environments_owned_by_other_users() {
-        // Every unrelated process on a shared host denies `environ` reads to a
-        // non-root Homeboy. None of them can carry this run's scope marker, so
-        // discovery must stay silent about them (#13128).
-        let mut denied_foreign = 0usize;
-        let mut denied_same_owner = 0usize;
-        for entry in std::fs::read_dir("/proc").expect("read /proc").flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_none_or(|name| name.parse::<u32>().is_err())
-            {
-                continue;
-            }
-            let Err(error) = std::fs::read(entry.path().join("environ")) else {
-                continue;
-            };
-            if error.kind() != std::io::ErrorKind::PermissionDenied {
-                continue;
-            }
-            if linux_proc_is_same_owner(&entry.path()) {
-                denied_same_owner += 1;
-            } else {
-                denied_foreign += 1;
-            }
+        for (kind, same_owner, unreadable) in [
+            (std::io::ErrorKind::NotFound, false, false),
+            (std::io::ErrorKind::NotFound, true, false),
+            (std::io::ErrorKind::PermissionDenied, false, false),
+            (std::io::ErrorKind::PermissionDenied, true, true),
+            (std::io::ErrorKind::InvalidData, false, true),
+            (std::io::ErrorKind::InvalidData, true, true),
+        ] {
+            assert_eq!(
+                linux_environ_read_error_is_unreadable(kind, same_owner),
+                unreadable,
+                "{kind:?} same_owner={same_owner}"
+            );
         }
+    }
 
-        let discovery = linux_scope_pids(&Uuid::new_v4().to_string()).expect("scope discovery");
+    #[test]
+    fn scope_discovery_finds_an_owned_child() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let containment = ProcessContainment::prepare(&mut command).expect("prepare containment");
+        let mut child = OwnedScopeChild(command.spawn().expect("spawn owned scope child"));
+        let pid = child.0.id();
+        wait_for_scope_pids(&containment.scope, &[pid], Duration::from_secs(1));
 
-        assert!(discovery.pids.is_empty(), "an unused scope owns no process");
-        // Before the fix this equalled `denied_foreign`, which is in the
-        // hundreds on a shared VPS or a GitHub-hosted runner and buried every
-        // clean run in a bogus diagnostic. Only same-owner denials may ever be
-        // counted, so the reported gap can never exceed what this sample could
-        // plausibly see.
+        let unused = linux_scope_pids(&Uuid::new_v4().to_string()).expect("unused scope");
         assert!(
-            discovery.unreadable_environments <= denied_same_owner,
-            "counted {} unreadable environments with {denied_same_owner} same-owner and {denied_foreign} foreign denials",
-            discovery.unreadable_environments
+            unused.pids.is_empty(),
+            "an unused scope must not claim the owned child"
         );
+
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        wait_for_scope_pids(&containment.scope, &[], Duration::from_secs(1));
     }
 
     /// A command that exits before teardown looks must not be reported as an
