@@ -178,10 +178,10 @@ pub use external_check_detail_resolver::{
     EXTERNAL_CHECK_DETAIL_RESPONSE_SCHEMA,
 };
 pub use external_storage_retention::{
-    ExternalStorageInventory, ExternalStorageItem, ExternalStorageOperation,
-    ExternalStorageReclaimResult, ExternalStorageReclaimTarget, ExternalStorageRequest,
-    ExternalStorageResourceClass, ExternalStorageRetentionConfig,
-    ExternalStorageRetentionProviderConfig, ExternalStorageRoot,
+    ExternalStorageIncompleteRoot, ExternalStorageInventory, ExternalStorageInventoryCompleteness,
+    ExternalStorageItem, ExternalStorageOperation, ExternalStorageReclaimResult,
+    ExternalStorageReclaimTarget, ExternalStorageRequest, ExternalStorageResourceClass,
+    ExternalStorageRetentionConfig, ExternalStorageRetentionProviderConfig, ExternalStorageRoot,
     DEFAULT_EXTERNAL_STORAGE_PROVIDER_TIMEOUT_SECONDS, EXTERNAL_STORAGE_RETENTION_SCHEMA,
     MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS, MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };

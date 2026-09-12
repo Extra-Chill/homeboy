@@ -31,6 +31,9 @@ pub struct UpgradeOperationStatus {
     pub status: String,
     pub phase: String,
     pub elapsed_seconds: u64,
+    /// True when the durable terminal operation did not satisfy every required
+    /// upgrade postcondition. This is independent from the controller swap.
+    pub failed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller: Option<UpgradeComponentStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,6 +48,27 @@ pub struct UpgradeOperationStatus {
     pub inspect_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promotion_wait: Option<UpgradePromotionWaitStatus>,
+    /// The concrete terminal predicate and retained runner evidence, when a
+    /// post-install verification prevents convergence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<UpgradeOperationFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpgradeOperationFailure {
+    pub phase: String,
+    pub predicate: String,
+    pub elapsed_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_references: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runners: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -292,6 +316,13 @@ impl UpgradeOperation {
         }
         if let Some(status) = &result.runners {
             self.metadata["runners"] = json!(status);
+        }
+        // The component summaries are intentionally compact. Keep the complete
+        // result with the operation so a later status lookup can still explain
+        // a post-swap runner verification failure after the caller has exited.
+        self.metadata["result"] = json!(result);
+        if let Some(failure) = failure_from_result(result, self.started.elapsed().as_secs()) {
+            self.metadata["failure"] = json!(failure);
         }
         self.metadata["phase"] = json!("completed");
         self.metadata["elapsed_seconds"] = json!(self.started.elapsed().as_secs());
@@ -811,6 +842,7 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             .get("elapsed_seconds")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        failed: matches!(run.status.as_str(), "fail" | "error"),
         controller: component_from_metadata(&metadata, "controller"),
         extensions: component_from_metadata(&metadata, "extensions"),
         runners: component_from_metadata(&metadata, "runners"),
@@ -822,6 +854,96 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             .get("promotion_wait")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
+        failure: failure_from_metadata(&metadata, &run.status),
+    })
+}
+
+fn failure_from_metadata(metadata: &Value, status: &str) -> Option<UpgradeOperationFailure> {
+    if !matches!(status, "fail" | "error") {
+        return None;
+    }
+    let phase = metadata
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("failed")
+        .to_string();
+    let elapsed_seconds = metadata
+        .get("elapsed_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let budget_ms = metadata
+        .pointer("/promotion_wait/wait_timeout_ms")
+        .and_then(Value::as_u64)
+        .map(u128::from);
+    if let Some(failure) = metadata
+        .get("failure")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+    {
+        return Some(failure);
+    }
+    let expected_identity = metadata
+        .get("result")
+        .and_then(|result| result.get("new_build_identity"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let predicate = metadata
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("upgrade_terminal_failure")
+        .to_string();
+    Some(UpgradeOperationFailure {
+        phase,
+        predicate,
+        elapsed_seconds,
+        budget_ms,
+        expected_identity,
+        observed_identity: None,
+        diagnostic_references: Vec::new(),
+        runners: Vec::new(),
+    })
+}
+
+fn failure_from_result(
+    result: &UpgradeResult,
+    elapsed_seconds: u64,
+) -> Option<UpgradeOperationFailure> {
+    let runners = result
+        .runners_updated
+        .iter()
+        .chain(&result.runners_skipped)
+        .filter(|runner| !runner.success)
+        .map(|runner| json!(runner))
+        .collect::<Vec<_>>();
+    if runners.is_empty() {
+        return None;
+    }
+    let diagnostic_references = runners
+        .iter()
+        .flat_map(|runner| {
+            runner["recovery_commands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let observed_identity = runners.iter().find_map(|runner| {
+        runner["path_drift"]
+            .as_str()
+            .filter(|detail| detail.contains("observed"))
+            .map(str::to_string)
+    });
+    Some(UpgradeOperationFailure {
+        phase: "completed".to_string(),
+        predicate: "runner_post_swap_verification".to_string(),
+        elapsed_seconds,
+        budget_ms: None,
+        expected_identity: result.new_build_identity.clone(),
+        observed_identity,
+        diagnostic_references,
+        runners,
     })
 }
 
@@ -1252,6 +1374,68 @@ mod tests {
                     .as_ref()
                     .map(|component| component.status.as_str()),
                 Some("completed")
+            );
+        });
+    }
+
+    #[test]
+    fn post_swap_runner_verification_failure_survives_operation_reload() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let id = {
+                let mut operation = UpgradeOperation::start("homeboy upgrade");
+                let id = operation.id().expect("persisted operation").to_string();
+                let mut result = completed_upgrade_result();
+                result.new_build_identity = Some("0.2.0+selected".to_string());
+                result.partial = true;
+                result.runner_convergence = Some(RunnerConvergenceDisposition::Partial);
+                result.runners = Some(UpgradeComponentStatus {
+                    status: "partial".to_string(),
+                    summary: "0 converged, 1 require repair".to_string(),
+                });
+                result.runners_skipped.push(super::super::types::RunnerUpgradeEntry {
+                    runner_id: "lab".to_string(),
+                    homeboy_path: "/opt/homeboy".to_string(),
+                    success: false,
+                    upgraded: true,
+                    previous_version: Some("0.1.0".to_string()),
+                    new_version: Some("0.2.0".to_string()),
+                    bare_homeboy_version: None,
+                    path_drift: Some(
+                        "configured runner executable did not converge to initiating controller identity `0.2.0+selected`; observed `0.2.0+stale`".to_string(),
+                    ),
+                    recovery_commands: vec![
+                        "homeboy upgrade --force --upgrade-runner lab".to_string(),
+                    ],
+                    extensions_synced: Vec::new(),
+                    extensions_skipped: Vec::new(),
+                    extensions_failed: Vec::new(),
+                    stale_daemon: None,
+                    daemon_previous_version: None,
+                    daemon_new_version: None,
+                    exit_code: 1,
+                    detail: "post-swap identity verification failed".to_string(),
+                });
+                operation
+                    .finish_completed_durable(&result)
+                    .expect("persist terminal failure");
+                id
+            };
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("reload operation");
+            assert_eq!(status.status, RunStatus::Fail.as_str());
+            assert!(status.failed);
+            let failure = status.failure.expect("projected failure evidence");
+            assert_eq!(failure.phase, "completed");
+            assert_eq!(failure.predicate, "runner_post_swap_verification");
+            assert_eq!(failure.expected_identity.as_deref(), Some("0.2.0+selected"));
+            assert!(failure
+                .observed_identity
+                .as_deref()
+                .is_some_and(|observed| observed.contains("0.2.0+stale")));
+            assert_eq!(failure.runners.len(), 1);
+            assert_eq!(
+                failure.diagnostic_references,
+                vec!["homeboy upgrade --force --upgrade-runner lab"]
             );
         });
     }

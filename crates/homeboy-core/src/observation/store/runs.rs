@@ -1667,13 +1667,13 @@ impl ObservationStore {
     }
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, false, None)
+        self.upsert_imported_run_with_terminal_guard(run, false, None, None)
     }
 
     /// Upsert an imported projection without allowing a stale in-flight writer
     /// to replace a settled observation.
     pub fn upsert_imported_run_preserving_terminal(&self, run: &RunRecord) -> Result<()> {
-        self.upsert_imported_run_with_terminal_guard(run, true, None)
+        self.upsert_imported_run_with_terminal_guard(run, true, None, None)
     }
 
     pub fn upsert_imported_run_with_mission(
@@ -1683,7 +1683,35 @@ impl ObservationStore {
         preserve_terminal: bool,
     ) -> Result<()> {
         validate_required("mission_id", mission_id)?;
-        self.upsert_imported_run_with_terminal_guard(run, preserve_terminal, Some(mission_id))
+        self.upsert_imported_run_with_terminal_guard(run, preserve_terminal, Some(mission_id), None)
+    }
+
+    pub fn upsert_imported_run_with_mission_and_resource_projection(
+        &self,
+        run: &RunRecord,
+        mission_id: &str,
+        projection: &ControlPlaneResourceProjection,
+        preserve_terminal: bool,
+    ) -> Result<()> {
+        validate_required("mission_id", mission_id)?;
+        self.upsert_imported_run_with_terminal_guard(
+            run,
+            preserve_terminal,
+            Some(mission_id),
+            Some(projection),
+        )
+    }
+
+    /// Atomically replace a run projection and its domain-neutral action
+    /// authority. This is the only write path lifecycle adapters may use once
+    /// actions can target their resource.
+    pub fn upsert_imported_run_with_resource_projection(
+        &self,
+        run: &RunRecord,
+        projection: &ControlPlaneResourceProjection,
+        preserve_terminal: bool,
+    ) -> Result<()> {
+        self.upsert_imported_run_with_terminal_guard(run, preserve_terminal, None, Some(projection))
     }
 
     fn upsert_imported_run_with_terminal_guard(
@@ -1691,6 +1719,7 @@ impl ObservationStore {
         run: &RunRecord,
         preserve_terminal: bool,
         mission_id: Option<&str>,
+        resource_projection: Option<&ControlPlaneResourceProjection>,
     ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
@@ -1778,6 +1807,26 @@ impl ObservationStore {
                     "#,
                     params![mission_id, run.id],
                 )?;
+            }
+            if let Some(projection) = resource_projection {
+                let eligibility = serde_json::to_string(&projection.eligibility)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                let provenance = serde_json::to_string(&projection.provenance)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                transaction.execute(
+                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+                    params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+                )?;
+                transaction.execute(
+                    "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+                    params![projection.resource_type, projection.resource_id],
+                )?;
+                for alias in &projection.aliases {
+                    transaction.execute(
+                        "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                        params![projection.resource_type, alias, projection.resource_id],
+                    )?;
+                }
             }
             transaction.commit()
         })?;

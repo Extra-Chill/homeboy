@@ -83,6 +83,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         live_daemon_job_count: 0,
         retained_durable_job_count: 0,
         unresolved_retained_projection_count: 0,
+        retained_job_inconsistency: None,
         admission_blocking_job_ids: Vec::new(),
         unresolved_job_owners: Vec::new(),
         unresolved_generation_ids: Vec::new(),

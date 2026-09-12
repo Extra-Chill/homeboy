@@ -4,6 +4,99 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.372.3] - 2026-09-11
+
+### Changed
+- Name the blocker when a GitHub Release lookup cannot be answered
+- Push the release branch and its tag atomically
+
+## [0.372.2] - 2026-09-11
+
+### Fixed
+- make base preflight proxy-aware and diagnosable
+
+## [0.372.1] - 2026-09-11
+
+### Fixed
+- let a terminal Cook release its stranded attempts
+
+## [0.372.0] - 2026-09-11
+
+### Added
+- attribute the audit detectors phase with named spans and an unattributed-time self-check
+
+### Fixed
+- retain post-swap failure evidence
+- settle terminal generation jobs
+- probe lab artifact root
+- defer unresolved preview base
+- preserve terminal startup diagnosis
+- surface silent provider startup diagnostics
+
+## [0.371.9] - 2026-09-11
+
+### Changed
+- harden detached admission coverage
+- cover interrupted detached admission
+
+### Fixed
+- retain explicit Cargo target lifecycle
+- close detached admission races
+- recover interrupted detached admission
+- preserve rooted failure recovery
+- root recovery command routing
+- root finalization projections
+- preserve rooted continuation semantics
+- atomically publish detached supervision
+- fence detached admission ownership
+- bind reports to runtime stores
+- persist detached handoff admission
+- validate output before handoff
+- admit before workspace bootstrap
+
+## [0.371.8] - 2026-09-10
+
+### Changed
+- give each wire identifier one definition
+- Accept review options after actions
+
+### Fixed
+- Fix lifecycle-owned snapshot recovery projection
+
+## [0.371.7] - 2026-09-10
+
+### Changed
+- isolate execution provenance from the developer's installation
+
+## [0.371.6] - 2026-09-10
+
+### Changed
+- Make agent-task inspection scoped and bounded
+
+### Fixed
+- preflight deferred worktrees
+
+## [0.371.5] - 2026-09-10
+
+### Changed
+- reap fixture daemons during teardown
+
+### Fixed
+- report partial external storage inventory
+
+## [0.371.4] - 2026-09-10
+
+### Changed
+- build the ssh fixtures once
+- build the trace fixtures once per crate
+- build the runs fixture once
+- declare two copy-pasted helpers once
+
+### Fixed
+- fence retained count disagreement
+- block-comment openers take precedence over doc line prefixes
+- stop authoritative rebound through SSH
+
 ## [0.371.3] - 2026-09-09
 
 ### Changed

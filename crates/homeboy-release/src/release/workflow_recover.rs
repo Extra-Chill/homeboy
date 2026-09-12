@@ -246,7 +246,7 @@ pub(super) fn run_recover(
             current_version,
             &head_commit,
             |candidate_tag| {
-                crate::release::executor::github_release_exists_for_tag(&component, candidate_tag)
+                crate::release::executor::github_release_lookup_for_tag(&component, candidate_tag)
             },
         )? {
             return Ok((result, None, RECOVERY_INCOMPLETE_EXIT_CODE));
@@ -359,7 +359,7 @@ pub(super) fn run_recover(
 
         require_unpublished_github_release(
             &tag_name,
-            crate::release::executor::github_release_exists_for_tag(&component, &tag_name),
+            crate::release::executor::github_release_lookup_for_tag(&component, &tag_name),
         )?;
 
         if input.dry_run {
@@ -399,7 +399,7 @@ pub(super) fn run_recover(
 
         require_unpublished_github_release(
             &tag_name,
-            crate::release::executor::github_release_exists_for_tag(&component, &tag_name),
+            crate::release::executor::github_release_lookup_for_tag(&component, &tag_name),
         )?;
 
         if tag_exists_local {
@@ -658,7 +658,7 @@ fn recreate_divergent_unpublished_release<F>(
     github_release_exists: F,
 ) -> Result<Option<ReleaseCommandResult>>
 where
-    F: Fn(&str) -> Option<bool>,
+    F: Fn(&str) -> Option<crate::release::executor::GhReleaseLookup>,
 {
     // Recovery must inspect the highest release identity even when it is not
     // reachable from HEAD; that divergence is the state this path repairs.
@@ -945,24 +945,54 @@ fn require_interrupted_release_lineage(
     ))
 }
 
-fn require_unpublished_github_release(tag_name: &str, exists: Option<bool>) -> Result<()> {
-    match exists {
-        Some(false) => Ok(()),
-        Some(true) => Err(Error::validation_invalid_argument(
+/// Refuse to move a tag unless GitHub positively confirms no Release is
+/// attached to it.
+///
+/// Only a confirmed [`GhReleaseLookup::Absent`] permits the move. Everything
+/// else refuses, because moving a published release is destructive and an
+/// unanswered lookup is not evidence of absence.
+///
+/// The refusal names the blocker that actually stopped the lookup. A missing
+/// binary, an unauthenticated host, and an unreachable host each need a
+/// different action, and reporting all three as an authentication problem sends
+/// the operator to re-check credentials that were never at fault (issue #14570).
+fn require_unpublished_github_release(
+    tag_name: &str,
+    lookup: Option<crate::release::executor::GhReleaseLookup>,
+) -> Result<()> {
+    use crate::release::executor::GhReleaseLookup;
+    match lookup {
+        Some(GhReleaseLookup::Absent) => Ok(()),
+        None => Err(Error::validation_invalid_argument(
+            "retag",
+            format!(
+                "Refusing to retag '{}': could not verify whether a GitHub Release exists because no GitHub remote resolved for this component",
+                tag_name
+            ),
+            None,
+            Some(vec![
+                "Configure the component's GitHub remote, then retry; moving a published release is destructive."
+                    .to_string(),
+            ]),
+        )),
+        Some(GhReleaseLookup::Published) => Err(Error::validation_invalid_argument(
             "retag",
             format!("Refusing to retag '{}': a GitHub Release already exists", tag_name),
             None,
             None,
         )),
-        None => Err(Error::validation_invalid_argument(
-            "retag",
-            format!(
-                "Refusing to retag '{}': could not verify whether a GitHub Release exists",
-                tag_name
-            ),
-            None,
-            Some(vec!["Authenticate gh for this repository and retry; moving a published release is destructive.".to_string()]),
-        )),
+        Some(GhReleaseLookup::Indeterminate(blocker)) => {
+            Err(Error::validation_invalid_argument(
+                "retag",
+                format!(
+                    "Refusing to retag '{}': could not verify whether a GitHub Release exists because {}",
+                    tag_name,
+                    blocker.describe()
+                ),
+                None,
+                Some(vec![blocker.remedy()]),
+            ))
+        }
     }
 }
 
@@ -1486,7 +1516,7 @@ mod tests {
                 &main_before,
                 |tag| {
                     assert_eq!(tag, "v0.1.1");
-                    Some(false)
+                    Some(crate::release::executor::GhReleaseLookup::Absent)
                 },
             )
             .expect("recovery succeeds")
@@ -1623,7 +1653,7 @@ mod tests {
                 &scope,
                 "0.1.1",
                 &retry_head,
-                |_| Some(false),
+                |_| Some(crate::release::executor::GhReleaseLookup::Absent),
             )
             .expect("retry recovery succeeds")
             .expect("equal-version divergent release detected");

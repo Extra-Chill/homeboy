@@ -244,6 +244,126 @@ pub(crate) fn gh_release_exists(
     gh_probe_succeeds(github, config, &["release", "view", tag, "-R", repo_flag])
 }
 
+/// Outcome of asking GitHub whether a published Release exists for a tag.
+///
+/// `gh release view` exits non-zero both when the release is absent and when
+/// the query never reached GitHub, so a bare bool cannot tell "there is no
+/// release" from "nobody answered". Callers guarding a destructive tag move
+/// must not treat the second as the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GhReleaseLookup {
+    /// GitHub answered and a published Release exists.
+    Published,
+    /// GitHub answered and no Release exists for the tag.
+    Absent,
+    /// The question could not be answered. Carries the operator-facing reason.
+    Indeterminate(GhLookupBlocker),
+}
+
+/// Why a release lookup could not be answered. Each variant maps to a different
+/// operator action, which is the whole reason they are kept apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GhLookupBlocker {
+    /// The `gh` binary is not on PATH.
+    GhMissing,
+    /// `gh` is present but not authenticated for this host.
+    Unauthenticated { host: String },
+    /// `gh` ran and failed for some other reason -- connectivity, proxy, rate
+    /// limit, a 5xx. Carries the first line of its stderr.
+    QueryFailed { detail: String },
+}
+
+impl GhLookupBlocker {
+    /// Operator-facing description of what stopped the lookup.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::GhMissing => "the gh CLI is not installed".to_string(),
+            Self::Unauthenticated { host } => {
+                format!("gh is not authenticated for {host}")
+            }
+            Self::QueryFailed { detail } => {
+                format!("the GitHub query failed: {detail}")
+            }
+        }
+    }
+
+    /// The next action that actually addresses this blocker.
+    pub(crate) fn remedy(&self) -> String {
+        match self {
+            Self::GhMissing => {
+                "Install the gh CLI, then retry; moving a published release is destructive."
+                    .to_string()
+            }
+            Self::Unauthenticated { host } => format!(
+                "Run `gh auth login --hostname {host}`, then retry; moving a published release is destructive."
+            ),
+            Self::QueryFailed { .. } => {
+                "Restore connectivity to the GitHub host and retry; moving a published release is destructive."
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// Ask GitHub whether a published Release exists for `tag`, preserving why the
+/// answer is unavailable when it is.
+pub(crate) fn gh_release_lookup(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    tag: &str,
+    repo_flag: &str,
+) -> GhReleaseLookup {
+    if !gh_is_available() {
+        return GhReleaseLookup::Indeterminate(GhLookupBlocker::GhMissing);
+    }
+    if !gh_is_authenticated(github, config) {
+        return GhReleaseLookup::Indeterminate(GhLookupBlocker::Unauthenticated {
+            host: github.host.clone(),
+        });
+    }
+
+    let output = gh_command(github, config, &["release", "view", tag, "-R", repo_flag]).output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            return GhReleaseLookup::Indeterminate(GhLookupBlocker::QueryFailed {
+                detail: err.to_string(),
+            });
+        }
+    };
+    if output.status.success() {
+        return GhReleaseLookup::Published;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if classify_release_view_stderr_as_absent(&stderr) {
+        GhReleaseLookup::Absent
+    } else {
+        GhReleaseLookup::Indeterminate(GhLookupBlocker::QueryFailed {
+            detail: first_meaningful_line(&stderr),
+        })
+    }
+}
+
+/// `gh release view` reports a missing release with a stable, specific message.
+/// Anything else on a non-zero exit is a failure to ask, not an answer.
+fn classify_release_view_stderr_as_absent(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("release not found") || lowered.contains("no release found")
+}
+
+fn first_meaningful_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no diagnostic output")
+        .chars()
+        .take(200)
+        .collect()
+}
+
 pub(crate) fn github_release_artifact_paths(state: &ReleaseState) -> Vec<String> {
     let authority_established = state
         .artifacts
@@ -1850,6 +1970,78 @@ pub(crate) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    use super::{classify_release_view_stderr_as_absent, first_meaningful_line, GhLookupBlocker};
+
+    /// `gh release view` exits 1 both when the release is absent and when the
+    /// query never reached GitHub. Only the first is an answer; treating the
+    /// second as "no release exists" would let a destructive retag proceed
+    /// against a tag that may well have a published Release attached
+    /// (issue #14570).
+    #[test]
+    fn only_a_missing_release_counts_as_an_answer() {
+        // gh's wording when the repository resolved and the tag has no release.
+        assert!(classify_release_view_stderr_as_absent(
+            "release not found\n"
+        ));
+        assert!(classify_release_view_stderr_as_absent(
+            "HTTP 404: no release found"
+        ));
+
+        // Everything else on a non-zero exit is a failure to ask. Each of these
+        // previously collapsed to "no release exists".
+        for stderr in [
+            "error connecting to github.example.com\ncheck your internet connection",
+            "dial tcp: lookup github.example.com: no such host",
+            "HTTP 502: Bad Gateway",
+            "API rate limit exceeded",
+            "",
+        ] {
+            assert!(
+                !classify_release_view_stderr_as_absent(stderr),
+                "must not read {stderr:?} as a confirmed absent release"
+            );
+        }
+    }
+
+    /// The blocker drives operator-facing text, so each cause has to name its
+    /// own remedy. Reporting an unreachable host as an authentication problem
+    /// sends the operator to re-check credentials that were never at fault.
+    #[test]
+    fn each_blocker_names_its_own_cause_and_remedy() {
+        let missing = GhLookupBlocker::GhMissing;
+        assert!(missing.describe().contains("not installed"));
+        assert!(missing.remedy().contains("Install"));
+
+        let unauth = GhLookupBlocker::Unauthenticated {
+            host: "github.example.com".to_string(),
+        };
+        assert!(unauth.describe().contains("github.example.com"));
+        assert!(unauth.remedy().contains("gh auth login"));
+
+        let failed = GhLookupBlocker::QueryFailed {
+            detail: "error connecting to github.example.com".to_string(),
+        };
+        assert!(failed.describe().contains("error connecting"));
+        assert!(
+            failed.remedy().contains("connectivity"),
+            "a failed query must point at connectivity, not authentication"
+        );
+        assert!(
+            !failed.remedy().contains("gh auth login"),
+            "a failed query must not send the operator to re-authenticate"
+        );
+    }
+
+    #[test]
+    fn query_failure_detail_is_the_first_useful_stderr_line() {
+        assert_eq!(
+            first_meaningful_line("\n\n  error connecting to host\ncheck your connection\n"),
+            "error connecting to host"
+        );
+        assert_eq!(first_meaningful_line("   \n"), "no diagnostic output");
+        assert_eq!(first_meaningful_line(&"x".repeat(500)).len(), 200);
+    }
+
     /// #10519: resolving a just-created draft must not scan the release list.
     ///
     /// `releases/tags/{tag}` 404s for a draft by design, so the readback after

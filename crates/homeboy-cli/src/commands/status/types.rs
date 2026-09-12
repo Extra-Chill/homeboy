@@ -51,6 +51,12 @@ pub struct StatusArgs {
     #[arg(long)]
     pub global: bool,
 
+    /// Restrict a global runner probe to these runner IDs. This is primarily an
+    /// executable continuation emitted when the bounded global collection omits
+    /// configured runners.
+    #[arg(long = "global-runner", value_name = "ID", requires = "global")]
+    pub global_runners: Vec<String>,
+
     /// Show only outdated components (local != remote)
     #[arg(long)]
     pub outdated: bool,
@@ -316,6 +322,8 @@ pub struct GlobalRunnerStatus {
     /// so daemon freshness is always established by the drill-down command.
     pub freshness_unverified: usize,
     pub drill_down: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

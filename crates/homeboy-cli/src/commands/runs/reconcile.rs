@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use homeboy::core::engine::run_dir;
 use homeboy::core::observation::{
-    run_has_active_remote_job, run_owner_pid, runs_service, ObservationStore, RunListFilter,
-    RunRecord, RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
+    run_has_active_remote_job, run_owner_pid, runs_service, NewRunRecord, ObservationStore,
+    RunListFilter, RunRecord, RunStatus, OWNERLESS_RUNNING_STALE_THRESHOLD_MINUTES,
 };
 use homeboy::core::process::pid_is_running;
 
@@ -553,7 +553,7 @@ fn read_extension_children(run_dir_path: &Path) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::core::observation::{NewRunRecord, RunRecord};
+    use homeboy::core::observation::RunRecord;
     use homeboy::test_support::with_isolated_home;
 
     use crate::commands::runs::test_support::sample_run;

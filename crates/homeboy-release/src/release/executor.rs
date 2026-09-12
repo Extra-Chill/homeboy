@@ -36,12 +36,14 @@ pub(crate) use git_push::run_git_push;
 pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;
 pub(crate) use github_release::run_github_release;
+pub(crate) use github_release::GhReleaseLookup;
 pub(crate) use package::{
     build_release_payload, run_extension_release_preflight, run_package, PackageRequest,
 };
 pub(crate) use publish::{publish_response_output, run_publish};
 pub(crate) use tagging::{
-    github_release_exists_for_tag, run_git_tag, run_tag_availability_preflight,
+    github_release_exists_for_tag, github_release_lookup_for_tag, run_git_tag,
+    run_tag_availability_preflight,
 };
 use version_targets::collect_version_target_mismatches;
 

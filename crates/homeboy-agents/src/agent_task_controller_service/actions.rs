@@ -619,6 +619,10 @@ pub(super) fn execute_retry_action(
         target_run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::EffectId(format!(
+                "controller:{}:{}",
+                record.loop_id, action.action_id
+            )),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
             idempotency_key: uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_OID,
@@ -859,6 +863,10 @@ where
                     &homeboy_control_plane_contract::ControlPlaneActionRequest {
                         schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                             .to_string(),
+                        effect_id: homeboy_control_plane_contract::EffectId(format!(
+                            "controller:{}:{}",
+                            record.loop_id, action.action_id
+                        )),
                         action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
                         idempotency_key,
                         actor: "homeboy-controller".to_string(),

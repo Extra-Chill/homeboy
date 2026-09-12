@@ -273,7 +273,9 @@ pub(super) fn parse_offloaded_agent_task_handoff(
     Ok(None)
 }
 
-const AGENT_TASK_LAB_HANDOFF_SCHEMA: &str = "homeboy/agent-task-lab-handoff/v1";
+/// Re-exported from the owning contract so the wire identifier has one
+/// definition rather than two that can drift apart at a version bump.
+use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event::AGENT_TASK_LAB_HANDOFF_SCHEMA;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct AgentTaskLabHandoff {

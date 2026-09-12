@@ -429,6 +429,9 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         promotion_request.gates.gate_heartbeat_interval(),
     );
     if let Some(run_id) = source_run_id.as_deref() {
+        let idempotency_key = args
+            .idempotency_key
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let acknowledgement =
             homeboy::agents::orchestration::execute_promotion_action_from_current_environment(
                 run_id,
@@ -436,9 +439,10 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
                     schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                         .to_string(),
                     action: homeboy_control_plane_contract::ControlPlaneAction::Promote,
-                    idempotency_key: args
-                        .idempotency_key
-                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    effect_id: homeboy_control_plane_contract::EffectId(format!(
+                        "cli:{run_id}:promote:{idempotency_key}"
+                    )),
+                    idempotency_key,
                     actor: "homeboy-cli".to_string(),
                     expected_updated_at: None,
                     parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {

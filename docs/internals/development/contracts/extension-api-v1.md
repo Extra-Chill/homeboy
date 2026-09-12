@@ -39,8 +39,10 @@ The wire schemas are:
 - `homeboy/extension-api-deployment-provider-inventory-response/v1`
 - `homeboy/extension-api-deployment-provider-resolve-request/v1`
 - `homeboy/extension-api-deployment-provider-resolve-response/v1`
-- `homeboy/extension-api-deployment-provider-invoke-request/v1`
-- `homeboy/extension-api-deployment-provider-invoke-response/v1`
+- `homeboy/extension-api-deployment-provider-submit-request/v1`
+- `homeboy/extension-api-deployment-provider-submit-response/v1`
+- `homeboy/extension-api-deployment-provider-status-request/v1`
+- `homeboy/extension-api-deployment-provider-status-response/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-request/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-response/v1`
 - `homeboy/extension-api-recipe-run-plan-request/v1`
@@ -132,6 +134,14 @@ failures as catalog and resolve.
 CLI extension inventory and startup command-health discovery consume v1 catalog
 and readiness responses. Their legacy presentation fields remain CLI adapters;
 core no longer maintains a parallel `ExtensionSummary` projection.
+
+### External Storage v1 Upgrades
+
+`ExternalStorageInventory` accepts additive completeness evidence in v1. Install
+the Homeboy core that understands that field before installing an extension that
+emits it: older cores reject unknown inventory fields by design. Older extension
+providers remain compatible with the newer core because the field is optional;
+their inventory is reported as complete unless they supply bounded-scan evidence.
 
 ## Read-Only Invocation
 
