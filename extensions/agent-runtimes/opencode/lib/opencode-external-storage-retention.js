@@ -41,7 +41,12 @@ function handleRequest(request, options = {}) {
 		reclaimed.push(item.id);
 		reclaimedBytes += receipt.bytes;
 	}
-	return { schema: SCHEMA, provider_id: PROVIDER_ID, generation: inventory.generation, reclaimed_item_ids: reclaimed, reclaimed_bytes: reclaimedBytes };
+	// Echo the generation the reclaim was requested against. Homeboy validates
+	// this to confirm the provider acted on the inventory view it was handed;
+	// returning a freshly recomputed generation fails that check on any root
+	// that saw unrelated writes since inventory (#2832). Per-item reclaim
+	// tokens, not this value, decide whether an individual item may be removed.
+	return { schema: SCHEMA, provider_id: PROVIDER_ID, generation: request.generation, reclaimed_item_ids: reclaimed, reclaimed_bytes: reclaimedBytes };
 }
 
 function writeOwnershipMarker(root, metadata = {}, env = process.env) {

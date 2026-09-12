@@ -80,6 +80,11 @@ else if (args === 'session list --format json') process.stdout.write('[]');
 		['scratch:churned'],
 		'unrelated root churn does not block reclaim, and a mutated target is refused',
 	);
+	assert.equal(
+		result.generation,
+		inventory.generation,
+		'the receipt echoes the generation the reclaim was requested against, which Homeboy validates',
+	);
 	assert.equal(fs.existsSync(churned), false, 'the reclaimed directory is removed');
 	assert.equal(fs.existsSync(mutated), true, 'the mutated target is left on disk');
 	assert.ok(result.reclaimed_bytes > 0, 'reclaimed bytes are reported');
