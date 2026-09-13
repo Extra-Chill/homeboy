@@ -1076,7 +1076,7 @@ fn test_sync_workspace() {
 }
 
 #[test]
-fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
+fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
     {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let roots = context.path_roots();
@@ -1118,7 +1118,7 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
         assert_eq!(exit_code, 0);
         assert!(output.excludes.contains(&"target".to_string()));
         assert!(output.excludes.contains(&"node_modules/**".to_string()));
-        assert!(output.excludes.contains(&"*.tsbuildinfo".to_string()));
+        assert!(output.excludes.contains(&"build.tsbuildinfo".to_string()));
         assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
         assert!(!Path::new(&output.remote_path)
             .join("target/debug/homeboy")
