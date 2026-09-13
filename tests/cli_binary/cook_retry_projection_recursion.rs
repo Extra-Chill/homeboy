@@ -74,11 +74,7 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
                 record.state = AgentTaskRunState::Failed;
                 record.metadata["cook_id"] = serde_json::json!(cook_id);
                 record.metadata["cook_attempt"] = serde_json::json!(1);
-                record.metadata["provider_executions_consumed"] = serde_json::json!(0);
-                record.metadata["pre_execution_failure"] = serde_json::json!({
-                    "retryable": true,
-                    "phase": "lab_handoff"
-                });
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
                 true
             })
             .expect("terminalize transport attempt");
@@ -109,15 +105,25 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
         )
         .expect("remove child resource projection");
 
-    let mut command = context.command(TestBinary::HomeboyFixture);
-    command.args([
+    let mut status = context.command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", &child_run_id]);
+    let status = bounded_output(&mut status, Duration::from_secs(10));
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let mut retry = context.command(TestBinary::HomeboyFixture);
+    retry.args([
         "agent-task",
         "retry",
         &child_run_id,
         "--idempotency-key",
         "retry-projection-recursion",
     ]);
-    let output = bounded_output(&mut command, Duration::from_secs(10));
+    let output = bounded_output(&mut retry, Duration::from_secs(10));
     assert_eq!(
         output.status.code(),
         Some(0),
