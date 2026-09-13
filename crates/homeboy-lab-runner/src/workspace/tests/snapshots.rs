@@ -215,7 +215,9 @@ fn workspace_snapshots_render_metadata_for_synced_workspace() {
         assert_eq!(snapshot.source_dirty, Some(false));
         assert_eq!(snapshot.run_id.as_deref(), Some("run-figma-1"));
         assert!(snapshot.created_at.contains('T'));
-        assert!(snapshot.exec_command.contains("homeboy runner exec --cwd"));
+        assert!(snapshot
+            .exec_command
+            .contains("homeboy runner exec --workspace-ref"));
     });
 }
 
