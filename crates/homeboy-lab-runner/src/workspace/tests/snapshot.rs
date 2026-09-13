@@ -8,12 +8,12 @@ use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
     excludes_with_links_to_excluded_targets, immutable_replay_snapshot, materialize_snapshot_piped,
     materialize_snapshot_stage, register_after_snapshot_directory_discovery_hook,
-    snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
-    snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
-    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_hash_v1, workspace_content_manifest_and_hash_for_policy,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    snapshot_archive_excludes, snapshot_input_manifest, snapshot_install_command,
+    snapshot_overlay_install_command, snapshot_stable_manifest, synthetic_checkout_value,
+    validate_snapshot_stability, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_hash_for_policy, workspace_content_hash_v1,
+    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -2284,6 +2284,70 @@ fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
         .expect("the excluded children retain their admitted empty root");
     assert!(staged_source.join("runtime-overlays").is_dir());
     assert!(!staged_source.join("runtime-overlays/php-wasm").exists());
+}
+
+#[test]
+fn snapshot_archive_excludes_anchors_only_single_segment_directory_rules() {
+    let root_vendor = snapshot_archive_excludes("vendor/");
+    assert!(root_vendor.contains(&"./vendor".to_string()));
+    assert!(root_vendor.contains(&"./vendor/**".to_string()));
+    assert!(!root_vendor.iter().any(|pattern| pattern == "vendor/**"));
+
+    let nested_vendor = snapshot_archive_excludes("runtime/vendor/");
+    assert!(nested_vendor.contains(&"runtime/vendor".to_string()));
+    assert!(nested_vendor.contains(&"runtime/vendor/**".to_string()));
+
+    let wildcard_vendor = snapshot_archive_excludes("**/vendor/");
+    assert!(wildcard_vendor.contains(&"**/vendor/**".to_string()));
+    assert!(wildcard_vendor.contains(&"vendor/**".to_string()));
+}
+
+#[test]
+fn snapshot_staging_preserves_dependency_vendors_for_root_vendor_excludes() {
+    let source = tempfile::tempdir().expect("source");
+    let babel_vendor = source
+        .path()
+        .join("node_modules/@babel/core/lib/vendor/import-meta-resolve.js");
+    let sentry_vendor = source
+        .path()
+        .join("node_modules/@sentry/utils/cjs/vendor/escapeStringForRegex.js");
+    let root_vendor = source.path().join("vendor/autoload.php");
+    for (path, contents) in [
+        (&babel_vendor, "export default 'babel runtime';\n"),
+        (&sentry_vendor, "module.exports = 'sentry runtime';\n"),
+        (&root_vendor, "root build dependency\n"),
+    ] {
+        fs::create_dir_all(path.parent().expect("dependency parent"))
+            .expect("dependency directory");
+        fs::write(path, contents).expect("dependency file");
+    }
+    let excludes = vec!["vendor/".to_string(), "vendor/**".to_string()];
+
+    let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &excludes, &manifest, None)
+        .expect("snapshot stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, source.path(), &staged_source)
+        .expect("staging preserves the manifest-approved dependency runtime");
+    assert!(!staged_source.join("vendor").exists());
+    assert_eq!(
+        fs::read_to_string(
+            staged_source.join("node_modules/@babel/core/lib/vendor/import-meta-resolve.js")
+        )
+        .expect("Babel runtime vendor file"),
+        "export default 'babel runtime';\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            staged_source.join("node_modules/@sentry/utils/cjs/vendor/escapeStringForRegex.js")
+        )
+        .expect("Sentry runtime vendor file"),
+        "module.exports = 'sentry runtime';\n"
+    );
 }
 
 #[test]

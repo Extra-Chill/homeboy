@@ -2476,16 +2476,31 @@ fn is_root_input_exclude(pattern: &str) -> bool {
     !root.is_empty() && !root.contains('/')
 }
 
-fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
-    let mut excludes = vec![pattern.to_string()];
+pub(super) fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
+    let root_anchored = pattern.starts_with("./");
+    let pattern = pattern.trim_start_matches("./");
     let directory = if pattern.ends_with('/') {
         Some(pattern.trim_end_matches('/'))
     } else {
         pattern.strip_suffix("/**")
     };
+    let root_directory = directory.is_some_and(|directory| {
+        !root_anchored && !directory.contains('/') && !directory.contains('*')
+    });
+    let pattern = if root_anchored || root_directory {
+        format!("./{pattern}")
+    } else {
+        pattern.to_string()
+    };
+    let mut excludes = vec![pattern.clone()];
     if let Some(directory) = directory {
         if !directory.is_empty() {
-            excludes.push(directory.to_string());
+            let directory = if root_anchored || root_directory {
+                format!("./{directory}")
+            } else {
+                directory.to_string()
+            };
+            excludes.push(directory.clone());
             excludes.push(format!("{directory}/**"));
             // Tar does not let a leading `**/` match the archive root. Add the
             // root form so its policy agrees with the manifest traversal.
