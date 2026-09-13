@@ -1652,9 +1652,11 @@ pub(crate) fn local_path_or_parent_writable(path: &Path) -> bool {
 }
 
 pub(crate) fn remote_path_writable(client: &SshClient, path: &str) -> bool {
-    client
-        .execute(&format!("test -w {}", common::shell_word(path)))
-        .success
+    client.execute(&remote_path_writable_command(path)).success
+}
+
+pub(super) fn remote_path_writable_command(path: &str) -> String {
+    format!("test -w {}", common::shell_path_expr(path))
 }
 
 pub(crate) fn remote_artifact_store_available(client: &SshClient, path: &str) -> bool {
@@ -1664,7 +1666,7 @@ pub(crate) fn remote_artifact_store_available(client: &SshClient, path: &str) ->
 }
 
 pub(super) fn remote_artifact_store_available_command(path: &str) -> String {
-    let path = common::shell_word(path);
+    let path = common::shell_path_expr(path);
     format!(
         "if [ -e {path} ]; then test -d {path} && test -w {path}; else parent=$(dirname {path}); test -d \"$parent\" && test -w \"$parent\"; fi"
     )
