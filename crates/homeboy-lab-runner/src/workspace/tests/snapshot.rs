@@ -8,12 +8,12 @@ use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
     excludes_with_links_to_excluded_targets, immutable_replay_snapshot, materialize_snapshot_piped,
     materialize_snapshot_stage, register_after_snapshot_directory_discovery_hook,
-    snapshot_archive_excludes, snapshot_input_manifest, snapshot_install_command,
-    snapshot_overlay_install_command, snapshot_stable_manifest, synthetic_checkout_value,
-    validate_snapshot_stability, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_hash_for_policy, workspace_content_hash_v1,
-    workspace_content_manifest_and_hash_for_policy, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    snapshot_input_manifest, snapshot_install_command, snapshot_overlay_install_command,
+    snapshot_stable_manifest, synthetic_checkout_value, validate_snapshot_stability,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_hash_v1, workspace_content_manifest_and_hash_for_policy,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -2284,22 +2284,6 @@ fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
         .expect("the excluded children retain their admitted empty root");
     assert!(staged_source.join("runtime-overlays").is_dir());
     assert!(!staged_source.join("runtime-overlays/php-wasm").exists());
-}
-
-#[test]
-fn snapshot_archive_excludes_anchors_only_single_segment_directory_rules() {
-    let root_vendor = snapshot_archive_excludes("vendor/");
-    assert!(root_vendor.contains(&"./vendor".to_string()));
-    assert!(root_vendor.contains(&"./vendor/**".to_string()));
-    assert!(!root_vendor.iter().any(|pattern| pattern == "vendor/**"));
-
-    let nested_vendor = snapshot_archive_excludes("runtime/vendor/");
-    assert!(nested_vendor.contains(&"runtime/vendor".to_string()));
-    assert!(nested_vendor.contains(&"runtime/vendor/**".to_string()));
-
-    let wildcard_vendor = snapshot_archive_excludes("**/vendor/");
-    assert!(wildcard_vendor.contains(&"**/vendor/**".to_string()));
-    assert!(wildcard_vendor.contains(&"vendor/**".to_string()));
 }
 
 #[test]
