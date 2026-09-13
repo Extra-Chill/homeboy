@@ -2469,38 +2469,27 @@ fn materialize_snapshot_stage_before(
 }
 
 fn is_root_input_exclude(pattern: &str) -> bool {
-    let Some(pattern) = pattern.strip_prefix("./") else {
+    let root_anchored = pattern.starts_with("./");
+    if !root_anchored && !pattern.ends_with('/') && !pattern.ends_with("/**") {
         return false;
-    };
-    let root = pattern.trim_end_matches("/**").trim_end_matches('/');
-    !root.is_empty() && !root.contains('/')
+    }
+    let root = pattern
+        .trim_start_matches("./")
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    !root.is_empty() && !root.contains('/') && !root.contains('*')
 }
 
-pub(super) fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
-    let root_anchored = pattern.starts_with("./");
-    let pattern = pattern.trim_start_matches("./");
+fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
+    let mut excludes = vec![pattern.to_string()];
     let directory = if pattern.ends_with('/') {
         Some(pattern.trim_end_matches('/'))
     } else {
         pattern.strip_suffix("/**")
     };
-    let root_directory = directory.is_some_and(|directory| {
-        !root_anchored && !directory.contains('/') && !directory.contains('*')
-    });
-    let pattern = if root_anchored || root_directory {
-        format!("./{pattern}")
-    } else {
-        pattern.to_string()
-    };
-    let mut excludes = vec![pattern.clone()];
     if let Some(directory) = directory {
         if !directory.is_empty() {
-            let directory = if root_anchored || root_directory {
-                format!("./{directory}")
-            } else {
-                directory.to_string()
-            };
-            excludes.push(directory.clone());
+            excludes.push(directory.to_string());
             excludes.push(format!("{directory}/**"));
             // Tar does not let a leading `**/` match the archive root. Add the
             // root form so its policy agrees with the manifest traversal.
