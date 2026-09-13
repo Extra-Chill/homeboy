@@ -1902,27 +1902,27 @@ fn run_gate_argv(
         )
     })?;
     let target_started = Instant::now();
-    let mut child = process.spawn().map_err(|error| {
+    let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("run deterministic gate {command}")),
         )
     })?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
+    if let Err(error) = containment.attach(child) {
         return Err(Error::internal_io(
             error.to_string(),
             Some(format!("guard deterministic gate {command}")),
         ));
     }
+    let process_group = containment.leader_pid().expect("attached gate owner");
     let timeout = declared_plan
         .map(|plan| plan.suite_timeout())
         .or(execution.timeout);
     let (mut output, termination) = if let Some(timeout) = timeout {
         let supervision = execution.supervision;
         if let Some(supervision) = supervision {
-            if let Err(error) = (supervision.on_spawn)(child.id(), command) {
-                if let Err(cleanup_error) = containment.terminate_live(&mut child) {
+            if let Err(error) = (supervision.on_spawn)(process_group, command) {
+                if let Err(cleanup_error) = containment.terminate_live() {
                     return Err(Error::internal_io(
                         format!(
                             "durable gate registration failed ({error}); failed to terminate and reap its child: {cleanup_error}"
@@ -1934,14 +1934,15 @@ fn run_gate_argv(
             }
         }
         let supervised =
-            homeboy_core::engine::command::wait_with_bounded_output_supervised_with_progress(
-                &mut child,
+            homeboy_core::engine::command::wait_with_bounded_output_supervised_with_progress_owned(
+                containment.owner_mut().expect("attached gate owner"),
                 65_536,
                 timeout,
                 supervision.map(|supervision| supervision.no_progress_timeout),
                 supervision
                     .map(|supervision| supervision.heartbeat_interval)
                     .unwrap_or(Duration::from_secs(5)),
+                None,
                 || supervision.is_some_and(|supervision| (supervision.is_cancelled)()),
                 |heartbeat| {
                     let Some(supervision) = supervision else {
@@ -1977,8 +1978,8 @@ fn run_gate_argv(
             })?;
         (supervised.output, supervised.termination)
     } else {
-        let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled(
-            &mut child,
+        let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled_owned(
+            containment.owner_mut().expect("attached gate owner"),
             65_536,
             || false,
         )

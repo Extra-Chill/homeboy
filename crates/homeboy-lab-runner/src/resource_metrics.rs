@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use homeboy_core::engine::command::{
-    isolate_process_tree, supports_process_tree_isolation, terminate_process_tree_and_reap,
-    wait_with_bounded_output, wait_with_bounded_output_until_cancelled_with_stdout_observer,
-    CommandCaptureMetadata, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
+    supports_process_tree_isolation, wait_with_bounded_output,
+    wait_with_bounded_output_until_cancelled_with_stdout_observer_owned, CommandCaptureMetadata,
+    ExecutionOwner, StdoutLineObserver, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::redaction::RedactionPolicy;
@@ -133,15 +133,16 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         require_process_tree_isolation()?;
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    isolate_process_tree(command);
     let started = Instant::now();
-    let mut child = command
-        .spawn()
+    let mut owner = ExecutionOwner::spawn(command)
         .map_err(|error| runner_command_spawn_error(command, &error))?;
-    let pid = child.id();
+    let pid = owner.identity().root_pid;
     if let Some(child_started) = child_started {
         if let Err(error) = child_started(pid) {
-            let cleanup = terminate_unpersisted_child_and_reap(&mut child);
+            let cleanup = owner
+                .drain_and_reap()
+                .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
+                .map(|_| ());
             let cleanup_context = cleanup
                 .err()
                 .map(|cleanup_error| format!("; child cleanup also failed: {cleanup_error}"))
@@ -170,7 +171,10 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
             pid,
             process_tree_resource_summary(pid),
         )) {
-            let cleanup = terminate_unpersisted_child_and_reap(&mut child);
+            let cleanup = owner
+                .drain_and_reap()
+                .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
+                .map(|_| ());
             let cleanup_context = cleanup
                 .err()
                 .map(|error| format!("; child cleanup also failed: {error}"))
@@ -192,8 +196,8 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         resource_guard_env,
         concurrency_limit,
     );
-    let bounded_output = wait_with_bounded_output_until_cancelled_with_stdout_observer(
-        &mut child,
+    let bounded_output = wait_with_bounded_output_until_cancelled_with_stdout_observer_owned(
+        &mut owner,
         DEFAULT_CAPTURE_LIMIT_BYTES,
         || {
             is_cancelled()
@@ -296,16 +300,6 @@ fn runner_command_spawn_error(command: &Command, error: &std::io::Error) -> Erro
 
 fn os_str_bytes(value: &OsStr) -> usize {
     value.as_encoded_bytes().len()
-}
-
-/// Terminate and reap an unrecorded child through the same bounded, verified
-/// process-tree lifecycle used by cancellation.
-fn terminate_unpersisted_child_and_reap(child: &mut std::process::Child) -> Result<()> {
-    terminate_process_tree_and_reap(child)
-        .map(|_| ())
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some("reap runner child".to_string()))
-        })
 }
 
 struct ResourceMetricsCollector {
@@ -958,6 +952,93 @@ mod tests {
         assert!(!homeboy_core::process::pid_is_running(
             pid.load(Ordering::SeqCst)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_cancel_reaps_term_resistant_descendants_and_persists_root_identity() {
+        struct ReapOnDrop(Arc<Mutex<Vec<u32>>>);
+        impl Drop for ReapOnDrop {
+            fn drop(&mut self) {
+                for pid in self.0.lock().expect("cleanup pids").iter().copied() {
+                    if pid != 0 && homeboy_core::process::pid_is_running(pid) {
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("unique tempfile dir");
+        let pid_file = temp.path().join("descendant.pid");
+        let cleanup_pids = Arc::new(Mutex::new(Vec::new()));
+        let _cleanup = ReapOnDrop(Arc::clone(&cleanup_pids));
+        let script = format!(
+            "trap '' TERM; sleep 30 & echo $! > {}; wait",
+            pid_file.display()
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        let persisted = Arc::new(AtomicU32::new(0));
+        let persisted_pgid = Arc::new(AtomicU32::new(0));
+        let callback_pid = Arc::clone(&persisted);
+        let callback_pgid = Arc::clone(&persisted_pgid);
+        let callback_cleanup = Arc::clone(&cleanup_pids);
+        let output = measured_command_output_until_cancelled_with_progress(
+            &mut command,
+            || pid_file.exists(),
+            None,
+            false,
+            None,
+            Some(Arc::new(move |root_pid| {
+                callback_pid.store(root_pid, Ordering::SeqCst);
+                callback_cleanup
+                    .lock()
+                    .expect("cleanup pids")
+                    .push(root_pid);
+                #[cfg(target_os = "linux")]
+                {
+                    let pgid = unsafe { libc::getpgid(root_pid as libc::pid_t) };
+                    assert!(
+                        pgid >= 0,
+                        "getpgid must succeed while the runner root is still alive"
+                    );
+                    callback_pgid.store(pgid as u32, Ordering::SeqCst);
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = callback_pgid;
+                }
+                Ok(())
+            })),
+            &HashMap::new(),
+            None,
+        )
+        .expect("runner cancel completes");
+        assert!(!output.output.status.success());
+        let root_pid = persisted.load(Ordering::SeqCst);
+        assert_ne!(root_pid, 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            persisted_pgid.load(Ordering::SeqCst),
+            root_pid,
+            "persisted runner identity is the live root leader"
+        );
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant");
+        cleanup_pids
+            .lock()
+            .expect("cleanup pids")
+            .push(descendant_pid);
+        assert!(
+            !homeboy_core::process::pid_is_running(descendant_pid),
+            "runner cancel left TERM-resistant descendant {descendant_pid}"
+        );
+        assert!(!homeboy_core::process::pid_is_running(root_pid));
     }
 
     #[test]

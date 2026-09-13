@@ -1113,14 +1113,14 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 &request.request.task_id,
                 attempt,
-                child.id(),
+                child.identity().expect("supervised identity").root_pid,
             );
         } else {
             let _ = crate::agent_task_lifecycle::record_provider_execution_process(
                 run_id,
                 &request.request.task_id,
                 attempt,
-                child.id(),
+                child.identity().expect("supervised identity").root_pid,
             );
         }
     }
@@ -1169,7 +1169,7 @@ fn run_materialized_provider_command_once_contained(
             )),
         );
     }
-    let stdout_reader = child.stdout.take().map(|stdout| {
+    let stdout_reader = child.take_stdout().map(|stdout| {
         spawn_provider_output_reader(
             stdout,
             Arc::clone(&stdout_capture),
@@ -1178,7 +1178,7 @@ fn run_materialized_provider_command_once_contained(
             stdout_runtime_capture.map(|capture| capture.file),
         )
     });
-    let stderr_reader = child.stderr.take().map(|stderr| {
+    let stderr_reader = child.take_stderr().map(|stderr| {
         spawn_provider_output_reader(
             stderr,
             Arc::clone(&stderr_capture),
@@ -1188,7 +1188,7 @@ fn run_materialized_provider_command_once_contained(
         )
     });
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.take_stdin() {
         let _ = Write::write_all(&mut stdin, &input);
     }
 
@@ -2737,13 +2737,13 @@ fn run_provider_readiness_invocation_with_timeout(
         .supervise(child)
         .map_err(|error| format!("failed to guard provider readiness invocation: {error}"))?;
     let (stdin_sender, stdin_receiver) = mpsc::sync_channel(1);
-    let stdin_writer = child.stdin.take().map(|mut stdin| {
+    let stdin_writer = child.take_stdin().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin_sender.send(stdin.write_all(&input));
         })
     });
-    let stdout_reader = child.stdout.take().map(spawn_readiness_output_reader);
-    let stderr_reader = child.stderr.take().map(spawn_readiness_output_reader);
+    let stdout_reader = child.take_stdout().map(spawn_readiness_output_reader);
+    let stderr_reader = child.take_stderr().map(spawn_readiness_output_reader);
     let mut stdin_complete = stdin_writer.is_none();
     let terminal = loop {
         if !stdin_complete {
@@ -3129,7 +3129,7 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
+    let stderr_reader = child.take_stderr().map(|mut stderr| {
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut buffer = Vec::new();
