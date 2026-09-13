@@ -2334,7 +2334,7 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
     existing
 }
 
-pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+pub(crate) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     let record = parse_record_from_run(run)?;
     if record.schema != super::records::schemas::RUN {
         return Err(Error::validation_invalid_argument(

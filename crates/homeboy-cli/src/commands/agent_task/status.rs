@@ -88,6 +88,7 @@ pub(crate) fn bounded_cancel_report(value: Value) -> Value {
             "disposition": bounded_value(cancellation.get("disposition").unwrap_or(&Value::Null)),
             "terminal": bounded_value(cancellation.get("terminal").unwrap_or(&Value::Null)),
             "waited_seconds": bounded_value(cancellation.get("waited_seconds").unwrap_or(&Value::Null)),
+            "message": bounded_value(value.get("message").unwrap_or(&Value::Null)),
         },
         "next_action": { "command": status_command },
         "output_budget": {

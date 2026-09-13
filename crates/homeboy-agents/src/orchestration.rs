@@ -1712,7 +1712,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             // alias owner would give one attempt every member's claim and leave
             // the others unreconciled, so an existing record wins here and the
             // alias is followed only when the id is nothing but an alias.
-            Some(projection)
+            Some(_projection)
                 if request.action == ControlPlaneAction::Reconcile
                     && observation
                         .control_plane_resource_projection_exact(
@@ -1758,24 +1758,14 @@ impl OrchestrationService<LifecycleStoreLookup> {
             request_digest,
             accepted_at,
         };
-        let version = record
-            .updated_at
-            .clone()
-            .unwrap_or_else(|| record.submitted_at.clone());
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: version,
-            eligible: action_unavailability(&record, request.action).is_none(),
-            reason: action_unavailability(&record, request.action),
-        };
         let idempotency_digest =
             homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
         let admission = observation
             .enqueue_control_plane_action_intent(
                 &intent,
-                &fence,
                 "agent_task_run",
                 &idempotency_digest,
+                |projection, run| agent_task_admission_fence(projection, run, request.action),
             )
             .map_err(map_lifecycle_error)?;
         let effect = match admission {
@@ -1892,18 +1882,9 @@ impl OrchestrationService<LifecycleStoreLookup> {
             action_name(request.action),
             request.idempotency_key
         );
-        let (outcome, resource, result, message) = if request
-            .expected_updated_at
-            .as_ref()
-            .is_some_and(|expected| record.updated_at.as_ref() != Some(expected))
+        let (outcome, resource, result, message) = if let Some(reason) =
+            action_unavailability(&record, request.action)
         {
-            (
-                ControlPlaneActionOutcome::Failed,
-                project_record(&record, None)?,
-                ControlPlaneActionPayload::empty(),
-                Some("run changed since the supplied precondition".to_string()),
-            )
-        } else if let Some(reason) = action_unavailability(&record, request.action) {
             (
                 ControlPlaneActionOutcome::Failed,
                 project_record(&record, None)?,
@@ -1942,6 +1923,28 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 project_record(&observed, None)?,
                                 cancel_result_payload(result),
                                 None,
+                            )
+                        }
+                        Err(error)
+                            if crate::agent_task_lifecycle::is_already_terminal_cancel_error(
+                                &error,
+                            ) =>
+                        {
+                            let current = self
+                                .lookup
+                                .store
+                                .read_record(&resolved)
+                                .map_err(map_lifecycle_error)?;
+                            (
+                                ControlPlaneActionOutcome::AlreadySatisfied,
+                                project_record(&current, None)?,
+                                cancel_result_payload(cancel_result_for_record(
+                                    &current,
+                                    Duration::ZERO,
+                                    0,
+                                    None,
+                                )),
+                                Some("run is already terminal".to_string()),
                             )
                         }
                         Err(error) => (
@@ -2391,6 +2394,25 @@ fn retry_action_run_id(
             format!("{}:retry:{}", record.run_id, request.idempotency_key).as_bytes(),
         );
         format!("retry-{identity}")
+    })
+}
+
+fn agent_task_admission_fence(
+    projection: &homeboy_core::observation::ControlPlaneResourceProjection,
+    run: Option<&homeboy_core::observation::RunRecord>,
+    action: ControlPlaneAction,
+) -> homeboy_core::Result<ControlPlaneActionFence> {
+    let reason = match run {
+        Some(run) => {
+            action_unavailability(&crate::agent_task_lifecycle::record_from_run(run)?, action)
+        }
+        None => Some("canonical control-plane resource not found".to_string()),
+    };
+    Ok(ControlPlaneActionFence {
+        schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+        resource_updated_at: projection.version.clone(),
+        eligible: reason.is_none(),
+        reason,
     })
 }
 
@@ -5420,7 +5442,7 @@ mod tests {
     use crate::agent_task_schedule::AgentTaskPlan;
     use crate::agent_tasks::AgentTaskState;
     use homeboy_control_plane_contract::{
-        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionFence,
+        ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionEligibilityReport,
         ControlPlaneActionIntent, ControlPlaneActionOutcome, ControlPlaneActionPayload,
         ControlPlaneActionRequest, ControlPlaneActionResource,
         ControlPlaneAdmissionRetryDisposition, ControlPlaneAttemptListRequest,
@@ -5432,10 +5454,10 @@ mod tests {
         ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
         ControlPlaneTaskListRequest, EffectId, EventCursor, EventId, ExecutionId, MissionId,
         ReferenceId, RunCursor, RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_FENCE_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
-        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA,
         CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
         CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
         CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
@@ -5484,15 +5506,6 @@ mod tests {
             ),
             accepted_at: accepted_at.clone(),
         };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: record
-                .updated_at
-                .clone()
-                .unwrap_or_else(|| record.submitted_at.clone()),
-            eligible: true,
-            reason: None,
-        };
         let observation = service
             .lookup
             .store
@@ -5501,11 +5514,13 @@ mod tests {
         observation
             .enqueue_control_plane_action_intent(
                 &intent,
-                &fence,
                 "agent_task_run",
                 &homeboy_engine_primitives::content_hash::sha256_hex(
                     request.idempotency_key.as_bytes(),
                 ),
+                |projection, run| {
+                    super::agent_task_admission_fence(projection, run, request.action)
+                },
             )
             .expect("enqueue action effect");
         observation
@@ -6879,23 +6894,18 @@ mod tests {
                 expected_updated_at: Some("2025-12-31T23:59:59Z".to_string()),
                 ..conflicting
             };
-            let acknowledgement = service
+            let error = service
                 .execute_action(&run, &stale)
-                .expect("failed acknowledgement");
-            assert_eq!(acknowledgement.outcome, ControlPlaneActionOutcome::Failed);
-            assert!(acknowledgement
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("precondition")));
+                .expect_err("stale explicit fence");
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+            assert!(error.message.contains("eligibility fence"));
             assert_eq!(
                 service
                     .events(&run, None)
-                    .expect("failed action events")
+                    .expect("stale fence does not append events")
                     .events
-                    .iter()
-                    .filter(|event| event.kind == "action.failed")
-                    .count(),
-                1
+                    .len(),
+                2
             );
 
             let reconcile = ControlPlaneActionRequest {
@@ -7031,6 +7041,213 @@ mod tests {
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
                 first
+            );
+        });
+    }
+
+    #[test]
+    fn cancel_action_is_already_satisfied_when_the_run_finishes_after_admission() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("cancel-finishes-after-admit", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            crate::agent_task_lifecycle::install_before_resolved_cancellation_for_test(|| {
+                crate::agent_task_lifecycle::rewrite_record_for_test(AGENT_TASK_RUN, |record| {
+                    record.state = AgentTaskRunState::Succeeded;
+                })
+                .expect("finish after admission");
+            });
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-finishes-after-admit".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-finishes-after-admit".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement = service
+                .execute_action(&run, &request)
+                .expect("terminal race is already satisfied");
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            assert_eq!(
+                acknowledgement.resource.state,
+                ControlPlaneRunState::Succeeded
+            );
+        });
+    }
+
+    #[test]
+    fn cancel_action_preserves_unrelated_errors_when_the_run_is_terminal() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("cancel-preserve-error", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            crate::agent_task_lifecycle::install_before_resolved_cancellation_for_test(|| {
+                crate::agent_task_lifecycle::rewrite_record_for_test(AGENT_TASK_RUN, |record| {
+                    record.state = AgentTaskRunState::Succeeded;
+                })
+                .expect("finish after admission");
+            });
+            crate::agent_task_lifecycle::install_resolved_cancel_error_for_test(
+                homeboy_core::Error::internal_unexpected("injected persistence failure"),
+            );
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-preserve-error".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-preserve-error".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement = service
+                .execute_action(&run, &request)
+                .expect("failed acknowledgement");
+            assert_eq!(acknowledgement.outcome, ControlPlaneActionOutcome::Failed);
+            assert!(acknowledgement
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("injected persistence failure")));
+        });
+    }
+
+    #[test]
+    fn exact_cancel_does_not_follow_a_rebound_cook_alias() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let cook_id = "cook-cancel-alias-rebind";
+            let first_id = crate::agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+            let second_id = crate::agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("alias-first", Vec::new()),
+                Some(&first_id),
+            )
+            .expect("first attempt");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("alias-second", Vec::new()),
+                Some(&second_id),
+            )
+            .expect("second attempt");
+            store
+                .write_cook_index_attempt(
+                    cook_id,
+                    1,
+                    &first_id,
+                    "2026-01-01T00:00:00Z".to_string(),
+                    None,
+                )
+                .expect("index first");
+            store
+                .write_cook_index_attempt(
+                    cook_id,
+                    2,
+                    &second_id,
+                    "2026-01-01T00:00:01Z".to_string(),
+                    None,
+                )
+                .expect("rebind alias");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-exact-after-rebind".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-exact-after-rebind".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "stop first attempt" }),
+                },
+                confirmed: true,
+            };
+
+            let cancelled = service
+                .execute_action(&RunId::new(&first_id).expect("first"), &request)
+                .expect("cancel exact attempt");
+            assert_eq!(cancelled.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(cancelled.run.as_str(), first_id);
+            assert_eq!(
+                store.read_record(&first_id).expect("first").state,
+                AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                store.read_record(&second_id).expect("second").state,
+                AgentTaskRunState::Queued
+            );
+        });
+    }
+
+    #[test]
+    fn live_ineligible_record_rejects_quarantine_without_an_effect() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            crate::agent_task_lifecycle::submit_plan_in_store(
+                &store,
+                &AgentTaskPlan::new("quarantine-ineligible", Vec::new()),
+                Some(AGENT_TASK_RUN),
+            )
+            .expect("queued record");
+            store
+                .mutate_record(AGENT_TASK_RUN, |record| {
+                    record.state = AgentTaskRunState::Running;
+                    true
+                })
+                .expect("advance to ineligible quarantine state");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:quarantine-live-ineligible".to_string()),
+                action: ControlPlaneAction::Quarantine,
+                idempotency_key: "quarantine-live-ineligible".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "hold" }),
+                },
+                confirmed: true,
+            };
+
+            let error = service
+                .execute_action(&run, &request)
+                .expect_err("live ineligible");
+            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
+            assert!(error.message.contains("queued run"));
+            assert_eq!(
+                service
+                    .effect_status(&run, &request.effect_id)
+                    .expect("status")
+                    .state,
+                ControlPlaneEffectExecutionState::NotStarted
             );
         });
     }
@@ -7205,6 +7422,12 @@ mod tests {
                 Some(AGENT_TASK_RUN),
             )
             .expect("source record");
+            store
+                .mutate_record(AGENT_TASK_RUN, |record| {
+                    record.state = AgentTaskRunState::Failed;
+                    true
+                })
+                .expect("retry-eligible record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let retry_run_id = "interrupted-retry-successor";
@@ -7479,6 +7702,68 @@ mod tests {
             assert_eq!(first.result.schema, CONTROL_PLANE_RESUME_RESULT_SCHEMA);
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
+        });
+    }
+
+    #[test]
+    fn terminal_runner_resume_admits_when_advisory_eligibility_is_stale() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let aggregate = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan",
+                "status": "succeeded",
+                "totals": { "skipped": 0, "succeeded": 0, "failed": 0 },
+                "outcomes": [],
+            }))
+            .expect("aggregate");
+            store
+                .write_aggregate(AGENT_TASK_RUN, &aggregate)
+                .expect("aggregate evidence");
+            let observation = store.open_observation_initialized().expect("observation");
+            let mut projection = observation
+                .control_plane_resource_projection_exact("agent_task_run", AGENT_TASK_RUN)
+                .expect("read projection")
+                .expect("exists");
+            let mut report: ControlPlaneActionEligibilityReport =
+                serde_json::from_value(projection.eligibility.clone()).expect("eligibility");
+            for entry in &mut report.actions {
+                if entry.action == ControlPlaneAction::Resume {
+                    entry.availability = ControlPlaneActionAvailability::Unavailable;
+                    entry.reason = "stale advisory resume ineligibility".to_string();
+                }
+            }
+            projection.eligibility = serde_json::to_value(&report).expect("eligibility json");
+            observation
+                .upsert_control_plane_resource_projection(&projection)
+                .expect("plant stale advisory eligibility");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
+            let run = RunId::new(AGENT_TASK_RUN).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:terminal-runner-resume".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "terminal-runner-resume".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: false,
+            };
+
+            let first = service
+                .execute_action(&run, &request)
+                .expect("terminal runner resume must admit");
+            assert!(
+                first.message.as_deref().is_none_or(|message| {
+                    !message.contains("stale advisory") && !message.contains("not eligible")
+                }),
+                "{first:?}"
+            );
+            assert_eq!(
+                service.execute_action(&run, &request).expect("replay"),
+                first
+            );
         });
     }
 
