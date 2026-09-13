@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.2] - 2026-09-13
+
+### Fixed
+- expose canonical standalone dependency identities
+
 ## [3.48.1] - 2026-09-12
 
 ### Fixed
