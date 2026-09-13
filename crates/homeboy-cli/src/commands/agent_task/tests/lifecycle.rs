@@ -4912,16 +4912,16 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 #[test]
 fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
-            .expect("submitted");
+        let source_run_id = format!("run-retry-{}", "x".repeat(120));
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&source_run_id)).expect("submitted");
         // Retry admission requires a terminal run, which is the only state an
         // operator actually retries from. Cancelling through the lifecycle is
         // the fixture's terminal precondition rather than a raw state write.
-        agent_task_lifecycle::cancel_run("run-retry-source", Some("fixture terminalization"))
+        agent_task_lifecycle::cancel_run(&source_run_id, Some("fixture terminalization"))
             .expect("terminalize the retried source run");
 
         let (value, exit_code) = retry(RetryArgs {
-            run_id: "run-retry-source".to_string(),
+            run_id: source_run_id.clone(),
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
             force: false,
@@ -4953,14 +4953,14 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
         assert_eq!(acknowledgement.result.data["record"]["state"], "queued");
         assert_eq!(
             acknowledgement.result.data["record"]["metadata"]["retry_of"],
-            json!("run-retry-source")
+            json!(source_run_id)
         );
         assert_eq!(
             value,
             serde_json::to_value(&acknowledgement).expect("serialize canonical acknowledgement")
         );
         let replay = retry(RetryArgs {
-            run_id: "run-retry-source".to_string(),
+            run_id: source_run_id,
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
             force: false,
