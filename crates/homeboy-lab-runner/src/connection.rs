@@ -2238,14 +2238,11 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
         .map(|generation| generation.active_job_count);
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(direct_daemon_active_jobs))
-            if authoritative_generation_count
-                .is_some_and(|count| count != direct_daemon_active_jobs) =>
-        {
+        (None, Some(_)) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
             Some(RunnerActiveJobError {
                 code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
-                    "selected daemon reports {direct_daemon_active_jobs} active job(s), but its authoritative generation ledger retains {}",
+                    "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger retains {}",
                     authoritative_generation_count.expect("guarded by is_some_and")
                 ),
             })
