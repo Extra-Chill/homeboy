@@ -80,6 +80,7 @@ const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
 const ATTEMPT_CURSOR_SCHEMA: &str = "homeboy/control-plane-attempt-cursor/v1";
 const EVENT_CURSOR_SCHEMA: &str = "homeboy/control-plane-event-cursor/v1";
 const INTERNAL_ACTION_EVENT_KEY_PREFIX: &str = "homeboy-internal-action:";
+const INTERNAL_PROGRESS_EVENT_KEY_PREFIX: &str = "homeboy-internal-progress:";
 const RUN_CURSOR_BOUND: usize = 1024;
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -2802,12 +2803,55 @@ pub(crate) fn action_event_idempotency_key(operation_key: &str, kind: &str) -> S
     )
 }
 
+pub(crate) fn progress_event_idempotency_key(kind: &str, identity: &str) -> String {
+    format!(
+        "{INTERNAL_PROGRESS_EVENT_KEY_PREFIX}{kind}:{}",
+        homeboy_engine_primitives::content_hash::sha256_hex(identity.as_bytes())
+    )
+}
+
+pub(crate) fn prepare_control_plane_event_append(
+    run: &RunId,
+    record: &AgentTaskRunRecord,
+    request: &ControlPlaneEventAppendRequest,
+) -> Result<homeboy_core::observation::PreparedControlPlaneEventAppend, ControlPlaneError> {
+    request.validate()?;
+    let mut request = request.clone();
+    request.actor = redacted_bounded(&request.actor, 256);
+    request.kind = redacted_bounded(&request.kind, 128);
+    request.source.component = redacted_bounded(&request.source.component, 128);
+    request.source.instance = request
+        .source
+        .instance
+        .as_deref()
+        .and_then(|value| nonempty_redacted_bounded(value, 256));
+    normalize_event_references(&mut request.artifacts)?;
+    normalize_event_references(&mut request.evidence)?;
+    request.data = homeboy_core::redaction::redact_json(&request.data);
+    validate_event_scope(record, &request)?;
+    let idempotency_digest =
+        homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
+    let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
+        &serde_json::to_vec(&request)
+            .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?,
+    );
+    Ok(homeboy_core::observation::PreparedControlPlaneEventAppend {
+        run: run.clone(),
+        request,
+        idempotency_digest,
+        request_digest,
+    })
+}
+
 fn validate_external_event_append_request(
     request: &ControlPlaneEventAppendRequest,
 ) -> Result<(), ControlPlaneError> {
     if request
         .idempotency_key
         .starts_with(INTERNAL_ACTION_EVENT_KEY_PREFIX)
+        || request
+            .idempotency_key
+            .starts_with(INTERNAL_PROGRESS_EVENT_KEY_PREFIX)
         || request.kind.starts_with("action.")
         || request.source.component == "control-plane"
     {
@@ -3427,38 +3471,26 @@ fn append_event_in_store(
     run: &RunId,
     request: &ControlPlaneEventAppendRequest,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
-    request.validate()?;
-    let mut request = request.clone();
-    request.actor = redacted_bounded(&request.actor, 256);
-    request.kind = redacted_bounded(&request.kind, 128);
-    request.source.component = redacted_bounded(&request.source.component, 128);
-    request.source.instance = request
-        .source
-        .instance
-        .as_deref()
-        .and_then(|value| nonempty_redacted_bounded(value, 256));
-    normalize_event_references(&mut request.artifacts)?;
-    normalize_event_references(&mut request.evidence)?;
-    request.data = homeboy_core::redaction::redact_json(&request.data);
     store
         .with_config_lock(|| {
             let record = store.read_record(run.as_str())?;
-            validate_event_scope(&record, &request).map_err(|error| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "event_scope",
-                    error.message,
-                    None,
-                    None,
-                )
-            })?;
-            let idempotency_digest = homeboy_engine_primitives::content_hash::sha256_hex(
-                request.idempotency_key.as_bytes(),
-            );
-            let request_digest =
-                homeboy_engine_primitives::content_hash::sha256_hex(&serde_json::to_vec(&request)?);
+            let prepared =
+                prepare_control_plane_event_append(run, &record, request).map_err(|error| {
+                    homeboy_core::Error::validation_invalid_argument(
+                        "control_plane_event",
+                        error.message,
+                        None,
+                        None,
+                    )
+                })?;
             store
                 .open_observation_initialized()?
-                .append_control_plane_event(run, &request, &idempotency_digest, &request_digest)
+                .append_control_plane_event(
+                    run,
+                    &prepared.request,
+                    &prepared.idempotency_digest,
+                    &prepared.request_digest,
+                )
         })
         .map_err(map_lifecycle_error)
 }

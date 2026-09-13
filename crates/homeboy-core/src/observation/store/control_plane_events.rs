@@ -2,11 +2,21 @@ use homeboy_control_plane_contract::{
     ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventRetention, EventId, RunId,
     CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
 };
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::*;
 
 pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
+
+/// Caller-validated event input for a store transaction. The store assigns
+/// identity and sequence; idempotency uses these exact digests.
+#[derive(Debug, Clone)]
+pub struct PreparedControlPlaneEventAppend {
+    pub run: RunId,
+    pub request: ControlPlaneEventAppendRequest,
+    pub idempotency_digest: String,
+    pub request_digest: String,
+}
 
 impl ObservationStore {
     pub fn control_plane_event_receipt_exists(
@@ -48,85 +58,13 @@ impl ObservationStore {
         self.connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sqlite_error("begin control-plane event append"))?;
-        let result = (|| {
-            let exists: bool = self
-                .connection
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1)",
-                    [run.as_str()],
-                    |row| row.get(0),
-                )
-                .map_err(sqlite_error("verify control-plane event run"))?;
-            if !exists {
-                return Err(Error::validation_invalid_argument(
-                    "run_id",
-                    "control-plane run not found",
-                    Some(run.as_str().to_string()),
-                    None,
-                ));
-            }
-            let existing: Option<(String, String, u64, Option<String>)> = self.connection.query_row("SELECT request_digest, event_id, sequence, event_json FROM control_plane_event_appends WHERE run_id = ?1 AND idempotency_digest = ?2", params![run.as_str(), idempotency_digest], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(sqlite_error("read control-plane event receipt"))?;
-            if let Some((stored_digest, event_id, sequence, event_json)) = existing {
-                if stored_digest != request_digest {
-                    return Err(Error::validation_invalid_argument(
-                        "idempotency_key",
-                        "control-plane event idempotency key was already used for different input",
-                        None,
-                        None,
-                    ));
-                }
-                let event = match event_json {
-                    Some(json) => serde_json::from_str(&json)
-                        .map_err(|error| Error::internal_unexpected(error.to_string()))?,
-                    None => ControlPlaneEvent {
-                        schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
-                        event: EventId::new(event_id.clone())
-                            .map_err(|error| Error::internal_unexpected(error.to_string()))?,
-                        sequence,
-                        occurred_at: request.occurred_at.clone(),
-                        mission: None,
-                        run: run.clone(),
-                        task: request.task.clone(),
-                        attempt: request.attempt.clone(),
-                        execution: request.execution.clone(),
-                        kind: request.kind.clone(),
-                        source: request.source.clone(),
-                        data: request.data.clone(),
-                        artifacts: request.artifacts.clone(),
-                        evidence: request.evidence.clone(),
-                    },
-                };
-                validate_stored_event(run, &event_id, sequence, &event)?;
-                return Ok(event);
-            }
-            let sequence: u64 = self.connection.query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_plane_event_appends WHERE run_id = ?1", [run.as_str()], |row| row.get(0)).map_err(sqlite_error("allocate control-plane event sequence"))?;
-            let event = ControlPlaneEvent {
-                schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
-                event: EventId::new(format!("{}:event:{sequence}", run.as_str())).map_err(
-                    |error| {
-                        Error::validation_invalid_argument("event", error.to_string(), None, None)
-                    },
-                )?,
-                sequence,
-                occurred_at: request.occurred_at.clone(),
-                mission: None,
-                run: run.clone(),
-                task: request.task.clone(),
-                attempt: request.attempt.clone(),
-                execution: request.execution.clone(),
-                kind: request.kind.clone(),
-                source: request.source.clone(),
-                data: request.data.clone(),
-                artifacts: request.artifacts.clone(),
-                evidence: request.evidence.clone(),
-            };
-            let json = serde_json::to_string(&event)
-                .map_err(|error| Error::internal_unexpected(error.to_string()))?;
-            self.connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![run.as_str(), idempotency_digest, request_digest, event.event.as_str(), sequence, json, chrono::Utc::now().to_rfc3339()]).map_err(sqlite_error("persist control-plane event"))?;
-            self.connection.execute("UPDATE control_plane_event_appends SET event_json = NULL WHERE run_id = ?1 AND event_json IS NOT NULL AND sequence <= (SELECT MAX(sequence) - ?2 FROM control_plane_event_appends WHERE run_id = ?1)", params![run.as_str(), CONTROL_PLANE_EVENT_RETENTION_LIMIT]).map_err(sqlite_error("prune control-plane event payloads"))?;
-            Ok(event)
-        })();
-        match result {
+        match append_control_plane_event_on(
+            &self.connection,
+            run,
+            request,
+            idempotency_digest,
+            request_digest,
+        ) {
             Ok(event) => {
                 self.connection
                     .execute_batch("COMMIT")
@@ -199,6 +137,88 @@ impl ObservationStore {
             latest_sequence,
         }))
     }
+}
+
+pub(crate) fn append_control_plane_event_on(
+    connection: &Connection,
+    run: &RunId,
+    request: &ControlPlaneEventAppendRequest,
+    idempotency_digest: &str,
+    request_digest: &str,
+) -> Result<ControlPlaneEvent> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1)",
+            [run.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(sqlite_error("verify control-plane event run"))?;
+    if !exists {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "control-plane run not found",
+            Some(run.as_str().to_string()),
+            None,
+        ));
+    }
+    let existing: Option<(String, String, u64, Option<String>)> = connection.query_row("SELECT request_digest, event_id, sequence, event_json FROM control_plane_event_appends WHERE run_id = ?1 AND idempotency_digest = ?2", params![run.as_str(), idempotency_digest], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional().map_err(sqlite_error("read control-plane event receipt"))?;
+    if let Some((stored_digest, event_id, sequence, event_json)) = existing {
+        if stored_digest != request_digest {
+            return Err(Error::validation_invalid_argument(
+                "idempotency_key",
+                "control-plane event idempotency key was already used for different input",
+                None,
+                None,
+            ));
+        }
+        let event = match event_json {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+            None => ControlPlaneEvent {
+                schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+                event: EventId::new(event_id.clone())
+                    .map_err(|error| Error::internal_unexpected(error.to_string()))?,
+                sequence,
+                occurred_at: request.occurred_at.clone(),
+                mission: None,
+                run: run.clone(),
+                task: request.task.clone(),
+                attempt: request.attempt.clone(),
+                execution: request.execution.clone(),
+                kind: request.kind.clone(),
+                source: request.source.clone(),
+                data: request.data.clone(),
+                artifacts: request.artifacts.clone(),
+                evidence: request.evidence.clone(),
+            },
+        };
+        validate_stored_event(run, &event_id, sequence, &event)?;
+        return Ok(event);
+    }
+    let sequence: u64 = connection.query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_plane_event_appends WHERE run_id = ?1", [run.as_str()], |row| row.get(0)).map_err(sqlite_error("allocate control-plane event sequence"))?;
+    let event = ControlPlaneEvent {
+        schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
+        event: EventId::new(format!("{}:event:{sequence}", run.as_str())).map_err(|error| {
+            Error::validation_invalid_argument("event", error.to_string(), None, None)
+        })?,
+        sequence,
+        occurred_at: request.occurred_at.clone(),
+        mission: None,
+        run: run.clone(),
+        task: request.task.clone(),
+        attempt: request.attempt.clone(),
+        execution: request.execution.clone(),
+        kind: request.kind.clone(),
+        source: request.source.clone(),
+        data: request.data.clone(),
+        artifacts: request.artifacts.clone(),
+        evidence: request.evidence.clone(),
+    };
+    let json = serde_json::to_string(&event)
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    connection.execute("INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, event_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![run.as_str(), idempotency_digest, request_digest, event.event.as_str(), sequence, json, chrono::Utc::now().to_rfc3339()]).map_err(sqlite_error("persist control-plane event"))?;
+    connection.execute("UPDATE control_plane_event_appends SET event_json = NULL WHERE run_id = ?1 AND event_json IS NOT NULL AND sequence <= (SELECT MAX(sequence) - ?2 FROM control_plane_event_appends WHERE run_id = ?1)", params![run.as_str(), CONTROL_PLANE_EVENT_RETENTION_LIMIT]).map_err(sqlite_error("prune control-plane event payloads"))?;
+    Ok(event)
 }
 
 fn validate_stored_event(
@@ -321,5 +341,270 @@ mod tests {
         assert!(store
             .append_control_plane_event(&run, &first, &"a".repeat(64), &"b".repeat(64))
             .is_err());
+    }
+
+    fn run_record(id: &str, status: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: "test".to_string(),
+            component_id: None,
+            started_at: "now".to_string(),
+            finished_at: None,
+            status: status.to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({}),
+        }
+    }
+
+    fn projection(state: &str, version: &str) -> ControlPlaneResourceProjection {
+        ControlPlaneResourceProjection {
+            resource_type: "test_run".to_string(),
+            resource_id: "run-1".to_string(),
+            version: version.to_string(),
+            state: state.to_string(),
+            aliases: vec!["alias-1".to_string()],
+            eligibility: serde_json::json!({"ok": true}),
+            provenance: serde_json::json!({"src": "seed"}),
+        }
+    }
+
+    fn prepared(
+        run: &RunId,
+        key: &str,
+        kind: &str,
+        request_digest: &str,
+    ) -> PreparedControlPlaneEventAppend {
+        PreparedControlPlaneEventAppend {
+            run: run.clone(),
+            request: request(key, kind),
+            idempotency_digest: "a".repeat(64),
+            request_digest: request_digest.to_string(),
+        }
+    }
+
+    #[test]
+    fn imported_run_events_and_projection_bind_identity_and_accept_exact_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        let run = RunId::new("run-1").unwrap();
+        let first = prepared(&run, "key-0", "task.state_changed", &"b".repeat(64));
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                false,
+                None,
+                Some(&projection("running", "1")),
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        drop(store);
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "running");
+        let resource = store
+            .control_plane_resource_projection_exact("test_run", "run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.version, "1");
+        assert_eq!(resource.state, "running");
+        let events = store.control_plane_event_stream(&run).unwrap().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run, run);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[0].event.as_str(), "run-1:event:1");
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                false,
+                None,
+                Some(&projection("running", "1")),
+                std::slice::from_ref(&first),
+            )
+            .unwrap();
+        drop(store);
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        let events = store.control_plane_event_stream(&run).unwrap().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[0].event.as_str(), "run-1:event:1");
+    }
+
+    #[test]
+    fn conflicting_event_digest_rolls_back_run_projection_and_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        let run = RunId::new("run-1").unwrap();
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                false,
+                None,
+                Some(&projection("running", "1")),
+                &[prepared(
+                    &run,
+                    "key-0",
+                    "task.state_changed",
+                    &"b".repeat(64),
+                )],
+            )
+            .unwrap();
+        let error = store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "succeeded"),
+                false,
+                None,
+                Some(&projection("succeeded", "2")),
+                &[prepared(&run, "key-0", "other", &"c".repeat(64))],
+            )
+            .expect_err("conflicting digest rolls back");
+        assert!(error.message.contains("idempotency"));
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "running");
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                false,
+                None,
+                Some(&projection("running", "1")),
+                &[PreparedControlPlaneEventAppend {
+                    run: run.clone(),
+                    request: request("key-1", "task.state_changed"),
+                    idempotency_digest: "d".repeat(64),
+                    request_digest: "e".repeat(64),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .control_plane_event_stream(&run)
+                .unwrap()
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(store);
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "running");
+        let resource = store
+            .control_plane_resource_projection_exact("test_run", "run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.version, "1");
+        assert_eq!(resource.state, "running");
+        let events = store.control_plane_event_stream(&run).unwrap().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].sequence, 1);
+        assert_eq!(events[0].kind, "task.state_changed");
+        assert_eq!(events[0].event.as_str(), "run-1:event:1");
+        assert_eq!(events[1].sequence, 2);
+        assert_eq!(events[1].event.as_str(), "run-1:event:2");
+    }
+
+    #[test]
+    fn preserve_terminal_discards_candidate_run_projection_and_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        let run = RunId::new("run-1").unwrap();
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "succeeded"),
+                false,
+                Some("mission-1"),
+                Some(&projection("succeeded", "1")),
+                &[],
+            )
+            .unwrap();
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                true,
+                Some("mission-stale"),
+                Some(&projection("running", "2")),
+                &[prepared(
+                    &run,
+                    "key-stale",
+                    "task.state_changed",
+                    &"b".repeat(64),
+                )],
+            )
+            .unwrap();
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "succeeded");
+        assert_eq!(
+            store.get_run_mission("run-1").unwrap().as_deref(),
+            Some("mission-1")
+        );
+        assert!(store.get_mission("mission-stale").unwrap().is_none());
+        drop(store);
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "succeeded");
+        let resource = store
+            .control_plane_resource_projection_exact("test_run", "run-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.version, "1");
+        assert_eq!(resource.state, "succeeded");
+        assert_eq!(
+            store
+                .control_plane_event_stream(&run)
+                .unwrap()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store.get_run_mission("run-1").unwrap().as_deref(),
+            Some("mission-1")
+        );
+        assert!(store.get_mission("mission-stale").unwrap().is_none());
+    }
+
+    #[test]
+    fn prepared_events_bind_to_updated_run_not_prepared_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("observations.sqlite"))
+                .unwrap();
+        let target = RunId::new("run-1").unwrap();
+        let other = RunId::new("run-2").unwrap();
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-2", "running"),
+                false,
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        store
+            .upsert_imported_run_with_events(
+                &run_record("run-1", "running"),
+                false,
+                None,
+                Some(&projection("running", "1")),
+                &[prepared(
+                    &other,
+                    "key-0",
+                    "task.state_changed",
+                    &"b".repeat(64),
+                )],
+            )
+            .unwrap();
+        let events = store.control_plane_event_stream(&target).unwrap().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run, target);
+        assert_eq!(events[0].event.as_str(), "run-1:event:1");
+        assert_eq!(
+            store
+                .control_plane_event_stream(&other)
+                .unwrap()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

@@ -41,6 +41,7 @@ mod control_plane_identities;
 pub mod controller_pin_reference_provider;
 mod conversion;
 mod cook_workspace_restore;
+mod durable_progress;
 mod failure_recording;
 mod health;
 mod lab_handoff_reconciliation;
