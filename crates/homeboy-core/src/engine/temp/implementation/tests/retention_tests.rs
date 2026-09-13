@@ -2,208 +2,197 @@ use super::*;
 
 #[test]
 fn active_invocation_lease_survives_transient_pin_loss() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let invocation = super::super::super::invocation::InvocationGuard::acquire(
-        &run_dir,
-        &super::super::super::invocation::InvocationRequirements::default(),
-    )
-    .expect("invocation");
-    let exported_path = invocation.context().tmp_dir;
-    #[cfg(unix)]
-    let path = fs::read_link(&exported_path).expect("managed invocation temp target");
-    #[cfg(not(unix))]
-    let path = exported_path.clone();
-    fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
-    // The directory is named for the invocation short id now, so this filter
-    // is resolved through the prefix recorded in `owner.json` (#14384).
-    let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
-    options.older_than_days = 0;
+    with_isolated_home(|_| {
+        let runtime_tmp = owned_runtime_tmp_root();
+        env::set_var(runtime_tmpdir_env(), runtime_tmp.path());
+        let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+        let invocation = super::super::super::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &super::super::super::invocation::InvocationRequirements::default(),
+        )
+        .expect("invocation");
+        let exported_path = invocation.context().tmp_dir;
+        #[cfg(unix)]
+        let path = fs::read_link(&exported_path).expect("managed invocation temp target");
+        #[cfg(not(unix))]
+        let path = exported_path.clone();
+        fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
+        // The directory is named for the invocation short id now, so this filter
+        // is resolved through the prefix recorded in `owner.json` (#14384).
+        let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
+        options.older_than_days = 0;
 
-    let protected = cleanup_runtime_tmp_bounded(options).expect("protected dry run");
-    assert_eq!(protected.removed_count, 0);
-    let protected_row = protected
-        .rows
-        .iter()
-        .find(|row| row.path == path.display().to_string())
-        .expect("managed invocation temp row");
-    assert_eq!(protected_row.action, "skip");
-    assert!(protected_row.reason.contains("invocation lease"));
-    assert!(path.exists());
+        let protected = cleanup_runtime_tmp_bounded(options).expect("protected dry run");
+        assert_eq!(protected.removed_count, 0);
+        let protected_row = protected
+            .rows
+            .iter()
+            .find(|row| row.path == path.display().to_string())
+            .expect("managed invocation temp row");
+        assert_eq!(protected_row.action, "skip");
+        assert!(protected_row.reason.contains("invocation lease"));
+        assert!(path.exists());
 
-    options.apply = true;
-    let applied = cleanup_runtime_tmp_bounded(options).expect("protected apply");
-    assert_eq!(applied.removed_count, 0);
-    assert!(applied.rows.iter().any(|row| {
-        row.path == path.display().to_string() && row.reason.contains("invocation lease")
-    }));
-    assert!(path.exists());
+        options.apply = true;
+        let applied = cleanup_runtime_tmp_bounded(options).expect("protected apply");
+        assert_eq!(applied.removed_count, 0);
+        assert!(applied.rows.iter().any(|row| {
+            row.path == path.display().to_string() && row.reason.contains("invocation lease")
+        }));
+        assert!(path.exists());
 
-    drop(invocation);
-    #[cfg(unix)]
-    assert!(
-        !exported_path.exists(),
-        "short temp alias is removed on drop"
-    );
-    let removed = cleanup_runtime_tmp_bounded(options).expect("released cleanup");
-    assert_eq!(removed.removed_count, 1);
-    assert!(!path.exists());
-    run_dir.cleanup();
-    env::remove_var(runtime_tmpdir_env());
+        drop(invocation);
+        #[cfg(unix)]
+        assert!(
+            !exported_path.exists(),
+            "short temp alias is removed on drop"
+        );
+        let removed = cleanup_runtime_tmp_bounded(options).expect("released cleanup");
+        assert_eq!(removed.removed_count, 1);
+        assert!(!path.exists());
+        run_dir.cleanup();
+    });
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn reused_pid_without_matching_starttime_does_not_protect_run() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let (path, pin) = managed_run_temp_dir("homeboy-run-pid-reuse").expect("managed run");
-    let mut owner = read_run_owner(&path).expect("owner");
-    owner.owner_pid = std::process::id();
-    owner.linux_starttime_ticks = Some(
-        crate::process::linux_process_starttime_ticks(std::process::id())
-            .expect("process identity")
-            .expect("live process has Linux starttime identity")
-            .saturating_add(1),
-    );
-    owner.created_at = "2000-01-01T00:00:00Z".to_string();
-    write_run_owner(&path, &owner).expect("write owner");
-    drop(pin);
-    let mut options = bounded_options(true, Some("homeboy-run-pid-reuse"));
-    options.older_than_days = 0;
+    with_isolated_home(|_| {
+        let (path, pin) = managed_run_temp_dir("homeboy-run-pid-reuse").expect("managed run");
+        let mut owner = read_run_owner(&path).expect("owner");
+        owner.owner_pid = std::process::id();
+        owner.linux_starttime_ticks = Some(
+            crate::process::linux_process_starttime_ticks(std::process::id())
+                .expect("process identity")
+                .expect("live process has Linux starttime identity")
+                .saturating_add(1),
+        );
+        owner.created_at = "2000-01-01T00:00:00Z".to_string();
+        write_run_owner(&path, &owner).expect("write owner");
+        drop(pin);
+        let mut options = bounded_options(true, Some("homeboy-run-pid-reuse"));
+        options.older_than_days = 0;
 
-    let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
-    assert_eq!(output.removed_count, 1);
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
+        assert_eq!(output.removed_count, 1);
+        assert!(!path.exists());
+    });
 }
 
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn persisted_linux_starttime_fails_closed_without_proc_identity() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let (path, pin) = managed_run_temp_dir("homeboy-run-pid-reuse").expect("managed run");
-    let mut owner = read_run_owner(&path).expect("owner");
-    owner.owner_pid = std::process::id();
-    owner.linux_starttime_ticks = Some(1);
-    owner.process_start_identity = None;
-    owner.created_at = "2000-01-01T00:00:00Z".to_string();
-    write_run_owner(&path, &owner).expect("write owner");
-    drop(pin);
-    let mut options = bounded_options(true, Some("homeboy-run-pid-reuse"));
-    options.older_than_days = 0;
+    with_isolated_home(|_| {
+        let (path, pin) = managed_run_temp_dir("homeboy-run-pid-reuse").expect("managed run");
+        let mut owner = read_run_owner(&path).expect("owner");
+        owner.owner_pid = std::process::id();
+        owner.linux_starttime_ticks = Some(1);
+        owner.process_start_identity = None;
+        owner.created_at = "2000-01-01T00:00:00Z".to_string();
+        write_run_owner(&path, &owner).expect("write owner");
+        drop(pin);
+        let mut options = bounded_options(true, Some("homeboy-run-pid-reuse"));
+        options.older_than_days = 0;
 
-    let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
-    assert_eq!(output.removed_count, 1);
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
+        assert_eq!(output.removed_count, 1);
+        assert!(!path.exists());
+    });
 }
 
 #[test]
 fn corrupt_owner_metadata_is_quarantined_then_reclaimed() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let (path, pin) = managed_run_temp_dir("homeboy-run-corrupt").expect("managed run");
-    drop(pin);
-    fs::write(path.join(RUN_OWNER_FILE), b"not-json").expect("corrupt owner");
+    with_isolated_home(|_| {
+        let (path, pin) = managed_run_temp_dir("homeboy-run-corrupt").expect("managed run");
+        drop(pin);
+        fs::write(path.join(RUN_OWNER_FILE), b"not-json").expect("corrupt owner");
 
-    let recent = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run-corrupt")))
-        .expect("recent quarantine");
-    assert_eq!(recent.removed_count, 0);
-    assert!(recent.rows[0].reason.contains("quarantine grace"));
+        let recent =
+            cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run-corrupt")))
+                .expect("recent quarantine");
+        assert_eq!(recent.removed_count, 0);
+        assert!(recent.rows[0].reason.contains("quarantine grace"));
 
-    fs::File::open(&path)
-        .expect("open directory age")
-        .set_modified(SystemTime::now() - CORRUPT_OWNER_GRACE - Duration::from_secs(1))
-        .expect("backdate directory age");
-    let stale = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run-corrupt")))
-        .expect("stale quarantine");
-    assert_eq!(stale.removed_count, 1);
-    assert!(stale.rows[0].reason.contains("owner metadata is corrupt"));
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        fs::File::open(&path)
+            .expect("open directory age")
+            .set_modified(SystemTime::now() - CORRUPT_OWNER_GRACE - Duration::from_secs(1))
+            .expect("backdate directory age");
+        let stale = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run-corrupt")))
+            .expect("stale quarantine");
+        assert_eq!(stale.removed_count, 1);
+        assert!(stale.rows[0].reason.contains("owner metadata is corrupt"));
+        assert!(!path.exists());
+    });
 }
 
 #[test]
 fn stale_crashed_run_becomes_eligible() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let (path, pin) = managed_run_temp_dir("homeboy-run-crashed").expect("managed run");
-    let mut owner = read_run_owner(&path).expect("owner");
-    owner.owner_pid = u32::MAX;
-    owner.created_at = "2000-01-01T00:00:00Z".to_string();
-    write_run_owner(&path, &owner).expect("stale owner");
-    drop(pin);
-    fs::write(
-        path.join(RUNTIME_TEMP_PIN_FILE),
-        format!("{RUNTIME_TEMP_PIN_SCHEMA_LINE}\nowner_pid={}\n", u32::MAX),
-    )
-    .expect("dead pin");
+    with_isolated_home(|_| {
+        let (path, pin) = managed_run_temp_dir("homeboy-run-crashed").expect("managed run");
+        let mut owner = read_run_owner(&path).expect("owner");
+        owner.owner_pid = u32::MAX;
+        owner.created_at = "2000-01-01T00:00:00Z".to_string();
+        write_run_owner(&path, &owner).expect("stale owner");
+        drop(pin);
+        fs::write(
+            path.join(RUNTIME_TEMP_PIN_FILE),
+            format!("{RUNTIME_TEMP_PIN_SCHEMA_LINE}\nowner_pid={}\n", u32::MAX),
+        )
+        .expect("dead pin");
 
-    let output = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run")))
-        .expect("cleanup stale run");
-    assert_eq!(output.removed_count, 1);
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let output = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run")))
+            .expect("cleanup stale run");
+        assert_eq!(output.removed_count, 1);
+        assert!(!path.exists());
+    });
 }
 
 #[test]
 fn failed_runs_converge_under_count_and_byte_bounds() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let first = failed_run("homeboy-run-bound", 32);
-    std::thread::sleep(Duration::from_millis(5));
-    let second = failed_run("homeboy-run-bound", 64);
-    let mut count_options = bounded_options(true, Some("homeboy-run-bound"));
-    count_options.run_max_count = 1;
-    count_options.limit = 1;
+    with_isolated_home(|_| {
+        let first = failed_run("homeboy-run-bound", 32);
+        std::thread::sleep(Duration::from_millis(5));
+        let second = failed_run("homeboy-run-bound", 64);
+        let mut count_options = bounded_options(true, Some("homeboy-run-bound"));
+        count_options.run_max_count = 1;
+        count_options.limit = 1;
 
-    let first_page = cleanup_runtime_tmp_bounded(count_options).expect("first count page");
-    assert_eq!(first_page.totals.inspected_count, 1);
-    assert_eq!(first_page.removed_count, 0);
-    assert!(first_page.has_more);
-    let cursor = first_page.next_cursor.expect("next cursor");
-    count_options.cursor = Some(&cursor);
-    let count_output = cleanup_runtime_tmp_bounded(count_options).expect("second count page");
-    assert_eq!(count_output.removed_count, 1);
-    assert!(first.exists() ^ second.exists());
+        let first_page = cleanup_runtime_tmp_bounded(count_options).expect("first count page");
+        assert_eq!(first_page.totals.inspected_count, 1);
+        assert_eq!(first_page.removed_count, 0);
+        assert!(first_page.has_more);
+        let cursor = first_page.next_cursor.expect("next cursor");
+        count_options.cursor = Some(&cursor);
+        let count_output = cleanup_runtime_tmp_bounded(count_options).expect("second count page");
+        assert_eq!(count_output.removed_count, 1);
+        assert!(first.exists() ^ second.exists());
 
-    let mut byte_options = bounded_options(true, Some("homeboy-run-bound"));
-    byte_options.run_max_bytes = 0;
-    let byte_output = cleanup_runtime_tmp_bounded(byte_options).expect("byte cleanup");
-    assert_eq!(byte_output.removed_count, 1);
-    assert!(!first.exists() && !second.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let mut byte_options = bounded_options(true, Some("homeboy-run-bound"));
+        byte_options.run_max_bytes = 0;
+        let byte_output = cleanup_runtime_tmp_bounded(byte_options).expect("byte cleanup");
+        assert_eq!(byte_output.removed_count, 1);
+        assert!(!first.exists() && !second.exists());
+    });
 }
 
 #[test]
 fn apply_reports_verified_bytes_and_is_idempotent() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let path = failed_run("homeboy-run-accounting", 257);
-    let expected = path_storage_measure(&path).expect("size").logical_bytes;
-    let mut options = bounded_options(true, Some("homeboy-run-accounting"));
-    options.older_than_days = 0;
+    with_isolated_home(|_| {
+        let path = failed_run("homeboy-run-accounting", 257);
+        let expected = path_storage_measure(&path).expect("size").logical_bytes;
+        let mut options = bounded_options(true, Some("homeboy-run-accounting"));
+        options.older_than_days = 0;
 
-    let applied = cleanup_runtime_tmp_bounded(options).expect("apply");
-    assert_eq!(applied.removed_count, 1);
-    assert_eq!(applied.totals.removed_size_bytes, expected);
-    assert!(applied.verified_reclaimed_bytes <= applied.removed_allocated_bytes);
-    assert!(!path.exists());
+        let applied = cleanup_runtime_tmp_bounded(options).expect("apply");
+        assert_eq!(applied.removed_count, 1);
+        assert_eq!(applied.totals.removed_size_bytes, expected);
+        assert!(applied.verified_reclaimed_bytes <= applied.removed_allocated_bytes);
+        assert!(!path.exists());
 
-    let repeated = cleanup_runtime_tmp_bounded(options).expect("repeat apply");
-    assert_eq!(repeated.removed_count, 0);
-    assert_eq!(repeated.totals.removed_size_bytes, 0);
-    env::remove_var(runtime_tmpdir_env());
+        let repeated = cleanup_runtime_tmp_bounded(options).expect("repeat apply");
+        assert_eq!(repeated.removed_count, 0);
+        assert_eq!(repeated.totals.removed_size_bytes, 0);
+    });
 }
 
 #[test]
@@ -431,25 +420,23 @@ fn stale_reclaimer_cannot_remove_a_lock_reacquired_during_claim() {
 
 #[test]
 fn abandoned_allocation_staging_is_reclaimed_after_staleness() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let staging = root
-        .path()
-        .join(format!("{ALLOCATION_STAGING_PREFIX}abandoned"));
-    fs::create_dir(&staging).expect("staging directory");
-    fs::write(staging.join("payload"), b"payload").expect("payload");
-    fs::File::open(&staging)
-        .expect("open staging")
-        .set_modified(SystemTime::now() - CLEANUP_LOCK_STALE_AFTER - Duration::from_secs(1))
-        .expect("backdate staging");
+    with_isolated_home(|_| {
+        let staging = runtime_root()
+            .expect("runtime root")
+            .join(format!("{ALLOCATION_STAGING_PREFIX}abandoned"));
+        fs::create_dir(&staging).expect("staging directory");
+        fs::write(staging.join("payload"), b"payload").expect("payload");
+        fs::File::open(&staging)
+            .expect("open staging")
+            .set_modified(SystemTime::now() - CLEANUP_LOCK_STALE_AFTER - Duration::from_secs(1))
+            .expect("backdate staging");
 
-    let mut options = bounded_options(true, None);
-    options.older_than_days = 0;
-    let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
-    assert_eq!(output.removed_count, 1);
-    assert!(!staging.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let mut options = bounded_options(true, None);
+        options.older_than_days = 0;
+        let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
+        assert_eq!(output.removed_count, 1);
+        assert!(!staging.exists());
+    });
 }
 
 #[test]
@@ -581,35 +568,34 @@ fn live_owner_is_not_reclaimed_by_the_relaxed_staleness_rule() {
 /// is the path the category timeout now takes instead of being SIGKILLed.
 #[test]
 fn budget_truncated_sweep_releases_its_cleanup_lock_and_resumes() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    for index in 0..4 {
-        let path = failed_run(&format!("homeboy-run-budget-{index}"), 64);
-        assert!(path.exists());
-    }
+    with_isolated_home(|_| {
+        let root = runtime_root().expect("runtime root");
+        for index in 0..4 {
+            let path = failed_run(&format!("homeboy-run-budget-{index}"), 64);
+            assert!(path.exists());
+        }
 
-    let mut options = bounded_options(true, None);
-    options.older_than_days = 0;
-    // Already spent: the sweep must stop at the first entry boundary.
-    options.deadline = Some(std::time::Instant::now());
-    let output = cleanup_runtime_tmp_bounded(options).expect("budget-truncated sweep returns");
+        let mut options = bounded_options(true, None);
+        options.older_than_days = 0;
+        // Already spent: the sweep must stop at the first entry boundary.
+        options.deadline = Some(std::time::Instant::now());
+        let output = cleanup_runtime_tmp_bounded(options).expect("budget-truncated sweep returns");
 
-    assert!(
-        output.has_more,
-        "a truncated sweep must report that work remains"
-    );
-    assert!(
-        !root.path().join(CLEANUP_LOCK_DIR).exists(),
-        "the cleanup lock must not survive a budget-truncated sweep"
-    );
+        assert!(
+            output.has_more,
+            "a truncated sweep must report that work remains"
+        );
+        assert!(
+            !root.join(CLEANUP_LOCK_DIR).exists(),
+            "the cleanup lock must not survive a budget-truncated sweep"
+        );
 
-    // And the next invocation, with budget, still makes progress.
-    options.deadline = None;
-    let resumed = cleanup_runtime_tmp_bounded(options).expect("resumed sweep");
-    assert!(resumed.removed_count > 0);
-    assert!(!root.path().join(CLEANUP_LOCK_DIR).exists());
-    env::remove_var(runtime_tmpdir_env());
+        // And the next invocation, with budget, still makes progress.
+        options.deadline = None;
+        let resumed = cleanup_runtime_tmp_bounded(options).expect("resumed sweep");
+        assert!(resumed.removed_count > 0);
+        assert!(!root.join(CLEANUP_LOCK_DIR).exists());
+    });
 }
 
 fn exited_pid() -> u32 {
@@ -626,197 +612,165 @@ fn exited_pid() -> u32 {
 fn storage_accounting_handles_sparse_hardlink_and_symlink_entries() {
     use std::os::unix::fs::symlink;
 
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let path = runtime_temp_dir("homeboy-storage-accounting").expect("runtime dir");
-    let sparse = path.join("sparse.bin");
-    fs::File::create(&sparse)
-        .expect("sparse file")
-        .set_len(8 * 1024 * 1024)
-        .expect("sparse length");
-    fs::hard_link(&sparse, path.join("hardlink.bin")).expect("hardlink");
-    symlink(&sparse, path.join("symlink.bin")).expect("symlink");
-    let measure = path_storage_measure(&path).expect("storage measure");
+    with_isolated_home(|_| {
+        let path = runtime_temp_dir("homeboy-storage-accounting").expect("runtime dir");
+        let sparse = path.join("sparse.bin");
+        fs::File::create(&sparse)
+            .expect("sparse file")
+            .set_len(8 * 1024 * 1024)
+            .expect("sparse length");
+        fs::hard_link(&sparse, path.join("hardlink.bin")).expect("hardlink");
+        symlink(&sparse, path.join("symlink.bin")).expect("symlink");
+        let measure = path_storage_measure(&path).expect("storage measure");
 
-    assert!(measure.logical_bytes >= 8 * 1024 * 1024);
-    assert!(measure.logical_bytes < 16 * 1024 * 1024);
-    assert!(measure.allocated_bytes < measure.logical_bytes);
+        assert!(measure.logical_bytes >= 8 * 1024 * 1024);
+        assert!(measure.logical_bytes < 16 * 1024 * 1024);
+        assert!(measure.allocated_bytes < measure.logical_bytes);
 
-    let output =
-        cleanup_runtime_tmp(true, 0, Some("homeboy-storage-accounting"), 10).expect("cleanup");
-    assert_eq!(output.removed_count, 1);
-    assert_eq!(output.rows[0].allocated_bytes, measure.allocated_bytes);
-    assert!(output.rows[0].verified_reclaimed_bytes <= measure.allocated_bytes);
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        let output =
+            cleanup_runtime_tmp(true, 0, Some("homeboy-storage-accounting"), 10).expect("cleanup");
+        assert_eq!(output.removed_count, 1);
+        assert_eq!(output.rows[0].allocated_bytes, measure.allocated_bytes);
+        assert!(output.rows[0].verified_reclaimed_bytes <= measure.allocated_bytes);
+        assert!(!path.exists());
+    });
 }
 
 #[test]
 fn concurrent_cleanup_serializes_and_removes_once() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let path = failed_run("homeboy-run-concurrent", 128);
-    let mut options = bounded_options(true, Some("homeboy-run-concurrent"));
-    options.older_than_days = 0;
+    with_isolated_home(|_| {
+        let path = failed_run("homeboy-run-concurrent", 128);
+        let mut options = bounded_options(true, Some("homeboy-run-concurrent"));
+        options.older_than_days = 0;
 
-    let first = std::thread::spawn(move || cleanup_runtime_tmp_bounded(options).expect("first"));
-    let second = std::thread::spawn(move || cleanup_runtime_tmp_bounded(options).expect("second"));
-    let outputs = [
-        first.join().expect("first join"),
-        second.join().expect("second join"),
-    ];
+        let first =
+            std::thread::spawn(move || cleanup_runtime_tmp_bounded(options).expect("first"));
+        let second =
+            std::thread::spawn(move || cleanup_runtime_tmp_bounded(options).expect("second"));
+        let outputs = [
+            first.join().expect("first join"),
+            second.join().expect("second join"),
+        ];
 
-    assert_eq!(
-        outputs
-            .iter()
-            .map(|output| output.removed_count)
-            .sum::<usize>(),
-        1
-    );
-    assert!(!path.exists());
-    env::remove_var(runtime_tmpdir_env());
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.removed_count)
+                .sum::<usize>(),
+            1
+        );
+        assert!(!path.exists());
+    });
 }
 
 #[test]
 fn concurrent_shared_run_binding_preserves_every_invocation() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let (path, pin) = managed_run_temp_dir("homeboy-run-bind").expect("managed run");
-    let threads = (0..12)
-        .map(|index| {
-            let path = path.clone();
-            std::thread::spawn(move || {
-                bind_run_dir_owner(&path, None, Some(&format!("invocation-{index}")))
-                    .expect("bind invocation");
+    with_isolated_home(|_| {
+        let (path, pin) = managed_run_temp_dir("homeboy-run-bind").expect("managed run");
+        let threads = (0..12)
+            .map(|index| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    bind_run_dir_owner(&path, None, Some(&format!("invocation-{index}")))
+                        .expect("bind invocation");
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    for thread in threads {
-        thread.join().expect("binding thread");
-    }
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.join().expect("binding thread");
+        }
 
-    let owner = read_run_owner(&path).expect("owner");
-    assert_eq!(owner.invocation_ids.len(), 12);
-    for index in 0..12 {
-        assert!(owner
-            .invocation_ids
-            .contains(&format!("invocation-{index}")));
-    }
-    drop(pin);
-    env::remove_var(runtime_tmpdir_env());
+        let owner = read_run_owner(&path).expect("owner");
+        assert_eq!(owner.invocation_ids.len(), 12);
+        for index in 0..12 {
+            assert!(owner
+                .invocation_ids
+                .contains(&format!("invocation-{index}")));
+        }
+        drop(pin);
+    });
 }
 
 #[test]
 fn deletion_revalidation_blocks_invocation_bound_after_inspection() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let path = run_dir.path().to_path_buf();
-    fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("remove pin");
-    run_dir.finish(false);
-    let inspected = read_run_owner(&path).expect("inspected owner");
+    with_isolated_home(|_| {
+        let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+        let path = run_dir.path().to_path_buf();
+        fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("remove pin");
+        run_dir.finish(false);
+        let inspected = read_run_owner(&path).expect("inspected owner");
 
-    let invocation = super::super::super::invocation::InvocationGuard::acquire(
-        &run_dir,
-        &super::super::super::invocation::InvocationRequirements::default(),
-    )
-    .expect("late invocation binding");
-    let protection = managed_deletion_protection(&path, &inspected, u64::MAX)
-        .expect("ownership change protects deletion");
+        let invocation = super::super::super::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &super::super::super::invocation::InvocationRequirements::default(),
+        )
+        .expect("late invocation binding");
+        let protection = managed_deletion_protection(&path, &inspected, u64::MAX)
+            .expect("ownership change protects deletion");
 
-    assert!(protection.contains("ownership changed") || protection.contains("invocation lease"));
-    assert!(path.exists());
-    drop(invocation);
-    env::remove_var(runtime_tmpdir_env());
+        assert!(
+            protection.contains("ownership changed") || protection.contains("invocation lease")
+        );
+        assert!(path.exists());
+        drop(invocation);
+    });
 }
 
 #[test]
 fn unmanaged_only_cleanup_pages_with_cursor() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    for index in 0..3 {
-        let path = runtime_temp_dir(&format!("homeboy-unmanaged-page-{index}"))
-            .expect("unmanaged directory");
-        fs::write(path.join("payload"), b"payload").expect("payload");
-    }
-    let mut cursor = None;
-    let mut names = Vec::new();
-    loop {
-        let mut options = bounded_options(false, Some("homeboy-unmanaged-page"));
-        options.older_than_days = 0;
-        options.limit = 1;
-        options.cursor = cursor.as_deref();
-        let page = cleanup_runtime_tmp_bounded(options).expect("cleanup page");
-        assert_eq!(page.totals.inspected_count, 1);
-        names.push(page.rows[0].name.clone());
-        if !page.has_more {
-            assert!(page.next_cursor.is_none());
-            break;
+    with_isolated_home(|_| {
+        let runtime_tmp = owned_runtime_tmp_root();
+        env::set_var(runtime_tmpdir_env(), runtime_tmp.path());
+        for index in 0..3 {
+            let path = runtime_temp_dir(&format!("homeboy-unmanaged-page-{index}"))
+                .expect("unmanaged directory");
+            fs::write(path.join("payload"), b"payload").expect("payload");
         }
-        cursor = page.next_cursor;
-        assert!(cursor.is_some());
-    }
-    names.sort();
-    names.dedup();
-    assert_eq!(names.len(), 3);
-    env::remove_var(runtime_tmpdir_env());
+        let mut cursor = None;
+        let mut names = Vec::new();
+        loop {
+            let mut options = bounded_options(false, Some("homeboy-unmanaged-page"));
+            options.older_than_days = 0;
+            options.limit = 1;
+            options.cursor = cursor.as_deref();
+            let page = cleanup_runtime_tmp_bounded(options).expect("cleanup page");
+            assert_eq!(page.totals.inspected_count, 1);
+            names.push(page.rows[0].name.clone());
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                break;
+            }
+            cursor = page.next_cursor;
+            assert!(cursor.is_some());
+        }
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), 3);
+    });
 }
 
 #[cfg(unix)]
 #[test]
 fn external_hardlink_is_not_reported_as_reclaimable_allocation() {
-    let _guard = home_env_guard();
-    let root = tempfile::tempdir().expect("tempdir");
-    env::set_var(runtime_tmpdir_env(), root.path());
-    let path = runtime_temp_dir("homeboy-external-hardlink").expect("runtime dir");
-    let payload = path.join("payload.bin");
-    fs::write(&payload, vec![b'x'; 64 * 1024]).expect("payload");
-    let external = root.path().join("external-link.bin");
-    fs::hard_link(&payload, &external).expect("external hardlink");
+    with_isolated_home(|home| {
+        let path = runtime_temp_dir("homeboy-external-hardlink").expect("runtime dir");
+        let payload = path.join("payload.bin");
+        fs::write(&payload, vec![b'x'; 64 * 1024]).expect("payload");
+        let external = home.path().join("external-link.bin");
+        fs::hard_link(&payload, &external).expect("external hardlink");
 
-    assert_eq!(
-        path_storage_measure(&payload)
-            .expect("payload measure")
-            .allocated_bytes,
-        0
-    );
-    let output =
-        cleanup_runtime_tmp(true, 0, Some("homeboy-external-hardlink"), 10).expect("cleanup");
-    assert_eq!(output.removed_count, 1);
-    assert!(external.exists());
-    assert!(output.verified_reclaimed_bytes <= output.removed_allocated_bytes);
-    env::remove_var(runtime_tmpdir_env());
-}
-
-/// Restore an invocation-runtime-root override on drop.
-struct InvocationRootGuard(Option<String>);
-
-impl InvocationRootGuard {
-    fn set(path: &Path) -> Self {
-        let prior = env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
-        env::set_var(
-            crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
-            path,
+        assert_eq!(
+            path_storage_measure(&payload)
+                .expect("payload measure")
+                .allocated_bytes,
+            0
         );
-        Self(prior)
-    }
-}
-
-impl Drop for InvocationRootGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(prior) => env::set_var(
-                crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
-                prior,
-            ),
-            None => env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV),
-        }
-    }
+        let output =
+            cleanup_runtime_tmp(true, 0, Some("homeboy-external-hardlink"), 10).expect("cleanup");
+        assert_eq!(output.removed_count, 1);
+        assert!(external.exists());
+        assert!(output.verified_reclaimed_bytes <= output.removed_allocated_bytes);
+    });
 }
 
 /// The reported bug, end to end.
@@ -832,51 +786,50 @@ impl Drop for InvocationRootGuard {
 fn exported_tmpdir_holds_a_socket_after_canonicalization() {
     use std::os::unix::net::UnixListener;
 
-    let _guard = home_env_guard();
-    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
-    let _root_guard = InvocationRootGuard::set(runtime_root.path());
-    let data_root = tempfile::tempdir().expect("data volume runtime temp root");
-    env::set_var(runtime_tmpdir_env(), data_root.path());
+    with_isolated_home(|_| {
+        let data_root = owned_runtime_tmp_root();
+        env::set_var(runtime_tmpdir_env(), data_root.path());
 
-    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let invocation = super::super::super::invocation::InvocationGuard::acquire(
-        &run_dir,
-        &super::super::super::invocation::InvocationRequirements::default(),
-    )
-    .expect("invocation");
+        let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+        let invocation = super::super::super::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &super::super::super::invocation::InvocationRequirements::default(),
+        )
+        .expect("invocation");
 
-    let exported = invocation.context().tmp_dir;
-    let canonical = exported
-        .canonicalize()
-        .expect("canonicalize exported TMPDIR");
-    let socket = canonical.join("server.sock");
-    assert!(
-        socket.as_os_str().len() < 108,
-        "socket path under the resolved TMPDIR must fit sun_path: {} bytes ({})",
-        socket.as_os_str().len(),
-        socket.display()
-    );
-    let listener = UnixListener::bind(&socket).expect("bind a socket under the resolved TMPDIR");
+        let exported = invocation.context().tmp_dir;
+        let canonical = exported
+            .canonicalize()
+            .expect("canonicalize exported TMPDIR");
+        let socket = canonical.join("server.sock");
+        assert!(
+            socket.as_os_str().len() < 108,
+            "socket path under the resolved TMPDIR must fit sun_path: {} bytes ({})",
+            socket.as_os_str().len(),
+            socket.display()
+        );
+        let listener =
+            UnixListener::bind(&socket).expect("bind a socket under the resolved TMPDIR");
 
-    // The durable owner still lives on the data volume (#11125) — the fix buys
-    // socket safety by shortening the name, not by moving the bytes.
-    assert!(
-        canonical.starts_with(data_root.path().canonicalize().expect("data root")),
-        "durable temp must stay on the data volume: {}",
-        canonical.display()
-    );
-    // The uuid and the creation time left the directory name; they are still
-    // recorded where cleanup actually reads them.
-    let owner = read_run_owner(&canonical).expect("owner record");
-    assert!(!owner.owner_id.is_empty());
-    assert!(!owner.created_at.is_empty());
-    assert_eq!(owner.producer.as_deref(), Some("invocation"));
-    assert_eq!(owner.placement, None, "default placement is the data root");
+        // The durable owner still lives on the data volume (#11125) — the fix buys
+        // socket safety by shortening the name, not by moving the bytes.
+        assert!(
+            canonical.starts_with(data_root.path().canonicalize().expect("data root")),
+            "durable temp must stay on the data volume: {}",
+            canonical.display()
+        );
+        // The uuid and the creation time left the directory name; they are still
+        // recorded where cleanup actually reads them.
+        let owner = read_run_owner(&canonical).expect("owner record");
+        assert!(!owner.owner_id.is_empty());
+        assert!(!owner.created_at.is_empty());
+        assert_eq!(owner.producer.as_deref(), Some("invocation"));
+        assert_eq!(owner.placement, None, "default placement is the data root");
 
-    drop(listener);
-    drop(invocation);
-    run_dir.cleanup();
-    env::remove_var(runtime_tmpdir_env());
+        drop(listener);
+        drop(invocation);
+        run_dir.cleanup();
+    });
 }
 
 /// A data root too long for even a 10-byte name degrades placement instead of
@@ -886,54 +839,53 @@ fn exported_tmpdir_holds_a_socket_after_canonicalization() {
 fn a_data_root_over_budget_falls_back_to_the_short_runtime_root() {
     use std::os::unix::net::UnixListener;
 
-    let _guard = home_env_guard();
-    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
-    let _root_guard = InvocationRootGuard::set(runtime_root.path());
-    let data_root = tempfile::tempdir().expect("data volume root");
-    // Deep enough that no invocation name fits the sockaddr_un budget beneath
-    // it — the long-$HOME host the fallback exists for.
-    let long_data_root = data_root.path().join("d".repeat(80));
-    fs::create_dir_all(&long_data_root).expect("long data root");
-    env::set_var(runtime_tmpdir_env(), &long_data_root);
+    with_isolated_home(|home| {
+        // Deep enough that no invocation name fits the sockaddr_un budget beneath
+        // it — the long-$HOME host the fallback exists for.
+        let long_data_root = home.path().join("d".repeat(80));
+        fs::create_dir_all(&long_data_root).expect("long data root");
+        env::set_var(runtime_tmpdir_env(), &long_data_root);
+        let invocation_root =
+            crate::engine::invocation::invocation_runtime_root().expect("invocation runtime root");
 
-    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let invocation = super::super::super::invocation::InvocationGuard::acquire(
-        &run_dir,
-        &super::super::super::invocation::InvocationRequirements::default(),
-    )
-    .expect("invocation");
+        let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+        let invocation = super::super::super::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &super::super::super::invocation::InvocationRequirements::default(),
+        )
+        .expect("invocation");
 
-    let exported = invocation.context().tmp_dir;
-    let canonical = exported
-        .canonicalize()
-        .expect("canonicalize exported TMPDIR");
-    assert!(
-        canonical.starts_with(runtime_root.path().canonicalize().expect("runtime root")),
-        "over-budget data root must degrade to the short runtime root: {}",
-        canonical.display()
-    );
-    // No alias: the owner is already short, so nothing is indirected.
-    assert!(
-        !fs::symlink_metadata(&exported)
-            .expect("exported metadata")
-            .file_type()
-            .is_symlink(),
-        "a fallback-placed owner is exported directly"
-    );
-    let listener = UnixListener::bind(canonical.join("server.sock"))
-        .expect("bind a socket under the fallback TMPDIR");
+        let exported = invocation.context().tmp_dir;
+        let canonical = exported
+            .canonicalize()
+            .expect("canonicalize exported TMPDIR");
+        assert!(
+            canonical.starts_with(invocation_root.canonicalize().expect("runtime root")),
+            "over-budget data root must degrade to the short runtime root: {}",
+            canonical.display()
+        );
+        // No alias: the owner is already short, so nothing is indirected.
+        assert!(
+            !fs::symlink_metadata(&exported)
+                .expect("exported metadata")
+                .file_type()
+                .is_symlink(),
+            "a fallback-placed owner is exported directly"
+        );
+        let listener = UnixListener::bind(canonical.join("server.sock"))
+            .expect("bind a socket under the fallback TMPDIR");
 
-    let owner = read_run_owner(&canonical).expect("owner record");
-    assert_eq!(
-        owner.placement.as_deref(),
-        Some("invocation-runtime-root"),
-        "the degradation must be recorded so cleanup and operators can see it"
-    );
+        let owner = read_run_owner(&canonical).expect("owner record");
+        assert_eq!(
+            owner.placement.as_deref(),
+            Some("invocation-runtime-root"),
+            "the degradation must be recorded so cleanup and operators can see it"
+        );
 
-    drop(listener);
-    drop(invocation);
-    run_dir.cleanup();
-    env::remove_var(runtime_tmpdir_env());
+        drop(listener);
+        drop(invocation);
+        run_dir.cleanup();
+    });
 }
 
 /// Cleanup has to find fallback-placed bytes, and must not mistake a live
@@ -942,54 +894,51 @@ fn a_data_root_over_budget_falls_back_to_the_short_runtime_root() {
 #[cfg(unix)]
 #[test]
 fn cleanup_reclaims_fallback_owners_and_spares_live_invocation_dirs() {
-    let _guard = home_env_guard();
-    let runtime_root = tempfile::tempdir_in("/tmp").expect("short runtime root");
-    let _root_guard = InvocationRootGuard::set(runtime_root.path());
-    let data_root = tempfile::tempdir().expect("data volume root");
-    let long_data_root = data_root.path().join("d".repeat(80));
-    fs::create_dir_all(&long_data_root).expect("long data root");
-    env::set_var(runtime_tmpdir_env(), &long_data_root);
+    with_isolated_home(|home| {
+        let long_data_root = home.path().join("d".repeat(80));
+        fs::create_dir_all(&long_data_root).expect("long data root");
+        env::set_var(runtime_tmpdir_env(), &long_data_root);
 
-    let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let invocation = super::super::super::invocation::InvocationGuard::acquire(
-        &run_dir,
-        &super::super::super::invocation::InvocationRequirements::default(),
-    )
-    .expect("invocation");
-    let context = invocation.context();
-    let fallback_owner = context.tmp_dir.clone();
-    let state_dir = context.state_dir.clone();
-    let artifact_dir = context.artifact_dir.clone();
-    fs::write(fallback_owner.join("payload.bin"), vec![b'x'; 4096]).expect("payload");
+        let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
+        let invocation = super::super::super::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &super::super::super::invocation::InvocationRequirements::default(),
+        )
+        .expect("invocation");
+        let context = invocation.context();
+        let fallback_owner = context.tmp_dir.clone();
+        let state_dir = context.state_dir.clone();
+        let artifact_dir = context.artifact_dir.clone();
+        fs::write(fallback_owner.join("payload.bin"), vec![b'x'; 4096]).expect("payload");
 
-    let mut options = bounded_options(true, None);
-    options.older_than_days = 0;
+        let mut options = bounded_options(true, None);
+        options.older_than_days = 0;
 
-    // While the invocation is live nothing under the shared root is reclaimed.
-    let live = cleanup_runtime_tmp_bounded(options).expect("live sweep");
-    assert_eq!(live.removed_count, 0);
-    assert!(fallback_owner.exists());
-    assert!(state_dir.exists());
-    assert!(artifact_dir.exists());
-    assert!(
-        !live
-            .rows
-            .iter()
-            .any(|row| row.path == state_dir.display().to_string()
-                || row.path == artifact_dir.display().to_string()),
-        "live invocation directories must not be inspected as runtime-temp strays"
-    );
+        // While the invocation is live nothing under the shared root is reclaimed.
+        let live = cleanup_runtime_tmp_bounded(options).expect("live sweep");
+        assert_eq!(live.removed_count, 0);
+        assert!(fallback_owner.exists());
+        assert!(state_dir.exists());
+        assert!(artifact_dir.exists());
+        assert!(
+            !live
+                .rows
+                .iter()
+                .any(|row| row.path == state_dir.display().to_string()
+                    || row.path == artifact_dir.display().to_string()),
+            "live invocation directories must not be inspected as runtime-temp strays"
+        );
 
-    drop(invocation);
-    assert!(!state_dir.exists(), "invocation teardown removes STATE_DIR");
+        drop(invocation);
+        assert!(!state_dir.exists(), "invocation teardown removes STATE_DIR");
 
-    let reclaimed = cleanup_runtime_tmp_bounded(options).expect("terminal sweep");
-    assert_eq!(
-        reclaimed.removed_count, 1,
-        "the fallback-placed owner is reclaimed once its invocation ends"
-    );
-    assert!(!fallback_owner.exists());
+        let reclaimed = cleanup_runtime_tmp_bounded(options).expect("terminal sweep");
+        assert_eq!(
+            reclaimed.removed_count, 1,
+            "the fallback-placed owner is reclaimed once its invocation ends"
+        );
+        assert!(!fallback_owner.exists());
 
-    run_dir.cleanup();
-    env::remove_var(runtime_tmpdir_env());
+        run_dir.cleanup();
+    });
 }
