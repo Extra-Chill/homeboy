@@ -356,6 +356,13 @@ homeboy_get_validation_dependency_slug() {
     local dir_slug
     dir_slug="$(basename "$plugin_path")"
 
+    # Resolver caches include the requested revision in the directory name;
+    # that storage identity is not the plugin slug exposed to test consumers.
+    if [[ "$dir_slug" =~ ^(.+)-(default|[a-f0-9]{40})$ ]] && [ -f "${plugin_path}/${BASH_REMATCH[1]}.php" ]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
     local canonical_dir_slug="${dir_slug%%@*}"
     if [ "$canonical_dir_slug" = "$dir_slug" ] && [ "$dir_slug" != "root" ]; then
         printf '%s\n' "$dir_slug"

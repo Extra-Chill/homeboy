@@ -38,6 +38,28 @@ homeboy_runner_init() {
 SH
 export HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude"
 
+cat > "${TMPDIR}/validation-dependencies.sh" <<'SH'
+homeboy_export_validation_dependency_paths() {
+    if [ "${TEST_DEPENDENCY_FAILURE:-0}" = 1 ]; then
+        echo "dependency resolution failed" >&2
+        return 17
+    fi
+    mkdir -p "${1}/resolved-dependency"
+    export HOMEBOY_WORDPRESS_DEPENDENCY_PATHS="${1}/resolved-dependency"
+}
+SH
+export HOMEBOY_RUNTIME_VALIDATION_DEPENDENCIES="${TMPDIR}/validation-dependencies.sh"
+
+(
+    source "${EXTENSION_PATH}/scripts/lib/validation-dependencies.sh"
+    for suffix in default 0123456789abcdef0123456789abcdef01234567; do
+        dependency="${TMPDIR}/fixture-plugin-${suffix}"
+        mkdir -p "$dependency"
+        touch "${dependency}/fixture-plugin.php"
+        [ "$(homeboy_get_validation_dependency_slug "$dependency")" = fixture-plugin ] || exit 1
+    done
+)
+
 results_writer="${TMPDIR}/write-test-results.sh"
 cat > "$results_writer" <<'SH'
 homeboy_write_test_results() {
@@ -79,6 +101,9 @@ export HOMEBOY_WP_CODEBOX_INSTALL_DIR HOMEBOY_WP_CODEBOX_CORE_MODULE
 
 cat > "${component}/tests/import-agent-ability-smoke.php" <<'PHP'
 <?php
+if ( getenv( 'HOMEBOY_WORDPRESS_DEPENDENCY_PATHS' ) !== getenv( 'HOMEBOY_COMPONENT_PATH' ) . '/resolved-dependency' ) {
+    throw new RuntimeException( 'Standalone dependency paths were not exported before execution.' );
+}
 fwrite( STDOUT, "standalone smoke ran\n" );
 PHP
 
@@ -385,6 +410,13 @@ HOMEBOY_TEST_SCOPE_ENV_VALUE=$'tests/import-agent-ability-smoke.php\ntests/queue
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_SUMMARY:passed=1 failed=0"
+
+if TEST_DEPENDENCY_FAILURE=1 run_changed_scope "${TMPDIR}/dependency-failure.out" 'tests/import-agent-ability-smoke.php'; then
+    echo "Expected unresolved standalone dependencies to fail the test command" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/dependency-failure.out" "dependency resolution failed"
+assert_not_contains "${TMPDIR}/dependency-failure.out" "PHP_SMOKE_BEGIN:"
 
 # A mixed changed scope accounts for every selection, including a settings-
 # declared standalone route and a deliberately unsupported helper.

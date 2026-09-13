@@ -386,13 +386,11 @@ homeboy_wordpress_standalone_dependency_environment() {
     STANDALONE_DEPENDENCY_ENV_NAMES=()
     STANDALONE_DEPENDENCY_ENV_VALUES=()
 
-    [ -f "$helper" ] || return 0
     if ! type homeboy_export_validation_dependency_paths >/dev/null 2>&1; then
         # shellcheck source=/dev/null
-        source "$helper" || return 0
+        source "$helper" || return $?
     fi
-    type homeboy_export_validation_dependency_paths >/dev/null 2>&1 || return 0
-    homeboy_export_validation_dependency_paths "$PLUGIN_PATH" >/dev/null 2>&1 || true
+    homeboy_export_validation_dependency_paths "$PLUGIN_PATH" || return $?
     [ -n "${HOMEBOY_WORDPRESS_DEPENDENCY_PATHS:-}" ] || return 0
 
     local dependency_path dependency_slug legacy_name
@@ -429,7 +427,7 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
     echo "  Backend: standalone-php"
 
-    homeboy_wordpress_standalone_dependency_environment
+    homeboy_wordpress_standalone_dependency_environment || return $?
     local dependency_env=()
     local dependency_index
     for dependency_index in "${!STANDALONE_DEPENDENCY_ENV_NAMES[@]}"; do
