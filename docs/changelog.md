@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.11] - 2026-09-13
+
+### Changed
+- align snapshot assertions with current contracts
+
+### Fixed
+- avoid Cook retry candidate projection recursion
+- Fix retry action projection recursion
+- bound control-plane action effect IDs
+- preserve nested dependency vendors in snapshots
+
 ## [0.373.10] - 2026-09-13
 
 ### Changed
