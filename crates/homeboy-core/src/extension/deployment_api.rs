@@ -912,17 +912,18 @@ fn admit_provider_effect(
         request_digest: request_digest.clone(),
         accepted_at: chrono::Utc::now().to_rfc3339(),
     };
-    let fence = ControlPlaneActionFence {
-        schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-        resource_updated_at: request_digest.clone(),
-        eligible: true,
-        reason: None,
-    };
     match store.enqueue_control_plane_action_intent_with_projection(
         &intent,
-        &fence,
         &projection,
         &request_digest,
+        |live, _run| {
+            Ok(ControlPlaneActionFence {
+                schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+                resource_updated_at: live.version.clone(),
+                eligible: true,
+                reason: None,
+            })
+        },
     )? {
         crate::observation::store::ControlPlaneEffectAdmission::Enqueued(effect)
         | crate::observation::store::ControlPlaneEffectAdmission::Duplicate(effect) => Ok(effect),

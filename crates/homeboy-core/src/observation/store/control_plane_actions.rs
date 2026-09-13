@@ -247,21 +247,25 @@ impl ObservationStore {
         Ok(aliases)
     }
 
-    /// Transaction boundary: verify the durable run version and eligibility,
-    /// then persist the immutable intent and pending outbox row together.
+    /// Transaction boundary: replay an existing effect, then ask the domain
+    /// adapter to derive live eligibility from the canonical exact projection
+    /// before persisting the immutable intent and pending outbox row together.
     pub fn enqueue_control_plane_action_intent(
         &self,
         intent: &ControlPlaneActionIntent,
-        fence: &ControlPlaneActionFence,
         resource_type: &str,
         idempotency_digest: &str,
+        admit: impl FnOnce(
+            &ControlPlaneResourceProjection,
+            Option<&RunRecord>,
+        ) -> Result<ControlPlaneActionFence>,
     ) -> Result<ControlPlaneEffectAdmission> {
         self.enqueue_control_plane_action_intent_inner(
             intent,
-            fence,
             resource_type,
             idempotency_digest,
             None,
+            admit,
         )
     }
 
@@ -271,26 +275,32 @@ impl ObservationStore {
     pub fn enqueue_control_plane_action_intent_with_projection(
         &self,
         intent: &ControlPlaneActionIntent,
-        fence: &ControlPlaneActionFence,
         projection: &ControlPlaneResourceProjection,
         idempotency_digest: &str,
+        admit: impl FnOnce(
+            &ControlPlaneResourceProjection,
+            Option<&RunRecord>,
+        ) -> Result<ControlPlaneActionFence>,
     ) -> Result<ControlPlaneEffectAdmission> {
         self.enqueue_control_plane_action_intent_inner(
             intent,
-            fence,
             &projection.resource_type,
             idempotency_digest,
             Some(projection),
+            admit,
         )
     }
 
     fn enqueue_control_plane_action_intent_inner(
         &self,
         intent: &ControlPlaneActionIntent,
-        fence: &ControlPlaneActionFence,
         resource_type: &str,
         idempotency_digest: &str,
         projection: Option<&ControlPlaneResourceProjection>,
+        admit: impl FnOnce(
+            &ControlPlaneResourceProjection,
+            Option<&RunRecord>,
+        ) -> Result<ControlPlaneActionFence>,
     ) -> Result<ControlPlaneEffectAdmission> {
         self.ensure_control_plane_resource_authority()?;
         self.connection
@@ -308,10 +318,21 @@ impl ObservationStore {
                 }
                 return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
             }
+            if let Some(existing) =
+                self.effect_status_by_idempotency(intent.resource.run.as_str(), idempotency_digest)?
+            {
+                if existing.intent.request_digest != intent.request_digest {
+                    return Err(Error::validation_invalid_argument(
+                        "idempotency_key",
+                        "idempotency key was already used with different action intent",
+                        None,
+                        None,
+                    ));
+                }
+                return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
             if let Some(projection) = projection {
-                if projection.resource_id != intent.resource.run.as_str()
-                    || projection.version != fence.resource_updated_at
-                {
+                if projection.resource_id != intent.resource.run.as_str() {
                     return Err(Error::validation_invalid_argument(
                         "projection",
                         "action projection does not match its immutable intent fence",
@@ -321,18 +342,7 @@ impl ObservationStore {
                 }
                 self.upsert_control_plane_resource_projection_in_transaction(projection)?;
             }
-            if !fence.eligible {
-                return Err(Error::validation_invalid_argument(
-                    "action",
-                    fence
-                        .reason
-                        .clone()
-                        .unwrap_or_else(|| "action is not eligible".to_string()),
-                    None,
-                    None,
-                ));
-            }
-            // The intent already names its canonical run, so the fence is
+            // The intent already names its canonical run, so admission is
             // checked against that run's own projection. Following an alias
             // here would compare one record's precondition against another
             // record's version and reject a legitimate action.
@@ -348,34 +358,40 @@ impl ObservationStore {
                     None,
                 ));
             };
-            let updated_at = projection.version.clone();
-            if updated_at != fence.resource_updated_at {
-                return Err(Error::validation_invalid_argument(
-                    "expected_updated_at",
-                    "run changed since the supplied eligibility fence",
-                    Some(updated_at),
-                    None,
-                ));
-            }
-            // The domain adapter evaluates the typed eligibility payload while
-            // constructing `fence`. Core persists it but deliberately does not
-            // interpret product-specific action names or availability states.
-            if let Some(existing) =
-                self.effect_status_by_idempotency(intent.resource.run.as_str(), idempotency_digest)?
-            {
-                if existing.intent.request_digest != intent.request_digest {
+            if let Some(expected) = intent.request.expected_updated_at.as_deref() {
+                if expected != projection.version {
                     return Err(Error::validation_invalid_argument(
-                        "idempotency_key",
-                        "idempotency key was already used with different action intent",
-                        None,
+                        "expected_updated_at",
+                        "run changed since the supplied eligibility fence",
+                        Some(projection.version.clone()),
                         None,
                     ));
                 }
-                return Ok(ControlPlaneEffectAdmission::Duplicate(existing));
+            }
+            let run = self.get_run(intent.resource.run.as_str())?;
+            let admitted_fence = admit(&projection, run.as_ref())?;
+            if admitted_fence.resource_updated_at != projection.version {
+                return Err(Error::validation_invalid_argument(
+                    "projection",
+                    "action projection does not match its immutable intent fence",
+                    Some(intent.resource.run.to_string()),
+                    None,
+                ));
+            }
+            if !admitted_fence.eligible {
+                return Err(Error::validation_invalid_argument(
+                    "action",
+                    admitted_fence
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "action is not eligible".to_string()),
+                    None,
+                    None,
+                ));
             }
             let encoded_intent = serde_json::to_string(intent)
                 .map_err(|e| Error::internal_json(e.to_string(), None))?;
-            let encoded_fence = serde_json::to_string(fence)
+            let encoded_fence = serde_json::to_string(&admitted_fence)
                 .map_err(|e| Error::internal_json(e.to_string(), None))?;
             self.connection.execute(
                 "INSERT INTO control_plane_action_claims(run_id, idempotency_digest, request_digest, state, owner_pid, accepted_at, intent_json, fence_json, effect_id, outbox_state) VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7, ?8, 'pending')",
@@ -968,6 +984,103 @@ mod tests {
         }).unwrap();
     }
 
+    fn action_intent(
+        run: &str,
+        effect: &str,
+        action: ControlPlaneAction,
+        expected_updated_at: Option<&str>,
+        digest: &str,
+    ) -> ControlPlaneActionIntent {
+        let run = RunId::new(run).unwrap();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId(effect.to_string()),
+            action,
+            idempotency_key: effect.to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: expected_updated_at.map(str::to_string),
+            parameters: ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+        ControlPlaneActionIntent {
+            schema: CONTROL_PLANE_ACTION_INTENT_SCHEMA.to_string(),
+            effect_id: request.effect_id.clone(),
+            resource: ControlPlaneActionResource {
+                resource: ControlPlaneRef::Run(run.clone()),
+                run,
+                original_alias: None,
+            },
+            request,
+            request_digest: digest.to_string(),
+            accepted_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn eligible_fence(version: &str) -> ControlPlaneActionFence {
+        ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: version.to_string(),
+            eligible: true,
+            reason: None,
+        }
+    }
+
+    fn admit_eligible(
+        projection: &ControlPlaneResourceProjection,
+        _run: Option<&RunRecord>,
+    ) -> Result<ControlPlaneActionFence> {
+        Ok(eligible_fence(&projection.version))
+    }
+
+    fn admit_planted(
+        projection: &ControlPlaneResourceProjection,
+        _run: Option<&RunRecord>,
+    ) -> Result<ControlPlaneActionFence> {
+        let eligible = projection
+            .eligibility
+            .get("eligible")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        Ok(ControlPlaneActionFence {
+            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+            resource_updated_at: projection.version.clone(),
+            eligible,
+            reason: (!eligible).then(|| {
+                projection
+                    .eligibility
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("action is not eligible")
+                    .to_string()
+            }),
+        })
+    }
+
+    fn planted_projection(
+        run: &str,
+        version: &str,
+        eligible: bool,
+        reason: Option<&str>,
+        aliases: Vec<String>,
+    ) -> ControlPlaneResourceProjection {
+        ControlPlaneResourceProjection {
+            resource_type: "agent_task_run".to_string(),
+            resource_id: run.to_string(),
+            version: version.to_string(),
+            state: if eligible {
+                "queued".to_string()
+            } else {
+                "failed".to_string()
+            },
+            aliases,
+            eligibility: serde_json::json!({
+                "eligible": eligible,
+                "reason": reason,
+            }),
+            provenance: serde_json::json!({"source":"test"}),
+        }
+    }
+
     #[test]
     fn action_claim_replays_one_immutable_acknowledgement() {
         let directory = tempfile::tempdir().unwrap();
@@ -1071,19 +1184,13 @@ mod tests {
             request_digest: "b".repeat(64),
             accepted_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: "now".to_string(),
-            eligible: true,
-            reason: None,
-        };
         assert!(matches!(
             store
                 .enqueue_control_plane_action_intent(
                     &intent,
-                    &fence,
                     "agent_task_run",
-                    &"a".repeat(64)
+                    &"a".repeat(64),
+                    admit_eligible,
                 )
                 .unwrap(),
             ControlPlaneEffectAdmission::Enqueued(_)
@@ -1094,9 +1201,9 @@ mod tests {
             store
                 .enqueue_control_plane_action_intent(
                     &intent,
-                    &fence,
                     "agent_task_run",
-                    &"a".repeat(64)
+                    &"a".repeat(64),
+                    admit_eligible,
                 )
                 .unwrap(),
             ControlPlaneEffectAdmission::Duplicate(_)
@@ -1207,28 +1314,22 @@ mod tests {
             request_digest: "d".repeat(64),
             accepted_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: "v1".to_string(),
-            eligible: true,
-            reason: None,
-        };
         let projection = ControlPlaneResourceProjection {
             resource_type: "agent_task_run".to_string(),
             resource_id: "run-1".to_string(),
             version: "v1".to_string(),
             state: "queued".to_string(),
             aliases: vec!["occupied".to_string()],
-            eligibility: serde_json::json!({}),
+            eligibility: serde_json::json!({"eligible": true}),
             provenance: serde_json::json!({}),
         };
 
         assert!(store
             .enqueue_control_plane_action_intent_with_projection(
                 &intent,
-                &fence,
                 &projection,
                 &"e".repeat(64),
+                admit_eligible,
             )
             .is_err());
         assert!(store
@@ -1273,18 +1374,11 @@ mod tests {
             request_digest: "c".repeat(64),
             accepted_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: "now".to_string(),
-            eligible: true,
-            reason: None,
-        };
         let barrier = Arc::new(Barrier::new(2));
         let mut joins = Vec::new();
         for _ in 0..2 {
             let path = path.clone();
             let intent = intent.clone();
-            let fence = fence.clone();
             let barrier = barrier.clone();
             joins.push(std::thread::spawn(move || {
                 let store = ObservationStore::open_initialized_at(path).unwrap();
@@ -1292,9 +1386,9 @@ mod tests {
                 store
                     .enqueue_control_plane_action_intent(
                         &intent,
-                        &fence,
                         "agent_task_run",
                         &"d".repeat(64),
+                        admit_eligible,
                     )
                     .unwrap()
             }));
@@ -1316,6 +1410,251 @@ mod tests {
                 .filter(|outcome| matches!(outcome, ControlPlaneEffectAdmission::Duplicate(_)))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn implicit_eligible_advancement_admits_the_live_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v2",
+                true,
+                None,
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        let intent = action_intent(
+            "run-1",
+            "effect-implicit-live",
+            ControlPlaneAction::Cancel,
+            None,
+            &"f".repeat(64),
+        );
+
+        let admitted = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"g".repeat(64),
+                admit_planted,
+            )
+            .unwrap();
+        let ControlPlaneEffectAdmission::Enqueued(effect) = admitted else {
+            panic!("implicit admit must use live eligible projection");
+        };
+        assert_eq!(effect.fence.resource_updated_at, "v2");
+        assert!(effect.fence.eligible);
+    }
+
+    #[test]
+    fn live_ineligible_projection_rejects_without_an_outbox_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v1",
+                true,
+                None,
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v2",
+                false,
+                Some("run is already terminal"),
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        let intent = action_intent(
+            "run-1",
+            "effect-live-ineligible",
+            ControlPlaneAction::Cancel,
+            None,
+            &"h".repeat(64),
+        );
+
+        let error = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"i".repeat(64),
+                admit_planted,
+            )
+            .unwrap_err();
+        assert!(error.message.contains("run is already terminal"));
+        assert!(store
+            .control_plane_effect_status(&intent.effect_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn explicit_stale_expected_updated_at_rejects_even_when_live_state_is_eligible() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v2",
+                true,
+                None,
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        let intent = action_intent(
+            "run-1",
+            "effect-explicit-stale",
+            ControlPlaneAction::Cancel,
+            Some("v1"),
+            &"j".repeat(64),
+        );
+
+        let error = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"k".repeat(64),
+                admit_planted,
+            )
+            .unwrap_err();
+        assert!(error
+            .message
+            .contains("run changed since the supplied eligibility fence"));
+        assert!(store
+            .control_plane_effect_status(&intent.effect_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn replay_returns_the_original_effect_after_the_projection_becomes_ineligible() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v1",
+                true,
+                None,
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        let intent = action_intent(
+            "run-1",
+            "effect-replay-after-change",
+            ControlPlaneAction::Cancel,
+            None,
+            &"l".repeat(64),
+        );
+        let first = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"m".repeat(64),
+                admit_planted,
+            )
+            .unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v2",
+                false,
+                Some("run is already terminal"),
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+
+        let replayed = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"m".repeat(64),
+                admit_planted,
+            )
+            .unwrap();
+        assert!(matches!(first, ControlPlaneEffectAdmission::Enqueued(_)));
+        assert!(matches!(
+            replayed,
+            ControlPlaneEffectAdmission::Duplicate(_)
+        ));
+        match (first, replayed) {
+            (
+                ControlPlaneEffectAdmission::Enqueued(first),
+                ControlPlaneEffectAdmission::Duplicate(replayed),
+            ) => {
+                assert_eq!(first.intent.effect_id, replayed.intent.effect_id);
+                assert_eq!(first.fence.resource_updated_at, "v1");
+            }
+            _ => panic!("replay must return the original admitted effect"),
+        }
+    }
+
+    #[test]
+    fn implicit_admission_keeps_the_named_run_when_an_alias_rebinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(directory.path().join("store.sqlite")).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running'), ('run-2', 'deploy', 'now', 'running')", []).unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-1",
+                "v2",
+                true,
+                None,
+                vec!["run-1".to_string()],
+            ))
+            .unwrap();
+        store
+            .upsert_control_plane_resource_projection(&planted_projection(
+                "run-2",
+                "v9",
+                true,
+                None,
+                vec!["run-2".to_string(), "cook".to_string()],
+            ))
+            .unwrap();
+        let intent = action_intent(
+            "run-1",
+            "effect-alias-rebind",
+            ControlPlaneAction::Cancel,
+            None,
+            &"n".repeat(64),
+        );
+
+        let admitted = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"o".repeat(64),
+                admit_planted,
+            )
+            .unwrap();
+        let ControlPlaneEffectAdmission::Enqueued(effect) = admitted else {
+            panic!("named run must still admit after alias rebind");
+        };
+        assert_eq!(effect.intent.resource.run.as_str(), "run-1");
+        assert_eq!(effect.fence.resource_updated_at, "v2");
+        assert_eq!(
+            store
+                .control_plane_resource_projection("agent_task_run", "cook")
+                .unwrap()
+                .unwrap()
+                .resource_id,
+            "run-2"
         );
     }
 
