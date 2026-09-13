@@ -4,6 +4,31 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.7] - 2026-09-13
+
+### Changed
+- isolate descendant ownership per execution
+- repair lifecycle gate regressions
+
+### Fixed
+- expand remote home paths in doctor probes
+- reconcile admission job counts consistently
+- bind shared runtime assets for extension execution
+- fall back to SSH file transfer
+- scope direct daemon lifecycle
+- promote fresh refresh environments
+- bypass bootstrap tool derivation
+- bootstrap fresh SSH refreshes
+- bootstrap disconnected refreshes
+- retire proven stopped generations
+- route dev sync through daemon
+- accept dirty source snapshots
+- report dev sync build failures
+- retain runner package sources
+- retain source build provenance
+- retain installed package sources
+- honor runner component paths
+
 ## [0.373.6] - 2026-09-12
 
 ### Changed
