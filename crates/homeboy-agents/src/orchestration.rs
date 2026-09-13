@@ -7422,6 +7422,12 @@ mod tests {
                 Some(AGENT_TASK_RUN),
             )
             .expect("source record");
+            store
+                .mutate_record(AGENT_TASK_RUN, |record| {
+                    record.state = AgentTaskRunState::Failed;
+                    true
+                })
+                .expect("retry-eligible record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let retry_run_id = "interrupted-retry-successor";
