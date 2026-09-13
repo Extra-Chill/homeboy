@@ -8415,10 +8415,12 @@ pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:placement-update:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "placement-update",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -8452,9 +8454,12 @@ pub(super) fn run_resume_with_executor(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
-                effect_id: homeboy_control_plane_contract::EffectId(format!(
-                    "cli:{run_id}:resume:{idempotency_key}"
-                )),
+                effect_id: homeboy_control_plane_contract::action_effect_id(
+                    "cli",
+                    &run_id,
+                    "resume",
+                    &idempotency_key,
+                ),
                 idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
@@ -8535,10 +8540,12 @@ where
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:retry:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "retry",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,

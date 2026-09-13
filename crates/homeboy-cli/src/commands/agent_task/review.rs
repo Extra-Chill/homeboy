@@ -439,9 +439,12 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
                     schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                         .to_string(),
                     action: homeboy_control_plane_contract::ControlPlaneAction::Promote,
-                    effect_id: homeboy_control_plane_contract::EffectId(format!(
-                        "cli:{run_id}:promote:{idempotency_key}"
-                    )),
+                    effect_id: homeboy_control_plane_contract::action_effect_id(
+                        "cli",
+                        run_id,
+                        "promote",
+                        &idempotency_key,
+                    ),
                     idempotency_key,
                     actor: "homeboy-cli".to_string(),
                     expected_updated_at: None,
