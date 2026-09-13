@@ -11766,6 +11766,66 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
 }
 
 #[test]
+fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-transport-projection", 2);
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("make the predecessor budget-consuming");
+        let semantic_retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .expect("materialize the semantic Cook retry");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &semantic_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed", None).with_retryable(true),
+        )
+        .expect("terminalize the semantic retry before its transport replacement");
+
+        let transport_run_id = format!("{}-transport-retry", semantic_retry.record.run_id);
+        super::super::cook_recipe::default_store()
+            .expect("Cook recipe store")
+            .record_recipe_attempt_replacement(
+                &options.identity.cook_id,
+                &semantic_retry.record.run_id,
+                &transport_run_id,
+            )
+            .expect("persist the transport replacement");
+        let transport_retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, true, true)
+                .expect("materialize the Cook transport retry child");
+        assert!(transport_retry.record.run_id.ends_with("-transport-retry"));
+        assert!(transport_retry.record.provider_handles.is_empty());
+        agent_task_lifecycle::record_pre_execution_failure(
+            &transport_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed again", None).with_retryable(true),
+        )
+        .expect("terminalize the transport retry child");
+
+        let projected =
+            crate::orchestration::run_from_current_environment(&transport_retry.record.run_id)
+                .expect("project the Cook transport retry child");
+        let retry = projected
+            .action_eligibility
+            .expect("projected action eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+        assert_eq!(
+            retry.availability,
+            ControlPlaneActionAvailability::Available
+        );
+    });
+}
+
+#[test]
 fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository root");

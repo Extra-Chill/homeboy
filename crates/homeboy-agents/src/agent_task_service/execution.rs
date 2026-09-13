@@ -2670,7 +2670,9 @@ pub(crate) enum RetryProjectionAdmission {
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let source = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)?;
+    // Eligibility is part of resource projection. Reading through the ordinary
+    // lifecycle accessor can backfill that same projection and recurse here.
+    let source = lifecycle_store.read_record_bounded(run_id)?;
     if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;
         return Ok(RetryProjectionAdmission::DurableCook);
