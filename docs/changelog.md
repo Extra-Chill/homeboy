@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.10] - 2026-09-13
+
+### Changed
+- single-source run reference metadata
+
+### Fixed
+- Fix canonical action admission and cancellation races
+
 ## [0.373.9] - 2026-09-13
 
 ### Changed
