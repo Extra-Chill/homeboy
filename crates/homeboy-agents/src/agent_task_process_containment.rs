@@ -315,11 +315,16 @@ mod tests {
             spawn_leaking_child("sleep 30 & echo $!; exit 0");
 
         child.wait().expect("leader exits on its own");
+        #[cfg(target_os = "linux")]
+        assert!(
+            !homeboy_core::process::pid_is_running(descendant_pid),
+            "the execution supervisor must drain descendants before exiting"
+        );
+        #[cfg(not(target_os = "linux"))]
         assert!(
             homeboy_core::process::pid_is_running(descendant_pid),
             "descendant must outlive its leader for this to test anything"
         );
-
         containment
             .reap_after_exit()
             .expect("surviving group members are reaped");
