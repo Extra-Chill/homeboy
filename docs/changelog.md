@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.12] - 2026-09-13
+
+### Fixed
+- enforce root snapshot exclusions before tar
+
 ## [0.373.11] - 2026-09-13
 
 ### Changed
