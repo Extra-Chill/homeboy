@@ -591,6 +591,11 @@ fn installer_fast_double_fork_fixture() {
         intermediate,
         "reap intermediate"
     );
+    // Keep the root alive until the post-exec descendant exists to be contained.
+    wait_for_installer_pid(
+        Path::new(&pid_file),
+        Instant::now() + Duration::from_secs(1),
+    );
 }
 
 #[cfg(target_os = "linux")]
