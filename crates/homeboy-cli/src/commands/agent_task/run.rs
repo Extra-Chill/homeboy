@@ -42,6 +42,20 @@ const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
 
+/// Keep the durable action identity bounded even when a Cook attempt ID grows
+/// through transport retries. The complete intent remains collision-resistant.
+pub(crate) fn retry_effect_id(
+    run_id: &str,
+    idempotency_key: &str,
+) -> homeboy_control_plane_contract::EffectId {
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"homeboy-cli-retry-v1\0");
+    digest.update(run_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(idempotency_key.as_bytes());
+    homeboy_control_plane_contract::EffectId(format!("cli:retry:{:x}", digest.finalize()))
+}
+
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
     executor: SharedAgentTaskExecutor,
@@ -8535,10 +8549,7 @@ where
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:retry:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: retry_effect_id(&args.run_id, &idempotency_key),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -8608,7 +8619,7 @@ mod tests {
         cook_report_with_continuation, cook_resolved_policy_disclosure,
         cook_review_form_timeout_disclosure, default_loop_title, detached_cook_route_less_warning,
         durable_cook_identity_lines, existing_candidate_title, preflight_continue_cook,
-        project_preview_dirty_admission,
+        project_preview_dirty_admission, retry_effect_id,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
@@ -8695,6 +8706,18 @@ mod tests {
             default_loop_title(&candidate, Some(workspace.path())),
             "fix: restore schema"
         );
+    }
+
+    #[test]
+    fn retry_effect_id_is_bounded_deterministic_and_distinguishes_full_intents() {
+        let long_run_id = format!("agent-task-{}-transport-retry", "a".repeat(200));
+        let first = retry_effect_id(&long_run_id, "retry-key-a");
+        let replay = retry_effect_id(&long_run_id, "retry-key-a");
+        let distinct = retry_effect_id(&long_run_id, "retry-key-b");
+
+        assert_eq!(first, replay);
+        assert_ne!(first, distinct);
+        assert!(first.0.len() <= 128, "effect id exceeds contract bound");
     }
 
     #[test]

@@ -2053,7 +2053,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
                 .with_retryable(true),
         )
         .expect("persist retryable Cook failure");
-        let args = ["homeboy", "agent-task", "retry", run_id, "--run"]
+        let args = ["homeboy", "agent-task", "retry", cook_id, "--run"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();

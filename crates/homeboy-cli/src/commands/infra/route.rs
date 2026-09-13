@@ -3821,10 +3821,10 @@ fn materialize_agent_task_retry_handoff(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-                effect_id: homeboy_control_plane_contract::EffectId(format!(
-                    "cli:{}:retry:{idempotency_key}",
-                    retry.run_id
-                )),
+                effect_id: crate::commands::agent_task::run::retry_effect_id(
+                    &retry.run_id,
+                    &idempotency_key,
+                ),
                 idempotency_key,
                 actor: "homeboy-cli-lab-route".to_string(),
                 expected_updated_at: None,

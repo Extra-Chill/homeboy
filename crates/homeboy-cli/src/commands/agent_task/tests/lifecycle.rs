@@ -22,6 +22,44 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
 }
 
 #[test]
+fn retry_executes_a_long_run_id_action_without_provider_dispatch() {
+    with_temp_home(|| {
+        let run_id = format!("agent-task-{}-transport-retry", "a".repeat(100));
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some(&run_id)).expect("submit long source run");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &run_id,
+            &plan,
+            "lab_handoff_preacceptance",
+            &Error::internal_unexpected("runner unavailable").with_retryable(true),
+        )
+        .expect("terminalize long source run");
+
+        let (acknowledgement, exit_code) = retry_with(
+            RetryArgs {
+                run_id: run_id.clone(),
+                new_run_id: None,
+                run: false,
+                force: false,
+                idempotency_key: Some("long-run-retry".to_string()),
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+            },
+            Arc::new(InspectingExecutor::noop("provider-must-not-run")),
+            |_| Ok(None),
+        )
+        .expect("retry action accepts a long run id");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(acknowledgement["action"], "retry");
+        assert_eq!(acknowledgement["run"], run_id);
+    });
+}
+
+#[test]
 fn diagnose_projects_causal_pre_execution_provider_evidence() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-provider-pre-execution";
