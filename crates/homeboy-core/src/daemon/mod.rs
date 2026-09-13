@@ -12,8 +12,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api_jobs::{
-    ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
-    LocalRunnerJobRequest, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+    canonical_run_ref_metadata, ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus,
+    JobStore, LocalRunnerJob, LocalRunnerJobRequest, RemoteRunnerJobRequest,
+    RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -3480,7 +3481,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     })?;
     let submission_key = resolve_exec_idempotency_key(
         legacy.idempotency_key.as_deref(),
-        exec_request_run_ref_metadata(
+        canonical_run_ref_metadata(
             legacy.lifecycle.as_ref(),
             legacy.lab_runner_workload.as_ref(),
             legacy.metadata.as_ref(),
@@ -3911,7 +3912,7 @@ fn enqueue_exec_request(
 
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata =
-        exec_request_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
+        canonical_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
             .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
@@ -4783,48 +4784,6 @@ pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(content_hash::sha256_hex(&encoded))
-}
-
-fn exec_request_run_ref_metadata(
-    lifecycle: Option<&RunnerJobLifecycleMetadata>,
-    lab_runner_workload: Option<&LabRunnerWorkload>,
-    metadata: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let durable_run_id = lifecycle
-        .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
-        .or_else(|| metadata.and_then(metadata_run_id));
-    let agent_task_run_id = lab_runner_workload
-        .and_then(|workload| workload.agent_task.as_ref())
-        .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
-        .or_else(|| {
-            metadata
-                .and_then(|metadata| metadata.get("agent_task_run_id"))
-                .and_then(|run_id| non_empty_string(run_id.as_str()))
-        })
-        .or_else(|| durable_run_id.clone());
-
-    if durable_run_id.is_none() && agent_task_run_id.is_none() {
-        return None;
-    }
-
-    Some(json!({
-        "durable_run_id": durable_run_id,
-        "agent_task_run_id": agent_task_run_id,
-    }))
-}
-
-fn metadata_run_id(metadata: &serde_json::Value) -> Option<String> {
-    ["durable_run_id", "run_id", "record_run_id"]
-        .iter()
-        .find_map(|key| metadata.get(*key))
-        .and_then(|run_id| non_empty_string(run_id.as_str()))
-}
-
-fn non_empty_string(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn daemon_job_store() -> &'static JobStore {
@@ -6694,7 +6653,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_request_run_ref_metadata_prefers_lifecycle_run_id() {
+    fn canonical_run_ref_metadata_prefers_lifecycle_run_id() {
         let lifecycle = RunnerJobLifecycleMetadata {
             source: Some("runner-daemon".to_string()),
             kind: Some("runner.exec".to_string()),
@@ -6703,7 +6662,7 @@ mod tests {
             active_cell_count: None,
         };
 
-        let metadata = exec_request_run_ref_metadata(
+        let metadata = canonical_run_ref_metadata(
             Some(&lifecycle),
             None,
             Some(&json!({ "run_id": "metadata-run" })),

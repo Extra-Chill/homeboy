@@ -378,32 +378,11 @@ impl RemoteRunnerJobRequest {
     }
 
     pub(crate) fn run_ref_metadata(&self) -> Option<Value> {
-        let durable_run_id = self
-            .lifecycle
-            .as_ref()
-            .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
-            .or_else(|| self.metadata.as_ref().and_then(metadata_run_id));
-        let agent_task_run_id = self
-            .lab_runner_workload
-            .as_ref()
-            .and_then(|workload| workload.agent_task.as_ref())
-            .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
-            .or_else(|| {
-                self.metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.get("agent_task_run_id"))
-                    .and_then(|run_id| non_empty_string(run_id.as_str()))
-            })
-            .or_else(|| durable_run_id.clone());
-
-        if durable_run_id.is_none() && agent_task_run_id.is_none() {
-            return None;
-        }
-
-        Some(serde_json::json!({
-            "durable_run_id": durable_run_id,
-            "agent_task_run_id": agent_task_run_id,
-        }))
+        canonical_run_ref_metadata(
+            self.lifecycle.as_ref(),
+            self.lab_runner_workload.as_ref(),
+            self.metadata.as_ref(),
+        )
     }
 }
 
@@ -471,32 +450,41 @@ fn metadata_run_id(metadata: &Value) -> Option<String> {
         .and_then(|run_id| non_empty_string(run_id.as_str()))
 }
 
-fn envelope_run_ref_metadata(
-    envelope: &RunnerExecutionEnvelope,
+pub(crate) fn canonical_run_ref_metadata(
+    lifecycle: Option<&RunnerJobLifecycleMetadata>,
     workload: Option<&LabRunnerWorkload>,
+    metadata: Option<&Value>,
 ) -> Option<Value> {
-    let durable_run_id = envelope
-        .lifecycle
-        .as_ref()
+    let durable_run_id = lifecycle
         .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
-        .or_else(|| metadata_run_id(&envelope.metadata));
+        .or_else(|| metadata.and_then(metadata_run_id));
     let agent_task_run_id = workload
         .and_then(|workload| workload.agent_task.as_ref())
         .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
         .or_else(|| {
-            envelope
-                .metadata
-                .get("agent_task_run_id")
+            metadata
+                .and_then(|metadata| metadata.get("agent_task_run_id"))
                 .and_then(|run_id| non_empty_string(run_id.as_str()))
         })
         .or_else(|| durable_run_id.clone());
+    if durable_run_id.is_none() && agent_task_run_id.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "durable_run_id": durable_run_id,
+        "agent_task_run_id": agent_task_run_id,
+    }))
+}
 
-    (durable_run_id.is_some() || agent_task_run_id.is_some()).then(|| {
-        serde_json::json!({
-            "durable_run_id": durable_run_id,
-            "agent_task_run_id": agent_task_run_id,
-        })
-    })
+fn envelope_run_ref_metadata(
+    envelope: &RunnerExecutionEnvelope,
+    workload: Option<&LabRunnerWorkload>,
+) -> Option<Value> {
+    canonical_run_ref_metadata(
+        envelope.lifecycle.as_ref(),
+        workload,
+        Some(&envelope.metadata),
+    )
 }
 
 fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
@@ -2753,4 +2741,107 @@ fn queued_event_sequence(stored: &StoredJob) -> u64 {
 
 fn json_exit_code(exit_code: i32) -> Value {
     serde_json::json!({ "exit_code": exit_code })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lifecycle(run_id: &str) -> RunnerJobLifecycleMetadata {
+        RunnerJobLifecycleMetadata {
+            source: Some("runner-daemon".to_string()),
+            kind: Some("runner.exec".to_string()),
+            durable_run_id: Some(run_id.to_string()),
+            active_child_count: None,
+            active_cell_count: None,
+        }
+    }
+
+    fn workload(run_id: &str) -> LabRunnerWorkload {
+        serde_json::from_value(json!({
+            "schema": "homeboy/runner-workload/v1",
+            "workload_id": "plan.runner_workload",
+            "kind": { "command_label": "agent-task run-plan", "command_family": "agent_task" },
+            "agent_task": {
+                "run_id": run_id,
+                "dispatch_kind": "run_plan",
+                "lifecycle_mirror_policy": "run_plan_aggregate"
+            },
+            "workspace_mappings": {
+                "source_path_mode": "existing_remote",
+                "workspace_mode_policy": "existing",
+                "mapping_ref": null
+            },
+            "required_capabilities": [],
+            "required_secrets": { "categories": [], "secret_env_plan": {} },
+            "required_extensions": [],
+            "mutation_policy": {
+                "capture_patch": false,
+                "mutation_flag": null,
+                "allow_dirty_lab_workspace": false
+            },
+            "assignment": {
+                "runner_id": "homeboy-lab",
+                "runner_mode": "direct_ssh",
+                "source": "explicit"
+            },
+            "state": {
+                "status": "offloaded",
+                "remote_workspace": "/tmp",
+                "fallback_reason": null
+            },
+            "result_refs": {
+                "plan_id": "plan",
+                "proof_id": null,
+                "workspace_mapping_ref": null
+            }
+        }))
+        .expect("workload")
+    }
+
+    fn assert_run_ref_wire(metadata: &Value, durable_run_id: Value, agent_task_run_id: Value) {
+        assert_eq!(metadata["durable_run_id"], durable_run_id);
+        assert_eq!(metadata["agent_task_run_id"], agent_task_run_id);
+        assert_eq!(metadata.as_object().map(|object| object.len()), Some(2));
+    }
+
+    #[test]
+    fn canonical_run_ref_metadata_copies_lifecycle_id_onto_the_existing_alias() {
+        let metadata = canonical_run_ref_metadata(Some(&lifecycle("run-1")), None, None)
+            .expect("lifecycle identity");
+        assert_run_ref_wire(&metadata, json!("run-1"), json!("run-1"));
+    }
+
+    #[test]
+    fn canonical_run_ref_metadata_keeps_workload_identity_on_the_existing_alias() {
+        let metadata = canonical_run_ref_metadata(None, Some(&workload("run-2")), None)
+            .expect("workload identity");
+        assert_run_ref_wire(&metadata, Value::Null, json!("run-2"));
+    }
+
+    #[test]
+    fn canonical_run_ref_metadata_still_emits_legacy_alias_input() {
+        let metadata = canonical_run_ref_metadata(
+            None,
+            None,
+            Some(&json!({ "agent_task_run_id": "legacy-run" })),
+        )
+        .expect("legacy identity");
+        assert_run_ref_wire(&metadata, Value::Null, json!("legacy-run"));
+    }
+
+    #[test]
+    fn canonical_run_ref_metadata_preserves_divergent_durable_and_alias_sources() {
+        let metadata = canonical_run_ref_metadata(
+            Some(&lifecycle("canonical-run")),
+            Some(&workload("workload-run")),
+            Some(&json!({
+                "run_id": "metadata-run",
+                "agent_task_run_id": "legacy-run"
+            })),
+        )
+        .expect("canonical identity");
+        assert_run_ref_wire(&metadata, json!("canonical-run"), json!("workload-run"));
+    }
 }
