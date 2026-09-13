@@ -7611,10 +7611,11 @@ fn substantive_candidate_in_store(
     lifecycle_store: Option<&AgentTaskLifecycleStore>,
 ) -> Option<(String, String)> {
     // Candidate recovery is a bounded scan. Avoid the aggregate reader's
-    // reconciliation path when this controller record never projected one.
+    // reconciliation path or record-projection backfill when this controller
+    // record never projected one.
     let record = match lifecycle_store {
-        Some(store) => store.read_record(run_id).ok()?,
-        None => exact_record(run_id).ok()?,
+        Some(store) => store.read_record_bounded(run_id).ok()?,
+        None => store::read_record_bounded(&sanitize_run_id(run_id)).ok()?,
     };
     let aggregate_path = record.aggregate_path?;
     if !std::path::Path::new(&aggregate_path).exists() {
