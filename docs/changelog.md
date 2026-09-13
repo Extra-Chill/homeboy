@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.8] - 2026-09-13
+
+### Changed
+- await descendant readiness before root exit
+
 ## [0.373.7] - 2026-09-13
 
 ### Changed
