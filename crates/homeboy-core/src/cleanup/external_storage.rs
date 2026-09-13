@@ -11,8 +11,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use homeboy_engine_primitives::command::{
-    terminate_process_tree_and_reap, wait_with_bounded_output_supervised, ControllerChildGuard,
-    SupervisedCommandTermination,
+    wait_with_bounded_output_supervised_owned, ExecutionOwner, SupervisedCommandTermination,
 };
 use homeboy_engine_primitives::template;
 use homeboy_extension_contract::{
@@ -520,36 +519,19 @@ fn invoke_raw(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let guard = ControllerChildGuard::prepare(&mut command).map_err(|error| {
-        Error::internal_unexpected(format!(
-            "guard external storage provider '{}': {error}",
-            provider.id
-        ))
-    })?;
-    let mut child = command.spawn().map_err(|error| {
+    let mut owner = ExecutionOwner::spawn(&mut command).map_err(|error| {
         Error::internal_unexpected(format!(
             "start external storage provider '{}': {error}",
-            provider.id
-        ))
-    })?;
-    attach_guard_or_reap(
-        &mut child,
-        |child| guard.attach(child),
-        terminate_process_tree_and_reap,
-    )
-    .map_err(|error| {
-        Error::internal_unexpected(format!(
-            "attach external storage provider guard '{}': {error}",
             provider.id
         ))
     })?;
     // Start stdin delivery only after process-tree ownership is established.
     // The writer can block on a provider that never reads, while the supervisor
     // concurrently drains output and kills the tree at the shared deadline.
-    let mut stdin = child.stdin.take().expect("piped stdin");
+    let mut stdin = owner.take_stdin().expect("piped stdin");
     let writer = std::thread::spawn(move || stdin.write_all(&request));
-    let supervised = wait_with_bounded_output_supervised(
-        &mut child,
+    let supervised = wait_with_bounded_output_supervised_owned(
+        &mut owner,
         PROVIDER_OUTPUT_LIMIT,
         timeout,
         Duration::from_millis(100),
@@ -589,45 +571,6 @@ fn invoke_raw(
         }
     }
     Ok(result.output.stdout)
-}
-
-fn attach_guard_or_reap(
-    child: &mut std::process::Child,
-    attach: impl FnOnce(&std::process::Child) -> std::io::Result<()>,
-    reap: impl FnOnce(&mut std::process::Child) -> std::io::Result<std::process::ExitStatus>,
-) -> std::io::Result<()> {
-    if let Err(error) = attach(child) {
-        match reap(child) {
-            Ok(_) if child.try_wait()?.is_some() => return Err(error),
-            Ok(_) => {}
-            Err(cleanup_error) => {
-                return force_reap_after_attach_failure(child, error, cleanup_error);
-            }
-        }
-        return force_reap_after_attach_failure(
-            child,
-            error,
-            std::io::Error::other("guard cleanup returned without reaping the child"),
-        );
-    }
-    Ok(())
-}
-
-fn force_reap_after_attach_failure(
-    child: &mut std::process::Child,
-    attach_error: std::io::Error,
-    cleanup_error: std::io::Error,
-) -> std::io::Result<()> {
-    let kill_error = child.kill().err();
-    let wait_error = child.wait().err();
-    let fallback = match (kill_error, wait_error) {
-        (_, Some(error)) => format!("fallback reap failed: {error}"),
-        (Some(error), None) => format!("fallback kill failed: {error}"),
-        (None, None) => "fallback child kill and reap succeeded".to_string(),
-    };
-    Err(std::io::Error::other(format!(
-        "guard attach failed: {attach_error}; process-tree cleanup failed: {cleanup_error}; {fallback}"
-    )))
 }
 
 fn invoke_reclaim(
@@ -1152,27 +1095,6 @@ mod tests {
         )
         .is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn guard_attach_failure_reaps_spawned_process() {
-        let mut command = Command::new("sh");
-        command.arg("-c").arg("sleep 5");
-        let guard = ControllerChildGuard::prepare(&mut command).expect("guard");
-        let mut child = command.spawn().expect("spawn");
-        let result = attach_guard_or_reap(
-            &mut child,
-            |_| Err(std::io::Error::other("fixture attach failure")),
-            |_| Err(std::io::Error::other("fixture cleanup failure")),
-        );
-        assert!(result.is_err());
-        assert!(result
-            .expect_err("failure")
-            .to_string()
-            .contains("fixture cleanup failure"));
-        assert!(child.try_wait().expect("poll").is_some());
-        drop(guard);
     }
 
     #[cfg(unix)]

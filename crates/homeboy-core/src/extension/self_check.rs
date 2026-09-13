@@ -394,28 +394,24 @@ fn execute_bounded_self_check_command(
     timeout: Duration,
     passthrough: Option<homeboy_engine_primitives::command::StreamChunkObserver>,
 ) -> SelfCheckCommandOutput {
-    use homeboy_engine_primitives::command::{ControllerChildGuard, SupervisedCommandTermination};
+    use homeboy_engine_primitives::command::{
+        wait_with_bounded_output_supervised_with_progress_owned, ExecutionOwner,
+        SupervisedCommandTermination,
+    };
 
-    let guard = match ControllerChildGuard::prepare(&mut command) {
-        Ok(guard) => guard,
+    let mut owner = match ExecutionOwner::spawn(&mut command) {
+        Ok(owner) => owner,
         Err(error) => return self_check_spawn_error(error),
     };
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return self_check_spawn_error(error),
-    };
-    if let Err(error) = guard.attach(&child) {
-        let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
-        return self_check_spawn_error(error);
-    }
-    let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_passthrough(
-        &mut child,
+    let supervised = match wait_with_bounded_output_supervised_with_progress_owned(
+        &mut owner,
         SELF_CHECK_CAPTURE_LIMIT_BYTES,
         timeout,
+        None,
         Duration::from_secs(1),
         passthrough,
         || false,
-        |_, _| Ok(()),
+        |_| Ok(()),
     ) {
         Ok(output) => output,
         Err(error) => return self_check_spawn_error(error),

@@ -4,6 +4,8 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::RawFd;
 use std::process::{Child, Command, ExitStatus, Output};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -15,19 +17,296 @@ use sha2::{Digest, Sha256};
 
 pub const DEFAULT_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OBSERVED_LINE_BYTES: usize = 64 * 1024;
+#[cfg(all(unix, not(target_os = "linux")))]
+type AdoptedGuard = Option<(u32, Option<u32>, u64)>;
 #[cfg(unix)]
 const PROCESS_TREE_TERM_GRACE: Duration = Duration::from_secs(2);
 #[cfg(unix)]
 const PROCESS_TREE_KILL_GRACE: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const CONTROLLER_LOSS_TERM_GRACE: Duration = Duration::from_millis(200);
+#[cfg(target_os = "linux")]
+const CONTROLLER_LOSS_KILL_GRACE: Duration = Duration::from_millis(400);
 #[cfg(any(unix, windows))]
 const PROCESS_TREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CAPTURE_JOIN_GRACE: Duration = Duration::from_secs(2);
 const PROCESS_TREE_CLEANUP_DEADLINE: Duration = Duration::from_secs(4);
+#[cfg(target_os = "linux")]
+const EXECUTION_PROTOCOL_IDENTITY_LEN: usize = 8;
+#[cfg(target_os = "linux")]
+const EXECUTION_PROTOCOL_TERMINAL_LEN: usize = 5;
+#[cfg(target_os = "linux")]
+const EXECUTION_PROTOCOL_COMPLETE: u8 = 0;
+#[cfg(target_os = "linux")]
+const EXECUTION_PROTOCOL_INCOMPLETE: u8 = 1;
+#[cfg(target_os = "linux")]
+const EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT: u8 = 2;
+
+/// Waitable identity of one isolated execution.
+///
+/// `wait_pid` is the spawned handle (`Child::id`): the Linux supervisor, or the
+/// workload root elsewhere. Workload signaling, metrics, and persisted recovery
+/// use `root_pid` / `root_pgid` only. Never treat `wait_pid` as the workload
+/// process group on a supervised Linux execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionIdentity {
+    pub wait_pid: u32,
+    pub root_pid: u32,
+    pub root_pgid: Option<u32>,
+    starttime_ticks: Option<u64>,
+}
+
+impl ExecutionIdentity {
+    #[cfg(not(target_os = "linux"))]
+    fn unmanaged(wait_pid: u32) -> Self {
+        Self {
+            wait_pid,
+            root_pid: wait_pid,
+            root_pgid: Some(wait_pid),
+            starttime_ticks: None,
+        }
+    }
+
+    pub fn recovery_process_group(&self) -> u32 {
+        self.root_pgid.unwrap_or(self.root_pid)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionCleanup {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionOutcome {
+    pub root_status: ExitStatus,
+    pub cleanup: ExecutionCleanup,
+}
+
+impl ExecutionOutcome {
+    fn complete(root_status: ExitStatus) -> Self {
+        Self {
+            root_status,
+            cleanup: ExecutionCleanup::Complete,
+        }
+    }
+
+    pub fn into_root_status(self) -> io::Result<ExitStatus> {
+        match self.cleanup {
+            ExecutionCleanup::Complete => Ok(self.root_status),
+            ExecutionCleanup::Incomplete => {
+                Err(io::Error::other("execution owner cleanup did not complete"))
+            }
+        }
+    }
+}
+
+/// Prepared isolation that becomes an [`ExecutionOwner`] after spawn.
+pub struct ExecutionOwnerPrep {
+    guard: ControllerChildGuard,
+}
+
+impl ExecutionOwnerPrep {
+    pub fn attach(self, mut child: Child) -> io::Result<ExecutionOwner> {
+        let mut guard = self.guard;
+        let wait_pid = child.id();
+        if let Err(error) = guard.attach(&child) {
+            let _ = bounded_drain_wait_handle(&mut guard, &mut child, wait_pid, None);
+            return Err(error);
+        }
+        let identity = match guard.execution_identity(wait_pid) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = bounded_drain_wait_handle(&mut guard, &mut child, wait_pid, None);
+                return Err(error);
+            }
+        };
+        Ok(ExecutionOwner {
+            child,
+            identity,
+            guard,
+            outcome: None,
+            teardown_complete: false,
+            last_resort_done: false,
+        })
+    }
+}
+
+/// Owns one isolated execution: supervisor wait handle, root identity, and
+/// terminal cleanup outcome. Cancellation requests drain through this owner.
+pub struct ExecutionOwner {
+    child: Child,
+    identity: ExecutionIdentity,
+    guard: ControllerChildGuard,
+    outcome: Option<ExecutionOutcome>,
+    teardown_complete: bool,
+    last_resort_done: bool,
+}
+
+impl ExecutionOwner {
+    pub fn prepare(command: &mut Command) -> io::Result<ExecutionOwnerPrep> {
+        Ok(ExecutionOwnerPrep {
+            guard: ControllerChildGuard::prepare(command)?,
+        })
+    }
+
+    pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        let prep = Self::prepare(command)?;
+        let child = command.spawn()?;
+        prep.attach(child)
+    }
+
+    pub fn identity(&self) -> ExecutionIdentity {
+        self.identity
+    }
+
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        match self.try_wait_outcome()? {
+            Some(outcome) => Ok(Some(outcome.into_root_status()?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn try_wait_outcome(&mut self) -> io::Result<Option<ExecutionOutcome>> {
+        if let Some(outcome) = self.outcome {
+            return Ok(Some(outcome));
+        }
+        if self.teardown_complete {
+            return Err(io::Error::other("execution owner cleanup did not complete"));
+        }
+        match self.guard.try_wait_outcome(&mut self.child, self.identity) {
+            Ok(Some(outcome)) => Ok(Some(self.record_terminal(outcome))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(self.fail_closed(error)),
+        }
+    }
+
+    pub fn request_drain(&mut self) -> io::Result<()> {
+        self.guard.request_drain(self.identity.wait_pid)
+    }
+
+    pub fn drain_and_reap(&mut self) -> io::Result<ExecutionOutcome> {
+        if let Some(outcome) = self.outcome {
+            return Ok(outcome);
+        }
+        if self.teardown_complete {
+            return Err(io::Error::other("execution owner cleanup did not complete"));
+        }
+        match self.guard.drain_and_reap(&mut self.child, self.identity) {
+            Ok(outcome) => Ok(self.record_terminal(outcome)),
+            Err(error) => Err(self.fail_closed(error)),
+        }
+    }
+
+    fn record_terminal(&mut self, outcome: ExecutionOutcome) -> ExecutionOutcome {
+        if outcome.cleanup == ExecutionCleanup::Incomplete {
+            self.last_resort_root_group();
+        }
+        self.teardown_complete = true;
+        self.outcome = Some(outcome);
+        outcome
+    }
+
+    fn fail_closed(&mut self, error: io::Error) -> io::Error {
+        self.last_resort_root_group();
+        let _ = reap_child_until(
+            &mut self.child,
+            std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+        );
+        self.teardown_complete = true;
+        error
+    }
+
+    fn last_resort_root_group(&mut self) {
+        if self.last_resort_done {
+            return;
+        }
+        self.last_resort_done = true;
+        last_resort_signal_root_group(self.identity);
+    }
+}
+
+impl Drop for ExecutionOwner {
+    fn drop(&mut self) {
+        if self.teardown_complete || self.outcome.is_some() {
+            return;
+        }
+        let _ = self.drain_and_reap();
+    }
+}
+
+fn bounded_drain_wait_handle(
+    guard: &mut ControllerChildGuard,
+    child: &mut Child,
+    wait_pid: u32,
+    identity: Option<ExecutionIdentity>,
+) -> io::Result<ExitStatus> {
+    let _ = guard.request_drain(wait_pid);
+    if let Some(identity) = identity {
+        last_resort_signal_root_group(identity);
+    }
+    reap_child_until(
+        child,
+        std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+    )
+}
+
+fn last_resort_signal_root_group(identity: ExecutionIdentity) {
+    #[cfg(unix)]
+    {
+        if !root_identity_is_live(identity) {
+            return;
+        }
+        let _ = terminate_remaining_process_group(identity.recovery_process_group());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = identity;
+    }
+}
+
+#[cfg(unix)]
+fn root_identity_is_live(identity: ExecutionIdentity) -> bool {
+    let root = identity.root_pid;
+    if root == 0 || root > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(stat) = linux_process_stat(root) else {
+            return false;
+        };
+        let Some(ticks) = identity.starttime_ticks else {
+            return false;
+        };
+        if stat.starttime_ticks != ticks {
+            return false;
+        }
+        let expected = identity.root_pgid.unwrap_or(root);
+        let pgid = unsafe { libc::getpgid(root as libc::pid_t) };
+        pgid >= 0 && pgid as u32 == expected
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        process_is_running(root)
+    }
+}
 
 #[cfg(target_os = "linux")]
-static CHILD_SUBREAPER_ENABLED: std::sync::OnceLock<io::Result<()>> = std::sync::OnceLock::new();
-#[cfg(target_os = "linux")]
-static CHILD_GUARD_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SUPERVISOR_TEARDOWN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 pub type StreamChunkObserver = Arc<dyn Fn(&[u8], bool) + Send + Sync + 'static>;
@@ -81,17 +360,47 @@ pub fn process_is_running(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_state(pid: u32) -> Option<char> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxProcStat {
+    state: char,
+    parent_pid: u32,
+    starttime_ticks: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_stat(pid: u32) -> Option<LinuxProcStat> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    fields.split_whitespace().next()?.chars().next()
+    parse_linux_proc_stat(&stat)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat(stat: &str) -> Option<LinuxProcStat> {
+    let after_command = stat.rsplit_once(") ")?.1;
+    let mut fields = after_command.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent_pid = fields.next()?.parse().ok()?;
+    let starttime_ticks = after_command.split_whitespace().nth(19)?.parse().ok()?;
+    Some(LinuxProcStat {
+        state,
+        parent_pid,
+        starttime_ticks,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_state(pid: u32) -> Option<char> {
+    linux_process_stat(pid).map(|stat| stat.state)
 }
 
 /// Keeps an isolated child tree owned by the controller that spawned it.
 ///
-/// On Unix, a small guard process watches a pipe whose write end is held only
-/// by the controller. Controller exit closes the pipe and the guard kills the
-/// complete child process group, including descendants which ignore SIGTERM.
+/// On Linux, the spawned child is an execution-scoped supervisor: it is the
+/// parent and subreaper for only that command, waits the root separately, and
+/// reaps every descendant — including never-observed adopted zombies — without
+/// consuming unrelated `Child` statuses. Controller exit closes a pipe whose
+/// write end is held only by this guard; the supervisor then tears the tree
+/// down. Other Unix platforms keep a sibling death watcher over the isolated
+/// process group. Windows uses a kill-on-close job object.
 pub struct ControllerChildGuard {
     #[cfg(unix)]
     controller_liveness_read_fd: RawFd,
@@ -101,14 +410,12 @@ pub struct ControllerChildGuard {
     child_registration_read_fd: RawFd,
     #[cfg(unix)]
     child_registration_fd: RawFd,
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    protocol_write_fd: AtomicI32,
+    #[cfg(target_os = "linux")]
+    root_identity: Mutex<Option<(u32, u32)>>,
+    #[cfg(all(unix, not(target_os = "linux")))]
     owned_processes: Mutex<Vec<UnixProcessIdentity>>,
-    #[cfg(target_os = "linux")]
-    controller_pid: u32,
-    #[cfg(target_os = "linux")]
-    guard_pid: Mutex<Option<u32>>,
-    #[cfg(target_os = "linux")]
-    guard_id: u64,
     #[cfg(windows)]
     job: Mutex<windows_sys::Win32::Foundation::HANDLE>,
 }
@@ -119,71 +426,96 @@ impl ControllerChildGuard {
     pub fn prepare(command: &mut Command) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            #[cfg(target_os = "linux")]
-            let guard_id = CHILD_GUARD_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            #[cfg(target_os = "linux")]
-            command.env("HOMEBOY_CHILD_GUARD_ID", guard_id.to_string());
             let mut fds = [-1; 2];
-            let mut registration_fds = [-1; 2];
             if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
                 return Err(io::Error::last_os_error());
             }
-            if unsafe { libc::pipe(registration_fds.as_mut_ptr()) } != 0 {
-                let error = io::Error::last_os_error();
-                unsafe {
-                    libc::close(fds[0]);
-                    libc::close(fds[1]);
-                }
-                return Err(error);
-            }
-            for fd in fds.into_iter().chain(registration_fds) {
+            for fd in fds {
                 if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                    let error = io::Error::last_os_error();
                     unsafe {
                         libc::close(fds[0]);
                         libc::close(fds[1]);
-                        libc::close(registration_fds[0]);
-                        libc::close(registration_fds[1]);
                     }
-                    return Err(io::Error::last_os_error());
+                    return Err(error);
                 }
             }
-            // The child reports its PID from pre_exec, after it became its own
-            // process-group leader but before it can execute workload code.
-            // That lets the already-running guard cover spawn-to-attach.
-            configure_isolated_process_tree(command, registration_fds[1]);
-            let guard = Self {
-                controller_liveness_read_fd: fds[0],
-                controller_liveness_fd: fds[1],
-                child_registration_read_fd: registration_fds[0],
-                child_registration_fd: registration_fds[1],
-                owned_processes: Mutex::new(Vec::new()),
-                #[cfg(target_os = "linux")]
-                controller_pid: std::process::id(),
-                #[cfg(target_os = "linux")]
-                guard_pid: Mutex::new(None),
-                #[cfg(target_os = "linux")]
-                guard_id,
-            };
-            match unsafe { libc::fork() } {
-                -1 => Err(io::Error::last_os_error()),
-                0 => controller_death_guard_loop(
-                    guard.controller_liveness_read_fd,
-                    guard.controller_liveness_fd,
-                    guard.child_registration_read_fd,
-                    guard.child_registration_fd,
-                ),
-                guard_pid => {
-                    #[cfg(target_os = "linux")]
-                    {
-                        *guard
-                            .guard_pid
-                            .lock()
-                            .map_err(|_| io::Error::other("guard PID lock poisoned"))? =
-                            Some(guard_pid as u32);
+            #[cfg(target_os = "linux")]
+            {
+                let mut protocol = [-1; 2];
+                if unsafe { libc::pipe(protocol.as_mut_ptr()) } != 0 {
+                    let error = io::Error::last_os_error();
+                    unsafe {
+                        libc::close(fds[0]);
+                        libc::close(fds[1]);
                     }
-                    #[cfg(not(target_os = "linux"))]
-                    let _ = guard_pid;
-                    Ok(guard)
+                    return Err(error);
+                }
+                for fd in protocol {
+                    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                        let error = io::Error::last_os_error();
+                        unsafe {
+                            libc::close(fds[0]);
+                            libc::close(fds[1]);
+                            libc::close(protocol[0]);
+                            libc::close(protocol[1]);
+                        }
+                        return Err(error);
+                    }
+                }
+                configure_isolated_process_tree(command, protocol[1], fds[0]);
+                return Ok(Self {
+                    controller_liveness_read_fd: fds[0],
+                    controller_liveness_fd: fds[1],
+                    child_registration_read_fd: protocol[0],
+                    child_registration_fd: -1,
+                    protocol_write_fd: AtomicI32::new(protocol[1]),
+                    root_identity: Mutex::new(None),
+                });
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let mut registration_fds = [-1; 2];
+                if unsafe { libc::pipe(registration_fds.as_mut_ptr()) } != 0 {
+                    let error = io::Error::last_os_error();
+                    unsafe {
+                        libc::close(fds[0]);
+                        libc::close(fds[1]);
+                    }
+                    return Err(error);
+                }
+                for fd in registration_fds {
+                    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                        let error = io::Error::last_os_error();
+                        unsafe {
+                            libc::close(fds[0]);
+                            libc::close(fds[1]);
+                            libc::close(registration_fds[0]);
+                            libc::close(registration_fds[1]);
+                        }
+                        return Err(error);
+                    }
+                }
+                // The child reports its PID from pre_exec, after it became its own
+                // process-group leader but before it can execute workload code.
+                // That lets the already-running guard cover spawn-to-attach.
+                configure_isolated_process_tree(command, registration_fds[1], -1);
+                let guard = Self {
+                    controller_liveness_read_fd: fds[0],
+                    controller_liveness_fd: fds[1],
+                    child_registration_read_fd: registration_fds[0],
+                    child_registration_fd: registration_fds[1],
+                    owned_processes: Mutex::new(Vec::new()),
+                };
+                match unsafe { libc::fork() } {
+                    -1 => Err(io::Error::last_os_error()),
+                    0 => controller_death_guard_loop(
+                        guard.controller_liveness_read_fd,
+                        guard.controller_liveness_fd,
+                        guard.child_registration_read_fd,
+                        guard.child_registration_fd,
+                    ),
+                    _guard_pid => Ok(guard),
                 }
             }
         }
@@ -201,9 +533,25 @@ impl ControllerChildGuard {
     /// Record the child after spawn. The guard already runs from `prepare`, so
     /// controller death during this handoff cannot leave workload descendants.
     pub fn attach(&self, child: &Child) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             self.observe_owned_processes(child.id())?;
+            Ok(())
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            self.close_protocol_write();
+            let mut identity = [0_u8; EXECUTION_PROTOCOL_IDENTITY_LEN];
+            read_exact_fd(self.child_registration_read_fd, &mut identity)?;
+            let root_pid = u32::from_ne_bytes(identity[..4].try_into().expect("root pid"));
+            let root_pgid = u32::from_ne_bytes(identity[4..].try_into().expect("root pgid"));
+            *self
+                .root_identity
+                .lock()
+                .map_err(|_| io::Error::other("execution identity lock poisoned"))? =
+                Some((root_pid, root_pgid));
+            let _ = child;
             Ok(())
         }
 
@@ -220,16 +568,114 @@ impl ControllerChildGuard {
         }
     }
 
+    fn execution_identity(&self, wait_pid: u32) -> io::Result<ExecutionIdentity> {
+        #[cfg(target_os = "linux")]
+        {
+            let (root_pid, root_pgid) = self
+                .root_identity
+                .lock()
+                .map_err(|_| io::Error::other("execution identity lock poisoned"))?
+                .ok_or_else(|| {
+                    io::Error::other("execution owner attached without root identity")
+                })?;
+            Ok(ExecutionIdentity {
+                wait_pid,
+                root_pid,
+                root_pgid: Some(root_pgid),
+                starttime_ticks: linux_process_stat(root_pid).map(|stat| stat.starttime_ticks),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(ExecutionIdentity::unmanaged(wait_pid))
+        }
+    }
+
+    fn request_drain(&mut self, wait_pid: u32) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.close_liveness_write();
+            signal_pid(wait_pid, libc::SIGTERM)
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            signal_process_group(wait_pid, libc::SIGTERM)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = wait_pid;
+            Ok(())
+        }
+    }
+
+    fn try_wait_outcome(
+        &mut self,
+        child: &mut Child,
+        identity: ExecutionIdentity,
+    ) -> io::Result<Option<ExecutionOutcome>> {
+        match child.try_wait()? {
+            Some(status) => self.outcome_after_wait(status, identity).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn outcome_after_wait(
+        &mut self,
+        wait_status: ExitStatus,
+        identity: ExecutionIdentity,
+    ) -> io::Result<ExecutionOutcome> {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = (wait_status, identity);
+            read_execution_protocol_outcome(self.child_registration_read_fd)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+            self.close_after_root_exit(identity.recovery_process_group(), deadline)?;
+            Ok(ExecutionOutcome::complete(wait_status))
+        }
+    }
+
+    fn drain_and_reap(
+        &mut self,
+        child: &mut Child,
+        identity: ExecutionIdentity,
+    ) -> io::Result<ExecutionOutcome> {
+        let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
+        self.request_drain(identity.wait_pid)?;
+        match reap_child_until(child, deadline) {
+            Ok(status) => self.outcome_after_wait(status, identity),
+            Err(error) => Err(io::Error::other(format!(
+                "execution owner did not complete drain: {error}"
+            ))),
+        }
+    }
+
     fn terminate_and_reap(
         &mut self,
         child: &mut Child,
         deadline: std::time::Instant,
     ) -> io::Result<ExitStatus> {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        {
+            let identity = self.execution_identity(child.id())?;
+            self.request_drain(identity.wait_pid)?;
+            match reap_child_until(child, deadline) {
+                Ok(status) => self
+                    .outcome_after_wait(status, identity)?
+                    .into_root_status(),
+                Err(error) => Err(io::Error::other(format!(
+                    "execution owner did not complete drain: {error}"
+                ))),
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             let _ = deadline;
             self.observe_owned_processes(child.id())?;
-            terminate_owned_processes_and_reap(child, &self.owned_processes)
+            terminate_owned_processes_and_reap(child, &self.owned_processes, self.adopted_guard()?)
         }
 
         #[cfg(windows)]
@@ -248,8 +694,14 @@ impl ControllerChildGuard {
         match self.terminate_and_reap(child, deadline) {
             Ok(status) => Ok(status),
             Err(primary) => {
-                #[cfg(unix)]
+                #[cfg(all(unix, not(target_os = "linux")))]
                 let _ = signal_process_group(child.id(), libc::SIGKILL);
+                #[cfg(target_os = "linux")]
+                {
+                    self.close_liveness_write();
+                    let _ = signal_pid(child.id(), libc::SIGTERM);
+                }
+                #[cfg(not(target_os = "linux"))]
                 let _ = child.kill();
                 reap_child_until(child, deadline).map_err(|fallback| {
                     io::Error::other(format!(
@@ -260,12 +712,13 @@ impl ControllerChildGuard {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn close_after_root_exit(
         &mut self,
         root_pid: u32,
         deadline: std::time::Instant,
     ) -> io::Result<()> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         {
             let _ = deadline;
             self.observe_owned_processes(root_pid)?;
@@ -273,7 +726,11 @@ impl ControllerChildGuard {
             // Its ordinary descendants remain in the isolated process group;
             // drain that group before handling tracked session escapees.
             terminate_remaining_process_group(root_pid)?;
-            terminate_owned_processes_after_root_exit(root_pid, &self.owned_processes)
+            terminate_owned_processes_after_root_exit(
+                root_pid,
+                &self.owned_processes,
+                self.adopted_guard()?,
+            )
         }
 
         #[cfg(not(unix))]
@@ -290,26 +747,40 @@ impl ControllerChildGuard {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    fn close_liveness_write(&mut self) {
+        if self.controller_liveness_fd >= 0 {
+            unsafe {
+                libc::close(self.controller_liveness_fd);
+            }
+            self.controller_liveness_fd = -1;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn close_protocol_write(&self) {
+        let fd = self.protocol_write_fd.swap(-1, Ordering::Relaxed);
+        if fd >= 0 {
+            unsafe {
+                libc::close(fd);
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
     fn observe_owned_processes(&self, root_pid: u32) -> io::Result<()> {
         let snapshot = unix_process_snapshot()?;
         let mut owned = self
             .owned_processes
             .lock()
             .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-        #[cfg(target_os = "linux")]
-        let adopted = Some((
-            self.controller_pid,
-            *self
-                .guard_pid
-                .lock()
-                .map_err(|_| io::Error::other("guard PID lock poisoned"))?,
-            self.guard_id,
-        ));
-        #[cfg(not(target_os = "linux"))]
-        let adopted = None;
-        extend_owned_processes(&mut owned, root_pid, &snapshot, adopted);
+        extend_owned_processes(&mut owned, root_pid, &snapshot, self.adopted_guard()?)?;
         Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn adopted_guard(&self) -> io::Result<AdoptedGuard> {
+        Ok(None)
     }
 
     #[cfg(windows)]
@@ -375,11 +846,25 @@ impl Drop for ControllerChildGuard {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
-            libc::close(self.controller_liveness_read_fd);
-            libc::close(self.controller_liveness_fd);
-            libc::close(self.child_registration_read_fd);
-            libc::close(self.child_registration_fd);
+            if self.controller_liveness_read_fd >= 0 {
+                libc::close(self.controller_liveness_read_fd);
+                self.controller_liveness_read_fd = -1;
+            }
+            if self.controller_liveness_fd >= 0 {
+                libc::close(self.controller_liveness_fd);
+                self.controller_liveness_fd = -1;
+            }
+            if self.child_registration_read_fd >= 0 {
+                libc::close(self.child_registration_read_fd);
+                self.child_registration_read_fd = -1;
+            }
+            if self.child_registration_fd >= 0 {
+                libc::close(self.child_registration_fd);
+                self.child_registration_fd = -1;
+            }
         }
+        #[cfg(target_os = "linux")]
+        self.close_protocol_write();
         #[cfg(windows)]
         if let Ok(mut job) = self.job.lock() {
             if !job.is_null() {
@@ -394,17 +879,21 @@ impl Drop for ControllerChildGuard {
 
 /// Close every descriptor this process inherited except `keep`.
 ///
-/// Runs in a forked child, so it stays inside async-signal-safe libc calls and
-/// walks a bounded descriptor range rather than allocating to enumerate
-/// `/proc/self/fd`.
+/// Runs in a forked child, so it stays inside async-signal-safe libc calls.
+/// Linux uses `close_range` so this does not walk `OPEN_MAX`.
 #[cfg(unix)]
 fn close_inherited_descriptors_except(keep: &[RawFd]) {
-    let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    let max = if max > 0 { max as RawFd } else { 1024 };
-    for fd in 3..max {
-        if !keep.contains(&fd) {
-            unsafe {
-                libc::close(fd);
+    #[cfg(target_os = "linux")]
+    close_inherited_linux(keep);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        let max = if max > 0 { max as RawFd } else { 1024 };
+        for fd in 3..max {
+            if !keep.contains(&fd) {
+                unsafe {
+                    libc::close(fd);
+                }
             }
         }
     }
@@ -427,7 +916,34 @@ fn close_inherited_descriptors_except(keep: &[RawFd]) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn close_inherited_linux(keep: &[RawFd]) {
+    let mut kept = [u32::MAX; 8];
+    let mut n = 0usize;
+    for &fd in keep {
+        if fd >= 3 && n < kept.len() {
+            kept[n] = fd as u32;
+            n += 1;
+        }
+    }
+    kept[..n].sort_unstable();
+    let mut start = 3u32;
+    for &fd in &kept[..n] {
+        if fd > start {
+            unsafe {
+                libc::syscall(libc::SYS_close_range, start, fd - 1, 0u32);
+            }
+        }
+        if fd >= start {
+            start = fd.saturating_add(1);
+        }
+    }
+    unsafe {
+        libc::syscall(libc::SYS_close_range, start, u32::MAX, 0u32);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn controller_death_guard_loop(
     read_fd: RawFd,
     write_fd: RawFd,
@@ -499,7 +1015,7 @@ fn write_u32_nul(buf: &mut [u8; 12], mut value: u32) -> *const libc::c_char {
 /// descendants by both PID and kernel-reported start time. The root is still
 /// alive when controller death closes the pipe, so session/group escapees remain
 /// connected through PPID for the first snapshot.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn controller_death_cleanup(root_pid: u32) -> ! {
     const SCRIPT: &str = concat!(
         r#"
@@ -875,6 +1391,58 @@ pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
     })
 }
 
+pub fn wait_with_bounded_output_until_cancelled_owned(
+    owner: &mut ExecutionOwner,
+    byte_limit: usize,
+    is_cancelled: impl FnMut() -> bool,
+) -> io::Result<BoundedCommandOutput> {
+    wait_with_bounded_output_until_cancelled_with_stdout_observer_owned(
+        owner,
+        byte_limit,
+        is_cancelled,
+        None,
+    )
+}
+
+pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer_owned(
+    owner: &mut ExecutionOwner,
+    byte_limit: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+    stdout_line_observer: Option<StdoutLineObserver>,
+) -> io::Result<BoundedCommandOutput> {
+    let stdout = owner.child.stdout.take();
+    let stderr = owner.child.stderr.take();
+    let stdout_handle = stdout.map(|stream| {
+        thread::spawn(move || {
+            capture_tail_with_stdout_observer(stream, byte_limit, stdout_line_observer)
+        })
+    });
+    let stderr_handle =
+        stderr.map(|stream| thread::spawn(move || capture_tail(stream, byte_limit)));
+
+    let status = loop {
+        if let Some(outcome) = owner.try_wait_outcome()? {
+            break outcome.into_root_status()?;
+        }
+        if is_cancelled() {
+            break owner.drain_and_reap()?.into_root_status()?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let stdout = join_capture(stdout_handle)?;
+    let stderr = join_capture(stderr_handle)?;
+
+    Ok(BoundedCommandOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        capture: CommandCaptureMetadata {
+            stdout: stdout.metadata,
+            stderr: stderr.metadata,
+        },
+    })
+}
+
 /// Wait for an isolated child while retaining bounded output and reporting
 /// liveness at a caller-selected cadence. The caller owns durable state; this
 /// primitive owns only child supervision and process-tree termination.
@@ -954,7 +1522,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
     let started = std::time::Instant::now();
     let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
     let supervision: io::Result<_> = loop {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "linux")))]
         if let Err(error) = guard.observe_owned_processes(child.id()) {
             break Err(error);
         }
@@ -964,9 +1532,13 @@ pub fn wait_with_bounded_output_supervised_guarded(
         };
         if let Some(status) = status {
             let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
-            break guard
-                .close_after_root_exit(child.id(), deadline)
-                .map(|()| (status, SupervisedCommandTermination::Completed, deadline));
+            break (|| {
+                let identity = guard.execution_identity(child.id())?;
+                guard
+                    .outcome_after_wait(status, identity)?
+                    .into_root_status()
+                    .map(|status| (status, SupervisedCommandTermination::Completed, deadline))
+            })();
         }
         if is_cancelled() {
             let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
@@ -1177,15 +1749,140 @@ pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
     })
 }
 
+pub fn wait_with_bounded_output_supervised_owned(
+    owner: &mut ExecutionOwner,
+    byte_limit: usize,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+    is_cancelled: impl FnMut() -> bool,
+    mut on_heartbeat: impl FnMut(Duration, &str) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    wait_with_bounded_output_supervised_with_progress_owned(
+        owner,
+        byte_limit,
+        timeout,
+        None,
+        heartbeat_interval,
+        None,
+        is_cancelled,
+        |heartbeat| on_heartbeat(heartbeat.elapsed, &heartbeat.output_tail),
+    )
+}
+
+/// Supervise an [`ExecutionOwner`] with wall-clock and optional structured-progress
+/// deadlines. Cancellation requests owner drain rather than signaling the wait
+/// handle as a workload process group.
+#[allow(clippy::too_many_arguments)]
+pub fn wait_with_bounded_output_supervised_with_progress_owned(
+    owner: &mut ExecutionOwner,
+    byte_limit: usize,
+    timeout: Duration,
+    no_progress_timeout: Option<Duration>,
+    heartbeat_interval: Duration,
+    passthrough: Option<StreamChunkObserver>,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut on_heartbeat: impl FnMut(SupervisedCommandHeartbeat) -> io::Result<()>,
+) -> io::Result<SupervisedCommandOutput> {
+    let stdout = owner.child.stdout.take();
+    let stderr = owner.child.stderr.take();
+    let live_output = Arc::new(Mutex::new(LiveOutputTail::new(byte_limit)));
+    let stdout_handle = stdout.map({
+        let live_output = Arc::clone(&live_output);
+        let passthrough = passthrough.clone();
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, true, live_output, passthrough)
+            })
+        }
+    });
+    let stderr_handle = stderr.map({
+        let live_output = Arc::clone(&live_output);
+        let passthrough = passthrough.clone();
+        move |stream| {
+            thread::spawn(move || {
+                capture_tail_with_live_snapshot(stream, byte_limit, false, live_output, passthrough)
+            })
+        }
+    });
+    let started = std::time::Instant::now();
+    let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
+    let (status, termination) = loop {
+        if let Some(outcome) = owner.try_wait_outcome()? {
+            break (
+                outcome.into_root_status()?,
+                SupervisedCommandTermination::Completed,
+            );
+        }
+        if is_cancelled() {
+            break (
+                owner.drain_and_reap()?.into_root_status()?,
+                SupervisedCommandTermination::Cancelled,
+            );
+        }
+        if started.elapsed() >= timeout {
+            break (
+                owner.drain_and_reap()?.into_root_status()?,
+                SupervisedCommandTermination::TimedOut,
+            );
+        }
+        if no_progress_timeout.is_some_and(|limit| {
+            live_output
+                .lock()
+                .map(|live| {
+                    live.last_progress
+                        .as_ref()
+                        .map(|(_, progress_at)| progress_at.elapsed())
+                        .unwrap_or_else(|| started.elapsed())
+                        >= limit
+                })
+                .unwrap_or(false)
+        }) {
+            break (
+                owner.drain_and_reap()?.into_root_status()?,
+                SupervisedCommandTermination::NoProgress,
+            );
+        }
+        if last_heartbeat.elapsed() >= heartbeat_interval {
+            let heartbeat = live_output
+                .lock()
+                .map(|tail| tail.heartbeat(started.elapsed()))
+                .unwrap_or_default();
+            if let Err(error) = on_heartbeat(heartbeat) {
+                return match owner.drain_and_reap() {
+                    Ok(_) => Err(error),
+                    Err(cleanup_error) => Err(io::Error::other(format!(
+                        "{error}; failed to drain execution owner after heartbeat failure: {cleanup_error}"
+                    ))),
+                };
+            }
+            last_heartbeat = std::time::Instant::now();
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = join_capture(stdout_handle)?;
+    let stderr = join_capture(stderr_handle)?;
+    Ok(SupervisedCommandOutput {
+        output: BoundedCommandOutput {
+            status,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+            capture: CommandCaptureMetadata {
+                stdout: stdout.metadata,
+                stderr: stderr.metadata,
+            },
+        },
+        termination,
+    })
+}
+
 /// A command can exit before a background descendant closes inherited output
 /// pipes. Stop that remaining process group before joining capture readers.
 ///
-/// Public so callers that run their own wait loop (the agent-task provider
-/// path supervises stdin delivery and liveness itself) can reap an isolated
-/// tree with the same semantics instead of reimplementing them.
+/// This is the unmanaged isolated-group path. Supervised Linux executions must
+/// drain through [`ExecutionOwner`] instead of treating `Child::id` as the
+/// workload process group.
 #[cfg(unix)]
 pub fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
-    enable_child_subreaper()?;
     if !process_group_has_live_member(root_pid) {
         return Ok(());
     }
@@ -1313,11 +2010,18 @@ fn capture_tail_with_live_snapshot(
 }
 
 pub fn isolate_process_tree(command: &mut Command) {
-    // Enable adoption before spawn: descendants that outlive their direct
-    // parent are then reparented here and can be reaped during cleanup.
-    let _ = enable_child_subreaper();
     #[cfg(unix)]
-    configure_isolated_process_tree(command, -1);
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     #[cfg(not(unix))]
     {
@@ -1326,25 +2030,457 @@ pub fn isolate_process_tree(command: &mut Command) {
 }
 
 #[cfg(unix)]
-fn configure_isolated_process_tree(command: &mut Command, registration_fd: RawFd) {
+fn configure_isolated_process_tree(
+    command: &mut Command,
+    registration_fd: RawFd,
+    liveness_read_fd: RawFd,
+) {
     unsafe {
         use std::os::unix::process::CommandExt;
 
         command.pre_exec(move || {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if registration_fd >= 0 {
-                let pid = libc::getpid() as u32;
-                let bytes = pid.to_ne_bytes();
-                if libc::write(registration_fd, bytes.as_ptr().cast(), bytes.len())
-                    != bytes.len() as isize
-                {
+            #[cfg(target_os = "linux")]
+            {
+                if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let root = libc::fork();
+                if root < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if root == 0 {
+                    if registration_fd >= 0 {
+                        libc::close(registration_fd);
+                    }
+                    if liveness_read_fd >= 0 {
+                        libc::close(liveness_read_fd);
+                    }
+                    if libc::setpgid(0, 0) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    return Ok(());
+                }
+                execution_supervisor_loop(root as u32, liveness_read_fd, registration_fd);
             }
-            Ok(())
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = liveness_read_fd;
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if registration_fd >= 0 {
+                    let pid = libc::getpid() as u32;
+                    let bytes = pid.to_ne_bytes();
+                    if libc::write(registration_fd, bytes.as_ptr().cast(), bytes.len())
+                        != bytes.len() as isize
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            }
         });
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn signal_pid(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Ok(());
+    }
+    unsafe {
+        if libc::kill(pid as libc::pid_t, signal) != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn handle_supervisor_term(_signal: libc::c_int) {
+    SUPERVISOR_TEARDOWN.store(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+fn execution_supervisor_loop(
+    root_pid: u32,
+    liveness_read_fd: RawFd,
+    protocol_write_fd: RawFd,
+) -> ! {
+    let mut identity = [0_u8; EXECUTION_PROTOCOL_IDENTITY_LEN];
+    identity[..4].copy_from_slice(&root_pid.to_ne_bytes());
+    identity[4..].copy_from_slice(&root_pid.to_ne_bytes());
+    if protocol_write_fd < 0 || !write_all_fd(protocol_write_fd, &identity) {
+        unsafe { libc::_exit(1) };
+    }
+    // Close the std exec-error pipe write end inherited from Command::spawn.
+    // The root child still holds it, so spawn can return on root exec success
+    // or receive the root exec errno. Keeping this fd open would block spawn
+    // until the supervisor exits.
+    let mut keep = [-1; 2];
+    let mut n = 0;
+    if liveness_read_fd >= 0 {
+        keep[n] = liveness_read_fd;
+        n += 1;
+    }
+    if protocol_write_fd >= 0 {
+        keep[n] = protocol_write_fd;
+        n += 1;
+    }
+    close_inherited_descriptors_except(&keep[..n]);
+    SUPERVISOR_TEARDOWN.store(0, std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handle_supervisor_term as *const () as libc::sighandler_t;
+        if libc::sigemptyset(&mut action.sa_mask) != 0
+            || libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut()) != 0
+        {
+            libc::_exit(1);
+        }
+        if liveness_read_fd >= 0
+            && libc::fcntl(liveness_read_fd, libc::F_SETFL, libc::O_NONBLOCK) == -1
+        {
+            libc::_exit(1);
+        }
+    }
+
+    let mut liveness_fd = liveness_read_fd;
+    let mut root_wait_status = 0;
+    let mut root_reaped = false;
+    let mut tearing_down = false;
+    let mut kill_phase = false;
+    let mut controller_loss = false;
+    let mut phase_deadline = supervisor_now();
+
+    loop {
+        loop {
+            let mut status = 0;
+            let reaped = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if reaped > 0 {
+                if reaped == root_pid as libc::pid_t {
+                    root_wait_status = status;
+                    root_reaped = true;
+                    if !tearing_down {
+                        tearing_down = true;
+                        kill_phase = false;
+                        phase_deadline = supervisor_deadline(PROCESS_TREE_TERM_GRACE);
+                    }
+                }
+                continue;
+            }
+            if reaped < 0 {
+                let errno = io::Error::last_os_error().raw_os_error();
+                if errno == Some(libc::EINTR) {
+                    continue;
+                }
+                if errno == Some(libc::ECHILD) && root_reaped {
+                    supervisor_finish(
+                        protocol_write_fd,
+                        EXECUTION_PROTOCOL_COMPLETE,
+                        root_wait_status,
+                    );
+                }
+            }
+            break;
+        }
+
+        let liveness_closed = supervisor_liveness_closed(&mut liveness_fd);
+        if !tearing_down
+            && (SUPERVISOR_TEARDOWN.load(std::sync::atomic::Ordering::Relaxed) != 0
+                || liveness_closed)
+        {
+            tearing_down = true;
+            controller_loss = liveness_closed;
+            kill_phase = false;
+            phase_deadline = supervisor_deadline(if controller_loss {
+                CONTROLLER_LOSS_TERM_GRACE
+            } else {
+                PROCESS_TREE_TERM_GRACE
+            });
+        } else if tearing_down && supervisor_deadline_reached(phase_deadline) {
+            if !kill_phase {
+                kill_phase = true;
+                phase_deadline = supervisor_deadline(if controller_loss {
+                    CONTROLLER_LOSS_KILL_GRACE
+                } else {
+                    PROCESS_TREE_KILL_GRACE
+                });
+            } else {
+                let tag = if root_reaped {
+                    EXECUTION_PROTOCOL_INCOMPLETE
+                } else {
+                    EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT
+                };
+                supervisor_finish(protocol_write_fd, tag, root_wait_status);
+            }
+        }
+
+        if tearing_down {
+            supervisor_signal_remaining(
+                root_pid,
+                if kill_phase {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                },
+            );
+        }
+
+        supervisor_idle(&mut liveness_fd);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_now() -> libc::timespec {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        unsafe { libc::_exit(1) };
+    }
+    now
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_deadline(grace: Duration) -> libc::timespec {
+    let mut deadline = supervisor_now();
+    deadline.tv_sec += grace.as_secs() as libc::time_t;
+    deadline.tv_nsec += grace.subsec_nanos() as libc::c_long;
+    if deadline.tv_nsec >= 1_000_000_000 {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1_000_000_000;
+    }
+    deadline
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_deadline_reached(deadline: libc::timespec) -> bool {
+    let now = supervisor_now();
+    now.tv_sec > deadline.tv_sec
+        || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_disable_liveness(fd: &mut RawFd) {
+    if *fd >= 0 {
+        unsafe {
+            libc::close(*fd);
+        }
+        *fd = -1;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_liveness_closed(fd: &mut RawFd) -> bool {
+    if *fd < 0 {
+        return true;
+    }
+    let mut byte = 0_u8;
+    loop {
+        let read = unsafe { libc::read(*fd, (&mut byte as *mut u8).cast(), 1) };
+        if read == 0 {
+            supervisor_disable_liveness(fd);
+            return true;
+        }
+        if read > 0 {
+            continue;
+        }
+        let errno = io::Error::last_os_error().raw_os_error();
+        if matches!(errno, Some(libc::EINTR | libc::EAGAIN)) {
+            return false;
+        }
+        supervisor_disable_liveness(fd);
+        return true;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_idle(fd: &mut RawFd) {
+    if *fd >= 0 {
+        let mut pollfd = libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        let result = unsafe {
+            libc::poll(
+                &mut pollfd,
+                1,
+                PROCESS_TREE_POLL_INTERVAL.as_millis() as libc::c_int,
+            )
+        };
+        if result > 0 && pollfd.revents & (libc::POLLHUP | libc::POLLIN | libc::POLLERR) != 0 {
+            if supervisor_liveness_closed(fd) {
+                return;
+            }
+        }
+        return;
+    }
+    let mut sleep_for = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: PROCESS_TREE_POLL_INTERVAL.as_nanos() as libc::c_long,
+    };
+    unsafe {
+        libc::nanosleep(&mut sleep_for, std::ptr::null_mut());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_signal_remaining(root_pid: u32, signal: libc::c_int) {
+    unsafe {
+        libc::kill(-(root_pid as libc::pid_t), signal);
+    }
+    supervisor_signal_children(signal);
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_signal_children(signal: libc::c_int) {
+    let mut path = [0u8; 64];
+    let prefix = b"/proc/self/task/";
+    path[..prefix.len()].copy_from_slice(prefix);
+    let mut pid_buf = [0u8; 12];
+    let pid = write_u32_nul(&mut pid_buf, unsafe { libc::getpid() } as u32);
+    let pid_bytes = unsafe { std::ffi::CStr::from_ptr(pid) }.to_bytes();
+    let mut offset = prefix.len();
+    path[offset..offset + pid_bytes.len()].copy_from_slice(pid_bytes);
+    offset += pid_bytes.len();
+    let suffix = b"/children";
+    path[offset..offset + suffix.len()].copy_from_slice(suffix);
+    path[offset + suffix.len()] = 0;
+    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return;
+    }
+    let self_pid = unsafe { libc::getpid() } as u32;
+    let mut buf = [0u8; 4096];
+    let mut pid = 0u32;
+    let mut in_pid = false;
+    loop {
+        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if read == 0 {
+            break;
+        }
+        if read < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        for &byte in &buf[..read as usize] {
+            if byte.is_ascii_digit() {
+                in_pid = true;
+                pid = pid.saturating_mul(10).saturating_add((byte - b'0') as u32);
+            } else if in_pid {
+                if pid != 0 && pid != self_pid {
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, signal);
+                    }
+                }
+                pid = 0;
+                in_pid = false;
+            }
+        }
+    }
+    unsafe {
+        libc::close(fd);
+    }
+    if in_pid && pid != 0 && pid != self_pid {
+        unsafe {
+            libc::kill(pid as libc::pid_t, signal);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn supervisor_finish(protocol_fd: RawFd, tag: u8, wait_status: libc::c_int) -> ! {
+    if protocol_fd >= 0 {
+        let mut payload = [0_u8; EXECUTION_PROTOCOL_TERMINAL_LEN];
+        payload[0] = tag;
+        payload[1..].copy_from_slice(&(wait_status as i32).to_ne_bytes());
+        let _ = write_all_fd(protocol_fd, &payload);
+        unsafe {
+            libc::close(protocol_fd);
+        }
+    }
+    unsafe { libc::_exit(0) };
+}
+
+#[cfg(target_os = "linux")]
+fn write_all_fd(fd: RawFd, bytes: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let wrote =
+            unsafe { libc::write(fd, bytes[offset..].as_ptr().cast(), bytes.len() - offset) };
+        if wrote < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if wrote == 0 {
+            return false;
+        }
+        offset += wrote as usize;
+    }
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn read_exact_fd(fd: RawFd, bytes: &mut [u8]) -> io::Result<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let read = unsafe {
+            libc::read(
+                fd,
+                bytes[offset..].as_mut_ptr().cast(),
+                bytes.len() - offset,
+            )
+        };
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "execution owner protocol closed",
+            ));
+        }
+        if read < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        offset += read as usize;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_execution_protocol_outcome(fd: RawFd) -> io::Result<ExecutionOutcome> {
+    use std::os::unix::process::ExitStatusExt;
+    let mut payload = [0_u8; EXECUTION_PROTOCOL_TERMINAL_LEN];
+    read_exact_fd(fd, &mut payload)?;
+    let wait_status = i32::from_ne_bytes(payload[1..].try_into().expect("wait status"));
+    let root_status = ExitStatus::from_raw(wait_status);
+    match payload[0] {
+        EXECUTION_PROTOCOL_COMPLETE => Ok(ExecutionOutcome::complete(root_status)),
+        EXECUTION_PROTOCOL_INCOMPLETE => Ok(ExecutionOutcome {
+            root_status,
+            cleanup: ExecutionCleanup::Incomplete,
+        }),
+        EXECUTION_PROTOCOL_INCOMPLETE_NO_ROOT => Err(io::Error::other(
+            "execution owner cleanup did not complete before root status was observed",
+        )),
+        tag => Err(io::Error::other(format!(
+            "execution owner protocol tag {tag} is invalid"
+        ))),
     }
 }
 
@@ -1362,7 +2498,7 @@ fn signal_process_group(root_pid: u32, signal: libc::c_int) -> io::Result<()> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
     // Process-tree cleanup is controller infrastructure, not workload code. It
     // must remain available when a caller replaces the ambient PATH.
@@ -1391,7 +2527,7 @@ fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
     Ok(descendants)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UnixProcessIdentity {
     pid: u32,
@@ -1399,7 +2535,7 @@ struct UnixProcessIdentity {
     started_at: String,
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
     let output = Command::new("ps")
         .env("PATH", "/usr/bin:/bin")
@@ -1427,13 +2563,14 @@ fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
         .collect())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn extend_owned_processes(
     owned: &mut Vec<UnixProcessIdentity>,
     root_pid: u32,
     snapshot: &[UnixProcessIdentity],
-    adopted: Option<(u32, Option<u32>, u64)>,
-) {
+    adopted: AdoptedGuard,
+) -> io::Result<()> {
+    let _ = adopted;
     if owned.is_empty() {
         if let Some(root) = snapshot.iter().find(|process| process.pid == root_pid) {
             owned.push(root.clone());
@@ -1445,13 +2582,7 @@ fn extend_owned_processes(
             if owned.iter().any(|known| known.pid == process.pid) {
                 continue;
             }
-            let adopted_descendant =
-                adopted.is_some_and(|(controller_pid, guard_pid, guard_id)| {
-                    process.parent_pid == controller_pid
-                        && Some(process.pid) != guard_pid
-                        && process_has_guard_id(process.pid, guard_id)
-                });
-            if adopted_descendant || owned.iter().any(|known| known.pid == process.parent_pid) {
+            if owned_contains_matching_parent(owned, snapshot, process.parent_pid) {
                 owned.push(process.clone());
                 changed = true;
             }
@@ -1460,63 +2591,39 @@ fn extend_owned_processes(
             break;
         }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn process_has_guard_id(pid: u32, guard_id: u64) -> bool {
-    let expected = format!("HOMEBOY_CHILD_GUARD_ID={guard_id}");
-    std::fs::read(format!("/proc/{pid}/environ"))
-        .ok()
-        .is_some_and(|environment| {
-            environment
-                .split(|byte| *byte == 0)
-                .any(|entry| entry == expected.as_bytes())
-        })
+    Ok(())
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn process_has_guard_id(_pid: u32, _guard_id: u64) -> bool {
-    false
+fn owned_identity_matches(known: &UnixProcessIdentity, current: &UnixProcessIdentity) -> bool {
+    known.pid == current.pid && known.started_at == current.started_at
 }
 
-#[cfg(unix)]
-fn live_owned_pids(owned: &[UnixProcessIdentity], snapshot: &[UnixProcessIdentity]) -> Vec<u32> {
-    owned
-        .iter()
-        .filter_map(|known| {
-            snapshot
+#[cfg(all(unix, not(target_os = "linux")))]
+fn owned_contains_matching_parent(
+    owned: &[UnixProcessIdentity],
+    snapshot: &[UnixProcessIdentity],
+    parent_pid: u32,
+) -> bool {
+    owned.iter().any(|known| {
+        known.pid == parent_pid
+            && snapshot
                 .iter()
-                .any(|process| process.pid == known.pid && process.started_at == known.started_at)
-                .then_some(known.pid)
-        })
-        .collect()
+                .any(|current| owned_identity_matches(known, current))
+    })
 }
 
-#[cfg(unix)]
-fn signal_owned_processes(
-    owned: &mut Vec<UnixProcessIdentity>,
-    root_pid: u32,
-    signal: libc::c_int,
-) -> io::Result<Vec<u32>> {
-    let snapshot = unix_process_snapshot()?;
-    extend_owned_processes(owned, root_pid, &snapshot, None);
-    let pids = live_owned_pids(owned, &snapshot);
-    signal_pids(&pids, signal);
-    Ok(pids)
-}
-
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn terminate_owned_processes_and_reap(
     child: &mut Child,
     owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    adopted: AdoptedGuard,
 ) -> io::Result<ExitStatus> {
-    enable_child_subreaper()?;
     let root_pid = child.id();
     let mut owned = owned_processes
         .lock()
         .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
     signal_process_group(root_pid, libc::SIGTERM)?;
-    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM)?;
     let mut status = child.try_wait()?;
     if !wait_for_owned_process_exit(
         child,
@@ -1525,9 +2632,9 @@ fn terminate_owned_processes_and_reap(
         PROCESS_TREE_TERM_GRACE,
         libc::SIGTERM,
         &mut status,
+        adopted,
     )? {
         signal_process_group(root_pid, libc::SIGKILL)?;
-        signal_owned_processes(&mut owned, root_pid, libc::SIGKILL)?;
         if !wait_for_owned_process_exit(
             child,
             root_pid,
@@ -1535,6 +2642,7 @@ fn terminate_owned_processes_and_reap(
             PROCESS_TREE_KILL_GRACE,
             libc::SIGKILL,
             &mut status,
+            adopted,
         )? {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -1545,29 +2653,30 @@ fn terminate_owned_processes_and_reap(
     status.map(Ok).unwrap_or_else(|| child.wait())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn terminate_owned_processes_after_root_exit(
     root_pid: u32,
     owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    adopted: AdoptedGuard,
 ) -> io::Result<()> {
     let mut owned = owned_processes
         .lock()
         .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-    signal_owned_processes(&mut owned, root_pid, libc::SIGTERM)?;
     if wait_for_owned_process_exit_without_child(
         root_pid,
         &mut owned,
         PROCESS_TREE_TERM_GRACE,
         libc::SIGTERM,
+        adopted,
     )? {
         return Ok(());
     }
-    signal_owned_processes(&mut owned, root_pid, libc::SIGKILL)?;
     if wait_for_owned_process_exit_without_child(
         root_pid,
         &mut owned,
         PROCESS_TREE_KILL_GRACE,
         libc::SIGKILL,
+        adopted,
     )? {
         return Ok(());
     }
@@ -1577,7 +2686,7 @@ fn terminate_owned_processes_after_root_exit(
     ))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn wait_for_owned_process_exit(
     child: &mut Child,
     root_pid: u32,
@@ -1585,17 +2694,17 @@ fn wait_for_owned_process_exit(
     grace: Duration,
     signal: libc::c_int,
     status: &mut Option<ExitStatus>,
+    adopted: AdoptedGuard,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
     loop {
-        let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot, None);
-        signal_pids(&live_owned_pids(owned, &snapshot), signal);
         if status.is_none() {
             *status = child.try_wait()?;
         }
-        reap_exited_process_group_children(root_pid);
-        if live_owned_pids(owned, &snapshot).is_empty() {
+        if status.is_some() {
+            reap_exited_process_group_children(root_pid);
+        }
+        if drain_owned_processes(owned, root_pid, signal, adopted)? {
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
@@ -1605,20 +2714,18 @@ fn wait_for_owned_process_exit(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn wait_for_owned_process_exit_without_child(
     root_pid: u32,
     owned: &mut Vec<UnixProcessIdentity>,
     grace: Duration,
     signal: libc::c_int,
+    adopted: AdoptedGuard,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
     loop {
-        let snapshot = unix_process_snapshot()?;
-        extend_owned_processes(owned, root_pid, &snapshot, None);
-        signal_pids(&live_owned_pids(owned, &snapshot), signal);
         reap_exited_process_group_children(root_pid);
-        if live_owned_pids(owned, &snapshot).is_empty() {
+        if drain_owned_processes(owned, root_pid, signal, adopted)? {
             return Ok(true);
         }
         if std::time::Instant::now() >= deadline {
@@ -1628,7 +2735,49 @@ fn wait_for_owned_process_exit_without_child(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn drain_owned_processes(
+    owned: &mut Vec<UnixProcessIdentity>,
+    root_pid: u32,
+    signal: libc::c_int,
+    adopted: AdoptedGuard,
+) -> io::Result<bool> {
+    let snapshot = unix_process_snapshot()?;
+    extend_owned_processes(owned, root_pid, &snapshot, adopted)?;
+    if signal_and_reap_owned(owned, root_pid, signal, adopted)? {
+        return Ok(false);
+    }
+    let discovered = owned.len();
+    let refresh = unix_process_snapshot()?;
+    extend_owned_processes(owned, root_pid, &refresh, adopted)?;
+    Ok(owned.len() == discovered)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn signal_and_reap_owned(
+    owned: &[UnixProcessIdentity],
+    root_pid: u32,
+    signal: libc::c_int,
+    adopted: AdoptedGuard,
+) -> io::Result<bool> {
+    let mut remaining = false;
+    let snapshot = unix_process_snapshot()?;
+    for known in owned {
+        let Some(current) = snapshot.iter().find(|process| process.pid == known.pid) else {
+            continue;
+        };
+        if owned_identity_matches(known, current) && process_is_running(known.pid) {
+            unsafe {
+                let _ = libc::kill(known.pid as libc::pid_t, signal);
+            }
+            remaining = true;
+        }
+    }
+    let _ = (root_pid, adopted);
+    Ok(remaining)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn signal_pids(pids: &[u32], signal: libc::c_int) {
     for pid in pids {
         unsafe {
@@ -1860,6 +3009,15 @@ mod process_group_liveness_tests {
 
         let _ = terminate_process_tree_and_reap(&mut child);
     }
+
+    #[test]
+    fn parse_linux_proc_stat_handles_command_names_with_spaces() {
+        let stat = "123 (name with spaces) Z 1 456 456 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 4242 extra";
+        let parsed = parse_linux_proc_stat(stat).expect("parse");
+        assert_eq!(parsed.state, 'Z');
+        assert_eq!(parsed.parent_pid, 1);
+        assert_eq!(parsed.starttime_ticks, 4242);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1945,23 +3103,385 @@ mod supervisor_zombie_guard_tests {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod adopted_child_reaping_tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::process::CommandExt;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore = "subprocess fixture for a rapidly reparented guarded descendant"]
+    fn guarded_fast_double_fork_fixture() {
+        let target = std::env::var("HOMEBOY_ADOPTED_DAEMON_TARGET").expect("target");
+        let pid_file = std::env::var("HOMEBOY_ADOPTED_DAEMON_PID_FILE").expect("pid file");
+        let script = CString::new(format!(
+            "printf '%s' $$ > {}; sleep 0.25; printf stale > {}; sleep 30",
+            crate::shell::quote_path(&pid_file),
+            crate::shell::quote_path(&target),
+        ))
+        .expect("fixture script");
+        let shell = c"/bin/sh";
+        let shell_name = c"sh";
+        let command_flag = c"-c";
+
+        let intermediate = unsafe { libc::fork() };
+        assert_ne!(intermediate, -1, "fork intermediate");
+        if intermediate == 0 {
+            let daemon = unsafe { libc::fork() };
+            if daemon < 0 {
+                unsafe { libc::_exit(2) };
+            }
+            if daemon > 0 {
+                unsafe { libc::_exit(0) };
+            }
+            if unsafe { libc::setsid() } == -1 {
+                unsafe { libc::_exit(3) };
+            }
+            let max = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+            for fd in 0..if max > 0 { max as i32 } else { 1024 } {
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            unsafe {
+                libc::execl(
+                    shell.as_ptr(),
+                    shell_name.as_ptr(),
+                    command_flag.as_ptr(),
+                    script.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(4);
+            }
+        }
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(intermediate, &mut status, 0) },
+            intermediate,
+            "reap intermediate"
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for an immediately-exiting reparented descendant"]
+    fn guarded_instant_double_fork_fixture() {
+        let intermediate = unsafe { libc::fork() };
+        assert_ne!(intermediate, -1, "fork intermediate");
+        if intermediate == 0 {
+            let daemon = unsafe { libc::fork() };
+            if daemon < 0 {
+                unsafe { libc::_exit(2) };
+            }
+            if daemon > 0 {
+                unsafe { libc::_exit(0) };
+            }
+            if unsafe { libc::setsid() } == -1 {
+                unsafe { libc::_exit(3) };
+            }
+            unsafe { libc::_exit(0) };
+        }
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(intermediate, &mut status, 0) },
+            intermediate,
+            "reap intermediate"
+        );
+    }
+
+    fn wait_for_recorded_pid(path: &Path, deadline: Instant) -> u32 {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    return pid;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "double-fork fixture did not publish its PID"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    struct RecordedLinuxProcess {
+        pid: u32,
+        starttime_ticks: u64,
+    }
+
+    impl Drop for RecordedLinuxProcess {
+        fn drop(&mut self) {
+            let Some(stat) = linux_process_stat(self.pid) else {
+                return;
+            };
+            if stat.starttime_ticks != self.starttime_ticks {
+                return;
+            }
+            if process_is_running(self.pid) {
+                unsafe {
+                    libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            let Some(stat) = linux_process_stat(self.pid) else {
+                return;
+            };
+            if stat.starttime_ticks == self.starttime_ticks
+                && stat.state == 'Z'
+                && stat.parent_pid == std::process::id()
+            {
+                let mut status = 0;
+                unsafe {
+                    libc::waitpid(self.pid as libc::pid_t, &mut status, libc::WNOHANG);
+                }
+            }
+        }
+    }
+
+    struct KillChildOnDrop(Option<std::process::Child>);
+
+    impl Drop for KillChildOnDrop {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_completion_reaps_double_fork_setsid_closed_fd_without_touching_sibling() {
+        let mut sibling = Command::new("sh");
+        sibling
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let sibling = sibling.spawn().expect("spawn unrelated child");
+        let sibling_pid = sibling.id();
+        let sibling_ticks = linux_process_stat(sibling_pid)
+            .expect("sibling start identity")
+            .starttime_ticks;
+        let mut sibling = KillChildOnDrop(Some(sibling));
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let target = workspace.path().join("target");
+        let pid_file = workspace.path().join("daemon.pid");
+        std::fs::write(&target, b"original").expect("write target");
+        let test_binary = std::env::current_exe().expect("test executable");
+        let mut command = Command::new(&test_binary);
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "command::adopted_child_reaping_tests::guarded_fast_double_fork_fixture",
+                "--nocapture",
+            ])
+            .env("HOMEBOY_ADOPTED_DAEMON_TARGET", &target)
+            .env("HOMEBOY_ADOPTED_DAEMON_PID_FILE", &pid_file)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn double-fork root");
+        guard.attach(&child).expect("attach guard");
+        let daemon_pid = wait_for_recorded_pid(&pid_file, Instant::now() + Duration::from_secs(2));
+        let daemon_ticks = linux_process_stat(daemon_pid)
+            .expect("daemon start identity")
+            .starttime_ticks;
+        let _daemon = RecordedLinuxProcess {
+            pid: daemon_pid,
+            starttime_ticks: daemon_ticks,
+        };
+
+        let supervised = wait_with_bounded_output_supervised_guarded(
+            &mut child,
+            &mut guard,
+            4096,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("root completion contains reparented descendant");
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::Completed
+        );
+        thread::sleep(Duration::from_millis(350));
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"original",
+            "descriptor-closing daemon mutated after root completion"
+        );
+        let daemon_still_same =
+            linux_process_stat(daemon_pid).is_some_and(|stat| stat.starttime_ticks == daemon_ticks);
+        assert!(
+            !daemon_still_same || !process_is_running(daemon_pid),
+            "adopted double-fork descendant remained runnable"
+        );
+
+        let sibling_child = sibling.0.as_mut().expect("sibling child");
+        let sibling_stat = linux_process_stat(sibling_pid);
+        assert!(
+            sibling_child.try_wait().expect("sibling status").is_none(),
+            "an unrelated child must not be reaped"
+        );
+        assert_eq!(
+            sibling_stat.map(|stat| stat.starttime_ticks),
+            Some(sibling_ticks),
+            "unrelated child identity must remain the recorded process"
+        );
+    }
+
+    fn our_zombie_pids() -> Vec<u32> {
+        let self_pid = std::process::id();
+        let mut zombies = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return zombies;
+        };
+        for entry in entries.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let Some(stat) = linux_process_stat(pid) else {
+                continue;
+            };
+            if stat.state == 'Z' && stat.parent_pid == self_pid {
+                zombies.push(pid);
+            }
+        }
+        zombies
+    }
+
+    fn run_instant_double_fork() -> SupervisedCommandOutput {
+        let test_binary = std::env::current_exe().expect("test executable");
+        let mut command = Command::new(&test_binary);
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "command::adopted_child_reaping_tests::guarded_instant_double_fork_fixture",
+                "--nocapture",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn instant double-fork root");
+        guard.attach(&child).expect("attach guard");
+        wait_with_bounded_output_supervised_guarded(
+            &mut child,
+            &mut guard,
+            4096,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("instant double-fork root completes")
+    }
+
+    #[test]
+    fn guarded_completion_reaps_instant_double_fork_without_touching_sibling() {
+        let mut sibling = Command::new("sh");
+        sibling
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let sibling = sibling.spawn().expect("spawn unrelated child");
+        let sibling_pid = sibling.id();
+        let sibling_ticks = linux_process_stat(sibling_pid)
+            .expect("sibling start identity")
+            .starttime_ticks;
+        let mut sibling = KillChildOnDrop(Some(sibling));
+        let zombies_before = our_zombie_pids();
+
+        let supervised = run_instant_double_fork();
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::Completed
+        );
+        assert_eq!(
+            our_zombie_pids(),
+            zombies_before,
+            "never-observed adopted descendant became a controller zombie"
+        );
+
+        let sibling_child = sibling.0.as_mut().expect("sibling child");
+        assert!(
+            sibling_child.try_wait().expect("sibling status").is_none(),
+            "an unrelated child must not be reaped"
+        );
+        assert_eq!(
+            linux_process_stat(sibling_pid).map(|stat| stat.starttime_ticks),
+            Some(sibling_ticks),
+            "unrelated child identity must remain the recorded process"
+        );
+    }
+
+    #[test]
+    fn repeated_instant_double_forks_leave_no_adopted_zombies() {
+        let mut sibling = Command::new("sh");
+        sibling
+            .args(["-c", "exec sleep 30"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut sibling = KillChildOnDrop(Some(sibling.spawn().expect("spawn unrelated child")));
+        let sibling_pid = sibling.0.as_ref().expect("sibling").id();
+        let zombies_before = our_zombie_pids();
+
+        for _ in 0..8 {
+            let supervised = run_instant_double_fork();
+            assert_eq!(
+                supervised.termination,
+                SupervisedCommandTermination::Completed
+            );
+        }
+
+        assert_eq!(
+            our_zombie_pids(),
+            zombies_before,
+            "repeated executions left adopted zombies on the controller"
+        );
+        assert!(
+            sibling
+                .0
+                .as_mut()
+                .expect("sibling")
+                .try_wait()
+                .expect("sibling status")
+                .is_none(),
+            "unrelated Child status must remain available across repeated executions"
+        );
+        assert_eq!(
+            linux_process_stat(sibling_pid).map(|stat| stat.parent_pid),
+            Some(std::process::id())
+        );
+    }
+}
+
 /// Terminate an isolated child process tree and reap its direct child process.
 /// On platforms without process groups, `Child::kill` still provides portable
 /// termination and reaping of the spawned process.
 pub fn terminate_process_tree_and_reap(child: &mut Child) -> io::Result<ExitStatus> {
     #[cfg(unix)]
     {
-        enable_child_subreaper()?;
         let root_pid = child.id();
         // Shells can put background jobs in a distinct process group. Snapshot
         // descendants before terminating the root so those jobs cannot retain
         // output pipes and strand capture-reader joins.
+        #[cfg(not(target_os = "linux"))]
         let descendants = descendant_pids(root_pid)?;
         signal_process_group(root_pid, libc::SIGTERM)?;
+        #[cfg(not(target_os = "linux"))]
         signal_pids(&descendants, libc::SIGTERM);
         let mut status = child.try_wait()?;
         if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_TERM_GRACE, &mut status)? {
             signal_process_group(root_pid, libc::SIGKILL)?;
+            #[cfg(not(target_os = "linux"))]
             signal_pids(&descendants, libc::SIGKILL);
             if !wait_for_process_group_exit(child, root_pid, PROCESS_TREE_KILL_GRACE, &mut status)?
             {
@@ -2007,28 +3527,6 @@ fn reap_child_until(child: &mut Child, deadline: std::time::Instant) -> io::Resu
         }
         thread::sleep(Duration::from_millis(10));
     }
-}
-
-/// Adopt orphaned descendants while their isolated process group is being
-/// terminated, so they can be reaped instead of remaining zombies under PID 1.
-#[cfg(target_os = "linux")]
-fn enable_child_subreaper() -> io::Result<()> {
-    CHILD_SUBREAPER_ENABLED
-        .get_or_init(|| {
-            if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        })
-        .as_ref()
-        .copied()
-        .map_err(|error| io::Error::new(error.kind(), error.to_string()))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn enable_child_subreaper() -> io::Result<()> {
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -2324,6 +3822,98 @@ mod tests {
         assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn isolated_spawn_returns_before_the_command_exits() {
+        let mut command = Command::new("sleep");
+        command
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        isolate_process_tree(&mut command);
+        let started = std::time::Instant::now();
+        let mut child = command
+            .spawn()
+            .expect("spawn must not wait on the supervisor exec-error pipe");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "Command::spawn blocked until the isolated command finished"
+        );
+        let _ = terminate_process_tree_and_reap(&mut child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_spawn_reports_root_exec_failure() {
+        let mut command = Command::new("/no/such/homeboy-execution-supervisor-probe");
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        isolate_process_tree(&mut command);
+        let error = command
+            .spawn()
+            .expect_err("root exec failure must fail spawn, not return a live supervisor");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_nonzero_root_exit_status_is_preserved() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 7"]);
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn nonzero root");
+        guard.attach(&child).expect("attach guard");
+        let supervised = wait_with_bounded_output_supervised_guarded(
+            &mut child,
+            &mut guard,
+            4096,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("nonzero root completes");
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::Completed
+        );
+        assert_eq!(supervised.output.status.code(), Some(7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_root_term_signal_status_is_preserved() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "kill -TERM $$"]);
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn signaled root");
+        guard.attach(&child).expect("attach guard");
+        let supervised = wait_with_bounded_output_supervised_guarded(
+            &mut child,
+            &mut guard,
+            4096,
+            Duration::from_secs(2),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("signaled root completes");
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::Completed
+        );
+        assert_eq!(supervised.output.status.signal(), Some(libc::SIGTERM));
+    }
+
     #[test]
     fn tail_capture_reports_untruncated_stream() {
         let mut capture = TailCapture::new(10);
@@ -2529,5 +4119,235 @@ mod tests {
             !process_is_running(descendant_pid as u32),
             "cancellable wait left descendant {descendant_pid} runnable"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_preserves_root_exit_one_as_command_status() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exit 1"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let identity = owner.identity();
+        #[cfg(target_os = "linux")]
+        assert_ne!(
+            identity.wait_pid, identity.root_pid,
+            "linux supervisor must not share the workload pid"
+        );
+        let output = wait_with_bounded_output_until_cancelled_owned(&mut owner, 64, || false)
+            .expect("root exit 1 is a completed command status");
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(identity.recovery_process_group(), identity.root_pid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_cancel_reaps_term_resistant_descendants() {
+        struct ReapOnDrop(u32);
+        impl Drop for ReapOnDrop {
+            fn drop(&mut self) {
+                if self.0 != 0 && process_is_running(self.0) {
+                    unsafe {
+                        libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let script = format!(
+            "trap '' TERM; sleep 30 & echo $! > {}; wait",
+            crate::shell::quote_path(&pid_file.display().to_string())
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let root_guard = ReapOnDrop(owner.identity().root_pid);
+        let output =
+            wait_with_bounded_output_until_cancelled_owned(&mut owner, 1024, || pid_file.exists())
+                .expect("owner drain cancels the tree");
+        assert!(!output.status.success());
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let _descendant_guard = ReapOnDrop(descendant_pid);
+        assert!(
+            !process_is_running(descendant_pid),
+            "owner cancel left TERM-resistant descendant {descendant_pid} runnable"
+        );
+        let _ = root_guard;
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    fn unix_exit_wait_status(code: i32) -> i32 {
+        code << 8
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    fn write_protocol_outcome(tag: u8, wait_status: i32) -> ExecutionOutcome {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let mut payload = [0_u8; EXECUTION_PROTOCOL_TERMINAL_LEN];
+        payload[0] = tag;
+        payload[1..].copy_from_slice(&wait_status.to_ne_bytes());
+        assert!(write_all_fd(fds[1], &payload));
+        unsafe {
+            libc::close(fds[1]);
+        }
+        let outcome = read_execution_protocol_outcome(fds[0]).expect("read protocol");
+        unsafe {
+            libc::close(fds[0]);
+        }
+        outcome
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn protocol_incomplete_cleanup_is_not_root_exit_one() {
+        let complete =
+            write_protocol_outcome(EXECUTION_PROTOCOL_COMPLETE, unix_exit_wait_status(1));
+        assert_eq!(complete.cleanup, ExecutionCleanup::Complete);
+        assert_eq!(complete.root_status.code(), Some(1));
+        assert_eq!(
+            complete.into_root_status().expect("complete exit 1").code(),
+            Some(1)
+        );
+
+        let incomplete =
+            write_protocol_outcome(EXECUTION_PROTOCOL_INCOMPLETE, unix_exit_wait_status(1));
+        assert_eq!(incomplete.cleanup, ExecutionCleanup::Incomplete);
+        assert_eq!(incomplete.root_status.code(), Some(1));
+        let error = incomplete
+            .into_root_status()
+            .expect_err("incomplete cleanup must not become root exit 1");
+        assert!(
+            error
+                .to_string()
+                .contains("execution owner cleanup did not complete"),
+            "cleanup failure must stay distinct from root exit 1: {error}"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn missing_owner_protocol_is_cleanup_failure_not_root_exit_one() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let wait_pid = owner.identity().wait_pid;
+        let root_pid = owner.identity().root_pid;
+        unsafe {
+            libc::kill(wait_pid as libc::pid_t, libc::SIGKILL);
+        }
+        let error = loop {
+            match owner.try_wait_outcome() {
+                Ok(Some(outcome)) => {
+                    break outcome
+                        .into_root_status()
+                        .expect_err("killed supervisor without protocol is not root status");
+                }
+                Ok(None) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            error.to_string().contains("execution owner"),
+            "cleanup failure must not look like root exit 1: {error}"
+        );
+        assert!(
+            !process_is_running(root_pid),
+            "incomplete last-resort must reap root {root_pid} before fixture cleanup"
+        );
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} remained after protocol loss"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_drop_before_wait_reaps_supervisor_without_orphaning() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let wait_pid = owner.identity().wait_pid;
+        let root_pid = owner.identity().root_pid;
+        drop(owner);
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} still running after owner drop"
+        );
+        assert!(
+            !process_is_running(root_pid),
+            "root {root_pid} still running after owner drop"
+        );
+        let waited =
+            unsafe { libc::waitpid(wait_pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(
+            waited, -1,
+            "supervisor {wait_pid} remained waitable after owner drop"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_loss_last_resorts_root_and_stays_incomplete() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let wait_pid = owner.identity().wait_pid;
+        let root_pid = owner.identity().root_pid;
+        unsafe {
+            libc::kill(wait_pid as libc::pid_t, libc::SIGKILL);
+        }
+        let result = owner.drain_and_reap();
+        assert!(
+            !process_is_running(root_pid),
+            "last-resort must reap root {root_pid} before fixture cleanup"
+        );
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} remained after drain"
+        );
+        match result {
+            Ok(outcome) => {
+                assert_eq!(outcome.cleanup, ExecutionCleanup::Incomplete);
+                assert!(
+                    outcome.into_root_status().is_err(),
+                    "incomplete cleanup must not become a successful root status"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("execution owner"),
+                    "supervisor loss must stay distinct from root exit 1: {error}"
+                );
+            }
+        }
+        let second = owner.drain_and_reap();
+        match second {
+            Ok(outcome) => assert_eq!(outcome.cleanup, ExecutionCleanup::Incomplete),
+            Err(error) => assert!(error.to_string().contains("execution owner")),
+        }
     }
 }

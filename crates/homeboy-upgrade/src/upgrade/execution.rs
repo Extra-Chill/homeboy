@@ -4,8 +4,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
-    supports_process_tree_isolation, terminate_process_tree_and_reap,
-    wait_with_bounded_output_supervised_guarded, ControllerChildGuard,
+    supports_process_tree_isolation, wait_with_bounded_output_supervised_owned, ExecutionOwner,
     SupervisedCommandTermination,
 };
 use serde::{Deserialize, Serialize};
@@ -535,11 +534,11 @@ fn supervise_installer_shell_command<A>(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut guard = ControllerChildGuard::prepare(&mut command)
+    let prep = ExecutionOwner::prepare(&mut command)
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
     // The capability is intentionally scoped to this exact supervised spawn.
     let mutation_fence = authorize_before_spawn(&mut command)?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))?;
     drop(mutation_fence);
@@ -556,25 +555,23 @@ fn supervise_installer_shell_command<A>(
             std::thread::park_timeout(Duration::from_secs(30));
         }
     }
-    if let Err(error) = guard.attach(&child) {
-        let primary = Error::internal_io(
+    let mut owner = prep.attach(child).map_err(|error| {
+        Error::internal_io(
             format!("failed to attach installer process guard: {error}"),
             Some(context.to_string()),
-        );
-        return Err(append_cleanup_failure_context(
-            primary,
-            terminate_process_tree_and_reap(&mut child).err(),
-        ));
-    }
-    start_gate.release().map_err(|error| {
-        append_cleanup_failure_context(
-            Error::internal_io(error.to_string(), Some(context.to_string())),
-            terminate_process_tree_and_reap(&mut child).err(),
         )
     })?;
-    let supervised = wait_with_bounded_output_supervised_guarded(
-        &mut child,
-        &mut guard,
+    if let Err(error) = start_gate.release() {
+        return Err(append_cleanup_failure_context(
+            Error::internal_io(error.to_string(), Some(context.to_string())),
+            owner
+                .drain_and_reap()
+                .and_then(homeboy_engine_primitives::command::ExecutionOutcome::into_root_status)
+                .err(),
+        ));
+    }
+    let supervised = wait_with_bounded_output_supervised_owned(
+        &mut owner,
         UPGRADE_CAPTURE_LIMIT_BYTES,
         timeout,
         INSTALLER_SUPERVISION_POLL_INTERVAL,
@@ -586,7 +583,12 @@ fn supervise_installer_shell_command<A>(
         Err(error) => {
             return Err(append_cleanup_failure_context(
                 Error::internal_io(error.to_string(), Some(context.to_string())),
-                guard.terminate_and_reap_bounded(&mut child).err(),
+                owner
+                    .drain_and_reap()
+                    .and_then(
+                        homeboy_engine_primitives::command::ExecutionOutcome::into_root_status,
+                    )
+                    .err(),
             ));
         }
     };
@@ -1095,25 +1097,11 @@ fn run_source_upgrade_command(
             .env("CARGO_TARGET_DIR", cargo_target_dir)
             .env("HOMEBOY_CARGO_TARGET_RESOLUTION", resolution);
     }
-    let mut guard = ControllerChildGuard::prepare(&mut child_command).map_err(|error| {
+    let mut owner = ExecutionOwner::spawn(&mut child_command).map_err(|error| {
         Error::internal_io(error.to_string(), Some("run source upgrade".to_string()))
     })?;
-    let mut child = child_command
-        .spawn()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("run source upgrade".to_string())))?;
-    if let Err(error) = guard.attach(&child) {
-        let primary = Error::internal_io(
-            format!("failed to attach source-upgrade process guard: {error}"),
-            Some("run source upgrade".to_string()),
-        );
-        return Err(append_cleanup_failure_context(
-            primary,
-            terminate_process_tree_and_reap(&mut child).err(),
-        ));
-    }
-    let supervised = wait_with_bounded_output_supervised_guarded(
-        &mut child,
-        &mut guard,
+    let supervised = wait_with_bounded_output_supervised_owned(
+        &mut owner,
         0,
         timeout,
         INSTALLER_SUPERVISION_POLL_INTERVAL,
@@ -1125,7 +1113,12 @@ fn run_source_upgrade_command(
         Err(error) => {
             return Err(append_cleanup_failure_context(
                 Error::internal_io(error.to_string(), Some("run source upgrade".to_string())),
-                guard.terminate_and_reap_bounded(&mut child).err(),
+                owner
+                    .drain_and_reap()
+                    .and_then(
+                        homeboy_engine_primitives::command::ExecutionOutcome::into_root_status,
+                    )
+                    .err(),
             ));
         }
     };

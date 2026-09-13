@@ -7,7 +7,7 @@ use homeboy_core::error::CommandEvidence;
 use homeboy_core::git::release_download::GitHubRepo;
 use homeboy_core::redaction::RedactionPolicy;
 use homeboy_engine_primitives::command::{
-    wait_with_bounded_output_supervised, ControllerChildGuard, SupervisedCommandTermination,
+    wait_with_bounded_output_supervised_owned, ExecutionOwner, SupervisedCommandTermination,
 };
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
@@ -1810,19 +1810,8 @@ fn parse_github_request_id(value: &str) -> Option<String> {
 
 pub(crate) fn run_gh_command(mut command: Command, timeout: Duration) -> GhCommandOutput {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let _controller_guard = match ControllerChildGuard::prepare(&mut command) {
-        Ok(guard) => guard,
-        Err(error) => {
-            return GhCommandOutput {
-                stdout: String::new(),
-                stderr: gh_diagnostic_text(&format!("could not contain gh command: {error}")),
-                exit_code: None,
-                timed_out: false,
-            }
-        }
-    };
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let mut owner = match ExecutionOwner::spawn(&mut command) {
+        Ok(owner) => owner,
         Err(error) => {
             return GhCommandOutput {
                 stdout: String::new(),
@@ -1832,18 +1821,8 @@ pub(crate) fn run_gh_command(mut command: Command, timeout: Duration) -> GhComma
             }
         }
     };
-    if let Err(error) = _controller_guard.attach(&child) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return GhCommandOutput {
-            stdout: String::new(),
-            stderr: gh_diagnostic_text(&format!("could not guard gh command: {error}")),
-            exit_code: None,
-            timed_out: false,
-        };
-    }
-    match wait_with_bounded_output_supervised(
-        &mut child,
+    match wait_with_bounded_output_supervised_owned(
+        &mut owner,
         GITHUB_COMMAND_OUTPUT_LIMIT,
         timeout,
         timeout,
