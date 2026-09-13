@@ -8544,7 +8544,7 @@ fn cook_lab_workspace_stage_retry_eligibility_matches_durable_admission() {
 
         assert_eq!(
             retry.availability,
-            ControlPlaneActionAvailability::Unavailable
+            ControlPlaneActionAvailability::Available
         );
         let replay = crate::agent_task_service::retry(run_id, None, false, false)
             .expect("advertised Cook retry is admitted");
@@ -8583,7 +8583,7 @@ fn unbound_cook_workspace_stage_failure_does_not_advertise_retry() {
 
         assert_eq!(
             retry.availability,
-            ControlPlaneActionAvailability::Available
+            ControlPlaneActionAvailability::Unavailable
         );
         assert!(retry.reason.contains("homeboy agent-task status"));
         assert!(retry.reason.contains(run_id));
