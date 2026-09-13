@@ -11676,7 +11676,7 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
 }
 
 #[test]
-fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
+fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatches = Arc::new(AtomicUsize::new(0));
         let runner_jobs_created = Arc::new(AtomicUsize::new(0));
@@ -11761,18 +11761,54 @@ fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
             assert!(!serde_json::to_string(&record)
                 .expect("serialize durable record")
                 .contains("fixture-preacceptance-secret"));
-
-            let projected = crate::orchestration::run_from_current_environment(run_id)
-                .expect("project the Cook transport retry child");
-            let retry = projected
-                .action_eligibility
-                .expect("projected action eligibility")
-                .actions
-                .into_iter()
-                .find(|action| action.action == ControlPlaneAction::Retry)
-                .expect("retry action");
-            assert_eq!(retry.availability, ControlPlaneActionAvailability::Available);
         }
+    });
+}
+
+#[test]
+fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-transport-projection", 2);
+        let semantic_retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .expect("materialize the semantic Cook retry");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &semantic_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed", None).with_retryable(true),
+        )
+        .expect("terminalize the semantic retry before its transport replacement");
+
+        let transport_retry =
+            crate::agent_task_service::retry(&semantic_retry.record.run_id, None, false, false)
+                .expect("materialize the Cook transport retry child");
+        assert!(transport_retry.record.run_id.ends_with("-transport-retry"));
+        assert!(transport_retry.record.provider_handles.is_empty());
+        agent_task_lifecycle::record_pre_execution_failure(
+            &transport_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed again", None).with_retryable(true),
+        )
+        .expect("terminalize the transport retry child");
+
+        let projected =
+            crate::orchestration::run_from_current_environment(&transport_retry.record.run_id)
+                .expect("project the Cook transport retry child");
+        let retry = projected
+            .action_eligibility
+            .expect("projected action eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+        assert_eq!(
+            retry.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
     });
 }
 
