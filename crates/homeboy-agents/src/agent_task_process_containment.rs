@@ -36,8 +36,7 @@ use std::ops::{Deref, DerefMut};
 use std::process::{Child, Command};
 
 use homeboy_core::engine::command::{
-    terminate_remaining_process_group, ExecutionCleanup, ExecutionIdentity, ExecutionOwner,
-    ExecutionOwnerPrep,
+    ExecutionCleanup, ExecutionIdentity, ExecutionOwner, ExecutionOwnerPrep,
 };
 
 /// Owns the process group of one spawned agent-task child.
@@ -118,22 +117,10 @@ impl AgentTaskProcessContainment {
                     )
                 })
             }
-            Err(primary_error) => {
-                let group_error = self
-                    .identity
-                    .map(|identity| identity.recovery_process_group())
-                    .and_then(|pid| terminate_remaining_process_group(pid).err());
-                self.reaped = group_error.is_none();
-                let mut details = vec![primary_error.to_string()];
-                if let Some(error) = group_error {
-                    details.push(format!("fallback group cleanup failed: {error}"));
-                }
-                Err(format!(
-                    "could not terminate the contained provider process group{}: {}",
-                    self.leader_suffix(),
-                    details.join("; ")
-                ))
-            }
+            Err(primary_error) => Err(format!(
+                "could not terminate the contained provider process group{}: {primary_error}",
+                self.leader_suffix()
+            )),
         }
     }
 

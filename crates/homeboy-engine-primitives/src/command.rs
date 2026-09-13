@@ -53,6 +53,7 @@ pub struct ExecutionIdentity {
     pub wait_pid: u32,
     pub root_pid: u32,
     pub root_pgid: Option<u32>,
+    starttime_ticks: Option<u64>,
 }
 
 impl ExecutionIdentity {
@@ -62,6 +63,7 @@ impl ExecutionIdentity {
             wait_pid,
             root_pid: wait_pid,
             root_pgid: Some(wait_pid),
+            starttime_ticks: None,
         }
     }
 
@@ -108,16 +110,15 @@ pub struct ExecutionOwnerPrep {
 impl ExecutionOwnerPrep {
     pub fn attach(self, mut child: Child) -> io::Result<ExecutionOwner> {
         let mut guard = self.guard;
+        let wait_pid = child.id();
         if let Err(error) = guard.attach(&child) {
-            let _ = guard.request_drain(child.id());
-            let _ = child.wait();
+            let _ = bounded_drain_wait_handle(&mut guard, &mut child, wait_pid, None);
             return Err(error);
         }
-        let identity = match guard.execution_identity(child.id()) {
+        let identity = match guard.execution_identity(wait_pid) {
             Ok(identity) => identity,
             Err(error) => {
-                let _ = guard.request_drain(child.id());
-                let _ = child.wait();
+                let _ = bounded_drain_wait_handle(&mut guard, &mut child, wait_pid, None);
                 return Err(error);
             }
         };
@@ -126,6 +127,8 @@ impl ExecutionOwnerPrep {
             identity,
             guard,
             outcome: None,
+            teardown_complete: false,
+            last_resort_done: false,
         })
     }
 }
@@ -137,6 +140,8 @@ pub struct ExecutionOwner {
     identity: ExecutionIdentity,
     guard: ControllerChildGuard,
     outcome: Option<ExecutionOutcome>,
+    teardown_complete: bool,
+    last_resort_done: bool,
 }
 
 impl ExecutionOwner {
@@ -179,14 +184,14 @@ impl ExecutionOwner {
         if let Some(outcome) = self.outcome {
             return Ok(Some(outcome));
         }
-        let Some(outcome) = self
-            .guard
-            .try_wait_outcome(&mut self.child, self.identity)?
-        else {
-            return Ok(None);
-        };
-        self.outcome = Some(outcome);
-        Ok(Some(outcome))
+        if self.teardown_complete {
+            return Err(io::Error::other("execution owner cleanup did not complete"));
+        }
+        match self.guard.try_wait_outcome(&mut self.child, self.identity) {
+            Ok(Some(outcome)) => Ok(Some(self.record_terminal(outcome))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(self.fail_closed(error)),
+        }
     }
 
     pub fn request_drain(&mut self) -> io::Result<()> {
@@ -197,9 +202,106 @@ impl ExecutionOwner {
         if let Some(outcome) = self.outcome {
             return Ok(outcome);
         }
-        let outcome = self.guard.drain_and_reap(&mut self.child, self.identity)?;
+        if self.teardown_complete {
+            return Err(io::Error::other("execution owner cleanup did not complete"));
+        }
+        match self.guard.drain_and_reap(&mut self.child, self.identity) {
+            Ok(outcome) => Ok(self.record_terminal(outcome)),
+            Err(error) => Err(self.fail_closed(error)),
+        }
+    }
+
+    fn record_terminal(&mut self, outcome: ExecutionOutcome) -> ExecutionOutcome {
+        if outcome.cleanup == ExecutionCleanup::Incomplete {
+            self.last_resort_root_group();
+        }
+        self.teardown_complete = true;
         self.outcome = Some(outcome);
-        Ok(outcome)
+        outcome
+    }
+
+    fn fail_closed(&mut self, error: io::Error) -> io::Error {
+        self.last_resort_root_group();
+        let _ = reap_child_until(
+            &mut self.child,
+            std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+        );
+        self.teardown_complete = true;
+        error
+    }
+
+    fn last_resort_root_group(&mut self) {
+        if self.last_resort_done {
+            return;
+        }
+        self.last_resort_done = true;
+        last_resort_signal_root_group(self.identity);
+    }
+}
+
+impl Drop for ExecutionOwner {
+    fn drop(&mut self) {
+        if self.teardown_complete || self.outcome.is_some() {
+            return;
+        }
+        let _ = self.drain_and_reap();
+    }
+}
+
+fn bounded_drain_wait_handle(
+    guard: &mut ControllerChildGuard,
+    child: &mut Child,
+    wait_pid: u32,
+    identity: Option<ExecutionIdentity>,
+) -> io::Result<ExitStatus> {
+    let _ = guard.request_drain(wait_pid);
+    if let Some(identity) = identity {
+        last_resort_signal_root_group(identity);
+    }
+    reap_child_until(
+        child,
+        std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE,
+    )
+}
+
+fn last_resort_signal_root_group(identity: ExecutionIdentity) {
+    #[cfg(unix)]
+    {
+        if !root_identity_is_live(identity) {
+            return;
+        }
+        let _ = terminate_remaining_process_group(identity.recovery_process_group());
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = identity;
+    }
+}
+
+#[cfg(unix)]
+fn root_identity_is_live(identity: ExecutionIdentity) -> bool {
+    let root = identity.root_pid;
+    if root == 0 || root > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(stat) = linux_process_stat(root) else {
+            return false;
+        };
+        let Some(ticks) = identity.starttime_ticks else {
+            return false;
+        };
+        if stat.starttime_ticks != ticks {
+            return false;
+        }
+        let expected = identity.root_pgid.unwrap_or(root);
+        let pgid = unsafe { libc::getpgid(root as libc::pid_t) };
+        pgid >= 0 && pgid as u32 == expected
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        process_is_running(root)
     }
 }
 
@@ -480,6 +582,7 @@ impl ControllerChildGuard {
                 wait_pid,
                 root_pid,
                 root_pgid: Some(root_pgid),
+                starttime_ticks: linux_process_stat(root_pid).map(|stat| stat.starttime_ticks),
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -4161,10 +4264,90 @@ mod tests {
             error.to_string().contains("execution owner"),
             "cleanup failure must not look like root exit 1: {error}"
         );
-        if process_is_running(root_pid) {
-            unsafe {
-                libc::kill(root_pid as libc::pid_t, libc::SIGKILL);
+        assert!(
+            !process_is_running(root_pid),
+            "incomplete last-resort must reap root {root_pid} before fixture cleanup"
+        );
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} remained after protocol loss"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_drop_before_wait_reaps_supervisor_without_orphaning() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let wait_pid = owner.identity().wait_pid;
+        let root_pid = owner.identity().root_pid;
+        drop(owner);
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} still running after owner drop"
+        );
+        assert!(
+            !process_is_running(root_pid),
+            "root {root_pid} still running after owner drop"
+        );
+        let waited =
+            unsafe { libc::waitpid(wait_pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(
+            waited, -1,
+            "supervisor {wait_pid} remained waitable after owner drop"
+        );
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_loss_last_resorts_root_and_stays_incomplete() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn owner");
+        let wait_pid = owner.identity().wait_pid;
+        let root_pid = owner.identity().root_pid;
+        unsafe {
+            libc::kill(wait_pid as libc::pid_t, libc::SIGKILL);
+        }
+        let result = owner.drain_and_reap();
+        assert!(
+            !process_is_running(root_pid),
+            "last-resort must reap root {root_pid} before fixture cleanup"
+        );
+        assert!(
+            !process_is_running(wait_pid),
+            "supervisor {wait_pid} remained after drain"
+        );
+        match result {
+            Ok(outcome) => {
+                assert_eq!(outcome.cleanup, ExecutionCleanup::Incomplete);
+                assert!(
+                    outcome.into_root_status().is_err(),
+                    "incomplete cleanup must not become a successful root status"
+                );
             }
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("execution owner"),
+                    "supervisor loss must stay distinct from root exit 1: {error}"
+                );
+            }
+        }
+        let second = owner.drain_and_reap();
+        match second {
+            Ok(outcome) => assert_eq!(outcome.cleanup, ExecutionCleanup::Incomplete),
+            Err(error) => assert!(error.to_string().contains("execution owner")),
         }
     }
 }
