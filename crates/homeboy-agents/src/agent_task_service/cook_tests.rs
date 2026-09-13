@@ -11676,7 +11676,7 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
 }
 
 #[test]
-fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget() {
+fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatches = Arc::new(AtomicUsize::new(0));
         let runner_jobs_created = Arc::new(AtomicUsize::new(0));
@@ -11761,6 +11761,17 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
             assert!(!serde_json::to_string(&record)
                 .expect("serialize durable record")
                 .contains("fixture-preacceptance-secret"));
+
+            let projected = crate::orchestration::run_from_current_environment(run_id)
+                .expect("project the Cook transport retry child");
+            let retry = projected
+                .action_eligibility
+                .expect("projected action eligibility")
+                .actions
+                .into_iter()
+                .find(|action| action.action == ControlPlaneAction::Retry)
+                .expect("retry action");
+            assert_eq!(retry.availability, ControlPlaneActionAvailability::Available);
         }
     });
 }
