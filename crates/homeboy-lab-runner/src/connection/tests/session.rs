@@ -2248,6 +2248,141 @@ fn daemon_count_divergence_reconciles_to_typed_owners_without_cancelling_them() 
 }
 
 #[test]
+fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
+    test_support::with_isolated_home(|_| {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let address = listener.local_addr().expect("listener address");
+        let active_job = serde_json::to_value(sample_active_job(Some("run-live"), "live job"))
+            .expect("serialize active job");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_server = std::sync::Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !stop_server.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < deadline
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    serde_json::json!({
+                        "freshness": {
+                            "fresh": true,
+                            "restartable": true,
+                            "lease_id": "lease-live",
+                            "pid": 4242,
+                            "active_jobs": 2,
+                        },
+                        "pid": 4242,
+                    })
+                } else if request.starts_with("GET /jobs ") {
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "body": {
+                            "active_runner_jobs": [active_job],
+                            "stale_runner_jobs": [],
+                        }},
+                    })
+                } else {
+                    serde_json::json!({
+                        "version": "test",
+                        "build_identity": { "display": "homeboy test+abc123" },
+                    })
+                }
+                .to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("write response");
+            }
+        });
+
+        server::create(
+            r#"{"id":"homeboy-lab","host":"localhost","user":"test"}"#,
+            false,
+        )
+        .expect("create server");
+        crate::create(
+            r#"{"id":"homeboy-lab","kind":"ssh","homeboy_path":"true"}"#,
+            false,
+        )
+        .expect("create runner");
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = Some(format!("http://{address}"));
+        session.local_port = Some(address.port());
+        session.tunnel_pid = Some(std::process::id());
+        write_session(&session).expect("write session");
+        let mut generations = crate::RollingGenerations::new("lease-live", session);
+        let admission = generations
+            .generations
+            .get_mut("lease-live")
+            .expect("admission generation");
+        admission.active_jobs = 1;
+        admission.observed_active_jobs = Some(1);
+        crate::generation_store::write("homeboy-lab", &generations)
+            .expect("write generation ledger");
+
+        let (report, generations, owners) =
+            status_with_admission_projection("homeboy-lab").expect("status observation");
+        let summary = report.admission_summary_with_generations(&generations, &owners, 0);
+
+        assert_eq!(report.active_job_count, 1);
+        assert!(report.active_job_error.is_none());
+        assert!(summary.retained_job_inconsistency.is_none());
+
+        let mut mismatched = crate::generation_store::read("homeboy-lab", report.session.as_ref())
+            .expect("read generation ledger")
+            .expect("generation ledger");
+        let admission_owner = mismatched.admission_owner.clone();
+        mismatched
+            .generations
+            .get_mut(&admission_owner)
+            .expect("admission generation")
+            .active_jobs = 2;
+        mismatched
+            .generations
+            .get_mut(&admission_owner)
+            .expect("admission generation")
+            .observed_active_jobs = Some(2);
+        crate::generation_store::write("homeboy-lab", &mismatched)
+            .expect("write mismatched ledger");
+
+        let (mismatched_report, mismatched_generations, mismatched_owners) =
+            status_with_admission_projection("homeboy-lab").expect("mismatched status observation");
+        let mismatch = mismatched_report.admission_summary_with_generations(
+            &mismatched_generations,
+            &mismatched_owners,
+            0,
+        );
+        assert_eq!(mismatched_report.active_job_count, 1);
+        assert_eq!(
+            mismatched_report
+                .active_job_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("retained_active_job_count_inconsistent")
+        );
+        assert!(!mismatch.accepting_jobs);
+        assert!(mismatch.retained_job_inconsistency.is_some());
+
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        server.join().expect("daemon server");
+    });
+}
+
+#[test]
 fn synthetic_active_job_run_summaries_are_not_child_runs() {
     let mut synthetic = sample_run_summary("runner-job-job-1");
     synthetic.status_note =
