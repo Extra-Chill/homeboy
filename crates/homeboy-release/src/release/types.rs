@@ -416,6 +416,10 @@ pub struct ReleasePipelineOptions {
     /// Deploy after release — defers artifact cleanup until after deployment.
     #[serde(default)]
     pub deploy: bool,
+    /// Prepare through a release pull request rather than updating the default
+    /// branch directly. With `head`, finalize the normally merged commit.
+    #[serde(default)]
+    pub protected_branch: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

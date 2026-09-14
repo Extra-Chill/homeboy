@@ -236,14 +236,37 @@ pub(super) fn execute_release_plan_step(
                 .clone()
                 .or_else(|| context.state.version.as_deref().map(|v| format!("v{v}")));
             let push_branch = step.inputs.get("branch").and_then(|value| value.as_str());
-            executor::run_git_push(
-                context.component,
-                context.component_id,
-                release_tag.as_deref(),
-                push_branch,
-            )
-            .map(Some)
+            if step
+                .inputs
+                .get("tag_only")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                let tag = step
+                    .inputs
+                    .get("tag")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| {
+                        Error::internal_unexpected("git.push tag-only step missing tag")
+                    })?;
+                executor::run_git_tag_push(context.component, context.component_id, tag).map(Some)
+            } else if step.inputs.get("tags").and_then(|value| value.as_bool()) == Some(false) {
+                let branch = push_branch.ok_or_else(|| {
+                    Error::internal_unexpected("git.push branch preparation step missing branch")
+                })?;
+                executor::run_git_branch_push(context.component, context.component_id, branch)
+                    .map(Some)
+            } else {
+                executor::run_git_push(
+                    context.component,
+                    context.component_id,
+                    release_tag.as_deref(),
+                    push_branch,
+                )
+                .map(Some)
+            }
         }
+        "github.release_pr" => executor::run_release_pr(step, context.component).map(Some),
         "github.release" => Ok(Some(
             executor::run_github_release(
                 context.component,

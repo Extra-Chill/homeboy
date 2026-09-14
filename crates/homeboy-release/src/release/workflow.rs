@@ -536,6 +536,13 @@ fn run_command_with_workspace_inner(
         }
     }
 
+    let protected_prepare = input.pipeline.protected_branch && !input.pipeline.head;
+    let continuation_command = protected_prepare.then(|| {
+        format!(
+            "homeboy release {} --protected-branch --head --apply",
+            input.component_id
+        )
+    });
     let exit_code = release_command_exit_code(
         skipped_reason.as_deref(),
         release_step_exit,
@@ -548,7 +555,11 @@ fn run_command_with_workspace_inner(
             result: ReleaseCommandResult {
                 phase: execution.phase,
                 component_id: input.component_id,
-                status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
+                status: if protected_prepare && release_step_exit == 0 {
+                    "release_pr_open".to_string()
+                } else {
+                    release_command_status(false, skipped_reason.as_deref(), Some(&run_result))
+                },
                 bump_type,
                 dry_run: false,
                 releasable_commits: releasable_count,
@@ -558,7 +569,7 @@ fn run_command_with_workspace_inner(
                 plan: Some(plan),
                 run: Some(run_result),
                 deployment,
-                continuation_command: None,
+                continuation_command,
                 release_summary,
                 changelog_history_recovery: None,
                 readiness: None,
