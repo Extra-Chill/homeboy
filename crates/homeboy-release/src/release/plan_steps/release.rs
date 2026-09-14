@@ -168,6 +168,33 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         StepConfig::new(),
     ));
 
+    if options.pipeline.protected_branch {
+        let branch = format!("release/{tag_name}");
+        steps.push(ready_step(
+            "git.push",
+            "git.push",
+            format!("Push release branch {}", branch),
+            vec!["git.commit".to_string()],
+            StepConfig::new()
+                .bool("tags", false)
+                .string("branch", branch.clone()),
+        ));
+        steps.push(ready_step(
+            "github.release_pr",
+            "github.release_pr",
+            format!("Open release pull request for {}", tag_name),
+            vec!["git.push".to_string()],
+            StepConfig::new()
+                .string(
+                    "base",
+                    super::super::planning_git::default_branch(component),
+                )
+                .string("head", branch)
+                .string("title", format!("release: {}", tag_name)),
+        ));
+        return Ok(steps);
+    }
+
     steps.push(ready_step(
         "git.tag",
         "git.tag",
@@ -309,6 +336,27 @@ fn build_head_release_steps(
     let registry_publish_enabled = component.release.publish_enabled();
     let package_step_needed = options.pipeline.from_artifacts.is_none()
         && head_package_step_needed(component, extensions, publish_targets, options);
+
+    if options.pipeline.protected_branch {
+        let tag_name = release_scope.tag_name(version);
+        steps.push(ready_step(
+            "git.tag",
+            "git.tag",
+            format!("Tag merged release {}", tag_name),
+            vec![artifact_need.clone()],
+            string_config("name", tag_name.clone()),
+        ));
+        steps.push(ready_step(
+            "git.push",
+            "git.push",
+            format!("Push release tag {}", tag_name),
+            vec!["git.tag".to_string()],
+            StepConfig::new()
+                .bool("tag_only", true)
+                .string("tag", tag_name),
+        ));
+        artifact_need = "git.push".to_string();
+    }
 
     if registry_publish_enabled
         && !publish_targets.is_empty()

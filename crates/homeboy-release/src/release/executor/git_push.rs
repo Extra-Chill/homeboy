@@ -140,6 +140,89 @@ pub(crate) fn run_git_push(
     ))
 }
 
+/// Push exactly one annotated release tag without updating any branch ref.
+/// Protected-default-branch finalization has already reached the default branch
+/// through a normal PR merge, so it must not attempt a direct branch update.
+pub(crate) fn run_git_tag_push(
+    component: &Component,
+    component_id: &str,
+    tag: &str,
+) -> Result<ReleaseStepResult> {
+    let output = homeboy_core::git::push_at(
+        Some(component_id),
+        homeboy_core::git::PushOptions {
+            refspec: Some(format!("refs/tags/{tag}")),
+            ..Default::default()
+        },
+        Some(&component.local_path),
+    )?;
+    let data = serde_json::json!({
+        "success": output.success,
+        "tag": tag,
+        "target": format!("origin/refs/tags/{tag}"),
+    });
+    if output.success {
+        Ok(step_success("git.push", "git.push", Some(data), Vec::new()))
+    } else {
+        Ok(step_failed(
+            "git.push",
+            "git.push",
+            Some(data),
+            Some(push_error_message(&output)),
+            Vec::new(),
+        ))
+    }
+}
+
+/// Push a prepared release branch without following tags. This is the first
+/// half of protected-default-branch releases; the immutable tag is created only
+/// after the PR merge has made its target reachable from the default branch.
+pub(crate) fn run_git_branch_push(
+    component: &Component,
+    component_id: &str,
+    branch: &str,
+) -> Result<ReleaseStepResult> {
+    let switch = std::process::Command::new("git")
+        .args(["switch", "-c", branch])
+        .current_dir(&component.local_path)
+        .output()
+        .map_err(|error| {
+            Error::git_command_failed(format!("create release branch {branch}: {error}"))
+        })?;
+    if !switch.status.success() {
+        return Ok(step_failed(
+            "git.push",
+            "git.push",
+            Some(serde_json::json!({ "target": format!("origin/{branch}") })),
+            Some(String::from_utf8_lossy(&switch.stderr).trim().to_string()),
+            Vec::new(),
+        ));
+    }
+    let output = homeboy_core::git::push_at(
+        Some(component_id),
+        homeboy_core::git::PushOptions {
+            refspec: Some(format!("HEAD:refs/heads/{branch}")),
+            ..Default::default()
+        },
+        Some(&component.local_path),
+    )?;
+    let data = serde_json::json!({
+        "success": output.success,
+        "target": format!("origin/{branch}"),
+    });
+    if output.success {
+        Ok(step_success("git.push", "git.push", Some(data), Vec::new()))
+    } else {
+        Ok(step_failed(
+            "git.push",
+            "git.push",
+            Some(data),
+            Some(push_error_message(&output)),
+            Vec::new(),
+        ))
+    }
+}
+
 /// Recover from a non-fast-forward branch rejection caused by the remote
 /// advancing after the release commit/tag were created (issues #3611, #5502).
 ///
@@ -253,7 +336,9 @@ fn non_fast_forward_recovery_hints(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_non_fast_forward_rejection, run_git_push};
+    use super::{
+        is_non_fast_forward_rejection, run_git_branch_push, run_git_push, run_git_tag_push,
+    };
     use crate::release::types::ReleaseStepStatus;
     use homeboy_core::component::Component;
     use std::process::Command;
@@ -397,6 +482,121 @@ mod tests {
                 .expect("git branch")
                 .stdout,
             b"release/v1.0.0\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn run_git_tag_push_does_not_update_the_default_branch() {
+        let local = tempfile::tempdir().expect("local tempdir");
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(local.path().join("README.md"), "base").expect("write base");
+        git(local.path(), &["add", "README.md"]);
+        git(local.path(), &["commit", "-m", "base"]);
+        git(local.path(), &["push", "origin", "main"]);
+        let remote_main = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(remote.path())
+            .output()
+            .expect("remote main")
+            .stdout;
+        std::fs::write(local.path().join("release.txt"), "release").expect("write release");
+        git(local.path(), &["add", "release.txt"]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let result = run_git_tag_push(&component, "fixture", "v1.0.0").expect("push tag");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        git(remote.path(), &["show-ref", "--verify", "refs/tags/v1.0.0"]);
+        assert_eq!(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(remote.path())
+                .output()
+                .expect("remote main after tag push")
+                .stdout,
+            remote_main,
+            "tag publication must not update the protected default branch"
+        );
+    }
+
+    #[test]
+    fn run_git_branch_push_creates_a_release_branch_without_updating_default() {
+        let local = tempfile::tempdir().expect("local tempdir");
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        git(local.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            local.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(local.path().join("README.md"), "base").expect("write base");
+        git(local.path(), &["add", "README.md"]);
+        git(local.path(), &["commit", "-m", "base"]);
+        git(local.path(), &["push", "origin", "main"]);
+        let remote_main = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(remote.path())
+            .output()
+            .expect("remote main")
+            .stdout;
+        std::fs::write(local.path().join("release.txt"), "release").expect("write release");
+        git(local.path(), &["add", "release.txt"]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        let result = run_git_branch_push(&component, "fixture", "release/v1.0.0")
+            .expect("push release branch");
+
+        assert_eq!(result.status, ReleaseStepStatus::Success);
+        git(
+            remote.path(),
+            &["show-ref", "--verify", "refs/heads/release/v1.0.0"],
+        );
+        assert_eq!(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(remote.path())
+                .output()
+                .expect("remote main after release branch push")
+                .stdout,
+            remote_main,
+            "release preparation must not update the protected default branch"
+        );
+        assert_eq!(
+            Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(local.path())
+                .output()
+                .expect("current branch")
+                .stdout,
+            b"release/v1.0.0\n"
         );
     }
 

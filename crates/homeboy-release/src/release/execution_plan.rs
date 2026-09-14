@@ -185,6 +185,16 @@ fn initial_release_state(
     let release_scope = super::scope::ReleaseScope::resolve(component, component_id)?;
     let expected_tag = release_scope.tag_name(&version_info.version);
 
+    // Protected-branch finalization tags only after the release PR is merged,
+    // so the expected tag intentionally does not exist when this phase starts.
+    if options.pipeline.protected_branch {
+        return Ok(ReleaseState {
+            version: Some(version_info.version),
+            tag: Some(expected_tag),
+            ..ReleaseState::default()
+        });
+    }
+
     let (tag, version) = resolve_head_release(
         &component.local_path,
         &expected_tag,
