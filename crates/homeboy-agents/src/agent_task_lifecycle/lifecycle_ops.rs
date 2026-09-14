@@ -6614,6 +6614,23 @@ where
     if let Some(reservation_metadata) = reservation_metadata {
         metadata.extend(reservation_metadata);
     }
+    let transport_runtime_recovery = source.state.is_terminal()
+        && source.provider_handles.is_empty()
+        && source.runner_job_id().is_none()
+        && source
+            .lab_handoff
+            .as_ref()
+            .is_none_or(|handoff| handoff.state != AgentTaskLabHandoffState::Accepted)
+        && source.metadata["provider_executions_consumed"].as_u64() == Some(0)
+        && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(&source);
+    let previous_controller_runtime = transport_runtime_recovery
+        .then(|| {
+            source
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned()
+        })
+        .flatten();
     let mut record = submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         &plan,
@@ -6623,6 +6640,28 @@ where
         admission_status,
         admit_runtime,
     )?;
+    if let Some(previous) = previous_controller_runtime {
+        let recovered = lifecycle_store.mutate_record(&record.run_id, |child| {
+            let current = child
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned()
+                .unwrap_or(Value::Null);
+            child.metadata["controller_runtime_recovery"] = json!({
+                "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
+                "reason": "retryable_pre_execution_transport_failure",
+                "source_run_id": source.run_id,
+                "previous": previous,
+                "current": current,
+                "provider_executions_consumed": 0,
+                "recovered_at": now_timestamp(),
+            });
+            true
+        })?;
+        record = recovered.ok_or_else(|| {
+            Error::internal_unexpected("persisted transport runtime recovery child is unavailable")
+        })?;
+    }
     if let Some(mut acceptance) = source.acceptance.clone() {
         // A repair is a new candidate, but it retains the rejected verdict and
         // evidence as lineage instead of erasing the reviewer decision.
