@@ -4993,13 +4993,18 @@ fn reconstruct_existing_cook_options(
 ) -> Result<CookRequest> {
     if adoption_or_historical_continuation {
         super::reconstruct_adoption_options_with_dispatcher(recipe, attempt_dispatcher)
-    } else if pre_execution_runtime_recovery {
-        super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-            recipe,
-            attempt_dispatcher,
-        )
     } else if local_placement_override {
         super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
+    } else if pre_execution_runtime_recovery {
+        match attempt_dispatcher {
+            Some(dispatcher) => {
+                super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+                    recipe,
+                    Some(dispatcher),
+                )
+            }
+            None => super::reconstruct_options_for_pre_execution_recovery(recipe),
+        }
     } else {
         super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher)
     }
