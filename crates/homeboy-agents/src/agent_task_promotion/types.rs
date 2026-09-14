@@ -7,6 +7,7 @@ use crate::agent_task_gate::{AgentTaskGateReport, AgentTaskGateStatus, VerifyGat
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::gate::{HomeboyGateResult, HomeboyGateVisibility};
 use homeboy_core::git::output_allow_empty;
+use homeboy_core::repository_integrity::RepositoryIntegrityEvidence;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 
 pub const AGENT_TASK_PROMOTION_REPORT_SCHEMA: &str = "homeboy/agent-task-promotion-report/v1";
@@ -43,6 +44,8 @@ pub struct AgentTaskPromotionRequest {
     pub gates: VerifyGateOptions,
     pub provider_command: Option<String>,
     pub provider_invocation: Option<CommandInvocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -65,6 +68,8 @@ pub struct AgentTaskPromotionReport {
     /// Declared base branch snapshot captured immediately before promotion gates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_base: Option<AgentTaskPromotionVerifiedBase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
     pub operator_notification: AgentTaskPromotionNotification,

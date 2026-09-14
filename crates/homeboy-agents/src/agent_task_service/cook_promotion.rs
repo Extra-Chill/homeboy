@@ -385,6 +385,8 @@ pub(crate) fn promote_attempt_in_store(
         Some(artifact_id) => Some(artifact_id),
         None => canonical_cook_patch_artifact_id_in_store(lifecycle_store, options, run_id)?,
     };
+    let repository_integrity_evidence =
+        admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     promote_with_checkpoint_in_observation_store(
         AgentTaskPromotionRequest {
@@ -403,6 +405,7 @@ pub(crate) fn promote_attempt_in_store(
             gates: options.gates.clone(),
             provider_command: options.provider_transport.provider_command.clone(),
             provider_invocation: options.provider_transport.provider_invocation.clone(),
+            repository_integrity_evidence,
         },
         &observation_store,
         |checkpoint| {
@@ -418,6 +421,38 @@ pub(crate) fn promote_attempt_in_store(
             Ok(())
         },
     )
+}
+
+fn admitted_repository_integrity_evidence(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<homeboy_core::repository_integrity::RepositoryIntegrityEvidence>> {
+    let record = lifecycle_store.read_record(run_id)?;
+    let evidence = record
+        .metadata
+        .pointer("/source_checkout/repository_integrity_evidence")
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/runner_handoff/source_snapshot/repository_integrity_evidence")
+        })
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/source_snapshot/repository_integrity_evidence")
+        });
+    evidence
+        .map(|evidence| {
+            serde_json::from_value(evidence.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "source_snapshot.repository_integrity_evidence",
+                    format!("persisted source snapshot evidence is invalid: {error}"),
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()
 }
 
 /// Observe the exact persisted promote-or-load decision without opening a
@@ -534,6 +569,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         gates: options.gates.clone(),
         provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
+        repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
     if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
@@ -671,6 +707,7 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         gates: options.gates.clone(),
         provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
+        repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
@@ -1107,6 +1144,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     gates: options.gates.clone(),
                     provider_command: options.provider_transport.provider_command.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
+                    repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
                 },
                 &target_path,
                 &serde_json::to_value(&promotion)
@@ -1263,6 +1301,9 @@ pub fn record_replacement_gate_proof(
             None,
         ));
     }
+    // Replacement gates authenticate the already-admitted candidate; they must
+    // never replace or discard the policy evidence bound at original promotion.
+    replacement.repository_integrity_evidence = original.repository_integrity_evidence.clone();
     replacement.normalize_gate_outcome();
     validate_replacement_proof_finalization_eligibility(
         run_id,
@@ -1748,6 +1789,7 @@ fn verify_replacement_gates_owned(
             gates,
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: original.repository_integrity_evidence.clone(),
         },
         &target_path,
         &serde_json::to_value(&original)
@@ -2408,6 +2450,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             gates: options.gates.clone(),
             provider_command: options.provider_transport.provider_command.clone(),
             provider_invocation: options.provider_transport.provider_invocation.clone(),
+            repository_integrity_evidence: recovery.promotion.repository_integrity_evidence.clone(),
         },
         std::path::Path::new(path),
         &checkpoint,
@@ -3218,6 +3261,7 @@ fn cook_finalization_options_with_stores_and_review_form(
         inherited_gate_evidence: None,
         protected_branches: options.finalization.protected_branches.clone(),
         draft_pr: options.finalization.draft_pr,
+        repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
 }
 
@@ -4769,6 +4813,7 @@ fn manual_finalization_options(
             "trunk".to_string(),
         ],
         draft_pr: false,
+        repository_integrity_evidence: None,
     })
 }
 
@@ -6640,6 +6685,7 @@ fn ambiguous_promotion_artifact_ids(
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
     )
     .map(|canonical| {

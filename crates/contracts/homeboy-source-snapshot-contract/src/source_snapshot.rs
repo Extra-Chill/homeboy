@@ -13,6 +13,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Immutable operator authorization captured before source leaves its checkout.
+/// `sha256` is the SHA-256 of the canonical serialization without that field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepositoryIntegrityEvidence {
+    pub origin: String,
+    pub symlink_exceptions: Vec<RepositoryIntegritySymlinkException>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepositoryIntegritySymlinkException {
+    pub path: String,
+    pub target_base64: String,
+    pub reason: String,
+}
+
 const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     ".git/",
     ".homeboy-build/",
@@ -106,4 +122,36 @@ pub struct SourceSnapshot {
     pub snapshot_hash: String,
     pub synced_at: String,
     pub sync_excludes: Vec<String>,
+    /// Operator policy evidence captured at the controller checkout. Runners
+    /// must validate this value rather than opening controller-local policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_snapshot_preserves_repository_integrity_evidence_across_json() {
+        let mut snapshot = SourceSnapshot::default();
+        snapshot.repository_integrity_evidence = Some(RepositoryIntegrityEvidence {
+            origin: "ssh://example.test/homeboy.git".to_string(),
+            symlink_exceptions: vec![RepositoryIntegritySymlinkException {
+                path: "assets/link".to_string(),
+                target_base64: "L3Nydi9hc3NldHM=".to_string(),
+                reason: "operator mounted assets".to_string(),
+            }],
+            sha256: "sha256:evidence".to_string(),
+        });
+
+        let restored: SourceSnapshot = serde_json::from_str(
+            &serde_json::to_string(&snapshot).expect("serialize source snapshot"),
+        )
+        .expect("deserialize source snapshot");
+        assert_eq!(
+            restored.repository_integrity_evidence,
+            snapshot.repository_integrity_evidence
+        );
+    }
 }

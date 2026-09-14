@@ -1,17 +1,56 @@
 //! Portable repository checks evaluated from tracked Git objects.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
+/// An operator-owned policy stored under the repository's Git common directory.
+pub const OPERATOR_POLICY_FILE: &str = "homeboy.repository-integrity.json";
+const OPERATOR_POLICY_SCHEMA: &str = "homeboy/repository-integrity-policy/v1";
+const OPERATOR_POLICY_MAX_BYTES: u64 = 64 * 1024;
+const OPERATOR_POLICY_MAX_EXCEPTIONS: usize = 128;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SymlinkException {
+    pub path: String,
+    pub target_base64: String,
+    pub reason: String,
+}
+
+pub use homeboy_source_snapshot_contract::source_snapshot::{
+    RepositoryIntegrityEvidence, RepositoryIntegritySymlinkException,
+};
+
+#[derive(Deserialize)]
+struct OperatorPolicy {
+    schema: String,
+    origin: String,
+    #[serde(default)]
+    symlink_exceptions: Vec<SymlinkException>,
+}
+
+#[derive(Serialize)]
+struct CanonicalEvidence<'a> {
+    origin: &'a str,
+    symlink_exceptions: &'a [RepositoryIntegritySymlinkException],
+}
+
 /// Verify every tracked symlink in `revision` without consulting the checkout.
-/// Exceptions are exact repository-relative paths declared in the candidate's
-/// `homeboy.json` at `repository_integrity.symlink_exceptions` with a `reason`.
-pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result<()> {
+/// Candidate `homeboy.json` retains its path-and-reason exception contract. An
+/// operator may additionally supply immutable admitted evidence with exact
+/// path, target-byte, and reason exceptions.
+pub fn verify_tracked_symlink_portability(
+    path: &Path,
+    revision: &str,
+    evidence: Option<&RepositoryIntegrityEvidence>,
+) -> Result<()> {
     let Some(tree) = git_optional(
         path,
         &["rev-parse", "--verify", &format!("{revision}^{{tree}}")],
@@ -19,7 +58,8 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
     else {
         return Ok(());
     };
-    let exceptions = exceptions(path, tree.trim())?;
+    let exceptions = tracked_exceptions(path, tree.trim())?;
+    let operator_exceptions = validate_evidence(path, evidence)?;
     let entries = git_bytes(path, &["ls-tree", "-rz", "--full-tree", tree.trim()])?;
     for entry in entries
         .split(|byte| *byte == 0)
@@ -63,13 +103,20 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
             if exceptions
                 .iter()
                 .any(|(exception_path, _)| exception_path == &link_path)
+                || operator_exceptions.is_some_and(|exceptions| {
+                    exceptions.iter().any(|exception| {
+                        exception.path == link_path
+                            && STANDARD.decode(&exception.target_base64).ok().as_deref()
+                                == Some(target.as_slice())
+                    })
+                })
             {
                 continue;
             }
             return Err(Error::validation_invalid_argument(
                 "repository_integrity.symlink",
                 format!(
-                    "candidate revision {} tracks a {} symlink at `{}` with raw target bytes base64 `{}` under the default repository portability policy; replace it with an internal relative target, or add an exact reviewed exception with a reason in candidate homeboy.json repository_integrity.symlink_exceptions",
+                    "candidate revision {} tracks a {} symlink at `{}` with raw target bytes base64 `{}` under the default repository portability policy; replace it with an internal relative target, add an exact reviewed exception with a reason in candidate homeboy.json repository_integrity.symlink_exceptions, or admit an exact path, target_base64, and reason operator policy exception",
                     revision, violation, link_path, STANDARD.encode(&target)
                 ),
                 Some(link_path),
@@ -80,7 +127,7 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
     Ok(())
 }
 
-fn exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
+fn tracked_exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
     let Some(raw) = git_optional(path, &["show", &format!("{tree}:homeboy.json")])? else {
         return Ok(Vec::new());
     };
@@ -115,6 +162,178 @@ fn exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
             }
         })
         .collect()
+}
+
+/// Read and bind operator policy once, before a source snapshot crosses a
+/// durable boundary. Validators intentionally never call this function.
+pub fn collect_operator_policy_evidence(
+    path: &Path,
+) -> Result<Option<RepositoryIntegrityEvidence>> {
+    let Some(common_dir) = git_common_dir(path)? else {
+        return Ok(None);
+    };
+    let policy_path = common_dir.join(OPERATOR_POLICY_FILE);
+    if !policy_path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&policy_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(policy_path.display().to_string()))
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            format!("{OPERATOR_POLICY_FILE} in the Git common directory must be a regular non-symlink file"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    if metadata.len() > OPERATOR_POLICY_MAX_BYTES {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            format!("{OPERATOR_POLICY_FILE} exceeds {OPERATOR_POLICY_MAX_BYTES} bytes"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    if std::os::unix::fs::MetadataExt::mode(&metadata) & 0o077 != 0
+        || std::os::unix::fs::MetadataExt::uid(&metadata) != unsafe { libc::geteuid() }
+    {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            format!(
+                "{OPERATOR_POLICY_FILE} must be owned by the current operator and mode 0600 or stricter"
+            ),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    let raw = std::fs::read_to_string(&policy_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(policy_path.display().to_string()))
+    })?;
+    let config: OperatorPolicy = serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_json(error, Some(policy_path.display().to_string()), None)
+    })?;
+    if config.schema != OPERATOR_POLICY_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy.schema",
+            format!("operator policy schema must be `{OPERATOR_POLICY_SCHEMA}`"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    let origin = git_optional(path, &["remote", "get-url", "origin"])?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            "operator policy requires a configured origin remote",
+            Some(policy_path.display().to_string()),
+            None,
+        )
+    })?;
+    if config.origin.trim().is_empty() || config.origin != origin.trim() {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy.origin",
+            "operator policy origin must exactly match this checkout's origin remote",
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    if config.symlink_exceptions.len() > OPERATOR_POLICY_MAX_EXCEPTIONS {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy.symlink_exceptions",
+            format!("operator policy supports at most {OPERATOR_POLICY_MAX_EXCEPTIONS} exceptions"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    let mut symlink_exceptions = config.symlink_exceptions.into_iter().map(|exception| {
+        if exception.path.is_empty() || exception.path.starts_with('/') || exception.path.split('/').any(|part| matches!(part, "" | "." | "..")) || exception.reason.trim().is_empty() || STANDARD.decode(&exception.target_base64).is_err() {
+            return Err(Error::validation_invalid_argument("repository_integrity.operator_policy.symlink_exceptions", "each exception requires an exact repository-relative path, raw target bytes encoded as base64, and a nonempty reason", Some(policy_path.display().to_string()), None));
+        }
+        Ok(RepositoryIntegritySymlinkException { path: exception.path, target_base64: exception.target_base64, reason: exception.reason })
+    }).collect::<Result<Vec<_>>>()?;
+    symlink_exceptions.sort();
+    if symlink_exceptions.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy.symlink_exceptions",
+            "operator policy contains a duplicate exact exception",
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    let sha256 = canonical_evidence_sha256(&config.origin, &symlink_exceptions)?;
+    Ok(Some(RepositoryIntegrityEvidence {
+        origin: config.origin,
+        symlink_exceptions,
+        sha256,
+    }))
+}
+
+fn validate_evidence<'a>(
+    path: &Path,
+    evidence: Option<&'a RepositoryIntegrityEvidence>,
+) -> Result<Option<&'a [RepositoryIntegritySymlinkException]>> {
+    let Some(evidence) = evidence else {
+        return Ok(None);
+    };
+    let origin = git_optional(path, &["remote", "get-url", "origin"])?;
+    if evidence.origin.trim().is_empty()
+        || origin.as_deref().map(str::trim) != Some(evidence.origin.as_str())
+        || evidence.symlink_exceptions.len() > OPERATOR_POLICY_MAX_EXCEPTIONS
+        || evidence
+            .symlink_exceptions
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || evidence.symlink_exceptions.iter().any(|entry| {
+            entry.path.is_empty()
+                || entry.path.starts_with('/')
+                || entry
+                    .path
+                    .split('/')
+                    .any(|part| matches!(part, "" | "." | ".."))
+                || entry.reason.trim().is_empty()
+                || STANDARD.decode(&entry.target_base64).is_err()
+        })
+        || evidence.sha256
+            != canonical_evidence_sha256(&evidence.origin, &evidence.symlink_exceptions)?
+    {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.evidence",
+            "repository integrity evidence is not canonical or its sha256 does not match",
+            None,
+            None,
+        ));
+    }
+    Ok(Some(&evidence.symlink_exceptions))
+}
+
+fn canonical_evidence_sha256(
+    origin: &str,
+    exceptions: &[RepositoryIntegritySymlinkException],
+) -> Result<String> {
+    let bytes = serde_json::to_vec(&CanonicalEvidence {
+        origin,
+        symlink_exceptions: exceptions,
+    })
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("repository integrity evidence".to_string()),
+        )
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn git_common_dir(path: &Path) -> Result<Option<PathBuf>> {
+    let Some(common_dir) = git_optional(path, &["rev-parse", "--git-common-dir"])? else {
+        return Ok(None);
+    };
+    let common_dir = PathBuf::from(common_dir.trim());
+    Ok(Some(if common_dir.is_absolute() {
+        common_dir
+    } else {
+        path.join(common_dir)
+    }))
 }
 
 fn is_absolute(target: &[u8]) -> bool {
@@ -215,14 +434,14 @@ mod tests {
     fn rejects_absolute_and_escaping_targets_but_preserves_internal_unresolved_links() {
         for target in ["/tmp/external", "../../external"] {
             let fixture = repo(target, None);
-            let error = verify_tracked_symlink_portability(fixture.path(), "HEAD")
+            let error = verify_tracked_symlink_portability(fixture.path(), "HEAD", None)
                 .expect_err("non-portable link is rejected");
             assert!(error.message.contains("raw target bytes base64"));
             assert!(error.message.contains("homeboy.json"));
         }
         for target in ["missing", "dir/missing"] {
             let fixture = repo(target, None);
-            verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+            verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
         }
         let fixture = tempfile::tempdir().unwrap();
         Command::new("git")
@@ -250,7 +469,7 @@ mod tests {
             .current_dir(fixture.path())
             .status()
             .unwrap();
-        verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+        verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
     }
 
     #[cfg(unix)]
@@ -282,7 +501,7 @@ mod tests {
             .current_dir(fixture.path())
             .status()
             .unwrap();
-        verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+        verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
     }
 
     #[cfg(unix)]
@@ -294,6 +513,115 @@ mod tests {
                 r#"{"repository_integrity":{"symlink_exceptions":[{"path":"link","reason":"shared fixture dependency"}]}}"#,
             ),
         );
-        verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+        verify_tracked_symlink_portability(fixture.path(), "HEAD", None).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn common_dir_policy_is_bound_and_evidence_survives_policy_mutation() {
+        let fixture = repo("/srv/example-assets", None);
+        Command::new("git")
+            .args(["remote", "add", "origin", "ssh://example.test/homeboy.git"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        fs::write(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            r#"{"schema":"homeboy/repository-integrity-policy/v1","origin":"ssh://example.test/homeboy.git","symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9leGFtcGxlLWFzc2V0cw==","reason":"Lab fixture asset mount"}]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        let evidence = collect_operator_policy_evidence(fixture.path())
+            .unwrap()
+            .expect("policy evidence");
+
+        verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).unwrap();
+
+        fs::write(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            r#"{"schema":"homeboy/repository-integrity-policy/v1","origin":"ssh://example.test/homeboy.git","symlink_exceptions":[]}"#,
+        )
+        .unwrap();
+        // Validation consumes the immutable captured bytes, not mutable policy.
+        verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).unwrap();
+        std::os::unix::fs::symlink("/srv/other-assets", fixture.path().join("other-link")).unwrap();
+        Command::new("git")
+            .args(["add", "other-link"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "add another link",
+            ])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(
+            verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mutated_evidence_and_insecure_or_wrong_origin_common_dir_policy() {
+        let fixture = repo("/srv/example-assets", None);
+        fs::write(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            r#"{"schema":"homeboy/repository-integrity-policy/v1","origin":"ssh://wrong.test/homeboy.git","symlink_exceptions":[]}"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .unwrap();
+        let error = collect_operator_policy_evidence(fixture.path()).unwrap_err();
+        assert!(error.message.contains("mode 0600"));
+
+        Command::new("git")
+            .args(["remote", "add", "origin", "ssh://example.test/homeboy.git"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        fs::set_permissions(
+            fixture.path().join(".git").join(OPERATOR_POLICY_FILE),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        let error = collect_operator_policy_evidence(fixture.path()).unwrap_err();
+        assert!(error.message.contains("exactly match"));
+
+        let mut evidence = RepositoryIntegrityEvidence {
+            origin: "ssh://example.test/homeboy.git".to_string(),
+            symlink_exceptions: vec![RepositoryIntegritySymlinkException {
+                path: "link".to_string(),
+                target_base64: "L3Nydi9leGFtcGxlLWFzc2V0cw==".to_string(),
+                reason: "fixture".to_string(),
+            }],
+            sha256: canonical_evidence_sha256(
+                "ssh://example.test/homeboy.git",
+                &[RepositoryIntegritySymlinkException {
+                    path: "link".to_string(),
+                    target_base64: "L3Nydi9leGFtcGxlLWFzc2V0cw==".to_string(),
+                    reason: "fixture".to_string(),
+                }],
+            )
+            .unwrap(),
+        };
+        evidence.symlink_exceptions[0].reason = "tampered".to_string();
+        assert!(
+            verify_tracked_symlink_portability(fixture.path(), "HEAD", Some(&evidence)).is_err()
+        );
     }
 }

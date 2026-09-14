@@ -2833,6 +2833,7 @@ fn production_validator_finalizes_only_the_adopted_merge_candidate_and_resolutio
                 },
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             |checkpoint| {
                 crate::agent_task_lifecycle::record_promotion(
@@ -3284,6 +3285,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
             "trunk".to_string(),
         ],
         draft_pr: false,
+        repository_integrity_evidence: None,
     }
 }
 
