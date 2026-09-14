@@ -2518,36 +2518,54 @@ pub fn reconstruct_options_for_pre_execution_recovery(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
+/// Reconstruct a pre-execution recovery that must revalidate its current
+/// transport before provider work can resume.
+pub fn reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+    recipe: &AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+) -> Result<CookRequest> {
+    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
+}
+
 /// Whether an attempt that never reached provider execution may be rebuilt by
-/// the current controller without replaying a historical external transport.
-/// A queued retry proves that boundary through its immutable retry origin.
-pub fn local_pre_execution_runtime_recovery_is_eligible(
+/// the current controller. A queued retry proves that boundary through its
+/// immutable retry origin.
+pub fn pre_execution_runtime_recovery_is_eligible(
     recipe: &AgentTaskCookRecipe,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-    explicit_local_override: bool,
 ) -> bool {
-    let local_transport = explicit_local_override
-        || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local");
-    if !local_transport {
-        return false;
-    }
-    if super::cook_pre_execution::retryable_pre_execution_failure(record) {
+    let zero_provider_executions = record.metadata["provider_executions_consumed"].as_u64()
+        == Some(0)
+        && record.metadata["provider_run_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty);
+    let unambiguous_transport_ownership = record.provider_handles.is_empty()
+        && record.runner_job_id().is_none()
+        && record.lab_handoff.as_ref().is_none_or(|handoff| {
+            handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+        });
+    if record.state.is_terminal()
+        && zero_provider_executions
+        && unambiguous_transport_ownership
+        && super::cook_pre_execution::retryable_pre_execution_failure(record)
+    {
         return true;
     }
 
     let origin = &record.metadata["retry_origin"]["pre_execution_failure"];
+    let transport_recovery = &record.metadata["controller_runtime_recovery"];
     let current_runtime = homeboy_core::build_identity::current().display;
     record.state == agent_task_lifecycle::AgentTaskRunState::Queued
         && recipe.runtime_generation != current_runtime
         && record.metadata["controller_identity"].as_str() == Some(current_runtime.as_str())
         && record.metadata["retry_of"].is_string()
-        && record.metadata["provider_executions_consumed"].as_u64() == Some(0)
-        && record.metadata["provider_run_ids"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
+        && zero_provider_executions
+        && unambiguous_transport_ownership
         && (origin["retryable"] == Value::Bool(true)
             || origin["phase"].as_str() == Some("local_retry_supervisor"))
         && origin["provider_executions_consumed"].as_u64() == Some(0)
+        && transport_recovery["schema"] == "homeboy/controller-runtime-pre-execution-recovery/v1"
+        && transport_recovery["reason"] == "retryable_pre_execution_transport_failure"
 }
 
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption

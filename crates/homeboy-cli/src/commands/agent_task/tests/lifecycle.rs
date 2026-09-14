@@ -1877,11 +1877,37 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("load historical recipe");
         assert!(
-            homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
                 &loaded_recipe,
                 &persisted_record,
-                false,
             )
+        );
+        let mut executed = persisted_record.clone();
+        executed.metadata["provider_executions_consumed"] = json!(1);
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &executed,
+            ),
+            "executed provider work retains its immutable runtime pin"
+        );
+        let mut in_flight = persisted_record.clone();
+        in_flight.state = agent_task_lifecycle::AgentTaskRunState::Running;
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &in_flight,
+            ),
+            "in-flight work retains its immutable runtime pin"
+        );
+        let mut ambiguous = persisted_record.clone();
+        ambiguous.metadata["runner_job_id"] = json!("still-owned-runner-job");
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &ambiguous,
+            ),
+            "ambiguous runner ownership retains its immutable runtime pin"
         );
 
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
@@ -1919,7 +1945,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
 }
 
 #[test]
-fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions() {
+fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_executions() {
     with_temp_home(|| {
         let root = tempfile::tempdir().expect("workspace root");
         let primary = root.path().join("primary");
@@ -2028,14 +2054,20 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
             serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
                 .expect("parse persisted recipe");
         persisted_recipe["runtime_generation"] = "homeboy 0.1.0+historical".into();
-        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "local" });
+        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "lab" });
         std::fs::write(
             &recipe_path,
             serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
         )
-        .expect("persist historical local recipe");
+        .expect("persist historical transport recipe");
+        let previous_runtime = test_lifecycle_store()
+            .read_record(run_id)
+            .expect("read historical transport attempt")
+            .metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            .clone();
 
         let executor = Arc::new(CountingCookExecutor::default());
+        let dispatcher = Arc::new(CountingCookDispatcher::default());
         let (retried, exit_code) = retry_with(
             RetryArgs {
                 run_id: run_id.to_string(),
@@ -2050,35 +2082,39 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
                 provider_rotations: None,
             },
             executor.clone(),
-            |_| Ok(None),
+            |_| Ok(Some(dispatcher.clone())),
         )
         .expect("queued retry recovers under the current runtime");
 
-        // Provider execution succeeded, but this fixture produces no patch
-        // artifact, so Cook must retain its durable failure exit contract.
+        // The transport accepted the recovered attempt, then this fixture
+        // returns without a provider result, so Cook records a new
+        // pre-execution failure rather than replaying the old runtime.
         assert_eq!(exit_code, 1, "{retried:#?}");
-        assert_eq!(retried["status"], "durable_failure");
+        assert_eq!(retried["status"], "pre_execution_failure");
         assert_eq!(
-            executor.executions.load(Ordering::SeqCst),
+            dispatcher.prepared.load(Ordering::SeqCst),
             1,
-            "{retried:#?}"
+            "the current transport must be revalidated before recovery: {retried:#?}"
         );
+        assert_eq!(dispatcher.dispatched.load(Ordering::SeqCst), 1);
         let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("read recovered recipe");
         let recovered = test_lifecycle_store()
             .read_record(&recipe.attempts.last().expect("replacement attempt").run_id)
             .expect("read recovered replacement");
         assert_eq!(recovered.metadata["retry_of"], run_id);
-        assert_eq!(recovered.metadata["provider_executions_consumed"], 1);
+        assert_eq!(recovered.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            recovered.metadata["controller_runtime_recovery"]["previous"],
+            previous_runtime
+        );
+        assert_eq!(
+            recovered.metadata["controller_runtime_recovery"]["current"],
+            recovered.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+        );
         assert_eq!(
             recovered.metadata["controller_identity"],
             homeboy::core::build_identity::current().display
-        );
-        assert!(
-            !homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-                &recipe, &recovered, false,
-            ),
-            "provider execution restores the strict historical runtime fence"
         );
     });
 }
