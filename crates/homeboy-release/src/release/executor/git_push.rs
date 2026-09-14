@@ -608,8 +608,9 @@ mod tests {
             !Command::new("git")
                 .args(["show-ref", "--verify", "refs/tags/v1.0.0"])
                 .current_dir(remote.path())
-                .status()
+                .output()
                 .expect("check remote tag")
+                .status
                 .success(),
             "PR preparation and its retry must not create the release tag"
         );
