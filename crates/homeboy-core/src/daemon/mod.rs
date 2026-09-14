@@ -208,6 +208,11 @@ impl LocalControllerJobClient {
     /// can deserialize a request while applying stale ownership semantics. Fail
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
+        // Dead-lease cleanup needs exclusive admission. Recover before taking
+        // our shared guard, then retain the guarded validation below.
+        if !read_status()?.running {
+            ensure_running(DEFAULT_ADDR)?;
+        }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
         match Self::connect_with_admission_guard(Some(admission_guard)) {
