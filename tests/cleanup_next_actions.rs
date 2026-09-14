@@ -406,6 +406,61 @@ fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn daemon_recover_replaces_a_dead_idle_lease() {
+    let fixture = HermeticTestContext::new();
+    let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
+    let invocation_dir = fixture.root().join("operator-cwd");
+    std::fs::create_dir_all(&invocation_dir).expect("operator directory");
+    let path = std::env::var("PATH").expect("PATH");
+
+    let started = run_homeboy(
+        &fixture,
+        &invocation_dir,
+        &["daemon", "ensure-running"],
+        &path,
+    );
+    assert_eq!(started["success"], true, "{started:#}");
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(fixture.daemon_dir().join("state.json")).expect("daemon state"),
+    )
+    .expect("daemon state JSON");
+    let token = state["startup_token"].as_str().expect("startup token");
+    let pids = daemon_pids_for_token(token);
+    assert!(
+        !pids.is_empty(),
+        "record daemon processes before termination"
+    );
+    for pid in pids {
+        assert_eq!(
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) },
+            0,
+            "kill {pid}"
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline
+        && daemon_pids_for_token(token).iter().any(|pid| {
+            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", token)
+                .expect("inspect terminated daemon")
+        })
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let recovered = run_homeboy(
+        &fixture,
+        &invocation_dir,
+        &["daemon", "recover", "--yes"],
+        &path,
+    );
+    assert_eq!(recovered["success"], true, "{recovered:#}");
+    assert_eq!(recovered["data"]["fresh"], true, "{recovered:#}");
+    assert_eq!(recovered["data"]["active_jobs"], 0, "{recovered:#}");
+}
+
 #[cfg(unix)]
 fn daemon_pids_for_token(token: &str) -> Vec<u32> {
     let output = Command::new("ps")

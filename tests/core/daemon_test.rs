@@ -2241,6 +2241,23 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
     acquire_daemon_operation_lock().expect("recover after interrupted lock holder");
 }
 
+#[cfg(unix)]
+#[test]
+fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
+    let _home = HomeGuard::new();
+    let mut child = {
+        let _lock = acquire_daemon_operation_lock().expect("acquire launcher lock");
+        Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn detached lifecycle child")
+    };
+
+    acquire_daemon_operation_lock().expect("child exec must not retain lifecycle lock");
+    child.kill().expect("stop lifecycle child");
+    child.wait().expect("reap lifecycle child");
+}
+
 #[test]
 fn stop_refuses_stale_lease_that_points_at_reused_pid() {
     let _home = HomeGuard::new();
