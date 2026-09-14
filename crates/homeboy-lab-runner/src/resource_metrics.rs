@@ -1397,7 +1397,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ordinary_measured_command_execution_remains_available() {
+    fn actual_runner_normal_exit_preserves_peak_metrics() {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 0"]);
 
