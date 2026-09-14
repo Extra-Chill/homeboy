@@ -475,12 +475,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
-    let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
+    let mut source_snapshot = homeboy_core::source_snapshot::collect_local_checked(
         runner_id,
         Path::new(&synced.local_path),
         Some(&remote_cwd),
         "lab_offload",
-    );
+    )?;
     // The effective workspace filters define the bytes shipped to Lab and are
     // carried to the runner for deterministic post-materialization verification.
     source_snapshot.sync_excludes = synced.excludes.clone();
@@ -501,12 +501,12 @@ fn prepare_lab_offload_workspace_stage_inner(
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     let mut workspace_snapshots = vec![source_snapshot.clone()];
     for extra in &synced_extra_workspaces {
-        let mut snapshot = homeboy_core::source_snapshot::collect_local(
+        let mut snapshot = homeboy_core::source_snapshot::collect_local_checked(
             runner_id,
             Path::new(&extra.local_path),
             Some(&extra.remote_path),
             "lab_offload",
-        );
+        )?;
         snapshot.sync_excludes = extra.excludes.clone();
         snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
         snapshot.synthetic_checkout_commit =

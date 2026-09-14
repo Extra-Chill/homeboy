@@ -354,6 +354,7 @@ pub(super) fn promote_recoverable_patch_count(
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     );
@@ -390,6 +391,7 @@ pub(super) fn promotion_options(to_worktree: &str) -> AgentTaskPromotionRequest 
         gates: VerifyGateOptions::default(),
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     }
 }
 
@@ -426,6 +428,7 @@ pub(super) fn adopted_commit_options(
         gates,
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     }
 }
 
