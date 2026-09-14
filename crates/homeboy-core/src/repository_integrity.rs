@@ -4,13 +4,26 @@ use std::path::Path;
 use std::process::Command;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
 
+/// The untracked, ignored repository-root policy file an operator may use when
+/// a portability exception must not become part of the candidate content.
+pub const OPERATOR_POLICY_FILE: &str = "homeboy.repository-integrity.json";
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SymlinkException {
+    pub path: String,
+    pub target_base64: String,
+    pub reason: String,
+}
+
 /// Verify every tracked symlink in `revision` without consulting the checkout.
-/// Exceptions are exact repository-relative paths declared in the candidate's
-/// `homeboy.json` at `repository_integrity.symlink_exceptions` with a `reason`.
+/// Candidate `homeboy.json` retains its path-and-reason exception contract. An
+/// operator may additionally supply exact path, target-byte, and reason
+/// exceptions in the ignored repository-root [`OPERATOR_POLICY_FILE`].
 pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result<()> {
     let Some(tree) = git_optional(
         path,
@@ -19,7 +32,8 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
     else {
         return Ok(());
     };
-    let exceptions = exceptions(path, tree.trim())?;
+    let exceptions = tracked_exceptions(path, tree.trim())?;
+    let operator_exceptions = operator_exceptions(path)?;
     let entries = git_bytes(path, &["ls-tree", "-rz", "--full-tree", tree.trim()])?;
     for entry in entries
         .split(|byte| *byte == 0)
@@ -63,14 +77,19 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
             if exceptions
                 .iter()
                 .any(|(exception_path, _)| exception_path == &link_path)
+                || operator_exceptions.iter().any(|exception| {
+                    exception.path == link_path
+                        && STANDARD.decode(&exception.target_base64).ok().as_deref()
+                            == Some(target.as_slice())
+                })
             {
                 continue;
             }
             return Err(Error::validation_invalid_argument(
                 "repository_integrity.symlink",
                 format!(
-                    "candidate revision {} tracks a {} symlink at `{}` with raw target bytes base64 `{}` under the default repository portability policy; replace it with an internal relative target, or add an exact reviewed exception with a reason in candidate homeboy.json repository_integrity.symlink_exceptions",
-                    revision, violation, link_path, STANDARD.encode(&target)
+                    "candidate revision {} tracks a {} symlink at `{}` with raw target bytes base64 `{}` under the default repository portability policy; replace it with an internal relative target, add an exact reviewed exception with a reason in candidate homeboy.json repository_integrity.symlink_exceptions, or add an exact path, target_base64, and reason exception to ignored {}",
+                    revision, violation, link_path, STANDARD.encode(&target), OPERATOR_POLICY_FILE
                 ),
                 Some(link_path),
                 None,
@@ -80,7 +99,7 @@ pub fn verify_tracked_symlink_portability(path: &Path, revision: &str) -> Result
     Ok(())
 }
 
-fn exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
+fn tracked_exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
     let Some(raw) = git_optional(path, &["show", &format!("{tree}:homeboy.json")])? else {
         return Ok(Vec::new());
     };
@@ -113,6 +132,68 @@ fn exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> {
                     None,
                 )),
             }
+        })
+        .collect()
+}
+
+fn operator_exceptions(path: &Path) -> Result<Vec<SymlinkException>> {
+    let policy_path = path.join(OPERATOR_POLICY_FILE);
+    if !policy_path.exists() {
+        return Ok(Vec::new());
+    }
+    if git_optional(
+        path,
+        &["ls-files", "--error-unmatch", "--", OPERATOR_POLICY_FILE],
+    )?
+    .is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            format!("{OPERATOR_POLICY_FILE} must be ignored and untracked"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    if git_optional(path, &["check-ignore", "-q", "--", OPERATOR_POLICY_FILE])?.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "repository_integrity.operator_policy",
+            format!("{OPERATOR_POLICY_FILE} must be explicitly ignored"),
+            Some(policy_path.display().to_string()),
+            None,
+        ));
+    }
+    let raw = std::fs::read_to_string(&policy_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(policy_path.display().to_string()))
+    })?;
+    let config: Value = serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_json(error, Some(policy_path.display().to_string()), None)
+    })?;
+    let Some(entries) = config.get("symlink_exceptions").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let exception: SymlinkException = serde_json::from_value(entry.clone()).map_err(|_| {
+                Error::validation_invalid_argument(
+                    "repository_integrity.operator_policy.symlink_exceptions",
+                    "each operator symlink exception requires exact `path`, base64 `target_base64`, and reviewed nonempty `reason` fields",
+                    Some(policy_path.display().to_string()),
+                    None,
+                )
+            })?;
+            if exception.path.is_empty()
+                || exception.reason.trim().is_empty()
+                || STANDARD.decode(&exception.target_base64).is_err()
+            {
+                return Err(Error::validation_invalid_argument(
+                    "repository_integrity.operator_policy.symlink_exceptions",
+                    "each operator symlink exception requires exact `path`, base64 `target_base64`, and reviewed nonempty `reason` fields",
+                    Some(policy_path.display().to_string()),
+                    None,
+                ));
+            }
+            Ok(exception)
         })
         .collect()
 }
@@ -295,5 +376,83 @@ mod tests {
             ),
         );
         verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_only_exact_ignored_operator_policy_exception() {
+        let fixture = repo("/srv/example-assets", None);
+        fs::write(
+            fixture.path().join(".git/info/exclude"),
+            format!("{OPERATOR_POLICY_FILE}\n"),
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join(OPERATOR_POLICY_FILE),
+            r#"{"symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9leGFtcGxlLWFzc2V0cw==","reason":"Lab fixture asset mount"}]}"#,
+        )
+        .unwrap();
+
+        verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap();
+        assert!(git_optional(
+            fixture.path(),
+            &["diff", "--quiet", "--", OPERATOR_POLICY_FILE]
+        )
+        .unwrap()
+        .is_some());
+
+        fs::write(
+            fixture.path().join(OPERATOR_POLICY_FILE),
+            r#"{"symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9vdGhlci1hc3NldHM=","reason":"Lab fixture asset mount"}]}"#,
+        )
+        .unwrap();
+        assert!(verify_tracked_symlink_portability(fixture.path(), "HEAD").is_err());
+
+        fs::write(
+            fixture.path().join(OPERATOR_POLICY_FILE),
+            r#"{"symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9leGFtcGxlLWFzc2V0cw==","reason":"Lab fixture asset mount"}]}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/srv/other-assets", fixture.path().join("other-link")).unwrap();
+        Command::new("git")
+            .args(["add", "other-link"])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "-m",
+                "add another link",
+            ])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        assert!(verify_tracked_symlink_portability(fixture.path(), "HEAD").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_tracked_or_unignored_operator_policy() {
+        let fixture = repo("/srv/example-assets", None);
+        fs::write(
+            fixture.path().join(OPERATOR_POLICY_FILE),
+            r#"{"symlink_exceptions":[{"path":"link","target_base64":"L3Nydi9leGFtcGxlLWFzc2V0cw==","reason":"Lab fixture asset mount"}]}"#,
+        )
+        .unwrap();
+        let error = verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap_err();
+        assert!(error.message.contains("explicitly ignored"));
+
+        Command::new("git")
+            .args(["add", OPERATOR_POLICY_FILE])
+            .current_dir(fixture.path())
+            .status()
+            .unwrap();
+        let error = verify_tracked_symlink_portability(fixture.path(), "HEAD").unwrap_err();
+        assert!(error.message.contains("ignored and untracked"));
     }
 }
