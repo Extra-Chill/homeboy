@@ -1562,6 +1562,14 @@ pub fn controller_runtime_test_executable() -> PathBuf {
 
 pub fn with_isolated_home<R>(body: impl FnOnce(&TempDir) -> R) -> R {
     let home = HomeGuard::new();
+    // Tests own fixture records rather than the runner job that invoked them.
+    let _runner_id = EnvVarGuard::unset(crate::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV);
+    let _runner_job = EnvVarGuard::unset(crate::runner_job_execution_context::RUNNER_JOB_ID_ENV);
+    let _runner_reservation =
+        EnvVarGuard::unset(crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV);
+    let _runner_context = EnvVarGuard::unset(
+        crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV,
+    );
     body(&home.context.root)
 }
 

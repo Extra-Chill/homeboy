@@ -211,18 +211,19 @@ mod tests {
             request_digest: request_digest.clone(),
             accepted_at: "2026-01-01T00:00:00Z".to_string(),
         };
-        let fence = ControlPlaneActionFence {
-            schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-            resource_updated_at: request_digest.clone(),
-            eligible: true,
-            reason: None,
-        };
         store
             .enqueue_control_plane_action_intent(
                 &intent,
-                &fence,
                 "deployment_provider_effect",
                 &request_digest,
+                |live, _run| {
+                    Ok(ControlPlaneActionFence {
+                        schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+                        resource_updated_at: live.version.clone(),
+                        eligible: true,
+                        reason: None,
+                    })
+                },
             )
             .expect("admit effect");
         store

@@ -2,12 +2,8 @@ use std::io::{Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-#[cfg(not(windows))]
-use homeboy_engine_primitives::command::terminate_process_tree_and_reap;
-use homeboy_engine_primitives::command::{terminate_remaining_process_group, ControllerChildGuard};
+use homeboy_engine_primitives::command::ExecutionOwner;
 use tempfile::NamedTempFile;
-
-use crate::process::{force_terminate_process_tree_bounded, ProcessContainment};
 
 pub(crate) struct DeadlineProcessOutput {
     pub status: ExitStatus,
@@ -101,33 +97,13 @@ pub(crate) fn execute_deadline_process(
     let captures = CaptureFiles::create(capture_limit, label)?;
     let (stdout, stderr) = captures.stdio(label)?;
     command.stdin(Stdio::piped()).stdout(stdout).stderr(stderr);
-    let mut containment = ProcessContainment::prepare(&mut command)
-        .map_err(|error| failure(format!("{label} containment setup failed: {error}")))?;
-    let mut guard = Some(
-        ControllerChildGuard::prepare(&mut command)
-            .map_err(|error| failure(format!("{label} containment setup failed: {error}")))?,
-    );
-    let mut child = command.spawn().map_err(|error| {
+    let mut owner = ExecutionOwner::spawn(&mut command).map_err(|error| {
         failure(format!(
             "{label} spawn failed; capture files will be removed: {error}"
         ))
     })?;
-    if let Err(error) = containment.attach(&child) {
-        let errors = cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
-        return Err(failure(format!(
-            "{label} containment attach failed: {error}{}",
-            cleanup_diagnostic(&errors)
-        )));
-    }
-    if let Err(error) = guard.as_ref().expect("guard exists").attach(&child) {
-        let errors = cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
-        return Err(failure(format!(
-            "{label} containment attach failed: {error}{}",
-            cleanup_diagnostic(&errors)
-        )));
-    }
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        let errors = cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
+    let mut stdin = owner.take_stdin().ok_or_else(|| {
+        let errors = drain_owner(&mut owner, cleanup_budget);
         failure(format!(
             "{label} stdin was unavailable.{}",
             cleanup_diagnostic(&errors)
@@ -138,7 +114,7 @@ pub(crate) fn execute_deadline_process(
         .and_then(|_| stdin.write_all(b"\n"))
         .is_err()
     {
-        let errors = cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
+        let errors = drain_owner(&mut owner, cleanup_budget);
         return Err(failure(format!(
             "{label} stdin write failed.{}",
             cleanup_diagnostic(&errors)
@@ -147,15 +123,8 @@ pub(crate) fn execute_deadline_process(
     drop(stdin);
 
     loop {
-        match child.try_wait() {
+        match owner.try_wait() {
             Ok(Some(status)) => {
-                let errors = cleanup(&containment, &mut child, &mut guard, true, cleanup_budget);
-                if !errors.is_empty() {
-                    return Err(failure(format!(
-                        "{label} exited but cleanup could not be verified: {}",
-                        errors.join("; ")
-                    )));
-                }
                 return Ok(DeadlineProcessOutput {
                     status,
                     stdout: captures.snapshot("stdout", label)?,
@@ -166,8 +135,7 @@ pub(crate) fn execute_deadline_process(
                 std::thread::sleep(Duration::from_millis(10));
             }
             Ok(None) => {
-                let mut errors =
-                    cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
+                let mut errors = drain_owner(&mut owner, cleanup_budget);
                 errors.extend(capture_snapshot_errors(&captures, label));
                 return Err(failure(format!(
                     "{label} timed out; capture files were snapshotted without waiting for inherited handles{}.",
@@ -175,8 +143,7 @@ pub(crate) fn execute_deadline_process(
                 )));
             }
             Err(error) => {
-                let mut errors =
-                    cleanup(&containment, &mut child, &mut guard, false, cleanup_budget);
+                let mut errors = drain_owner(&mut owner, cleanup_budget);
                 errors.extend(capture_snapshot_errors(&captures, label));
                 return Err(failure(format!(
                     "{label} wait failed: {error}; capture files were snapshotted without waiting for inherited handles{}.",
@@ -187,66 +154,13 @@ pub(crate) fn execute_deadline_process(
     }
 }
 
-fn cleanup(
-    containment: &ProcessContainment,
-    child: &mut std::process::Child,
-    guard: &mut Option<ControllerChildGuard>,
-    leader_has_exited: bool,
-    cleanup_budget: Duration,
-) -> Vec<String> {
-    drop(guard.take());
-    let mut errors = Vec::new();
-    if !leader_has_exited {
-        if let Err(error) = containment.terminate_on_failure_bounded(cleanup_budget, false) {
-            errors.push(format!("containment termination: {error}"));
-        }
-        if let Err(error) = force_terminate_process_tree_bounded(child.id(), cleanup_budget) {
-            errors.push(format!("process-tree termination: {error}"));
-        }
-        if let Err(error) = reap_child_after_bounded_cleanup(child, cleanup_budget) {
-            errors.push(format!("child reap: {error}"));
-        }
-    }
-    #[cfg(target_os = "linux")]
-    if let Err(error) = containment.cleanup_after_leader_exit_bounded(cleanup_budget) {
-        errors.push(format!("descendant cleanup: {error}"));
-    }
-    if let Err(error) = terminate_remaining_process_group(child.id()) {
-        errors.push(format!("remaining process-group cleanup: {error}"));
-    }
-    errors
-}
-
-#[cfg(not(windows))]
-fn reap_child_after_bounded_cleanup(
-    child: &mut std::process::Child,
-    _cleanup_budget: Duration,
-) -> std::io::Result<()> {
-    terminate_process_tree_and_reap(child).map(|_| ())
-}
-
-#[cfg(windows)]
-fn reap_child_after_bounded_cleanup(
-    child: &mut std::process::Child,
-    cleanup_budget: Duration,
-) -> std::io::Result<()> {
-    let pid = child.id();
-    let deadline = Instant::now() + cleanup_budget;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) if Instant::now() >= deadline => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "child {pid} remained alive after bounded cleanup for {} ms",
-                        cleanup_budget.as_millis()
-                    ),
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error),
-        }
+fn drain_owner(owner: &mut ExecutionOwner, _cleanup_budget: Duration) -> Vec<String> {
+    match owner.drain_and_reap().and_then(|outcome| {
+        outcome.into_root_status()?;
+        Ok(())
+    }) {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![format!("execution owner drain: {error}")],
     }
 }
 

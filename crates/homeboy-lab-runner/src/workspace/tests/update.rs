@@ -578,6 +578,7 @@ fn sync_options(path: &Path) -> RunnerWorkspaceSyncOptions {
         git_fetch_refs: Vec::new(),
         snapshot_includes: Vec::new(),
         allow_dirty_lab_workspace: false,
+        validation_dependency_ids: None,
         run_isolation_token: None,
     }
 }

@@ -138,6 +138,10 @@ pub(crate) fn run_git_tag(
     // Bind the tag operation to the exact release commit for durable operator
     // summaries and recovery evidence; GitOutput itself only records streams.
     data["head"] = serde_json::json!(head_commit);
+    // Name the tag this step created. Rollback has to undo exactly the tag this
+    // run made, and without the name it could only record that some tag was
+    // created while leaving it behind (#14577).
+    data["tag"] = serde_json::json!(tag_name);
 
     if !output.success {
         let mut hints = Vec::new();

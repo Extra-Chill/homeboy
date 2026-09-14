@@ -90,6 +90,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             std::path::Path::new(&options.path),
             "HEAD",
+            options.repository_integrity_evidence.as_ref(),
         )
     }
 
@@ -102,6 +103,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             std::path::Path::new(&options.path),
             "HEAD",
+            options.repository_integrity_evidence.as_ref(),
         )
     }
 

@@ -436,6 +436,7 @@ fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start(
                 git_fetch_refs: Vec::new(),
                 snapshot_includes: Vec::new(),
                 allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
                 run_isolation_token: None,
             },
         )

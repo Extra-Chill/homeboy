@@ -310,6 +310,7 @@ pub(super) fn runner_rig_install_command(
         source.to_string(),
         "--id".to_string(),
         rig_id.to_string(),
+        "--copy-local-source".to_string(),
     ]
 }
 
@@ -474,7 +475,8 @@ mod tests {
                 "install",
                 "/runner/source",
                 "--id",
-                "fixture"
+                "fixture",
+                "--copy-local-source"
             ]
         );
         assert_eq!(

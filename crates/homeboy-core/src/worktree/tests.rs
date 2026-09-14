@@ -1410,6 +1410,69 @@ fn safety_report_allows_missing_contained_worktree() {
 }
 
 #[test]
+fn provider_admission_rejects_dirty_missing_primary_outside_and_branch_mismatch_worktrees() {
+    let source = git_repo();
+    let store = tempfile::tempdir().unwrap();
+    let worktree = sibling_worktree_path(source.path(), "provider-admission");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+
+    let rejected = |record: TaskWorktreeRecord| {
+        write_record(store.path(), &record).unwrap();
+        resolve_active_task_for_provider_admission_with_store(&record.id, store.path())
+            .expect_err("unsafe worktree must not be admitted")
+    };
+
+    fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
+    assert!(rejected(fixture_record(source.path(), &worktree))
+        .message
+        .contains("not safe for reuse"));
+    fs::remove_file(worktree.join("dirty.txt")).unwrap();
+
+    assert!(rejected(fixture_record(
+        source.path(),
+        &sibling_worktree_path(source.path(), "provider-missing"),
+    ))
+    .message
+    .contains("not safe for reuse"));
+
+    assert!(rejected(fixture_record(source.path(), source.path()))
+        .message
+        .contains("not safe for reuse"));
+
+    let outside = tempfile::tempdir_in(
+        source
+            .path()
+            .parent()
+            .and_then(Path::parent)
+            .expect("source checkout has a grandparent"),
+    )
+    .unwrap();
+    let outside_worktree = outside.path().join("worktree");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "outside-task",
+            &outside_worktree.to_string_lossy(),
+        ],
+    );
+    let mut outside_record = fixture_record(source.path(), &outside_worktree);
+    outside_record.branch = "outside-task".to_string();
+    assert!(rejected(outside_record)
+        .message
+        .contains("not safe for reuse"));
+
+    let mut mismatch = fixture_record(source.path(), &worktree);
+    mismatch.branch = "other-task".to_string();
+    assert!(rejected(mismatch).message.contains("git rev-parse branch"));
+}
+
+#[test]
 fn cleanup_marks_missing_worktree_record_removed() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();

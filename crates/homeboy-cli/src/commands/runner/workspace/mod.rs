@@ -293,6 +293,7 @@ fn sync(
             git_fetch_refs: Vec::new(),
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace,
+            validation_dependency_ids: None,
             run_isolation_token: None,
         },
     )

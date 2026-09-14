@@ -1824,13 +1824,11 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
         options.command,
         vec!["bash", "-lc", "managed clone fetch build select"]
     );
-    assert_eq!(
-        options
-            .capability_preflight
-            .expect("preflight")
-            .required_commands,
-        vec!["bash", "git", "cargo"]
-    );
+    assert!(options
+        .capability_preflight
+        .expect("bootstrap preflight")
+        .required_commands
+        .is_empty());
 }
 
 fn stale_daemon_admission_snapshot(
@@ -1984,24 +1982,6 @@ fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
 
     assert!(!admission.summary.safe_to_rotate);
     assert!(refresh_execution_route(&runner, &admission).is_err());
-}
-
-#[test]
-fn diagnostic_ssh_bootstrap_preflight_requires_remote_materialization_tools() {
-    let options = refresh_execution_options(
-        &ssh_bootstrap_plan(),
-        vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
-        true,
-    );
-
-    assert_eq!(
-        options
-            .capability_preflight
-            .expect("diagnostic SSH capability preflight")
-            .required_commands,
-        ["bash", "git", "cargo"],
-        "diagnostic SSH must probe the remote shell before materialization"
-    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use super::SshClient;
 use crate::engine::command::{
-    wait_with_bounded_output_supervised_with_progress, ControllerChildGuard,
+    wait_with_bounded_output_supervised_with_progress_owned, ExecutionOwner,
     SupervisedCommandHeartbeat, DEFAULT_CAPTURE_LIMIT_BYTES,
 };
 use crate::server::ssh_args::{
@@ -805,16 +805,15 @@ fn run_transfer_command_with_policy(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let guard = ControllerChildGuard::prepare(command)?;
-    let mut child = command.spawn()?;
-    guard.attach(&child)?;
+    let mut owner = ExecutionOwner::spawn(command)?;
     let mut schedule = TransferHeartbeatSchedule::new(quiet_after);
-    let output = wait_with_bounded_output_supervised_with_progress(
-        &mut child,
+    let output = wait_with_bounded_output_supervised_with_progress_owned(
+        &mut owner,
         DEFAULT_CAPTURE_LIMIT_BYTES,
         Duration::MAX,
         None,
         poll_interval,
+        None,
         || false,
         |progress| {
             if schedule.due(&progress, interval) {

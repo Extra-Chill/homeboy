@@ -122,6 +122,7 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
             source_run_id: Some(run_id.clone()),
             source_path: None,
             source_worktree_path: None,
+            repository_integrity_evidence: None,
             base_ref: None,
             task_base_sha: None,
             candidate_ref: None,

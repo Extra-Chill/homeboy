@@ -763,6 +763,10 @@ pub(crate) fn safety_report_for_provider(
     safety_report(record)
 }
 
+pub(crate) fn resolve_active_task_for_provider_admission(id: &str) -> Result<TaskWorktreeRecord> {
+    resolve_active_task_for_provider_admission_with_store(id, &metadata_dir()?)
+}
+
 #[cfg(test)]
 pub(crate) fn remove_record_for_test(id: &str) {
     let store = metadata_dir().expect("task worktree store");

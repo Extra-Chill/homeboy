@@ -125,7 +125,23 @@ pub fn install(
     id: Option<&str>,
     all: bool,
 ) -> Result<RigInstallResult> {
-    let mut prepared = prepare_source(config_root, source)?;
+    install_with_local_source_copy(config_root, source, id, all, false)
+}
+
+/// Install a rig package, optionally copying a local source into durable
+/// registry storage instead of linking to the caller-owned directory.
+pub fn install_with_local_source_copy(
+    config_root: &Path,
+    source: &str,
+    id: Option<&str>,
+    all: bool,
+    copy_local_source: bool,
+) -> Result<RigInstallResult> {
+    let mut prepared = if copy_local_source && !is_git_url(source) && !source.contains(".git//") {
+        prepare_copied_local_source(config_root, source)?
+    } else {
+        prepare_source(config_root, source)?
+    };
     let discovered = discover_rigs_for_install(&prepared.discovery_path, id, all)?;
     let selected = select_rigs(discovered, id, all, source)?;
     let dependency_roots = package_source_roots_for_dependencies(&prepared, &selected)?;
@@ -1291,6 +1307,74 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
         source_ref,
         source_dirty,
         source_content_hash,
+    })
+}
+
+fn prepare_copied_local_source(config_root: &Path, source: &str) -> Result<PreparedSource> {
+    let package_path = local_source_path(source)?;
+    let source_root = git::repo_root(&package_path)
+        .or_else(|| materialized_runner_source_root(&package_path))
+        .unwrap_or_else(|| package_path.clone());
+    let source_root = canonical_package_path(&source_root, "source root")?;
+    let package_relative = package_path.strip_prefix(&source_root).map_err(|_| {
+        Error::validation_invalid_argument(
+            "source",
+            "Local rig package path must stay inside its source root",
+            Some(package_path.display().to_string()),
+            Some(vec![format!("source root: {}", source_root.display())]),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(source_root.to_string_lossy().as_bytes());
+    let package_id = format!("local-{:016x}", hasher.finalize());
+    let durable_root = paths::rig_package_in_root(config_root, &package_id);
+    if durable_root.exists() {
+        fs::remove_dir_all(&durable_root).map_err(|error| {
+            Error::internal_io(error.to_string(), Some("replace copied rig package".into()))
+        })?;
+    }
+    homeboy_core::io::copy_tree(
+        &source_root,
+        &durable_root,
+        "copy local rig package",
+        homeboy_core::io::EntryPolicy::CopyAnyNonDir,
+    )?;
+    let durable_package_path = durable_root.join(package_relative);
+    let source_revision = git::short_head_revision_at(&source_root);
+    let source_ref = git::current_branch(&source_root).filter(|branch| !branch.is_empty());
+    let source_dirty =
+        git::status_porcelain_bytes(&source_root).is_some_and(|status| !status.is_empty());
+    let source_content_hash = package_content_hash(&durable_root)?;
+
+    Ok(PreparedSource {
+        source: durable_root.to_string_lossy().to_string(),
+        source_root: durable_root.clone(),
+        discovery_path: durable_package_path.clone(),
+        package_path: durable_package_path,
+        linked: false,
+        source_revision,
+        source_ref,
+        source_dirty,
+        source_content_hash,
+    })
+}
+
+fn local_source_path(source: &str) -> Result<PathBuf> {
+    let source_path = Path::new(source);
+    let package_path = if source_path.is_absolute() {
+        source_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| Error::internal_io(e.to_string(), Some("get current dir".into())))?
+            .join(source_path)
+    };
+    package_path.canonicalize().map_err(|error| {
+        Error::validation_invalid_argument(
+            "source",
+            format!("Path does not exist: {}", package_path.display()),
+            Some(source.to_string()),
+            Some(vec![error.to_string()]),
+        )
     })
 }
 

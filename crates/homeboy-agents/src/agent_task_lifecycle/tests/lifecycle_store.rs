@@ -374,3 +374,50 @@ fn cook_index_projection_reconciles_after_its_filesystem_write_fails() {
         "a restarted reader converges on the same durable index"
     );
 }
+
+#[test]
+fn orphaned_historical_cook_index_does_not_block_canonical_lifecycle_records() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "canonical-run";
+    let cook_id = "canonical-cook";
+
+    let mut run = record(&store, run_id, "canonical");
+    run.metadata["cook_id"] = json!(cook_id);
+    store.write_record(&run).expect("write canonical run");
+    store
+        .write_cook_index_attempt(cook_id, 1, run_id, "canonical".to_string(), None)
+        .expect("write canonical index");
+
+    let orphan_path = store.cook_index_path("orphaned-cook");
+    std::fs::create_dir_all(orphan_path.parent().expect("orphan parent"))
+        .expect("create orphan parent");
+    homeboy_core::engine::local_files::write_json_file(
+        &orphan_path,
+        &crate::agent_task_lifecycle::AgentTaskCookIndex {
+            schema: crate::agent_task_lifecycle::records::schemas::COOK_INDEX.to_string(),
+            cook_id: "orphaned-cook".to_string(),
+            latest_run_id: "missing-run".to_string(),
+            latest_substantive_candidate: None,
+            cancellation_fence: None,
+            attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                attempt: 1,
+                run_id: "missing-run".to_string(),
+                recorded_at: "orphaned".to_string(),
+            }],
+        },
+    )
+    .expect("write orphaned historical index");
+
+    let observation = store
+        .open_observation_initialized()
+        .expect("orphaned derived index must not block lifecycle store");
+    assert!(observation
+        .control_plane_resource_projection("agent_task_run", cook_id)
+        .expect("read canonical projection")
+        .is_some());
+    assert!(observation
+        .control_plane_resource_projection("agent_task_run", "orphaned-cook")
+        .expect("read orphan projection")
+        .is_none());
+}

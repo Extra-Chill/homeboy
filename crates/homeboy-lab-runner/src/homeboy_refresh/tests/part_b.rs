@@ -110,6 +110,19 @@ fn refreshed_runner_env_replaces_stale_control_plane_overrides() {
             Some("/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy")
         );
         assert_eq!(offload_env.get("HOMEBOY_DAEMON_STATE_DIR"), None);
+
+        crate::create(
+            r#"{"id":"lab-fresh","kind":"local","workspace_root":"/runner/ws"}"#,
+            false,
+        )
+        .expect("create fresh runner");
+        let fresh_patch = refreshed_runner_patch_in_roots(
+            &ambient_roots(),
+            "lab-fresh",
+            "/runner/ws/_homeboy_binaries/homeboy-main/target/release/homeboy",
+        )
+        .expect("fresh refresh patch");
+        assert!(fresh_patch["env"].get("HOMEBOY_DAEMON_STATE_DIR").is_none());
     });
 }
 
@@ -119,6 +132,15 @@ fn dev_binary_path_uses_content_hash_slot() {
         dev_binary_path("/runner/ws/", "0123456789abcdef9999"),
         "/runner/ws/_homeboy_binaries/dev/0123456789abcdef/homeboy"
     );
+}
+
+#[test]
+fn dev_sync_shell_commands_use_daemon_backed_execution() {
+    let options = dev_sync_execution_options("printf synced".to_string());
+
+    assert!(!options.allow_diagnostic_ssh);
+    assert!(options.raw_exec);
+    assert_eq!(options.command, ["bash", "-lc", "printf synced"]);
 }
 
 #[test]
@@ -368,6 +390,20 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
         std::fs::create_dir_all(source.path().join("target")).expect("target");
         std::fs::write(source.path().join("target/local"), "controller binary")
             .expect("target output");
+        for args in [
+            ["init", "--quiet"].as_slice(),
+            ["config", "user.name", "Homeboy Test"].as_slice(),
+            ["config", "user.email", "homeboy@example.test"].as_slice(),
+            ["add", "."].as_slice(),
+            ["commit", "--quiet", "-m", "fixture"].as_slice(),
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .status()
+                .expect("set up git fixture")
+                .success());
+        }
         let snapshot = build_runner_source_snapshot(source.path(), "/runner/ws").expect("snapshot");
         let script = source_snapshot_build_script(&snapshot);
         let archive = std::process::Command::new("tar")
@@ -390,6 +426,123 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
         assert!(script.contains("runner_native_build_not_elf"));
         assert!(!script.contains(source.path().to_str().expect("utf8 source")));
         assert!(!String::from_utf8_lossy(&archive.stdout).contains("target/local"));
+    });
+}
+
+#[test]
+fn ssh_source_snapshot_script_preserves_dirty_provenance_and_rejects_malformed_input() {
+    test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::write(
+            source.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
+        )
+        .expect("manifest");
+        for args in [
+            ["init", "--quiet"].as_slice(),
+            ["config", "user.name", "Homeboy Test"].as_slice(),
+            ["config", "user.email", "homeboy@example.test"].as_slice(),
+            ["add", "."].as_slice(),
+            ["commit", "--quiet", "-m", "fixture"].as_slice(),
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("set up git fixture")
+                .success());
+        }
+
+        let bin = fixture.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("fake cargo directory");
+        let observed = fixture.path().join("observed-provenance");
+        std::fs::write(
+            bin.join("cargo"),
+            "#!/bin/sh\nset -eu\nprintf '%s,%s' \"$HOMEBOY_PRODUCT_GIT_COMMIT\" \"$HOMEBOY_PRODUCT_GIT_DIRTY\" > \"$HOMEBOY_TEST_PROVENANCE\"\nwhile [ \"$1\" != --target-dir ]; do shift; done\nmkdir -p \"$2/release\"\nprintf '\\177ELF' > \"$2/release/homeboy\"\nchmod 0755 \"$2/release/homeboy\"\n",
+        )
+        .expect("fake cargo");
+        assert!(std::process::Command::new("chmod")
+            .args(["0755", bin.join("cargo").to_str().expect("utf8 cargo")])
+            .status()
+            .expect("make fake cargo executable")
+            .success());
+
+        for dirty in [false, true] {
+            if dirty {
+                std::fs::write(source.join("dirty"), "uncommitted\n").expect("dirty source");
+            }
+            let mut snapshot =
+                build_runner_source_snapshot(&source, "/runner/ws").expect("snapshot");
+            snapshot.remote_archive = snapshot.archive.path().display().to_string();
+            snapshot.build_slot = fixture
+                .path()
+                .join(if dirty { "dirty-slot" } else { "clean-slot" })
+                .display()
+                .to_string();
+            let output = std::process::Command::new("sh")
+                .args(["-c", &source_snapshot_build_script(&snapshot)])
+                .env(
+                    "PATH",
+                    format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+                )
+                .env("HOMEBOY_TEST_PROVENANCE", &observed)
+                .output()
+                .expect("execute snapshot script");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(std::fs::read_to_string(&observed)
+                .expect("observed provenance")
+                .ends_with(if dirty { ",true" } else { ",false" }));
+        }
+
+        let malformed = fixture.path().join("malformed");
+        std::fs::create_dir_all(&malformed).expect("malformed source directory");
+        std::fs::write(
+            malformed.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
+        )
+        .expect("malformed manifest");
+        std::fs::write(
+            malformed.join(".homeboy-source-snapshot"),
+            "git_commit=invalid\ngit_dirty=false\n",
+        )
+        .expect("malformed provenance");
+        let archive = tempfile::NamedTempFile::new().expect("malformed archive");
+        assert!(std::process::Command::new("tar")
+            .args(["-C", malformed.to_str().expect("utf8 malformed"), "-cf"])
+            .arg(archive.path())
+            .arg(".")
+            .status()
+            .expect("archive malformed source")
+            .success());
+        let malformed_snapshot = PreparedRunnerSourceSnapshot {
+            sha256: sha256_file(archive.path()).expect("archive hash"),
+            size_bytes: archive
+                .as_file()
+                .metadata()
+                .expect("archive metadata")
+                .len(),
+            remote_archive: archive.path().display().to_string(),
+            build_slot: fixture.path().join("malformed-slot").display().to_string(),
+            archive,
+        };
+        let output = std::process::Command::new("sh")
+            .args(["-c", &source_snapshot_build_script(&malformed_snapshot)])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+            )
+            .output()
+            .expect("execute malformed snapshot script");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("source_snapshot_invalid_provenance")
+        );
     });
 }
 

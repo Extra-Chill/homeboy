@@ -340,6 +340,7 @@ fn resume_promoted_patch_internal<'a>(
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
         verified_base,
+        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -1068,6 +1069,7 @@ fn promote_with_provider_and_checkpoint_internal(
             deterministic_gates: gates.deterministic_gates,
             gate_results: gates.gate_results,
             verified_base,
+            repository_integrity_evidence: options.repository_integrity_evidence.clone(),
             provenance: json!({
                 "source_schema": outcome.schema,
                 "artifact_metadata": artifact.metadata,
@@ -1238,6 +1240,7 @@ fn promote_with_provider_and_checkpoint_internal(
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
         verified_base,
+        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.metadata,
@@ -2228,6 +2231,7 @@ fn promote_committed_changes(
         deterministic_gates: gates.deterministic_gates,
         gate_results: gates.gate_results,
         verified_base,
+        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": outcome.schema,
             "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
@@ -2330,6 +2334,7 @@ fn run_promotion_gates(
         homeboy_core::repository_integrity::verify_tracked_symlink_portability(
             worktree_path,
             "HEAD",
+            options.repository_integrity_evidence.as_ref(),
         )?;
     }
     if options.dry_run
@@ -3583,6 +3588,7 @@ fn post_apply_report(
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
         verified_base: verified_base.clone(),
+        repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": source_schema,
             "artifact_metadata": artifact_metadata,

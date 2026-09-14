@@ -2280,6 +2280,7 @@ mod tests {
             deterministic_gates,
             gate_results: Vec::new(),
             verified_base: None,
+            repository_integrity_evidence: None,
             provenance: json!({ "worktree_path": "/tmp/homeboy@fix-3676" }),
             operator_notification: AgentTaskPromotionNotification {
                 status: if status == AgentTaskPromotionStatus::Applied {

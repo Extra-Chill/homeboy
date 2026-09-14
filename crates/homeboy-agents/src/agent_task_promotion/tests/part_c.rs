@@ -115,6 +115,7 @@ fn promote_recoverable_candidate_reports_unreadable_patch_evidence() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -189,6 +190,7 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         })
         .expect("empty patch reports no changes");
 
@@ -249,6 +251,7 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -298,6 +301,7 @@ fn committed_change_promotion_rejects_a_non_ancestor_task_base() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut FakePromotionWorkspaceProvider::default(),
     )
@@ -383,6 +387,7 @@ fn promote_applies_patch_with_fake_workspace_provider() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -469,6 +474,7 @@ fn promote_persists_force_added_ignored_git_candidate_paths() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -540,6 +546,7 @@ fn promote_materializes_worktree_dependencies_before_verify_gate() {
                 },
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
         )

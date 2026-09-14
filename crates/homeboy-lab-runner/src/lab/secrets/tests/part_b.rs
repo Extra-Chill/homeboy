@@ -308,8 +308,109 @@ fn lab_dispatch_model_route_does_not_require_an_unrelated_sole_provider_default(
 }
 
 #[test]
-fn declared_agent_task_providers_still_include_provider_default_sources() {
+fn lab_dispatch_without_selected_route_does_not_require_unrelated_sole_provider_default() {
     let provider = fixture_provider_with_example_defaults();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--backend".to_string(),
+        "sample-runtime".to_string(),
+    ];
+
+    let names = declared_agent_task_controller_secret_env_with_providers(
+        &args,
+        std::slice::from_ref(&provider),
+    )
+    .expect("unselected route secret discovery");
+    let sources = declared_agent_task_controller_secret_sources_with_providers(
+        &args,
+        1,
+        std::slice::from_ref(&provider),
+    )
+    .expect("unselected route source discovery");
+
+    assert!(names.is_empty());
+    assert!(sources.is_empty());
+
+    let mut env = HashMap::new();
+    let metadata = hydrate_agent_task_secret_env_with_providers(
+        &args,
+        &mut env,
+        std::slice::from_ref(&provider),
+    )
+    .expect("unselected route hydrates without invented credentials");
+    assert!(env.is_empty());
+    assert_eq!(
+        metadata["runner_deferred_secret_env"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn lab_dispatch_selected_route_keeps_declared_credentials_runner_owned() {
+    let provider = fixture_provider_with_example_defaults();
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--backend".to_string(),
+        "sample-runtime".to_string(),
+        "--model".to_string(),
+        "example-oauth/default".to_string(),
+    ];
+
+    let names = declared_agent_task_controller_secret_env_with_providers(
+        &args,
+        std::slice::from_ref(&provider),
+    )
+    .expect("selected route secret discovery");
+    let sources = declared_agent_task_controller_secret_sources_with_providers(
+        &args,
+        1,
+        std::slice::from_ref(&provider),
+    )
+    .expect("selected route source discovery");
+
+    assert_eq!(names, vec!["EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()]);
+    assert_eq!(
+        sources
+            .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
+            .and_then(|source| source.path.as_deref()),
+        Some("~/.example-provider/auth.json")
+    );
+
+    let mut env = HashMap::new();
+    let metadata = hydrate_agent_task_secret_env_with_providers(
+        &args,
+        &mut env,
+        std::slice::from_ref(&provider),
+    )
+    .expect("selected route defers declared credentials to the runner");
+    assert!(env.is_empty());
+    assert_eq!(
+        metadata["runner_deferred_secret_env"],
+        serde_json::json!([{
+            "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
+            "source": "runner"
+        }])
+    );
+}
+
+#[test]
+fn declared_agent_task_providers_include_unconditional_sources() {
+    let mut provider = fixture_provider_with_example_defaults();
+    provider.secret_env_requirements = serde_json::from_value(serde_json::json!([{
+        "env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
+        "secret_env_sources": {
+            "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
+                "source": "json-file",
+                "path": "~/.example-provider/auth.json",
+                "field": "tokens.access_token"
+            }
+        }
+    }]))
+    .expect("unconditional secret sources");
     let args = vec![
         "homeboy".to_string(),
         "agent-task".to_string(),

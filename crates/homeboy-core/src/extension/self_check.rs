@@ -94,11 +94,12 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
     }
 
     let working_dir = source_path.to_string_lossy();
-    let explicit_cargo_target = component
-        .env
-        .get("CARGO_TARGET_DIR")
-        .cloned()
-        .or_else(|| std::env::var("CARGO_TARGET_DIR").ok());
+    // A component's declared `CARGO_TARGET_DIR`, and any value inherited from
+    // this process, describe the environment a child runs in — not a target the
+    // operator chose for this invocation. Honouring either would let two
+    // managed runs of the same component serialize on one Cargo lock, which is
+    // the contention this managed lease exists to remove. A caller-owned
+    // explicit target is passed by callers that genuinely own one.
     let cargo_target = component
         .managed_execution
         .shared_cargo_target
@@ -106,7 +107,7 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
             homeboy_core::cleanup::acquire_managed_cargo_target(
                 &format!("component:{}", component.id),
                 source_path,
-                explicit_cargo_target.as_deref(),
+                None,
             )
         })
         .transpose()?;
@@ -393,28 +394,24 @@ fn execute_bounded_self_check_command(
     timeout: Duration,
     passthrough: Option<homeboy_engine_primitives::command::StreamChunkObserver>,
 ) -> SelfCheckCommandOutput {
-    use homeboy_engine_primitives::command::{ControllerChildGuard, SupervisedCommandTermination};
+    use homeboy_engine_primitives::command::{
+        wait_with_bounded_output_supervised_with_progress_owned, ExecutionOwner,
+        SupervisedCommandTermination,
+    };
 
-    let guard = match ControllerChildGuard::prepare(&mut command) {
-        Ok(guard) => guard,
+    let mut owner = match ExecutionOwner::spawn(&mut command) {
+        Ok(owner) => owner,
         Err(error) => return self_check_spawn_error(error),
     };
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return self_check_spawn_error(error),
-    };
-    if let Err(error) = guard.attach(&child) {
-        let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
-        return self_check_spawn_error(error);
-    }
-    let supervised = match homeboy_engine_primitives::command::wait_with_bounded_output_supervised_with_passthrough(
-        &mut child,
+    let supervised = match wait_with_bounded_output_supervised_with_progress_owned(
+        &mut owner,
         SELF_CHECK_CAPTURE_LIMIT_BYTES,
         timeout,
+        None,
         Duration::from_secs(1),
         passthrough,
         || false,
-        |_, _| Ok(()),
+        |_| Ok(()),
     ) {
         Ok(output) => output,
         Err(error) => return self_check_spawn_error(error),
@@ -653,15 +650,10 @@ mod tests {
         )
         .expect("self-check should run");
 
-        assert_eq!(output.stdout, format!("local:{}", target.display()));
-        assert_eq!(
-            output.cargo_target,
-            Some(homeboy_core::CargoTargetEvidence {
-                path: target.to_string_lossy().to_string(),
-                resolution: "local".to_string(),
-                owner: "component:fixture".to_string(),
-            })
-        );
+        let evidence = output.cargo_target.expect("managed target evidence");
+        assert_eq!(evidence.resolution, "isolated");
+        assert_ne!(evidence.path, target.to_string_lossy());
+        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
     }
 
     #[test]
@@ -693,15 +685,10 @@ mod tests {
         )
         .expect("self-check should run");
 
-        assert_eq!(output.stdout, format!("local:{}", target.display()));
-        assert_eq!(
-            output.cargo_target,
-            Some(homeboy_core::CargoTargetEvidence {
-                path: target.to_string_lossy().to_string(),
-                resolution: "local".to_string(),
-                owner: "component:fixture".to_string(),
-            })
-        );
+        let evidence = output.cargo_target.expect("managed target evidence");
+        assert_eq!(evidence.resolution, "isolated");
+        assert_ne!(evidence.path, target.to_string_lossy());
+        assert_eq!(output.stdout, format!("isolated:{}", evidence.path));
     }
 
     #[test]
@@ -734,7 +721,7 @@ mod tests {
             let evidence = output.cargo_target.expect("managed target evidence");
 
             assert!(output.success);
-            assert_eq!(evidence.resolution, "shared");
+            assert_eq!(evidence.resolution, "isolated");
             assert!(!Path::new(&evidence.path).join(".homeboy-lease").exists());
         });
     }
