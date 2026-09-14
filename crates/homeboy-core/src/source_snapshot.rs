@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 pub use homeboy_source_snapshot_contract::source_snapshot::{
-    default_sync_excludes, SourceSnapshot, SourceSnapshotPolicy,
+    default_sync_excludes, RepositoryIntegrityEvidence, SourceSnapshot, SourceSnapshotPolicy,
 };
 
 use crate::git;
@@ -44,6 +44,18 @@ pub fn collect_local(
     remote_path: Option<&str>,
     sync_mode: &str,
 ) -> SourceSnapshot {
+    collect_local_checked(runner_id, path, remote_path, sync_mode)
+        .expect("source snapshot collection rejected repository integrity policy")
+}
+
+/// Collect a local snapshot and return invalid operator policy to callers that
+/// can surface a structured admission failure.
+pub fn collect_local_checked(
+    runner_id: &str,
+    path: &Path,
+    remote_path: Option<&str>,
+    sync_mode: &str,
+) -> crate::Result<SourceSnapshot> {
     let policy = policy_for_path(path);
     collect_local_with_policy(runner_id, path, remote_path, sync_mode, &policy)
 }
@@ -54,7 +66,7 @@ pub(crate) fn collect_local_with_policy(
     remote_path: Option<&str>,
     sync_mode: &str,
     policy: &SourceSnapshotPolicy,
-) -> SourceSnapshot {
+) -> crate::Result<SourceSnapshot> {
     let local_path = path.display().to_string();
     let git_root = git::toplevel(path);
     let git_branch = git::current_branch(path)
@@ -69,7 +81,7 @@ pub(crate) fn collect_local_with_policy(
         generic_snapshot_hash(&local_path)
     };
 
-    SourceSnapshot {
+    Ok(SourceSnapshot {
         runner_id: runner_id.to_string(),
         local_path: Some(local_path),
         remote_path: remote_path.map(str::to_string),
@@ -87,7 +99,9 @@ pub(crate) fn collect_local_with_policy(
         snapshot_hash,
         synced_at: chrono::Utc::now().to_rfc3339(),
         sync_excludes: policy.sync_excludes.clone(),
-    }
+        repository_integrity_evidence:
+            crate::repository_integrity::collect_operator_policy_evidence(path)?,
+    })
 }
 
 pub fn existing_remote(
@@ -134,6 +148,7 @@ pub(crate) fn existing_remote_with_policy(
         snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
         synced_at: chrono::Utc::now().to_rfc3339(),
         sync_excludes: policy.sync_excludes.clone(),
+        repository_integrity_evidence: None,
     }
 }
 
@@ -591,6 +606,36 @@ mod tests {
         );
         assert!(snapshot.git_sha.is_some());
         assert!(snapshot.snapshot_hash.starts_with("sha256:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_collection_rejects_invalid_operator_policy() {
+        let tempdir = tempfile::tempdir().expect("creates source fixture");
+        let source_path = tempdir.path();
+        git_test_command(source_path, &["init"]);
+        fs::write(
+            source_path
+                .join(".git")
+                .join(crate::repository_integrity::OPERATOR_POLICY_FILE),
+            "not-json",
+        )
+        .expect("writes invalid policy");
+        fs::set_permissions(
+            source_path
+                .join(".git")
+                .join(crate::repository_integrity::OPERATOR_POLICY_FILE),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .expect("secures invalid policy");
+
+        assert!(collect_local_checked(
+            "lab-local",
+            source_path,
+            Some("/srv/homeboy/repo"),
+            PATH_MATERIALIZATION_MODE_SNAPSHOT,
+        )
+        .is_err());
     }
 
     #[test]

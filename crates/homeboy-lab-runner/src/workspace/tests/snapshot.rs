@@ -1076,7 +1076,7 @@ fn test_sync_workspace() {
 }
 
 #[test]
-fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
+fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
     {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let roots = context.path_roots();
@@ -1118,7 +1118,7 @@ fn snapshot_sync_uses_gitignore_excludes_as_generic_fallback() {
         assert_eq!(exit_code, 0);
         assert!(output.excludes.contains(&"target".to_string()));
         assert!(output.excludes.contains(&"node_modules/**".to_string()));
-        assert!(output.excludes.contains(&"*.tsbuildinfo".to_string()));
+        assert!(output.excludes.contains(&"build.tsbuildinfo".to_string()));
         assert!(Path::new(&output.remote_path).join("src/main.rs").exists());
         assert!(!Path::new(&output.remote_path)
             .join("target/debug/homeboy")
@@ -2284,6 +2284,54 @@ fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
         .expect("the excluded children retain their admitted empty root");
     assert!(staged_source.join("runtime-overlays").is_dir());
     assert!(!staged_source.join("runtime-overlays/php-wasm").exists());
+}
+
+#[test]
+fn snapshot_staging_preserves_dependency_vendors_for_root_vendor_excludes() {
+    let source = tempfile::tempdir().expect("source");
+    let babel_vendor = source
+        .path()
+        .join("node_modules/@babel/core/lib/vendor/import-meta-resolve.js");
+    let sentry_vendor = source
+        .path()
+        .join("node_modules/@sentry/utils/cjs/vendor/escapeStringForRegex.js");
+    let root_vendor = source.path().join("vendor/autoload.php");
+    for (path, contents) in [
+        (&babel_vendor, "export default 'babel runtime';\n"),
+        (&sentry_vendor, "module.exports = 'sentry runtime';\n"),
+        (&root_vendor, "root build dependency\n"),
+    ] {
+        fs::create_dir_all(path.parent().expect("dependency parent"))
+            .expect("dependency directory");
+        fs::write(path, contents).expect("dependency file");
+    }
+    let excludes = vec!["vendor/".to_string(), "vendor/**".to_string()];
+
+    let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &excludes, &manifest, None)
+        .expect("snapshot stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
+    let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, source.path(), &staged_source)
+        .expect("staging preserves the manifest-approved dependency runtime");
+    assert!(!staged_source.join("vendor").exists());
+    assert_eq!(
+        fs::read_to_string(
+            staged_source.join("node_modules/@babel/core/lib/vendor/import-meta-resolve.js")
+        )
+        .expect("Babel runtime vendor file"),
+        "export default 'babel runtime';\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            staged_source.join("node_modules/@sentry/utils/cjs/vendor/escapeStringForRegex.js")
+        )
+        .expect("Sentry runtime vendor file"),
+        "module.exports = 'sentry runtime';\n"
+    );
 }
 
 #[test]

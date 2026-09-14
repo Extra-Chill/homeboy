@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
@@ -2246,6 +2245,23 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
     acquire_daemon_operation_lock().expect("recover after interrupted lock holder");
 }
 
+#[cfg(unix)]
+#[test]
+fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
+    let _home = HomeGuard::new();
+    let mut child = {
+        let _lock = acquire_daemon_operation_lock().expect("acquire launcher lock");
+        Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn detached lifecycle child")
+    };
+
+    acquire_daemon_operation_lock().expect("child exec must not retain lifecycle lock");
+    child.kill().expect("stop lifecycle child");
+    child.wait().expect("reap lifecycle child");
+}
+
 #[test]
 fn stop_refuses_stale_lease_that_points_at_reused_pid() {
     let _home = HomeGuard::new();
@@ -3256,6 +3272,33 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
     assert_eq!(store.list().len(), 1);
 }
 
+#[test]
+fn destructive_recovery_bounds_admission_contention_before_mutating() {
+    let _home = HomeGuard::new();
+    let shared =
+        super::acquire_daemon_admission_lock().expect("admission preflight holds shared lock");
+    let started = Instant::now();
+
+    let error = match super::acquire_daemon_job_admission_fence_with_wait(Duration::from_millis(10))
+    {
+        Ok(_) => panic!("recovery must not wait indefinitely for an unpersisted admission"),
+        Err(error) => error,
+    };
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert_eq!(
+        error.details["classification"],
+        "daemon_admission_fence_timeout"
+    );
+    assert_eq!(error.details["lifecycle_mutation"], "not_started");
+    assert_eq!(error.retryable, Some(true));
+    drop(shared);
+
+    super::acquire_daemon_job_admission_fence_with_wait(Duration::ZERO)
+        .expect("idle recovery acquires the released admission fence");
+}
+
 #[cfg(unix)]
 #[test]
 fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
@@ -3275,9 +3318,8 @@ fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admi
 
     // This is the guard retained by LocalControllerJobClient after it has
     // verified the resident build but before it posts the Cook job.
-    let preflight_guard =
-        super::acquire_daemon_admission_lock(super::DaemonAdmissionLockMode::Shared)
-            .expect("Cook preflight acquires shared generation guard");
+    let preflight_guard = super::acquire_daemon_admission_lock()
+        .expect("Cook preflight acquires shared generation guard");
     let (recovery_attempt_tx, recovery_attempt_rx) = mpsc::channel();
     let (recovery_acquired_tx, recovery_acquired_rx) = mpsc::channel();
     std::thread::spawn(move || {

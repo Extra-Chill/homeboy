@@ -276,6 +276,7 @@ fn lab_offload_workspace_verification_metadata_survives_process_env_hydration() 
         snapshot_hash: "sha256:verified".to_string(),
         synced_at: "2026-07-14T00:00:00Z".to_string(),
         sync_excludes: vec!["excluded.txt".to_string()],
+        repository_integrity_evidence: None,
     };
     let synced_workspace = primary_synced_workspace(&source_path, &remote_path);
     let path_materialization_plan = PathMaterializationPlan::new([PathMaterializationEntry::new(
@@ -512,6 +513,7 @@ fn materialization_proof_records_hashes_source_and_runner_identity() {
         snapshot_hash: "sha256:source".to_string(),
         synced_at: "2026-06-21T00:00:00Z".to_string(),
         sync_excludes: vec!["target/".to_string()],
+        repository_integrity_evidence: None,
     };
     let runner_homeboy = serde_json::json!({
         "schema": "homeboy/lab-runner-homeboy/v1",

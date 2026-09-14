@@ -88,6 +88,7 @@ pub(crate) fn bounded_cancel_report(value: Value) -> Value {
             "disposition": bounded_value(cancellation.get("disposition").unwrap_or(&Value::Null)),
             "terminal": bounded_value(cancellation.get("terminal").unwrap_or(&Value::Null)),
             "waited_seconds": bounded_value(cancellation.get("waited_seconds").unwrap_or(&Value::Null)),
+            "message": bounded_value(value.get("message").unwrap_or(&Value::Null)),
         },
         "next_action": { "command": status_command },
         "output_budget": {
@@ -1381,9 +1382,12 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
                         schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                             .to_string(),
                         action: homeboy_control_plane_contract::ControlPlaneAction::Reconcile,
-                        effect_id: homeboy_control_plane_contract::EffectId(format!(
-                            "cli:{resolved_run_id}:reconcile:{idempotency_key}"
-                        )),
+                        effect_id: homeboy_control_plane_contract::action_effect_id(
+                            "cli",
+                            &resolved_run_id,
+                            "reconcile",
+                            &idempotency_key,
+                        ),
                         idempotency_key,
                         actor: "homeboy-cli".to_string(),
                         expected_updated_at: None,
@@ -3717,10 +3721,12 @@ pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:cancel:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "cancel",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -3797,10 +3803,12 @@ pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:quarantine:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "quarantine",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -3831,10 +3839,12 @@ pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Rearm,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:rearm:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "rearm",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,

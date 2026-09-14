@@ -1031,6 +1031,43 @@ impl AgentTaskLifecycleStore {
         .map(|_| ())
     }
 
+    /// Atomically persist a metadata value only when it is absent or already
+    /// byte-for-byte identical. This prevents concurrent recovery callers from
+    /// publishing against a receipt another caller authored.
+    pub(crate) fn compare_and_set_metadata_value(
+        &self,
+        run_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<()> {
+        let run_id = sanitize_run_id(run_id);
+        let mut conflict = false;
+        self.mutate_record(&run_id, |record| {
+            let metadata = record.ensure_metadata_object();
+            match metadata.get(key) {
+                Some(existing) if existing == &value => false,
+                Some(_) => {
+                    conflict = true;
+                    false
+                }
+                None => {
+                    metadata.insert(key.to_string(), value.clone());
+                    record.updated_at = Some(super::now_timestamp());
+                    true
+                }
+            }
+        })?;
+        if conflict {
+            return Err(Error::validation_invalid_argument(
+                key,
+                "durable metadata already contains a different value",
+                Some(run_id),
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
         read_record_bounded_in_store(self, run_id)
     }
@@ -2334,7 +2371,7 @@ fn merge_observation_metadata(mut existing: Value, typed: Value) -> Value {
     existing
 }
 
-pub(super) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
+pub(crate) fn record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     let record = parse_record_from_run(run)?;
     if record.schema != super::records::schemas::RUN {
         return Err(Error::validation_invalid_argument(

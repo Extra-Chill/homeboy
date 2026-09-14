@@ -131,27 +131,29 @@ pub fn execute_delegated_action(
         request_digest,
         accepted_at,
     };
-    let fence = ControlPlaneActionFence {
-        schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
-        resource_updated_at: resource_version.to_string(),
-        eligible: eligible
-            && request
-                .expected_updated_at
-                .as_deref()
-                .map_or(true, |expected| expected == resource_version),
-        reason: request
-            .expected_updated_at
-            .as_deref()
-            .is_some_and(|expected| expected != resource_version)
-            .then(|| "run changed since the supplied precondition".to_string())
-            .or(reason),
-    };
+    let domain_reason = reason.clone();
     let effect = match store
         .enqueue_control_plane_action_intent_with_projection(
             &intent,
-            &fence,
             &projection,
             &idempotency_digest,
+            |live, _run| {
+                let eligible = live
+                    .eligibility
+                    .get("eligible")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                Ok(ControlPlaneActionFence {
+                    schema: CONTROL_PLANE_ACTION_FENCE_SCHEMA.to_string(),
+                    resource_updated_at: live.version.clone(),
+                    eligible,
+                    reason: (!eligible).then(|| {
+                        domain_reason
+                            .clone()
+                            .unwrap_or_else(|| "action is not eligible".to_string())
+                    }),
+                })
+            },
         )
         .map_err(map_store_error)?
     {
@@ -162,7 +164,7 @@ pub fn execute_delegated_action(
         ensure_delegated_action_events(store, request, &terminal.acknowledgement)?;
         return Ok(Some(terminal.acknowledgement));
     }
-    if fence.eligible && effect.lease_fence == 0 {
+    if effect.fence.eligible && effect.lease_fence == 0 {
         append_delegated_action_event(
             store,
             &requested_id,
@@ -198,13 +200,7 @@ pub fn execute_delegated_action(
             true,
         ),
     };
-    let domain = if !fence.eligible {
-        Ok(ControlPlaneActionDelegateResult {
-            outcome: ControlPlaneActionOutcome::Failed,
-            result: ControlPlaneActionPayload::empty(),
-            message: fence.reason.clone(),
-        })
-    } else if recovered {
+    let domain = if recovered {
         delegate.recover(run, request)
     } else {
         delegate.execute(run, request)

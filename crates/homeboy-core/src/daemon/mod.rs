@@ -7,13 +7,14 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api_jobs::{
-    ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
-    LocalRunnerJobRequest, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+    canonical_run_ref_metadata, ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus,
+    JobStore, LocalRunnerJob, LocalRunnerJobRequest, RemoteRunnerJobRequest,
+    RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -171,7 +172,7 @@ pub struct LocalControllerJobClient {
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
     // different build cannot replace this generation after preflight.
-    _admission_guard: Option<File>,
+    _admission_guard: Option<DaemonAdmissionGuard>,
 }
 
 /// The durable admission result for a typed controller job submission.
@@ -207,7 +208,12 @@ impl LocalControllerJobClient {
     /// can deserialize a request while applying stale ownership semantics. Fail
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
-        let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+        // Dead-lease cleanup needs exclusive admission. Recover before taking
+        // our shared guard, then retain the guarded validation below.
+        if !read_status()?.running {
+            ensure_running(DEFAULT_ADDR)?;
+        }
+        let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
         match Self::connect_with_admission_guard(Some(admission_guard)) {
             Ok(client) => Ok(client),
@@ -288,7 +294,7 @@ impl LocalControllerJobClient {
         })
     }
 
-    fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
+    fn connect_with_admission_guard(admission_guard: Option<DaemonAdmissionGuard>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -3480,7 +3486,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     })?;
     let submission_key = resolve_exec_idempotency_key(
         legacy.idempotency_key.as_deref(),
-        exec_request_run_ref_metadata(
+        canonical_run_ref_metadata(
             legacy.lifecycle.as_ref(),
             legacy.lab_runner_workload.as_ref(),
             legacy.metadata.as_ref(),
@@ -3911,7 +3917,7 @@ fn enqueue_exec_request(
 
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata =
-        exec_request_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
+        canonical_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
             .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
@@ -4783,48 +4789,6 @@ pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(content_hash::sha256_hex(&encoded))
-}
-
-fn exec_request_run_ref_metadata(
-    lifecycle: Option<&RunnerJobLifecycleMetadata>,
-    lab_runner_workload: Option<&LabRunnerWorkload>,
-    metadata: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let durable_run_id = lifecycle
-        .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
-        .or_else(|| metadata.and_then(metadata_run_id));
-    let agent_task_run_id = lab_runner_workload
-        .and_then(|workload| workload.agent_task.as_ref())
-        .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
-        .or_else(|| {
-            metadata
-                .and_then(|metadata| metadata.get("agent_task_run_id"))
-                .and_then(|run_id| non_empty_string(run_id.as_str()))
-        })
-        .or_else(|| durable_run_id.clone());
-
-    if durable_run_id.is_none() && agent_task_run_id.is_none() {
-        return None;
-    }
-
-    Some(json!({
-        "durable_run_id": durable_run_id,
-        "agent_task_run_id": agent_task_run_id,
-    }))
-}
-
-fn metadata_run_id(metadata: &serde_json::Value) -> Option<String> {
-    ["durable_run_id", "run_id", "record_run_id"]
-        .iter()
-        .find_map(|key| metadata.get(*key))
-        .and_then(|run_id| non_empty_string(run_id.as_str()))
-}
-
-fn non_empty_string(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn daemon_job_store() -> &'static JobStore {
@@ -6694,7 +6658,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_request_run_ref_metadata_prefers_lifecycle_run_id() {
+    fn canonical_run_ref_metadata_prefers_lifecycle_run_id() {
         let lifecycle = RunnerJobLifecycleMetadata {
             source: Some("runner-daemon".to_string()),
             kind: Some("runner.exec".to_string()),
@@ -6703,7 +6667,7 @@ mod tests {
             active_cell_count: None,
         };
 
-        let metadata = exec_request_run_ref_metadata(
+        let metadata = canonical_run_ref_metadata(
             Some(&lifecycle),
             None,
             Some(&json!({ "run_id": "metadata-run" })),
@@ -7163,15 +7127,19 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The daemon supervisor is detached from this launcher. It must not inherit
+    // the lifecycle lock and strand later recovery after the launcher exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    let file = options.open(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+    })?;
     if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
         return Err(Error::internal_unexpected(format!(
             "daemon lifecycle operation already in progress; lock is held at {}",
@@ -7218,53 +7186,117 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
-    acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
+    acquire_daemon_job_admission_fence_with_wait(Duration::from_secs(5))
+}
+
+/// A destructive lifecycle action must not wait indefinitely behind a Cook that
+/// has preflighted a daemon but has not persisted its durable job yet.
+pub(super) fn acquire_daemon_job_admission_fence_with_wait(
+    wait: Duration,
+) -> Result<DaemonAdmissionFence> {
+    const RETRY: Duration = Duration::from_millis(500);
+
+    let deadline = Instant::now() + wait;
+    loop {
+        match try_acquire_daemon_job_admission_fence()? {
+            Some(fence) => return Ok(fence),
+            None if Instant::now() >= deadline => {
+                return Err(daemon_admission_fence_timeout_error(wait));
+            }
+            None => {}
+        }
+        std::thread::sleep(RETRY.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn try_acquire_daemon_job_admission_fence() -> Result<Option<DaemonAdmissionFence>> {
+    let (state_lock, _) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    if state.shared_holders > 0 || state.exclusive_held {
+        return Ok(None);
+    }
+    state.exclusive_held = true;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            return Err(error);
+        }
+    };
+    match try_lock_file_exclusive(&file, "daemon admission") {
+        Ok(true) => Ok(Some(DaemonAdmissionFence { file })),
+        Ok(false) => {
+            release_daemon_admission_exclusive();
+            Ok(None)
+        }
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            Err(error)
+        }
+    }
+}
+
+fn daemon_admission_fence_timeout_error(wait: Duration) -> Error {
+    let path = state_path()
+        .map(|state| state.with_file_name("admission.lock"))
+        .unwrap_or_else(|_| PathBuf::from("daemon admission lock"));
+    daemon_admission_fence_timeout_error_at(&path, wait)
+}
+
+fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "daemon_admission_fence",
+        "timed out waiting for daemon admission; no daemon recovery or lease cleanup was performed",
+        Some(path.display().to_string()),
+        Some(vec![
+            "Wait for the concurrent admission to finish, then retry `homeboy daemon recover --yes`."
+                .to_string(),
+            "Run `homeboy daemon status` to inspect durable job evidence before retrying."
+                .to_string(),
+        ]),
+    )
+    .with_retryable(true);
+    error.details = serde_json::json!({
+        "classification": "daemon_admission_fence_timeout",
+        "lock_path": path,
+        "wait_ms": wait.as_millis(),
+        "lifecycle_mutation": "not_started",
+    });
+    error
 }
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+    let _guard = acquire_daemon_admission_lock()?;
     operation()
 }
 
-enum DaemonAdmissionLockMode {
-    Shared,
-    Exclusive,
-}
-
-fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> {
-    let state = state_path()?;
-    let parent = state
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(parent.join("admission.lock"))
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("open daemon admission lock".to_string()),
-            )
+fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    while state.exclusive_held {
+        state = state_changed.wait(state).map_err(|_| {
+            Error::internal_unexpected("daemon admission process state is poisoned")
         })?;
+    }
+    state.shared_holders += 1;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_shared();
+            return Err(error);
+        }
+    };
     #[cfg(unix)]
-    if unsafe {
-        libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            match mode {
-                DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
-                DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
-            },
-        )
-    } != 0
-    {
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
+        release_daemon_admission_shared();
         return Err(Error::internal_io(
             std::io::Error::last_os_error().to_string(),
             Some("lock daemon admission".to_string()),
@@ -7277,14 +7309,10 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let flags = match mode {
-            DaemonAdmissionLockMode::Shared => 0,
-            DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
-        };
         if unsafe {
             LockFileEx(
                 file.as_raw_handle(),
-                flags,
+                0,
                 0,
                 u32::MAX,
                 u32::MAX,
@@ -7292,15 +7320,41 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             )
         } == 0
         {
+            release_daemon_admission_shared();
             return Err(Error::internal_io(
                 std::io::Error::last_os_error().to_string(),
                 Some("lock daemon admission".to_string()),
             ));
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = mode;
-    Ok(file)
+    Ok(DaemonAdmissionGuard { file })
+}
+
+fn open_daemon_admission_lock() -> Result<(PathBuf, File)> {
+    let state = state_path()?;
+    let parent = state
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let path = parent.join("admission.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open daemon admission lock".to_string()),
+            )
+        })?;
+    Ok((path, file))
 }
 
 /// Acquires a non-blocking exclusive advisory lock backed by the OS. Platforms
@@ -7378,13 +7432,51 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
-pub(super) struct DaemonAdmissionFence(File);
+pub(super) struct DaemonAdmissionFence {
+    file: File,
+}
+
+struct DaemonAdmissionGuard {
+    file: File,
+}
+
+#[derive(Default)]
+struct DaemonAdmissionProcessState {
+    shared_holders: usize,
+    exclusive_held: bool,
+}
+
+fn daemon_admission_process_state() -> &'static (Mutex<DaemonAdmissionProcessState>, Condvar) {
+    static STATE: OnceLock<(Mutex<DaemonAdmissionProcessState>, Condvar)> = OnceLock::new();
+    STATE.get_or_init(|| {
+        (
+            Mutex::new(DaemonAdmissionProcessState::default()),
+            Condvar::new(),
+        )
+    })
+}
+
+fn release_daemon_admission_shared() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.shared_holders = state.shared_holders.saturating_sub(1);
+        state_changed.notify_all();
+    }
+}
+
+fn release_daemon_admission_exclusive() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.exclusive_held = false;
+        state_changed.notify_all();
+    }
+}
 
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
-            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN);
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
         }
         #[cfg(windows)]
         unsafe {
@@ -7394,13 +7486,39 @@ impl Drop for DaemonAdmissionFence {
 
             let mut overlapped: OVERLAPPED = std::mem::zeroed();
             let _ = UnlockFileEx(
-                self.0.as_raw_handle(),
+                self.file.as_raw_handle(),
                 0,
                 u32::MAX,
                 u32::MAX,
                 &mut overlapped,
             );
         }
+        release_daemon_admission_exclusive();
+    }
+}
+
+impl Drop for DaemonAdmissionGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            let _ = UnlockFileEx(
+                self.file.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
+        }
+        release_daemon_admission_shared();
     }
 }
 

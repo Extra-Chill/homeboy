@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{ControlPlaneAction, ControlPlaneRef, ControlPlaneRun, RunId};
 
@@ -20,6 +21,30 @@ pub const CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA: &str =
 pub const CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA: &str =
     "homeboy/control-plane-quarantine-result/v1";
 pub const CONTROL_PLANE_REARM_RESULT_SCHEMA: &str = "homeboy/control-plane-rearm-result/v1";
+pub const CONTROL_PLANE_ACTION_ID_BOUND: usize = 128;
+
+/// Builds the durable effect identity for an action without coupling it to the
+/// independently persisted idempotency key. Existing short identifiers retain
+/// their wire representation; longer inputs use a deterministic digest of each
+/// component so retries remain replayable and collision-resistant.
+pub fn action_effect_id(
+    provenance: &str,
+    target_id: &str,
+    action: &str,
+    idempotency_key: &str,
+) -> EffectId {
+    let legacy = format!("{provenance}:{target_id}:{action}:{idempotency_key}");
+    if legacy.len() <= CONTROL_PLANE_ACTION_ID_BOUND {
+        return EffectId(legacy);
+    }
+
+    let mut digest = Sha256::new();
+    for component in [provenance, target_id, action, idempotency_key] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
+    }
+    EffectId(format!("{provenance}:{action}:{:x}", digest.finalize()))
+}
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
 pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-placement-update-parameters/v1";
@@ -252,7 +277,7 @@ pub struct ControlPlaneActionRequest {
 
 impl ControlPlaneActionRequest {
     pub fn validate(&self) -> Result<(), crate::ControlPlaneError> {
-        const INPUT_BOUND: usize = 128;
+        const INPUT_BOUND: usize = CONTROL_PLANE_ACTION_ID_BOUND;
         const REASON_BOUND: usize = 1_024;
 
         if self.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
@@ -434,6 +459,45 @@ mod tests {
         let value = serde_json::to_value(&acknowledgement).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA);
         assert_eq!(value["outcome"], "succeeded");
+    }
+
+    #[test]
+    fn action_effect_id_preserves_short_persisted_identifiers() {
+        assert_eq!(
+            action_effect_id("cli", "run-1", "retry", "request-1"),
+            EffectId("cli:run-1:retry:request-1".to_string())
+        );
+    }
+
+    #[test]
+    fn action_effect_id_bounds_long_inputs_without_losing_replay_identity() {
+        let run_id = format!("run-{}", "x".repeat(120));
+        let first = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
+        );
+        let replay = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
+        );
+        let distinct = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "c5c72555-8670-4f5c-8937-8eb23d582d3f",
+        );
+
+        assert!(first.0.len() <= CONTROL_PLANE_ACTION_ID_BOUND);
+        assert_eq!(first, replay);
+        assert_ne!(first, distinct);
+        assert_eq!(
+            first.0.split(':').take(2).collect::<Vec<_>>(),
+            ["cli", "retry"]
+        );
     }
 
     #[test]

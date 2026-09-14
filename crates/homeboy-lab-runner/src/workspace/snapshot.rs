@@ -133,7 +133,13 @@ pub(crate) fn snapshot_identity(
     excludes: &[String],
     includes: &[String],
 ) -> Result<String> {
-    homeboy_core::repository_integrity::verify_tracked_symlink_portability(local_path, "HEAD")?;
+    let repository_integrity_evidence =
+        homeboy_core::repository_integrity::collect_operator_policy_evidence(local_path)?;
+    homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+        local_path,
+        "HEAD",
+        repository_integrity_evidence.as_ref(),
+    )?;
     let head =
         git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
     let status = snapshot_git_output(local_path, &["status", "--porcelain=v1"], excludes)
@@ -2469,11 +2475,15 @@ fn materialize_snapshot_stage_before(
 }
 
 fn is_root_input_exclude(pattern: &str) -> bool {
-    let Some(pattern) = pattern.strip_prefix("./") else {
+    let root_anchored = pattern.starts_with("./");
+    if !root_anchored && !pattern.ends_with('/') && !pattern.ends_with("/**") {
         return false;
-    };
-    let root = pattern.trim_end_matches("/**").trim_end_matches('/');
-    !root.is_empty() && !root.contains('/')
+    }
+    let root = pattern
+        .trim_start_matches("./")
+        .trim_end_matches("/**")
+        .trim_end_matches('/');
+    !root.is_empty() && !root.contains('/') && !root.contains('*')
 }
 
 fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {

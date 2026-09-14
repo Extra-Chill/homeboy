@@ -190,7 +190,7 @@ fn complete_readiness_operation(
 
 fn run_command_with_workspace_inner(
     roots: &homeboy_core::paths::PathRoots,
-    input: ReleaseCommandInput,
+    mut input: ReleaseCommandInput,
     recovery_owner_run_ref: Option<&str>,
 ) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
     let execution = release_execution_plan(&input);
@@ -244,6 +244,12 @@ fn run_command_with_workspace_inner(
     )?;
 
     let release_scope = ReleaseScope::resolve(&component, &input.component_id)?;
+    input.pipeline.protected_branch_resume = prepared_release_pr_resume_intent(
+        &component,
+        &release_scope,
+        input.pipeline.protected_branch,
+        input.pipeline.head,
+    )?;
     let resolved_bump = if input.pipeline.head {
         None
     } else {
@@ -536,6 +542,20 @@ fn run_command_with_workspace_inner(
         }
     }
 
+    let protected_prepare = input.pipeline.protected_branch && !input.pipeline.head;
+    let continuation_command = protected_prepare.then(|| {
+        if release_step_exit == 0 {
+            format!(
+                "homeboy release {} --protected-branch --head --apply",
+                input.component_id
+            )
+        } else {
+            format!(
+                "homeboy release {} --protected-branch --apply",
+                input.component_id
+            )
+        }
+    });
     let exit_code = release_command_exit_code(
         skipped_reason.as_deref(),
         release_step_exit,
@@ -548,7 +568,11 @@ fn run_command_with_workspace_inner(
             result: ReleaseCommandResult {
                 phase: execution.phase,
                 component_id: input.component_id,
-                status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
+                status: if protected_prepare && release_step_exit == 0 {
+                    "release_pr_open".to_string()
+                } else {
+                    release_command_status(false, skipped_reason.as_deref(), Some(&run_result))
+                },
                 bump_type,
                 dry_run: false,
                 releasable_commits: releasable_count,
@@ -558,7 +582,7 @@ fn run_command_with_workspace_inner(
                 plan: Some(plan),
                 run: Some(run_result),
                 deployment,
-                continuation_command: None,
+                continuation_command,
                 release_summary,
                 changelog_history_recovery: None,
                 readiness: None,
@@ -711,6 +735,101 @@ fn current_component_version(
     component: &homeboy_core::component::Component,
 ) -> Result<Option<String>> {
     super::version::read_component_version(component).map(|info| Some(info.version))
+}
+
+/// Recognize only a release branch that Homeboy already prepared and pushed.
+/// A retry may recreate the PR boundary, but it must never reinterpret arbitrary
+/// branch state as permission to skip versioning or create an early tag.
+fn prepared_release_pr_resume_intent(
+    component: &homeboy_core::component::Component,
+    release_scope: &ReleaseScope,
+    protected_branch: bool,
+    head: bool,
+) -> Result<bool> {
+    if !protected_branch || head {
+        return Ok(false);
+    }
+
+    let branch_output = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&component.local_path)
+        .output()
+        .map_err(|error| Error::git_command_failed(format!("read release branch: {error}")))?;
+    if !branch_output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "read release branch: {}",
+            String::from_utf8_lossy(&branch_output.stderr).trim()
+        )));
+    }
+    let branch = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
+    if !branch.starts_with("release/") {
+        return Ok(false);
+    }
+
+    let version = current_component_version(component)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "protected-branch",
+            "prepared release branch has no readable component version",
+            Some(branch.clone()),
+            None,
+        )
+    })?;
+    let tag = release_scope.tag_name(&version);
+    let expected_branch = format!("release/{tag}");
+    if branch != expected_branch {
+        return Err(Error::validation_invalid_argument(
+            "protected-branch",
+            format!(
+                "prepared release branch '{}' does not match its version-derived release intent '{}'",
+                branch, expected_branch
+            ),
+            Some(branch),
+            None,
+        ));
+    }
+
+    git::fetch_origin(&component.local_path)?;
+    let head_commit = git::get_head_commit(&component.local_path)?;
+    let remote_commit = git::remote_branch_commit(&component.local_path, &expected_branch)?;
+    if remote_commit.as_deref() != Some(head_commit.as_str()) {
+        return Err(Error::validation_invalid_argument(
+            "protected-branch",
+            "prepared release branch must exactly match its remote branch before PR creation can resume",
+            remote_commit,
+            Some(vec!["Push or reconcile the prepared release branch, then retry the protected release command.".to_string()]),
+        ));
+    }
+    if git::tag_exists_locally(&release_scope.git_root, &tag)?
+        || git::remote_tag_commit(&component.local_path, &tag)?.is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "protected-branch",
+            format!("prepared release branch '{}' already has tag '{}'", expected_branch, tag),
+            Some(tag),
+            Some(vec!["Use --protected-branch --head only after the release pull request is normally merged.".to_string()]),
+        ));
+    }
+    let subject = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(&component.local_path)
+        .output()
+        .map_err(|error| {
+            Error::git_command_failed(format!("read release commit subject: {error}"))
+        })?;
+    if !subject.status.success()
+        || String::from_utf8_lossy(&subject.stdout).trim() != format!("release: {tag}")
+    {
+        return Err(Error::validation_invalid_argument(
+            "protected-branch",
+            "prepared release branch HEAD is not the expected Homeboy release commit",
+            Some(expected_branch),
+            None,
+        ));
+    }
+
+    Ok(true)
 }
 
 fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>> {

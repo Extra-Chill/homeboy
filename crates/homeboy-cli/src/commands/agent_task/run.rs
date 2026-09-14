@@ -2590,12 +2590,8 @@ where
             .plan,
     )?;
     let pre_execution_runtime_recovery =
-        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            &record,
-            local_override.is_some(),
-        );
-    let dispatcher = if pre_execution_runtime_recovery || local_override.is_some() {
+        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
+    let dispatcher = if local_override.is_some() {
         None
     } else {
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
@@ -2617,7 +2613,9 @@ where
     let mut options = if terminal_review_form_continuation {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)?
     } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)?
+        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+            &recipe, dispatcher,
+        )?
     } else if local_override.is_some() {
         agent_task_service::reconstruct_options_with_local_placement_override(&recipe)?
     } else {
@@ -2712,14 +2710,9 @@ where
             let dispatched: CmdResult<Value> = (|| {
                 let record = lifecycle_store.read_record(run_id)?;
                 let pre_execution_runtime_recovery =
-                    agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-                        recipe, &record, false,
-                    );
-                let dispatcher = if pre_execution_runtime_recovery {
-                    None
-                } else {
-                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
-                };
+                    agent_task_service::pre_execution_runtime_recovery_is_eligible(recipe, &record);
+                let dispatcher =
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
                 let attempt = recipe
                     .attempts
                     .iter()
@@ -2733,7 +2726,9 @@ where
                         )
                     })?;
                 let mut options = if pre_execution_runtime_recovery {
-                    agent_task_service::reconstruct_options_for_pre_execution_recovery(recipe)?
+                    agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+                        recipe, dispatcher,
+                    )?
                 } else {
                     agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
                 };
@@ -3101,12 +3096,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         }
     };
     let pre_execution_runtime_recovery =
-        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            &record,
-            local_override.is_some(),
-        );
-    let dispatcher = match if pre_execution_runtime_recovery || local_override.is_some() {
+        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
+    let dispatcher = match if local_override.is_some() {
         Ok(None)
     } else {
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
@@ -3171,7 +3162,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     let mut options = match if terminal_review || historical_terminal {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
     } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)
+        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+            &recipe, dispatcher,
+        )
     } else if local_override.is_some() {
         agent_task_service::reconstruct_options_with_local_placement_override(&recipe)
     } else {
@@ -8415,10 +8408,12 @@ pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:placement-update:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "placement-update",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
@@ -8452,9 +8447,12 @@ pub(super) fn run_resume_with_executor(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
-                effect_id: homeboy_control_plane_contract::EffectId(format!(
-                    "cli:{run_id}:resume:{idempotency_key}"
-                )),
+                effect_id: homeboy_control_plane_contract::action_effect_id(
+                    "cli",
+                    &run_id,
+                    "resume",
+                    &idempotency_key,
+                ),
                 idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
@@ -8535,10 +8533,12 @@ where
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            effect_id: homeboy_control_plane_contract::EffectId(format!(
-                "cli:{}:retry:{idempotency_key}",
-                args.run_id
-            )),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "retry",
+                &idempotency_key,
+            ),
             idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
