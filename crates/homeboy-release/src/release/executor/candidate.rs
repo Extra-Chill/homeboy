@@ -2,7 +2,7 @@ use super::artifacts::source_authority_artifacts;
 use super::github_release::{gh_command, github_release_upload_timeout, run_gh_command};
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
@@ -69,7 +69,7 @@ pub fn publish_candidate(
         })
         .collect::<Vec<_>>();
     if apply {
-        verify_tag_is_absent(component, &tag)?;
+        verify_tag_is_absent(component, remote, &tag)?;
         let lookup = run_gh_command(
             gh_command(
                 &github,
@@ -125,7 +125,7 @@ pub fn publish_candidate(
                 None,
             ));
         }
-        verify_tag_matches(component, &tag, &sha)?;
+        verify_tag_matches(component, remote, &tag, &sha)?;
         let readback = run_gh_command(
             gh_command(
                 &github,
@@ -145,23 +145,7 @@ pub fn publish_candidate(
                 None,
             ));
         }
-        for asset in &assets {
-            if !readback.stdout.contains(&asset.name)
-                || !readback
-                    .stdout
-                    .contains(&format!("sha256:{}", asset.sha256))
-            {
-                return Err(Error::validation_invalid_argument(
-                    "candidate",
-                    format!(
-                        "candidate release readback did not verify asset {}",
-                        asset.name
-                    ),
-                    None,
-                    None,
-                ));
-            }
-        }
+        verify_readback(&readback.stdout, &tag, &assets)?;
     }
     Ok(CandidatePublication {
         source_sha: sha,
@@ -198,9 +182,9 @@ fn resolve_sha(path: &str, sha: &str) -> Result<String> {
     Ok(resolved)
 }
 
-fn verify_tag_is_absent(component: &Component, tag: &str) -> Result<()> {
+fn verify_tag_is_absent(component: &Component, remote: &str, tag: &str) -> Result<()> {
     let output = Command::new("git")
-        .args(["ls-remote", "--tags", "origin", &format!("refs/tags/{tag}")])
+        .args(["ls-remote", "--tags", remote, &format!("refs/tags/{tag}")])
         .current_dir(&component.local_path)
         .output()
         .map_err(|error| {
@@ -225,9 +209,9 @@ fn verify_tag_is_absent(component: &Component, tag: &str) -> Result<()> {
     Ok(())
 }
 
-fn verify_tag_matches(component: &Component, tag: &str, sha: &str) -> Result<()> {
+fn verify_tag_matches(component: &Component, remote: &str, tag: &str, sha: &str) -> Result<()> {
     let output = Command::new("git")
-        .args(["ls-remote", "--tags", "origin", &format!("refs/tags/{tag}")])
+        .args(["ls-remote", "--tags", remote, &format!("refs/tags/{tag}")])
         .current_dir(&component.local_path)
         .output()
         .map_err(|error| {
@@ -247,4 +231,68 @@ fn verify_tag_matches(component: &Component, tag: &str, sha: &str) -> Result<()>
         ));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct ReleaseReadback {
+    tag_name: String,
+    prerelease: bool,
+    assets: Vec<ReadbackAsset>,
+}
+#[derive(Deserialize)]
+struct ReadbackAsset {
+    name: String,
+    digest: Option<String>,
+}
+
+fn verify_readback(json: &str, tag: &str, assets: &[CandidateAsset]) -> Result<()> {
+    let release: ReleaseReadback = serde_json::from_str(json).map_err(|error| {
+        Error::validation_invalid_argument(
+            "candidate",
+            format!("candidate release readback was not valid JSON: {error}"),
+            None,
+            None,
+        )
+    })?;
+    if release.tag_name != tag || !release.prerelease {
+        return Err(Error::validation_invalid_argument(
+            "candidate",
+            "candidate release readback is not the expected prerelease tag",
+            None,
+            None,
+        ));
+    }
+    for expected in assets {
+        let digest = format!("sha256:{}", expected.sha256);
+        if !release.assets.iter().any(|asset| {
+            asset.name == expected.name && asset.digest.as_deref() == Some(digest.as_str())
+        }) {
+            return Err(Error::validation_invalid_argument(
+                "candidate",
+                format!(
+                    "candidate release readback did not verify asset {}",
+                    expected.name
+                ),
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn asset(name: &str, digest: &str) -> CandidateAsset {
+        CandidateAsset {
+            name: name.to_string(),
+            sha256: digest.to_string(),
+            url: String::new(),
+        }
+    }
+    #[test]
+    fn readback_rejects_crossed_asset_digests() {
+        assert!(verify_readback(r#"{"tag_name":"candidate-a","prerelease":true,"assets":[{"name":"one","digest":"sha256:b"},{"name":"two","digest":"sha256:a"}]}"#, "candidate-a", &[asset("one", "a"), asset("two", "b")]).is_err());
+    }
 }
