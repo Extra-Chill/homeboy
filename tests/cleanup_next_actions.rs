@@ -479,7 +479,10 @@ fn assert_dead_idle_lease_recovery(command: &[&str]) {
             match job["data"]["status"].as_str() {
                 Some("succeeded") => break,
                 Some("queued" | "running") => {
-                    assert!(Instant::now() < deadline, "cleanup did not complete: {job:#}");
+                    assert!(
+                        Instant::now() < deadline,
+                        "cleanup did not complete: {job:#}"
+                    );
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 _ => panic!("unexpected cleanup outcome: {job:#}"),
