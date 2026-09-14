@@ -69,7 +69,7 @@ pub fn publish_candidate(
         })
         .collect::<Vec<_>>();
     if apply {
-        verify_tag_is_absent(component, remote, &tag)?;
+        verify_tag_is_absent(&github, &component.github, &repo, &tag)?;
         let lookup = run_gh_command(
             gh_command(
                 &github,
@@ -125,7 +125,7 @@ pub fn publish_candidate(
                 None,
             ));
         }
-        verify_tag_matches(component, remote, &tag, &sha)?;
+        verify_tag_matches(&github, &component.github, &repo, &tag, &sha)?;
         let readback = run_gh_command(
             gh_command(
                 &github,
@@ -182,23 +182,61 @@ fn resolve_sha(path: &str, sha: &str) -> Result<String> {
     Ok(resolved)
 }
 
-fn verify_tag_is_absent(component: &Component, remote: &str, tag: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--tags", remote, &format!("refs/tags/{tag}")])
-        .current_dir(&component.local_path)
-        .output()
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some("check candidate tag".to_string()))
-        })?;
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "candidate",
-            "could not query remote candidate tag",
-            None,
-            None,
-        ));
+fn ref_lookup(
+    github: &homeboy_core::git::release_download::GitHubRepo,
+    config: &homeboy_core::component::GithubConfig,
+    repo: &str,
+    tag: &str,
+) -> Result<Option<String>> {
+    let output = run_gh_command(
+        gh_command(
+            github,
+            config,
+            &["api", &format!("repos/{repo}/git/ref/tags/{tag}")],
+        ),
+        github_release_upload_timeout(),
+    );
+    if output.exit_code == Some(0) {
+        #[derive(Deserialize)]
+        struct Ref {
+            object: RefObject,
+        }
+        #[derive(Deserialize)]
+        struct RefObject {
+            sha: String,
+        }
+        return serde_json::from_str::<Ref>(&output.stdout)
+            .map(|reference| Some(reference.object.sha))
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "candidate",
+                    format!("candidate tag ref response was not valid JSON: {error}"),
+                    None,
+                    None,
+                )
+            });
     }
-    if !output.stdout.is_empty() {
+    if !output.timed_out && output.stderr.to_ascii_lowercase().contains("404") {
+        return Ok(None);
+    }
+    Err(Error::validation_invalid_argument(
+        "candidate",
+        format!(
+            "could not query candidate tag ref: {}",
+            output.stderr.trim()
+        ),
+        None,
+        None,
+    ))
+}
+
+fn verify_tag_is_absent(
+    github: &homeboy_core::git::release_download::GitHubRepo,
+    config: &homeboy_core::component::GithubConfig,
+    repo: &str,
+    tag: &str,
+) -> Result<()> {
+    if ref_lookup(github, config, repo, tag)?.is_some() {
         return Err(Error::validation_invalid_argument(
             "candidate",
             "immutable candidate tag already exists",
@@ -209,20 +247,14 @@ fn verify_tag_is_absent(component: &Component, remote: &str, tag: &str) -> Resul
     Ok(())
 }
 
-fn verify_tag_matches(component: &Component, remote: &str, tag: &str, sha: &str) -> Result<()> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--tags", remote, &format!("refs/tags/{tag}")])
-        .current_dir(&component.local_path)
-        .output()
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some("verify candidate tag".to_string()))
-        })?;
-    let actual = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
-    if !output.status.success() || !actual.eq_ignore_ascii_case(sha) {
+fn verify_tag_matches(
+    github: &homeboy_core::git::release_download::GitHubRepo,
+    config: &homeboy_core::component::GithubConfig,
+    repo: &str,
+    tag: &str,
+    sha: &str,
+) -> Result<()> {
+    if ref_lookup(github, config, repo, tag)?.as_deref() != Some(sha) {
         return Err(Error::validation_invalid_argument(
             "candidate",
             "candidate tag does not resolve to the requested source SHA",
