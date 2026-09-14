@@ -409,6 +409,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         source_run_id: source_run_id.clone(),
         source_path,
         source_worktree_path: None,
+        repository_integrity_evidence: None,
         base_ref: Some(args.base),
         task_base_sha: None,
         candidate_ref: None,
@@ -1026,6 +1027,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         expected_candidate_sha: None,
         verified_candidate_sha,
         inherited_gate_evidence: None,
+        repository_integrity_evidence: None,
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
@@ -4602,6 +4604,7 @@ mod tests {
                 },
             ),
             provenance: serde_json::json!({ "worktree_path": "/Users/user/Developer/homeboy@fix-runtime" }),
+            repository_integrity_evidence: None,
             operator_notification: AgentTaskPromotionNotification {
                 status: "completed".to_string(),
                 message: "patch promoted".to_string(),
