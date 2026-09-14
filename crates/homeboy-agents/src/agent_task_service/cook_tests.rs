@@ -23,9 +23,10 @@ use super::super::cook_promotion::{
     persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
     prepare_manual_finalization_identity, promote_attempt_in_store,
     promote_or_load_attempt_in_store, record_replacement_gate_proof, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
-    replacement_gate_execution_started, selected_candidate_task_id_in_store,
-    verify_replacement_gates, CookReportInput, MovingBaseCookRecovery,
+    recover_cook_pr_with_backend_and_review_form, recover_moving_base_cook_candidate_in_store,
+    refreshed_moving_base_recovery, replacement_gate_execution_started,
+    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -278,6 +279,15 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
         verification: Vec::new(),
         used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
+    }
+}
+
+fn supplied_test_review_form() -> AgentTaskSuppliedReviewForm {
+    AgentTaskSuppliedReviewForm {
+        form: test_review_form(),
+        tool: "review-form-tool".to_string(),
+        model: "openai/gpt-5.6-sol".to_string(),
+        operator: "fixture-operator".to_string(),
     }
 }
 
@@ -19702,6 +19712,225 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         );
         assert!(!report.to_string().contains("stale-original-contract"));
         assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
+fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9866";
+        let run_id = "cook-9866-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        assert!(
+            agent_task_lifecycle::read_aggregate(run_id)
+                .unwrap()
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outputs.get("review_form").is_none()),
+            "fixture must model the missing historical form"
+        );
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record applied promotion");
+
+        let mut preflight_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        let preflight = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            true,
+            &mut preflight_backend,
+        )
+        .expect("supplied form recovers immutable candidate without dispatch");
+        assert_eq!(preflight["status"], "validated");
+        assert_eq!(
+            preflight["review_dossier"]["summary"],
+            "Close the issue by guarding the reload path."
+        );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["tool"],
+            "Homeboy (fixture)"
+        );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert!(preflight["review_dossier"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |evidence| evidence["summary"].as_str().is_some_and(|summary| {
+                    summary.contains("fixture-operator")
+                        && summary.contains("review-form-tool")
+                        && summary.contains("openai/gpt-5.6-sol")
+                })
+            ));
+        assert!(!preflight_backend.committed);
+        assert!(!preflight_backend.pushed);
+        assert!(!preflight_backend.created);
+
+        let mut existing_form = agent_task_lifecycle::read_aggregate(run_id).unwrap();
+        existing_form.outcomes[0].outputs = test_review_form_outputs();
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+        let error = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            true,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("a valid recorded form cannot be replaced");
+        assert_eq!(error.details["field"], "review_form");
+        existing_form.outcomes[0].outputs = Value::Null;
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+
+        let mut invalid_provenance = supplied_test_review_form();
+        invalid_provenance.tool = "OpenCode\ninvalid".to_string();
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(invalid_provenance),
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("invalid reviewer-visible provenance cannot create a receipt");
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
+            .unwrap()
+            .metadata
+            .get("recovery_review_form")
+            .is_none());
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        let mut failed_persistence_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_persistence_backend,
+        )
+        .expect_err("provenance persistence fails before publication");
+        assert!(!failed_persistence_backend.created);
+
+        let mut failed_publication_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            commit_error: true,
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_publication_backend,
+        )
+        .expect_err("publication failure retains the prior supplied-form receipt");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
+        );
+
+        let mut publish_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied),
+            ..Default::default()
+        };
+        let published = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            None,
+            Vec::new(),
+            false,
+            &mut publish_backend,
+        )
+        .expect("supplied form finalizes without manual reconstruction");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("recovery receipt");
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["source"],
+            "operator_supplied_recovery"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["submission"]["model"],
+            "openai/gpt-5.6-sol"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["deterministic_gates"],
+            serde_json::to_value(&record.metadata["latest_promotion"]["deterministic_gates"])
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn concurrent_conflicting_recovery_receipts_admit_only_one_submission() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-9866-concurrent-attempt-1";
+        let plan = AgentTaskPlan::new("cook-9866-concurrent", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let store = test_lifecycle_store();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let left_store = store.clone();
+        let right_store = store.clone();
+        let left_barrier = barrier.clone();
+        let right_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-a" } }),
+            )
+        });
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-b" } }),
+            )
+        });
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+        assert!(left.is_ok() ^ right.is_ok());
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        let operator = &record.metadata["recovery_review_form"]["submission"]["operator"];
+        assert!(operator == "operator-a" || operator == "operator-b");
     });
 }
 

@@ -215,7 +215,7 @@ pub mod review_dossier {
         AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
         AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
         AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewProfile,
-        AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+        AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
     };
 }
 
@@ -405,12 +405,13 @@ pub mod service {
         reconstruct_options_for_pre_execution_recovery,
         reconstruct_options_for_pre_execution_recovery_with_dispatcher,
         reconstruct_options_with_dispatcher, reconstruct_options_with_local_placement_override,
-        record_replacement_gate_proof, recover_cook_pr, recover_missing_promotion_aggregate,
-        register_cook_batch_work_handler, register_cook_work_handler,
-        register_promotion_job_driver, resolve_cook_budget, resume, resume_cook, resume_cook_batch,
-        retry_with_provider_route_override, retry_with_timeout_override, review_form_timeout_ms,
-        run_cook_batch_with_control, run_loaded_plan, run_next, run_next_with_cook_dispatcher,
-        run_submitted, run_submitted_with_timeout, source_worktree_path, submit_plan_spec,
+        record_replacement_gate_proof, recover_cook_pr, recover_cook_pr_with_review_form,
+        recover_missing_promotion_aggregate, register_cook_batch_work_handler,
+        register_cook_work_handler, register_promotion_job_driver, resolve_cook_budget, resume,
+        resume_cook, resume_cook_batch, retry_with_provider_route_override,
+        retry_with_timeout_override, review_form_timeout_ms, run_cook_batch_with_control,
+        run_loaded_plan, run_next, run_next_with_cook_dispatcher, run_submitted,
+        run_submitted_with_timeout, source_worktree_path, submit_plan_spec,
         terminal_review_form_continuation_is_eligible,
         terminal_review_form_continuation_is_eligible_for_observation_readonly,
         terminal_transport_recovery_required, validate_recipe_attempt_record,
@@ -418,10 +419,10 @@ pub mod service {
         AgentTaskCookBatchControl, AgentTaskCookBatchOptions, AgentTaskCookBatchReport,
         AgentTaskCookCellError, AgentTaskCookReport, AgentTaskDiscoveryFilter,
         AgentTaskDiscoveryReport, AgentTaskHydratedEvidence, AgentTaskLiveness,
-        AgentTaskPromotionRequest, AgentTaskRunResult, CookContinuationState, CookMode,
-        CookProgressEvent, CookProviderRouteOverride, CookRecipeStore, CookRequest, CookRuntime,
-        CookService, DEFAULT_REVIEW_FORM_TIMEOUT_MS, DETACHED_BATCH_COORDINATOR_ENV,
-        MAX_REVIEW_FORM_TIMEOUT_MS,
+        AgentTaskPromotionRequest, AgentTaskRunResult, AgentTaskSuppliedReviewForm,
+        CookContinuationState, CookMode, CookProgressEvent, CookProviderRouteOverride,
+        CookRecipeStore, CookRequest, CookRuntime, CookService, DEFAULT_REVIEW_FORM_TIMEOUT_MS,
+        DETACHED_BATCH_COORDINATOR_ENV, MAX_REVIEW_FORM_TIMEOUT_MS,
     };
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, promotion_source,
