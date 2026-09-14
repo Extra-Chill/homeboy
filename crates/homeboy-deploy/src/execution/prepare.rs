@@ -402,7 +402,8 @@ mod tests {
             tag: "v1.0.0".to_string(),
             source_commit: "commit".to_string(),
         });
-        let path = tempfile::NamedTempFile::new().expect("release asset");
+        let directory = tempfile::tempdir().expect("release artifact directory");
+        let path = tempfile::NamedTempFile::new_in(directory.path()).expect("release asset");
         std::fs::write(path.path(), "release").expect("release bytes");
         let lease =
             ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
