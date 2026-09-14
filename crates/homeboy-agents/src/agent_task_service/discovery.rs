@@ -379,7 +379,7 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (mut records, record_health, physical_count, truncated, next) =
+    let (mut records, _physical_record_health, physical_count, truncated, next) =
         store.read_record_page_with_health(after, limit)?;
     records.retain(|record| !is_fixture_runner_record(record));
     let submitted_after = options
@@ -416,6 +416,14 @@ pub fn discover_runs_page(
         .into_iter()
         .map(|record| discovery_run(record, filter == AgentTaskDiscoveryFilter::Active, now))
         .collect::<Vec<_>>();
+    // The page cursor bounds storage reads, but selectors apply after that read.
+    // Do not present malformed rows from the physical page as health of the
+    // filtered page the caller actually received.
+    let record_health = AgentTaskRecordHealthSummary {
+        schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+        healthy: runs.len(),
+        ..Default::default()
+    };
     Ok(AgentTaskDiscoveryPage {
         schema: "homeboy/agent-task-discovery-page/v1",
         filter: filter_name(filter),
@@ -807,11 +815,24 @@ pub(crate) fn controller_upgrade_admission_for_records(
             }
         }
     }
+    // A Cook whose own durable state is terminal is authoritative over the
+    // attempts it owns: an attempt cannot still be executing once its parent
+    // recorded a terminal outcome. Runner-generation reconciliation only
+    // retires daemon generations, and the durable reconciler deliberately
+    // leaves a runner-owned record alone, so an attempt stranded in `running`
+    // by a daemon restart is reachable by neither plane and would otherwise
+    // block every controller replacement permanently (#14571).
+    let terminal_run_ids = records
+        .iter()
+        .filter(|record| record.state.is_terminal())
+        .map(|record| record.run_id.as_str())
+        .collect::<BTreeSet<_>>();
     let mut blockers = records
         .iter()
         // Durable terminal state is authoritative even when stale ownership
         // metadata remains from the process that produced it.
         .filter(|record| !record.state.is_terminal())
+        .filter(|record| !owns_terminal_cook_parent(record, &terminal_run_ids))
         // A Cook that has not materialized any task and is blocked only by a
         // stale runner needs this controller replacement to converge runtime.
         // It owns no executable work, so it cannot safely block that upgrade.
@@ -990,6 +1011,12 @@ fn classify_liveness(
     if record.has_live_pending_local_cook_supervisor(now) {
         return AgentTaskLiveness::Active;
     }
+    // A completed Retry action intentionally leaves its successor queued until
+    // the durable queue consumer claims it. That reservation survives the
+    // short-lived caller, so lack of a live PID is not stale ownership.
+    if durable_queued_retry_is_live(record) {
+        return AgentTaskLiveness::Active;
+    }
     // A local Cook retry owns a queued lifecycle reservation before its child
     // begins provider execution. Its current daemon job is the authoritative
     // owner, so test it before generic queued-record staleness.
@@ -1080,6 +1107,13 @@ fn classify_liveness(
         // we genuinely cannot confirm this run either way.
         (false, false) => AgentTaskLiveness::Unreconciled,
     }
+}
+
+fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
+    record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && record.metadata["retry_of"]
+            .as_str()
+            .is_some_and(|run_id| !run_id.is_empty())
 }
 
 fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
@@ -1246,6 +1280,23 @@ fn discovery_run(
     }
 }
 
+/// Whether this record is an attempt owned by a Cook that already reached a
+/// durable terminal state, which disproves the attempt's own live projection.
+///
+/// Only a parent that is present in the same durable record set counts: an
+/// absent parent proves nothing, so ownership stays fail-closed and the
+/// attempt continues to block replacement.
+fn owns_terminal_cook_parent(
+    record: &AgentTaskRunRecord,
+    terminal_run_ids: &BTreeSet<&str>,
+) -> bool {
+    record
+        .metadata
+        .get("cook_id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|cook_id| cook_id != record.run_id && terminal_run_ids.contains(cook_id))
+}
+
 /// Explain every stale read projection, including a pure discovery read that
 /// deliberately leaves the durable record untouched.
 fn stale_reason_for_record(record: &AgentTaskRunRecord) -> String {
@@ -1358,6 +1409,25 @@ mod tests {
         assert_eq!(
             classify_liveness(&invalid, Some(10), now),
             AgentTaskLiveness::Stale
+        );
+    }
+
+    #[test]
+    fn durable_queued_retry_survives_launcher_death_until_the_queue_consumer_claims_it() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:01:00Z")
+            .expect("timestamp")
+            .with_timezone(&chrono::Utc);
+        let mut retry = queued_record(json!({}));
+        retry.metadata["retry_of"] = json!("source-attempt");
+        assert_eq!(
+            classify_liveness(&retry, Some(10), now),
+            AgentTaskLiveness::Active
+        );
+
+        retry.metadata["queue_quarantine"] = json!({ "reason": "operator hold" });
+        assert_eq!(
+            classify_liveness(&retry, Some(10), now),
+            AgentTaskLiveness::Active
         );
     }
 

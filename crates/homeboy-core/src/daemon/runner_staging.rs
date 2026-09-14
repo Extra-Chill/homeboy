@@ -10,6 +10,14 @@ pub trait RunnerStagingProvider: Send + Sync {
     /// The daemon-owned queue is passed through this narrow boundary so staging
     /// admits the real execution job instead of inventing a second executor.
     fn stage(&self, request: Value, jobs: &JobStore) -> Result<Value>;
+    fn stage_direct(&self, _request: Value, _jobs: &JobStore) -> Result<Value> {
+        Err(crate::Error::validation_invalid_argument(
+            "runner_capabilities",
+            "runner does not support direct staged execution",
+            None,
+            None,
+        ))
+    }
 }
 
 struct NoopProvider;

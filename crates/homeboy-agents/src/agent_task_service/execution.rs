@@ -1146,6 +1146,24 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    terminal_run_result_for_record(record, true)
+}
+
+/// Read terminal evidence without consulting runner authority. Daemon job
+/// reconciliation calls this while runner status itself is being resolved.
+pub(crate) fn persisted_terminal_run_result(
+    run_id: &str,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    terminal_run_result_for_record(record, false)
+}
+
+fn terminal_run_result_for_record(
+    record: agent_task_lifecycle::AgentTaskRunRecord,
+    recover_missing_aggregate: bool,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -1160,7 +1178,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
 
     let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
         Ok(aggregate) => aggregate,
-        Err(_) => {
+        Err(_) if recover_missing_aggregate => {
             // A terminal Lab result may have been persisted before its typed
             // aggregate projection. Reconcile only that recorded terminal
             // evidence; never resume or rerun the provider for this path.
@@ -1180,6 +1198,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         )
             })?
         }
+        Err(error) => return Err(error),
     };
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -1283,11 +1302,15 @@ pub fn retry_with_provider_route_override(
     Ok(retry)
 }
 
+/// Retrying an unmaterialized admission *is* a request to admit it again, so
+/// the rearm is not conditioned on the caller's dispatch intent. A reservation
+/// that left the replacement admission inert would need a second, unrelated
+/// reconcile pass before anything could happen.
 fn reconcile_unmaterialized_cook_retry(
     retry: &mut AgentTaskRetryServiceResult,
-    run: bool,
+    _run: bool,
 ) -> Result<()> {
-    if run && agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
+    if agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
         agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)?;
         crate::agent_task_service::reconcile_unmaterialized_cook_admission(&retry.record.run_id)?;
         retry.record = agent_task_lifecycle::exact_record(&retry.record.run_id)?;
@@ -2647,7 +2670,9 @@ pub(crate) enum RetryProjectionAdmission {
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let source = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)?;
+    // Eligibility is part of resource projection. Reading through the ordinary
+    // lifecycle accessor can backfill that same projection and recurse here.
+    let source = lifecycle_store.read_record_bounded(run_id)?;
     if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;
         return Ok(RetryProjectionAdmission::DurableCook);

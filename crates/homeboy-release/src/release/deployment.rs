@@ -1295,6 +1295,9 @@ mod tests {
             );
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "fixture:release-deploy-recovery-1".to_string(),
+                ),
                 action: ControlPlaneAction::Resume,
                 idempotency_key: "release-deploy-recovery-1".to_string(),
                 actor: "test".to_string(),
@@ -1302,6 +1305,11 @@ mod tests {
                 parameters: ControlPlaneActionPayload::empty(),
                 confirmed: false,
             };
+            let interrupted =
+                crate::release::control_plane::recover_deploy_action(&record, &request)
+                    .expect("inspect interrupted deploy action");
+            assert_eq!(interrupted.outcome, ControlPlaneActionOutcome::Failed);
+            assert!(recovery_path("fixture").exists());
             let execute = || {
                 let response =
                     homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {

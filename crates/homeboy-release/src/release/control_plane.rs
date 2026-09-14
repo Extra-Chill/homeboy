@@ -38,8 +38,45 @@ impl ControlPlaneActionDelegate for DeployActionDelegate {
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
     ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-        resume_deploy_action(run, request)
+        recover_deploy_action(run, request)
     }
+}
+
+pub(super) fn recover_deploy_action(
+    run: &homeboy_core::observation::RunRecord,
+    request: &ControlPlaneActionRequest,
+) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+    if request.action != ControlPlaneAction::Resume {
+        return Err(ControlPlaneError::invalid_argument(
+            "deploy runs currently support only the resume action",
+        ));
+    }
+    let roots = homeboy_core::paths::PathRoots::from_environment()
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let current = ObservationStore::open_readonly_in_roots(&roots)
+        .and_then(|store| store.get_run(&run.id))
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let status = current
+        .as_ref()
+        .map(|current| current.status.as_str())
+        .unwrap_or(run.status.as_str());
+    let succeeded = status == RunStatus::Pass.as_str();
+    Ok(ControlPlaneActionDelegateResult {
+        outcome: if succeeded {
+            ControlPlaneActionOutcome::AlreadySatisfied
+        } else {
+            ControlPlaneActionOutcome::Failed
+        },
+        result: ControlPlaneActionPayload {
+            schema: DEPLOY_RESUME_RESULT_SCHEMA.to_string(),
+            data: json!({ "run_id": run.id, "status": status, "recovered": true }),
+        },
+        message: Some(if succeeded {
+            "recovered from the durable successful deploy run".to_string()
+        } else {
+            "deploy resume was interrupted after acceptance without authoritative completion evidence; no second deployment was attempted".to_string()
+        }),
+    })
 }
 
 pub fn register_action_delegate() {

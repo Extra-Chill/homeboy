@@ -280,6 +280,7 @@ mod tests {
             snapshot_hash: "sha256:snapshot".to_string(),
             synced_at: "2026-05-31T00:00:00Z".to_string(),
             sync_excludes: Vec::new(),
+            repository_integrity_evidence: None,
         }
     }
 }

@@ -76,14 +76,17 @@ Homeboy auto-detects single vs bulk commit specs by checking for a top-level `co
 ### Push
 
 ```sh
-homeboy git push [component_id] [--tags] [--force-with-lease] [--path <path>]
+homeboy git push [component_id] [--tags] [--atomic] [--force-with-lease] [--path <path>]
 ```
 
 `push --force-with-lease` is the safe post-rebase force-push path. It refuses to overwrite the remote if it has commits the local ref has not seen. Plain `--force` is intentionally not exposed.
 
+`push --atomic` updates every ref in the push or none of them. Without it git updates refs independently, so a remote that rejects one ref still accepts the others — a protected branch can reject the branch while the tag from the same push lands, leaving the tag on a commit the branch never received. Release pushes always set it.
+
 ```sh
 homeboy git push
 homeboy git push --tags
+homeboy git push --tags --atomic
 homeboy git push --force-with-lease
 ```
 
@@ -354,11 +357,12 @@ Notes:
 {
   "component_ids": ["homeboy", "sample-plugin"],
   "tags": true,
+  "atomic": false,
   "force_with_lease": false
 }
 ```
 
-`tags` and `force_with_lease` are only used by `push`.
+`tags`, `atomic`, and `force_with_lease` are only used by `push`.
 
 ## JSON Output
 

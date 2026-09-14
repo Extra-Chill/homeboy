@@ -4,6 +4,191 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.14] - 2026-09-14
+
+### Fixed
+- resume protected release PR creation
+- recover zero-execution transport retries
+- prevent lifecycle lock inheritance
+
+## [0.373.13] - 2026-09-14
+
+### Fixed
+- support protected default branches
+
+## [0.373.12] - 2026-09-13
+
+### Fixed
+- enforce root snapshot exclusions before tar
+
+## [0.373.11] - 2026-09-13
+
+### Changed
+- align snapshot assertions with current contracts
+
+### Fixed
+- avoid Cook retry candidate projection recursion
+- Fix retry action projection recursion
+- bound control-plane action effect IDs
+- preserve nested dependency vendors in snapshots
+
+## [0.373.10] - 2026-09-13
+
+### Changed
+- single-source run reference metadata
+
+### Fixed
+- Fix canonical action admission and cancellation races
+
+## [0.373.9] - 2026-09-13
+
+### Changed
+- isolate every swept runtime root
+
+## [0.373.8] - 2026-09-13
+
+### Changed
+- await descendant readiness before root exit
+
+## [0.373.7] - 2026-09-13
+
+### Changed
+- isolate descendant ownership per execution
+- repair lifecycle gate regressions
+
+### Fixed
+- expand remote home paths in doctor probes
+- reconcile admission job counts consistently
+- bind shared runtime assets for extension execution
+- fall back to SSH file transfer
+- scope direct daemon lifecycle
+- promote fresh refresh environments
+- bypass bootstrap tool derivation
+- bootstrap fresh SSH refreshes
+- bootstrap disconnected refreshes
+- retire proven stopped generations
+- route dev sync through daemon
+- accept dirty source snapshots
+- report dev sync build failures
+- retain runner package sources
+- retain source build provenance
+- retain installed package sources
+- honor runner component paths
+
+## [0.373.6] - 2026-09-12
+
+### Changed
+- replace racy scope census with owned discovery
+
+## [0.373.5] - 2026-09-12
+
+### Fixed
+- restore controller-death watcher cleanup
+- require explicit account credential selection
+
+## [0.373.4] - 2026-09-12
+
+### Fixed
+- keep lifecycle routing read-only
+- prevent daemon terminal-recovery recursion
+- project verified pre-provider runner cancellations
+
+## [0.373.3] - 2026-09-12
+
+### Fixed
+- Fix unscoped Cook component selection
+- execute direct staged jobs through the daemon lifecycle
+- ignore orphaned historical cook indexes
+
+## [0.373.2] - 2026-09-12
+
+### Changed
+- Stop parallel verification serializing on Cargo locks
+
+### Fixed
+- align portable preflight gates
+- honor dependency overrides and admit reusable task worktrees
+
+## [0.373.1] - 2026-09-12
+
+### Fixed
+- report an incomplete release and undo its tag
+- Fix staged dangling symlink identity
+
+## [0.373.0] - 2026-09-12
+
+### Added
+- route provider effect reconciliation
+- add idempotent provider effects
+- route agent tasks through effect outbox
+- persist action resource authority
+- persist action effect identities
+- add transactional action outbox
+
+### Fixed
+- validate attempts against the canonical index
+- persist whole index and report retry outcomes
+- resolve canonical and alias identities deterministically
+- make action effects transactional
+- reconcile ambiguous provider effects
+- use canonical effect authority
+- finalize control-plane recovery
+- recover expired effect leases
+- bind delegates to canonical runs
+- make control actions durable
+- replay durable queued retries
+- canonicalize control-plane actions
+
+## [0.372.3] - 2026-09-11
+
+### Changed
+- Name the blocker when a GitHub Release lookup cannot be answered
+- Push the release branch and its tag atomically
+
+## [0.372.2] - 2026-09-11
+
+### Fixed
+- make base preflight proxy-aware and diagnosable
+
+## [0.372.1] - 2026-09-11
+
+### Fixed
+- let a terminal Cook release its stranded attempts
+
+## [0.372.0] - 2026-09-11
+
+### Added
+- attribute the audit detectors phase with named spans and an unattributed-time self-check
+
+### Fixed
+- retain post-swap failure evidence
+- settle terminal generation jobs
+- probe lab artifact root
+- defer unresolved preview base
+- preserve terminal startup diagnosis
+- surface silent provider startup diagnostics
+
+## [0.371.9] - 2026-09-11
+
+### Changed
+- harden detached admission coverage
+- cover interrupted detached admission
+
+### Fixed
+- retain explicit Cargo target lifecycle
+- close detached admission races
+- recover interrupted detached admission
+- preserve rooted failure recovery
+- root recovery command routing
+- root finalization projections
+- preserve rooted continuation semantics
+- atomically publish detached supervision
+- fence detached admission ownership
+- bind reports to runtime stores
+- persist detached handoff admission
+- validate output before handoff
+- admit before workspace bootstrap
+
 ## [0.371.8] - 2026-09-10
 
 ### Changed

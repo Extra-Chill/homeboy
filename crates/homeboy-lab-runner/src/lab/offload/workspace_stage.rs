@@ -243,6 +243,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         request.allow_dirty_lab_workspace,
     )?;
     let mut offload_args = materialization_planner.args;
+    let validation_dependency_ids = materialization_planner.validation_dependency_ids;
     verify_cook_workspace_attestations_in_args(&offload_args, source_path)?;
     let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
@@ -274,6 +275,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         git_fetch_refs: git_fetch_refs.clone(),
         snapshot_includes: Vec::new(),
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
+        validation_dependency_ids,
         run_isolation_token: run_isolation_token.clone(),
     };
     // Compatible snapshots are mutable runner workspaces, not shared immutable
@@ -473,12 +475,12 @@ fn prepare_lab_offload_workspace_stage_inner(
         );
     }
 
-    let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
+    let mut source_snapshot = homeboy_core::source_snapshot::collect_local_checked(
         runner_id,
         Path::new(&synced.local_path),
         Some(&remote_cwd),
         "lab_offload",
-    );
+    )?;
     // The effective workspace filters define the bytes shipped to Lab and are
     // carried to the runner for deterministic post-materialization verification.
     source_snapshot.sync_excludes = synced.excludes.clone();
@@ -499,12 +501,12 @@ fn prepare_lab_offload_workspace_stage_inner(
     validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
     let mut workspace_snapshots = vec![source_snapshot.clone()];
     for extra in &synced_extra_workspaces {
-        let mut snapshot = homeboy_core::source_snapshot::collect_local(
+        let mut snapshot = homeboy_core::source_snapshot::collect_local_checked(
             runner_id,
             Path::new(&extra.local_path),
             Some(&extra.remote_path),
             "lab_offload",
-        );
+        )?;
         snapshot.sync_excludes = extra.excludes.clone();
         snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
         snapshot.synthetic_checkout_commit =
@@ -523,6 +525,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
         runner_id,
         &changed_since_preflight.args,
+        &request.job_overrides.env,
         &synced.local_path,
         &remote_cwd,
         runner_workspace_root,

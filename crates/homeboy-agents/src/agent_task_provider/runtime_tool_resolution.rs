@@ -213,7 +213,7 @@ fn probe_capabilities(
             failure_classification: AgentTaskFailureClassification::Provider,
         }
     })?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_capability_probe_failed",
@@ -224,8 +224,7 @@ fn probe_capabilities(
             data: json!({ "tool": tool.id }),
             failure_classification: AgentTaskFailureClassification::Provider,
         })?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
+    if let Err(error) = containment.attach(child) {
         return Err(RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_capability_probe_failed",
             message: format!(
@@ -239,7 +238,11 @@ fn probe_capabilities(
     let timeout = std::time::Duration::from_millis(tool.timeout_ms.unwrap_or(20_000));
     let started = std::time::Instant::now();
     loop {
-        match child.try_wait() {
+        match containment
+            .owner_mut()
+            .expect("attached probe owner")
+            .try_wait()
+        {
             Ok(Some(status)) if status.success() => {
                 let _ = containment.reap_after_exit();
                 return Ok(Some(AgentTaskRuntimeToolProbeEvidence {
@@ -257,7 +260,7 @@ fn probe_capabilities(
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = containment.terminate_live(&mut child);
+                let _ = containment.terminate_live();
                 return Err(RuntimeToolResolutionError {
                     class: "agent_task.runtime_tool_capability_probe_timeout",
                     message: format!("capability probe timed out for runtime tool '{}'", tool.id),
@@ -295,7 +298,7 @@ fn probe_version(
             failure_classification: AgentTaskFailureClassification::Provider,
         }
     })?;
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_readiness_failed",
@@ -306,8 +309,7 @@ fn probe_version(
             data: json!({ "tool": tool.id }),
             failure_classification: AgentTaskFailureClassification::Provider,
         })?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
+    if let Err(error) = containment.attach(child) {
         return Err(RuntimeToolResolutionError {
             class: "agent_task.runtime_tool_readiness_failed",
             message: format!(
@@ -321,14 +323,22 @@ fn probe_version(
     let timeout = std::time::Duration::from_millis(tool.timeout_ms.unwrap_or(20_000));
     let started = std::time::Instant::now();
     loop {
-        match child.try_wait() {
+        match containment
+            .owner_mut()
+            .expect("attached probe owner")
+            .try_wait()
+        {
             Ok(Some(status)) if status.success() => {
                 let _ = containment.reap_after_exit();
-                let output = child.stdout.take().and_then(|mut stdout| {
-                    let mut value = String::new();
-                    std::io::Read::read_to_string(&mut stdout, &mut value).ok()?;
-                    Some(value.trim().to_string())
-                });
+                let output = containment
+                    .owner_mut()
+                    .expect("attached probe owner")
+                    .take_stdout()
+                    .and_then(|mut stdout| {
+                        let mut value = String::new();
+                        std::io::Read::read_to_string(&mut stdout, &mut value).ok()?;
+                        Some(value.trim().to_string())
+                    });
                 return Ok(output.filter(|value| !value.is_empty()));
             }
             Ok(Some(_)) | Err(_) => {
@@ -341,7 +351,7 @@ fn probe_version(
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
-                let _ = containment.terminate_live(&mut child);
+                let _ = containment.terminate_live();
                 return Err(RuntimeToolResolutionError {
                     class: "agent_task.runtime_tool_readiness_timeout",
                     message: format!("readiness probe timed out for runtime tool '{}'", tool.id),

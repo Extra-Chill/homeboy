@@ -21,11 +21,12 @@ use super::super::cook_promotion::{
     next_moving_base_recovery, persist_manual_finalization_intent,
     persist_manual_finalization_receipt, persisted_promotion_for_attempt,
     persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
-    prepare_manual_finalization_identity, record_replacement_gate_proof,
-    recover_cook_pr_with_backend, recover_moving_base_cook_candidate_in_store,
+    prepare_manual_finalization_identity, promote_attempt_in_store,
+    promote_or_load_attempt_in_store, record_replacement_gate_proof, recover_cook_pr_with_backend,
+    recover_cook_pr_with_backend_and_review_form, recover_moving_base_cook_candidate_in_store,
     refreshed_moving_base_recovery, replacement_gate_execution_started,
-    selected_candidate_task_id_in_store, verify_replacement_gates, CookReportInput,
-    MovingBaseCookRecovery,
+    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
+    CookReportInput, MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
@@ -278,6 +279,15 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
         verification: Vec::new(),
         used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
+    }
+}
+
+fn supplied_test_review_form() -> AgentTaskSuppliedReviewForm {
+    AgentTaskSuppliedReviewForm {
+        form: test_review_form(),
+        tool: "review-form-tool".to_string(),
+        model: "openai/gpt-5.6-sol".to_string(),
+        operator: "fixture-operator".to_string(),
     }
 }
 
@@ -940,6 +950,188 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     assert_eq!(
         rebound.legal_actions[0].command,
         "homeboy --placement local agent-task cook-continue timeout-run --timeout-ms 2400000"
+    );
+}
+
+#[test]
+fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
+    let plan = compile_options("startup-without-output-report")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_timeout".to_string(),
+            message: "provider exceeded timeout_ms=1200000".to_string(),
+            data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+        },
+        crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.provider_rotation_exhausted".to_string(),
+            message: "an earlier provider rotation exhausted".to_string(),
+            data: serde_json::json!({}),
+        },
+    ];
+    let mut startup_outcome = aggregate.outcomes[0].clone();
+    startup_outcome.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    startup_outcome.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    startup_outcome.diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "provider": "generic-provider",
+            "deadline": "liveness",
+            "liveness_timeout_ms": 300_000,
+            "timeout_ms": 1_230_000,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    aggregate.outcomes.push(startup_outcome);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "startup-without-output-report".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: Some("startup-without-output-run"),
+    });
+    report.value.failure_context = Some(AgentTaskCookFailureContext {
+        cook_id: "startup-without-output-report".to_string(),
+        latest_run_id: "startup-without-output-run".to_string(),
+        selected_run_id: None,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        promotion_provenance: None,
+        durable_recipe_ref: "homeboy://agent-task/cooks/startup-without-output-report/recipe"
+            .to_string(),
+        lifecycle_state: "Failed".to_string(),
+        phase: "provider".to_string(),
+        reason_code: "failed".to_string(),
+        diagnostic: None,
+        continuation_admission: None,
+        blocking_claim: None,
+        provider_budget_consumed: true,
+        provider_executions_consumed: 1,
+        recovery_legal: false,
+        recovery_reason: "generic".to_string(),
+        legal_actions: Vec::new(),
+        next_actions: Vec::new(),
+    });
+
+    make_provider_timeout_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        &plan,
+        "startup-without-output-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        false,
+    );
+    make_provider_rotation_actionable(None, &mut report, &aggregate, "startup-without-output-run");
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "startup-without-output-run",
+    );
+
+    assert_eq!(report.value.status, "provider_failure");
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_startup_without_output")
+    );
+    assert_ne!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_timeout")
+    );
+    let context = report
+        .value
+        .failure_context
+        .expect("startup diagnostic context");
+    assert_eq!(
+        context.diagnostic.expect("diagnostic")["data"]["timeout_ms"],
+        1_230_000
+    );
+    assert_eq!(
+        context
+            .legal_actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        vec!["status", "diagnose"]
+    );
+    assert!(context
+        .legal_actions
+        .iter()
+        .all(|action| !action.command.contains("--timeout-ms")));
+}
+
+#[test]
+fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure() {
+    let plan = compile_options("later-terminal-failure")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Stalled);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_liveness_timeout".to_string(),
+        message: "provider produced no observable progress before the liveness boundary"
+            .to_string(),
+        data: serde_json::json!({
+            "deadline": "liveness",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "runtime_progress_events": 0,
+            "workspace_progress_events": 0,
+        }),
+    }];
+    let mut later_failure = aggregate.outcomes[0].clone();
+    later_failure.status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    later_failure.failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+    later_failure.diagnostics.clear();
+    aggregate.outcomes.push(later_failure);
+    let mut report = cook_report(CookReportInput {
+        cook_id: "later-terminal-failure".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: Some("later provider execution failed".to_string()),
+        exit_code: 1,
+        invocation_latest_run_id: Some("later-terminal-failure-run"),
+    });
+    report.value.terminal_phase = Some("provider".to_string());
+    report.value.terminal_failure_classification = Some("provider_execution_failed".to_string());
+
+    make_startup_without_output_actionable(
+        None,
+        &mut report,
+        &aggregate,
+        "later-terminal-failure-run",
+    );
+
+    assert_eq!(report.value.terminal_phase.as_deref(), Some("provider"));
+    assert_eq!(
+        report.value.terminal_failure_classification.as_deref(),
+        Some("provider_execution_failed")
+    );
+    assert_eq!(
+        report.value.stop_reason.as_deref(),
+        Some("later provider execution failed")
     );
 }
 
@@ -3591,6 +3783,177 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
+    use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repository = tempfile::tempdir().expect("repository");
+        let path = repository.path();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        let origin = path.join(".git").display().to_string();
+        git(&["remote", "add", "origin", &origin]);
+        std::os::unix::fs::symlink("/srv/admitted-assets", path.join("asset-link")).unwrap();
+        std::fs::write(path.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        let admitted_head = git_output(path, &["rev-parse", "HEAD"]).unwrap();
+        let policy = path
+            .join(".git")
+            .join(homeboy_core::repository_integrity::OPERATOR_POLICY_FILE);
+        std::fs::write(
+            &policy,
+            format!(
+                r#"{{"schema":"homeboy/repository-integrity-policy/v1","origin":"{origin}","symlink_exceptions":[{{"path":"asset-link","target_base64":"L3Nydi9hZG1pdHRlZC1hc3NldHM=","reason":"fixture asset mount"}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&policy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = homeboy_core::source_snapshot::collect_local_checked(
+            "local",
+            path,
+            Some(path.to_str().unwrap()),
+            "git",
+        )
+        .expect("admit source snapshot");
+        let evidence = snapshot
+            .repository_integrity_evidence
+            .clone()
+            .expect("evidence");
+
+        std::fs::write(path.join("tracked.txt"), "candidate\n").unwrap();
+        let patch = path.join("candidate.patch");
+        let output = Command::new("git")
+            .args(["diff", "--binary"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let patch_contents = String::from_utf8(output.stdout).unwrap();
+        std::fs::write(&patch, &patch_contents).unwrap();
+        git(&["reset", "--hard"]);
+        std::fs::write(
+            &policy,
+            format!(
+                r#"{{"schema":"homeboy/repository-integrity-policy/v1","origin":"{origin}","symlink_exceptions":[]}}"#
+            ),
+        )
+        .unwrap();
+
+        let run_id = "admitted-policy-normal-promotion";
+        let mut options = batch_cook_options(
+            "admitted-policy-normal-promotion",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.identity.initial_run_id = run_id.to_string();
+        options.workspace.to_worktree = path.display().to_string();
+        options.workspace.source_worktree_path = Some(path.to_path_buf());
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: options.identity.initial_plan.plan_id.clone(),
+                status: AgentTaskAggregateStatus::CandidateRecoverable,
+                totals: AgentTaskAggregateTotals::default(),
+                outcomes: vec![AgentTaskOutcome {
+                    task_id: "provider".to_string(),
+                    status: AgentTaskOutcomeStatus::CandidateRecoverable,
+                    artifacts: vec![AgentTaskArtifact {
+                        id: "candidate".to_string(),
+                        kind: "patch".to_string(),
+                        path: Some(patch.display().to_string()),
+                        size_bytes: Some(patch_contents.len() as u64),
+                        sha256: Some(homeboy_engine_primitives::content_hash::sha256_hex(
+                            patch_contents.as_bytes(),
+                        )),
+                        metadata: serde_json::json!({
+                            "task_id": "provider",
+                            "producer_attempt": 1,
+                            "run_id": run_id,
+                            "base_ref": "main",
+                            "provider_backend": "fixture",
+                            "repository_identity": "fixture-repository",
+                            "workspace_identity": "fixture-workspace",
+                        }),
+                        ..Default::default()
+                    }],
+                    outputs: test_review_form_outputs(),
+                    metadata: serde_json::json!({ "model": "fixture-model" }),
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["source_checkout"] = serde_json::to_value(&snapshot).unwrap();
+        })
+        .unwrap();
+
+        let promotion =
+            promote_attempt_in_store(&store, &options, run_id).expect("normal promotion");
+        assert_eq!(
+            promotion.repository_integrity_evidence.as_ref(),
+            Some(&evidence)
+        );
+
+        let replay = promote_or_load_attempt_in_store(&store, &options, run_id).expect("replay");
+        assert_eq!(
+            replay.repository_integrity_evidence.as_ref(),
+            Some(&evidence)
+        );
+
+        std::os::unix::fs::symlink("/srv/unadmitted-assets", path.join("extra-link")).unwrap();
+        git(&["add", "extra-link"]);
+        git(&["commit", "-m", "unadmitted link"]);
+        assert!(
+            homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+                path,
+                "HEAD",
+                promotion.repository_integrity_evidence.as_ref(),
+            )
+            .is_err()
+        );
+        git(&["reset", "--hard", &admitted_head]);
+        git(&[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://wrong.test/homeboy.git",
+        ]);
+        assert!(
+            homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+                path,
+                "HEAD",
+                promotion.repository_integrity_evidence.as_ref(),
+            )
+            .is_err()
+        );
+    });
+}
+
 #[test]
 fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_divergence() {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
@@ -4712,7 +5075,7 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
                     providers: vec![serde_json::from_value(serde_json::json!({
                         "id": "credential.provider",
                         "backend": "credential",
-                        "provider_defaults": { "credential": { "required_secret_env": [missing_credential] } }
+                        "secret_env_requirements": [{ "env": [missing_credential] }]
                     })).expect("credential provider")],
                     ..Default::default()
                 },
@@ -5047,11 +5410,10 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
                 .success()
         };
         assert!(!destination_has_observed_base());
-        // Shallow and single-branch checkouts may not retain this local ref. The
-        // admission check must still resolve the authoritative origin base.
-        git(
-            &destination,
-            &["update-ref", "-d", "refs/remotes/origin/main"],
+        let stale_tracking_base = git(&destination, &["rev-parse", "origin/main"]);
+        assert_ne!(
+            stale_tracking_base, observed_base,
+            "the local origin tracking ref remains stale while the remote advances"
         );
 
         let preparation = prepare_cook_workspace_base(&destination, "main")
@@ -5183,6 +5545,18 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             .unwrap_or_default()
             .contains("--ff-only")));
     });
+}
+
+#[test]
+fn retryable_preview_base_resolution_is_deferred_not_admitted() {
+    let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);
+    assert!(tolerate_retryable_cook_base_resolution::<()>(Err(error))
+        .expect("retryable remote probe is deferred")
+        .is_none());
+    let preparation = deferred_cook_base_preparation("main");
+    assert_eq!(preparation.base_sha, None);
+    assert_eq!(preparation.provenance, "base_unresolved");
+    assert_eq!(preparation.remote_freshness, "deferred");
 }
 
 #[test]
@@ -11573,6 +11947,66 @@ fn cook_retries_retryable_pre_provider_transport_failures_within_attempt_budget(
 }
 
 #[test]
+fn cook_transport_retry_owner_projects_retry_eligibility_without_provider() {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-transport-projection", 2);
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("make the predecessor budget-consuming");
+        let semantic_retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .expect("materialize the semantic Cook retry");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &semantic_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed", None).with_retryable(true),
+        )
+        .expect("terminalize the semantic retry before its transport replacement");
+
+        let transport_run_id = format!("{}-transport-retry", semantic_retry.record.run_id);
+        super::super::cook_recipe::default_store()
+            .expect("Cook recipe store")
+            .record_recipe_attempt_replacement(
+                &options.identity.cook_id,
+                &semantic_retry.record.run_id,
+                &transport_run_id,
+            )
+            .expect("persist the transport replacement");
+        let transport_retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, true, true)
+                .expect("materialize the Cook transport retry child");
+        assert!(transport_retry.record.run_id.ends_with("-transport-retry"));
+        assert!(transport_retry.record.provider_handles.is_empty());
+        agent_task_lifecycle::record_pre_execution_failure(
+            &transport_retry.record.run_id,
+            &options.identity.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("transport failed again", None).with_retryable(true),
+        )
+        .expect("terminalize the transport retry child");
+
+        let projected =
+            crate::orchestration::run_from_current_environment(&transport_retry.record.run_id)
+                .expect("project the Cook transport retry child");
+        let retry = projected
+            .action_eligibility
+            .expect("projected action eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Retry)
+            .expect("retry action");
+        assert_eq!(
+            retry.availability,
+            ControlPlaneActionAvailability::Available
+        );
+    });
+}
+
+#[test]
 fn cook_reattests_each_initial_baseline_before_detached_transport_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository root");
@@ -16696,12 +17130,10 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
 }
 
 #[test]
-fn retry_dispatch_operation_key_claim_dispatches_once() {
-    // #8357: the detached retry-dispatch path reserves a durable claim keyed by
-    // the retry run id before the handoff and completes it after. A resumed pass
-    // (or a concurrent one) observes the completed claim / held lease and must
-    // not send a second handoff. This exercises that exactly-once contract at the
-    // claim boundary without the full git-backed cook loop.
+fn retry_dispatch_receipt_prevents_redispatch_after_completion_crash() {
+    // The receiver has accepted the handoff, but the controller dies before it
+    // completes its operation claim. A replay must see the receipt and retain
+    // the intent-bound lease instead of sending a second handoff.
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     let cook_id = "cook-dispatch-claim";
@@ -16714,31 +17146,63 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
     let operation_key = retry_dispatch_operation_key(next_run_id);
     let lease = std::time::Duration::from_secs(60);
 
-    // First pass acquires the claim → performs the (modeled) dispatch → completes.
+    let intent = serde_json::json!({
+        "schema": "homeboy/cook-dispatch-intent/v1",
+        "run_id": next_run_id,
+        "operation_key": operation_key,
+    });
     assert_eq!(
-        lifecycle_store
-            .claim_cook_operation(next_run_id, &operation_key, lease)
-            .unwrap(),
-        agent_task_lifecycle::ClaimOutcome::Acquired
-    );
-    lifecycle_store
-        .complete_cook_operation(
+        agent_task_lifecycle::claim_operation_with_intent_in_store(
+            &lifecycle_store,
             next_run_id,
             &operation_key,
-            serde_json::json!({ "dispatched_run_id": next_run_id }),
+            lease,
+            &intent,
         )
-        .unwrap();
+        .unwrap(),
+        agent_task_lifecycle::ClaimOutcome::Acquired
+    );
+    agent_task_lifecycle::record_detached_lab_run_in_store(
+        &lifecycle_store,
+        agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: next_run_id,
+            runner_id: "fixture-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        },
+    )
+    .expect("receiver accepts and persists receipt");
+    lifecycle_store
+        .mutate_record(next_run_id, |record| {
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = serde_json::json!(u32::MAX);
+            true
+        })
+        .expect("simulate controller crash");
 
-    // A resumed pass observes AlreadyCompleted and must not re-dispatch.
-    match lifecycle_store
-        .claim_cook_operation(next_run_id, &operation_key, lease)
-        .unwrap()
+    match agent_task_lifecycle::claim_operation_with_intent_in_store(
+        &lifecycle_store,
+        next_run_id,
+        &operation_key,
+        lease,
+        &intent,
+    )
+    .unwrap()
     {
-        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-            assert_eq!(result["dispatched_run_id"], next_run_id);
-        }
-        other => panic!("expected AlreadyCompleted, got {other:?}"),
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
+        other => panic!("expected retained receipt lease, got {other:?}"),
     }
+    let record = lifecycle_store
+        .read_record(next_run_id)
+        .expect("receipt record");
+    assert_eq!(
+        record.metadata["cook_dispatch_acceptance_receipts"][0]["operation_key"],
+        operation_key
+    );
+    assert_eq!(
+        record.metadata["cook_dispatch_acceptance_receipts"][0]["receipt"]["accepted_by"],
+        "runner_daemon"
+    );
 }
 
 #[test]
@@ -19248,6 +19712,225 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         );
         assert!(!report.to_string().contains("stale-original-contract"));
         assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
+fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9866";
+        let run_id = "cook-9866-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        assert!(
+            agent_task_lifecycle::read_aggregate(run_id)
+                .unwrap()
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outputs.get("review_form").is_none()),
+            "fixture must model the missing historical form"
+        );
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record applied promotion");
+
+        let mut preflight_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        let preflight = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            true,
+            &mut preflight_backend,
+        )
+        .expect("supplied form recovers immutable candidate without dispatch");
+        assert_eq!(preflight["status"], "validated");
+        assert_eq!(
+            preflight["review_dossier"]["summary"],
+            "Close the issue by guarding the reload path."
+        );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["tool"],
+            "Homeboy (fixture)"
+        );
+        assert_eq!(
+            preflight["review_dossier"]["ai_assistance"]["model"],
+            "openai/gpt-5.6-terra"
+        );
+        assert!(preflight["review_dossier"]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |evidence| evidence["summary"].as_str().is_some_and(|summary| {
+                    summary.contains("fixture-operator")
+                        && summary.contains("review-form-tool")
+                        && summary.contains("openai/gpt-5.6-sol")
+                })
+            ));
+        assert!(!preflight_backend.committed);
+        assert!(!preflight_backend.pushed);
+        assert!(!preflight_backend.created);
+
+        let mut existing_form = agent_task_lifecycle::read_aggregate(run_id).unwrap();
+        existing_form.outcomes[0].outputs = test_review_form_outputs();
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+        let error = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            true,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("a valid recorded form cannot be replaced");
+        assert_eq!(error.details["field"], "review_form");
+        existing_form.outcomes[0].outputs = Value::Null;
+        test_lifecycle_store()
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &existing_form)
+            .unwrap();
+
+        let mut invalid_provenance = supplied_test_review_form();
+        invalid_provenance.tool = "OpenCode\ninvalid".to_string();
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(invalid_provenance),
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("invalid reviewer-visible provenance cannot create a receipt");
+        assert!(agent_task_lifecycle::reconcile_status(run_id)
+            .unwrap()
+            .metadata
+            .get("recovery_review_form")
+            .is_none());
+
+        agent_task_lifecycle::fail_next_record_write_for_test();
+        let mut failed_persistence_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_persistence_backend,
+        )
+        .expect_err("provenance persistence fails before publication");
+        assert!(!failed_persistence_backend.created);
+
+        let mut failed_publication_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied.clone()),
+            commit_error: true,
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            Vec::new(),
+            false,
+            &mut failed_publication_backend,
+        )
+        .expect_err("publication failure retains the prior supplied-form receipt");
+        assert_eq!(
+            agent_task_lifecycle::reconcile_status(run_id)
+                .unwrap()
+                .metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
+        );
+
+        let mut publish_backend = CaptureBackend {
+            synthetic_gate_proof: Some(applied),
+            ..Default::default()
+        };
+        let published = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            None,
+            Vec::new(),
+            false,
+            &mut publish_backend,
+        )
+        .expect("supplied form finalizes without manual reconstruction");
+        assert_eq!(published["status"], "review_ready");
+        assert!(publish_backend.created);
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("recovery receipt");
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["source"],
+            "operator_supplied_recovery"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["submission"]["model"],
+            "openai/gpt-5.6-sol"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["submission"]["operator"],
+            "fixture-operator"
+        );
+        assert_eq!(
+            record.metadata["recovery_review_form"]["provenance"]["deterministic_gates"],
+            serde_json::to_value(&record.metadata["latest_promotion"]["deterministic_gates"])
+                .unwrap()
+        );
+    });
+}
+
+#[test]
+fn concurrent_conflicting_recovery_receipts_admit_only_one_submission() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-9866-concurrent-attempt-1";
+        let plan = AgentTaskPlan::new("cook-9866-concurrent", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let store = test_lifecycle_store();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let left_store = store.clone();
+        let right_store = store.clone();
+        let left_barrier = barrier.clone();
+        let right_barrier = barrier.clone();
+        let left = std::thread::spawn(move || {
+            left_barrier.wait();
+            left_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-a" } }),
+            )
+        });
+        let right = std::thread::spawn(move || {
+            right_barrier.wait();
+            right_store.compare_and_set_metadata_value(
+                run_id,
+                "recovery_review_form",
+                serde_json::json!({ "submission": { "operator": "operator-b" } }),
+            )
+        });
+        let left = left.join().unwrap();
+        let right = right.join().unwrap();
+        assert!(left.is_ok() ^ right.is_ok());
+        let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
+        let operator = &record.metadata["recovery_review_form"]["submission"]["operator"];
+        assert!(operator == "operator-a" || operator == "operator-b");
     });
 }
 

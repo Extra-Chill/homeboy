@@ -7,13 +7,14 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::api_jobs::{
-    ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus, JobStore, LocalRunnerJob,
-    LocalRunnerJobRequest, RemoteRunnerJobRequest, RunnerJobLifecycleMetadata,
+    canonical_run_ref_metadata, ControllerJobState, DaemonActiveJobRecoveryEvidence, JobStatus,
+    JobStore, LocalRunnerJob, LocalRunnerJobRequest, RemoteRunnerJobRequest,
+    RunnerJobLifecycleMetadata,
 };
 use crate::build_identity;
 use crate::error::{Error, ExecutableAction, RemoteCommandFailedDetails, Result, TargetDetails};
@@ -171,7 +172,7 @@ pub struct LocalControllerJobClient {
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
     // different build cannot replace this generation after preflight.
-    _admission_guard: Option<File>,
+    _admission_guard: Option<DaemonAdmissionGuard>,
 }
 
 /// The durable admission result for a typed controller job submission.
@@ -207,7 +208,12 @@ impl LocalControllerJobClient {
     /// can deserialize a request while applying stale ownership semantics. Fail
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
-        let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+        // Dead-lease cleanup needs exclusive admission. Recover before taking
+        // our shared guard, then retain the guarded validation below.
+        if !read_status()?.running {
+            ensure_running(DEFAULT_ADDR)?;
+        }
+        let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
         match Self::connect_with_admission_guard(Some(admission_guard)) {
             Ok(client) => Ok(client),
@@ -288,7 +294,7 @@ impl LocalControllerJobClient {
         })
     }
 
-    fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
+    fn connect_with_admission_guard(admission_guard: Option<DaemonAdmissionGuard>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -1138,6 +1144,11 @@ struct ExecRequest {
     workspace_owner_request: Option<WorkspaceOwnerRegisterRequest>,
 }
 
+enum StagedDirectExecution {
+    Adoption(Uuid, RunnerExecutionEnvelope),
+    Recovered(Uuid, RunnerExecutionEnvelope, String),
+}
+
 /// Direct-daemon transport adapter for the canonical runner submission.
 ///
 /// The inline descriptor and `raw_exec` remain local to the direct runner
@@ -1570,6 +1581,21 @@ where
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
+    // The exclusive daemon-owner lock is already held. Keep exact prior-owner
+    // death evidence before write_state replaces the lease; version skew alone
+    // never authorizes replay of an adopted job.
+    let prior = validate_lease_file(&paths::daemon_state_file()?)?;
+    let proven_dead = if prior.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) {
+        let candidates = control::daemon_process_candidates(&paths::daemon_jobs_file()?)?
+            .into_iter()
+            .filter(|candidate| candidate.pid != std::process::id())
+            .collect::<Vec<_>>();
+        (!has_conflicting_process_candidates(&candidates))
+            .then_some(prior.state)
+            .flatten()
+    } else {
+        None
+    };
     let state = write_state(local_addr)?;
     generation_store::seed(&state)?;
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
@@ -1582,6 +1608,9 @@ where
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
+    if let Some(prior) = proven_dead {
+        recover_staged_direct_jobs_after_owner_death(&job_store, &prior.lease_id, &state)?;
+    }
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
     recover_controller_jobs(&job_store);
@@ -1812,6 +1841,9 @@ fn orchestration_tick_loop(
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_unmaterialized_cook_admissions();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_queued_retries();
         });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
@@ -2337,7 +2369,9 @@ where
         | ("POST", "/runner/workspace-owners/release") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
-        ("POST", "/runner/staging") | ("POST", "/runner/staging/capabilities") => {
+        ("POST", "/runner/staging")
+        | ("POST", "/runner/staging/direct")
+        | ("POST", "/runner/staging/capabilities") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
         ("POST", "/runner/jobs") | ("POST", "/runner/jobs/claim") => {
@@ -2359,6 +2393,17 @@ where
         ("POST", "/v1/control-plane/runs") => {
             match authorize_control_plane_write(body, &broker_auth) {
                 Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
+                Err(error) => remote_runner::auth_or_bad_request(error),
+            }
+        }
+        ("POST", "/v1/control-plane/provider-effects/reconcile") => {
+            match authorize_control_plane_write(body, &broker_auth).and_then(|body| {
+                let request = serde_json::from_value::<homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest>(
+                    body.ok_or_else(|| Error::validation_invalid_argument("body", "provider-effect reconciliation requires a JSON request body", None, None))?,
+                ).map_err(|error| Error::validation_invalid_argument("body", error.to_string(), None, None))?;
+                Ok(crate::control_plane::reconcile_deployment_provider_effect(&request))
+            }) {
+                Ok(response) => daemon_endpoint_response("control_plane.provider_effects.reconcile", serde_json::to_value(response).unwrap_or(serde_json::Value::Null)),
                 Err(error) => remote_runner::auth_or_bad_request(error),
             }
         }
@@ -3441,7 +3486,7 @@ fn decode_legacy_exec_request(body: serde_json::Value) -> Result<ExecRequest> {
     })?;
     let submission_key = resolve_exec_idempotency_key(
         legacy.idempotency_key.as_deref(),
-        exec_request_run_ref_metadata(
+        canonical_run_ref_metadata(
             legacy.lifecycle.as_ref(),
             legacy.lab_runner_workload.as_ref(),
             legacy.metadata.as_ref(),
@@ -3536,6 +3581,192 @@ fn enqueue_exec_job(
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
     let request = decode_exec_request(body)?;
+    enqueue_exec_request(request, job_store, None)
+}
+
+fn recover_staged_direct_jobs_after_owner_death(
+    job_store: &JobStore,
+    proven_dead_lease: &str,
+    replacement: &DaemonState,
+) -> Result<()> {
+    for job in job_store.list().into_iter().filter(|job| {
+        job.status == JobStatus::Queued
+            && job.operation == "runner.exec"
+            && job.daemon_lease_id.as_deref() == Some(proven_dead_lease)
+    }) {
+        let Some(runner_id) = job.target_runner_id.as_deref() else {
+            continue;
+        };
+        let Some(envelope) = job_store.staged_direct_execution_envelope(job.id, runner_id)? else {
+            continue;
+        };
+        let request = ExecRequest {
+            submission_key: None,
+            legacy_submission_key_is_run_id: false,
+            envelope: envelope.clone(),
+            runner: None,
+            raw_exec: false,
+            workspace_claim_binding: None,
+            workspace_owner_request: None,
+        };
+        // Rebind before preparation, so a terminal preparation failure and any
+        // later result both route through the replacement generation.
+        generation_store::transfer_proven_dead_job(
+            &job.id.to_string(),
+            proven_dead_lease,
+            replacement,
+        )?;
+        if let Err(error) = enqueue_exec_request(
+            request,
+            job_store,
+            Some(StagedDirectExecution::Recovered(
+                job.id,
+                envelope,
+                proven_dead_lease.to_string(),
+            )),
+        ) {
+            // No child existed at the proven-dead boundary. A preparation
+            // failure is terminal evidence for the normal retry lifecycle,
+            // rather than another apparently accepted, unconsumed queue entry.
+            job_store.fail_with_data(
+                job.id,
+                error.to_string(),
+                Some(json!({
+                    "phase": "staged_direct_recovery_preparation_failed",
+                    "proven_dead_lease_id": proven_dead_lease,
+                    "error_code": error.code.as_str(),
+                    "error_details": error.details,
+                })),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Execute one already-admitted staged runner submission through the daemon's
+/// normal local-child lifecycle. The stored envelope is the admission authority;
+/// staged source materialization occurs only in the runner exec driver after
+/// this durable boundary.
+pub fn enqueue_staged_direct_exec(
+    job_store: &JobStore,
+    job_id: Uuid,
+    expected_envelope: RunnerExecutionEnvelope,
+    materialized_envelope: RunnerExecutionEnvelope,
+    runner: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let runner_id = materialized_envelope
+        .dispatch
+        .as_ref()
+        .map(|dispatch| dispatch.runner_id.as_str())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "materialized_envelope.dispatch",
+                "staged direct execution requires dispatch",
+                Some(job_id.to_string()),
+                None,
+            )
+        })?;
+    validate_staged_materialization(&expected_envelope, &materialized_envelope, job_id)?;
+    let selected = job_store.select_staged_direct_execution(job_id, runner_id)?;
+    let authoritative = selected
+        .map(|_| job_store.queued_staged_execution(job_id, runner_id))
+        .transpose()?
+        .flatten();
+    match authoritative {
+        Some(authoritative) if authoritative == expected_envelope => {}
+        Some(_) => {
+            return Err(Error::validation_invalid_argument(
+                "expected_envelope",
+                "staged direct execution does not match the queued durable submission",
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        None => {
+            let job = job_store.get(job_id)?;
+            if job.status == JobStatus::Running && job.claim_id.is_some() {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "staged execution is claimed by a reverse runner",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            return Ok(serde_json::json!({
+                "command": "api.runner.exec.enqueue",
+                "job": job,
+                "poll": {
+                    "job": format!("/jobs/{job_id}"),
+                    "events": format!("/jobs/{job_id}/events"),
+                },
+                "idempotent_resubmission": true,
+            }));
+        }
+    }
+    enqueue_exec_request(
+        ExecRequest {
+            submission_key: None,
+            legacy_submission_key_is_run_id: false,
+            envelope: materialized_envelope,
+            runner,
+            raw_exec: false,
+            workspace_claim_binding: None,
+            workspace_owner_request: None,
+        },
+        job_store,
+        Some(StagedDirectExecution::Adoption(job_id, expected_envelope)),
+    )
+}
+
+/// Staging may resolve the runner-owned workspace location, but must not turn a
+/// sealed submission into a different command or policy. The runner integration
+/// performs its source guard before this boundary and supplies those permitted
+/// location changes as `materialized_envelope`.
+fn validate_staged_materialization(
+    expected: &RunnerExecutionEnvelope,
+    materialized: &RunnerExecutionEnvelope,
+    job_id: Uuid,
+) -> Result<()> {
+    expected.dispatch.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "expected_envelope.dispatch",
+            "staged direct execution requires a sealed dispatch",
+            Some(job_id.to_string()),
+            None,
+        )
+    })?;
+    let materialized_dispatch = materialized.dispatch.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "materialized_envelope.dispatch",
+            "staged direct execution requires a materialized dispatch",
+            Some(job_id.to_string()),
+            None,
+        )
+    })?;
+    let mut permitted = expected.clone();
+    let permitted_dispatch = permitted
+        .dispatch
+        .as_mut()
+        .expect("expected dispatch was checked");
+    // Source staging owns only the runner-local working location and snapshot.
+    permitted_dispatch.cwd = materialized_dispatch.cwd.clone();
+    permitted_dispatch.source_snapshot = materialized_dispatch.source_snapshot.clone();
+    if permitted != *materialized {
+        return Err(Error::validation_invalid_argument(
+            "materialized_envelope",
+            "staged materialization may change only runner-owned workspace locations",
+            Some(job_id.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn enqueue_exec_request(
+    request: ExecRequest,
+    job_store: &JobStore,
+    staged_adoption: Option<StagedDirectExecution>,
+) -> Result<serde_json::Value> {
     let dispatch = request.envelope.dispatch.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "envelope.dispatch",
@@ -3606,7 +3837,7 @@ fn enqueue_exec_job(
         )
     })?;
     let submission_key = request.submission_key.clone();
-    let plan = runner_exec_driver::prepare_exec(runner_exec_driver::RunnerExecPrepareRequest {
+    let prepare_request = runner_exec_driver::RunnerExecPrepareRequest {
         runner_id: dispatch.runner_id.clone(),
         runner: request.runner.clone(),
         cwd: dispatch.cwd.clone(),
@@ -3629,7 +3860,16 @@ fn enqueue_exec_job(
             .and_then(|lifecycle| lifecycle.durable_run_id.clone())
             .or_else(|| submission_key.clone()),
         validate_require_paths_on_host: true,
-    })?;
+    };
+    let plan = match staged_adoption.as_ref() {
+        Some(StagedDirectExecution::Adoption(job_id, expected_envelope)) => {
+            runner_exec_driver::prepare_staged_exec(prepare_request, *job_id, expected_envelope)?
+        }
+        Some(StagedDirectExecution::Recovered(job_id, expected_envelope, _)) => {
+            runner_exec_driver::prepare_staged_exec(prepare_request, *job_id, expected_envelope)?
+        }
+        None => runner_exec_driver::prepare_exec(prepare_request)?,
+    };
     let source_snapshot = Some(plan.source_snapshot.clone());
 
     let mut lifecycle = request.envelope.lifecycle.clone();
@@ -3655,27 +3895,29 @@ fn enqueue_exec_job(
     // A dropped response can hide successful admission. Return the active
     // execution for the caller-owned submission key, but never confuse its
     // preceding capacity reservation for the execution itself.
-    if let Some(submission_key) = submission_key.as_deref() {
-        if let Some(existing) =
-            job_store.active_execution_job_for_admission_idempotency_key(submission_key)
-        {
-            let existing_job_id = existing.id;
-            return Ok(json!({
-                "command": "api.runner.exec.enqueue",
-                "job": existing,
-                "poll": {
-                    "job": format!("/jobs/{existing_job_id}"),
-                    "events": format!("/jobs/{existing_job_id}/events"),
-                },
-                "request": summary,
-                "idempotent_resubmission": true,
-            }));
+    if staged_adoption.is_none() {
+        if let Some(submission_key) = submission_key.as_deref() {
+            if let Some(existing) =
+                job_store.active_execution_job_for_admission_idempotency_key(submission_key)
+            {
+                let existing_job_id = existing.id;
+                return Ok(json!({
+                    "command": "api.runner.exec.enqueue",
+                    "job": existing,
+                    "poll": {
+                        "job": format!("/jobs/{existing_job_id}"),
+                        "events": format!("/jobs/{existing_job_id}/events"),
+                    },
+                    "request": summary,
+                    "idempotent_resubmission": true,
+                }));
+            }
         }
     }
 
     let operation = "runner.exec".to_string();
     let mut run_ref_metadata =
-        exec_request_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
+        canonical_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
             .unwrap_or_else(|| json!({}));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
@@ -3746,17 +3988,57 @@ fn enqueue_exec_job(
     let capacity = plan.concurrency_limit.unwrap_or(usize::MAX).max(1);
     let stall_watchdog_store = job_store.clone();
     let workspace_owner_renewal_store = (*job_store).clone();
+    let local_request = LocalRunnerJobRequest {
+        operation,
+        source_snapshot: source_snapshot.clone(),
+        metadata: Some(run_ref_metadata.clone()),
+        path_materialization_plan: path_materialization_plan.clone(),
+        local_runner: Some(local_runner),
+        admission_idempotency_key: submission_key.clone(),
+    };
+    let existing_job = match staged_adoption {
+        Some(StagedDirectExecution::Adoption(job_id, expected_envelope)) => Some(
+            job_store.adopt_queued_staged_execution_for_local_runner(
+                job_id,
+                &expected_envelope,
+                local_request
+                    .local_runner
+                    .clone()
+                    .expect("direct local request has runner authority"),
+                local_request.source_snapshot.clone(),
+                run_ref_metadata.clone(),
+                path_materialization_plan.clone(),
+            )?,
+        ),
+        Some(StagedDirectExecution::Recovered(job_id, _, proven_dead_lease_id)) => Some((
+            job_store
+                .recover_proven_dead_adopted_staged_direct_execution(
+                    job_id,
+                    local_request
+                        .local_runner
+                        .as_ref()
+                        .expect("direct local request has runner authority")
+                        .runner_id
+                        .as_str(),
+                    &proven_dead_lease_id,
+                )?
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "job_id",
+                        "staged direct recovery lost its proven-dead pre-worker claim",
+                        Some(job_id.to_string()),
+                        None,
+                    )
+                })?,
+            true,
+        )),
+        None => None,
+    };
     let (runner, created) = match job_store
-        .try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
-            LocalRunnerJobRequest {
-                operation,
-                source_snapshot: source_snapshot.clone(),
-                metadata: Some(run_ref_metadata),
-                path_materialization_plan: path_materialization_plan.clone(),
-                local_runner: Some(local_runner),
-                admission_idempotency_key: submission_key.clone(),
-            },
+        .try_run_capacity_queued_local_child_background_with_existing_job(
+            local_request,
             capacity,
+            existing_job,
             move |job| {
                 let mut plan = plan;
                 if let (Some(lease), Some(claim_store)) = (
@@ -4509,48 +4791,6 @@ pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
     Ok(content_hash::sha256_hex(&encoded))
 }
 
-fn exec_request_run_ref_metadata(
-    lifecycle: Option<&RunnerJobLifecycleMetadata>,
-    lab_runner_workload: Option<&LabRunnerWorkload>,
-    metadata: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
-    let durable_run_id = lifecycle
-        .and_then(|lifecycle| non_empty_string(lifecycle.durable_run_id.as_deref()))
-        .or_else(|| metadata.and_then(metadata_run_id));
-    let agent_task_run_id = lab_runner_workload
-        .and_then(|workload| workload.agent_task.as_ref())
-        .and_then(|agent_task| non_empty_string(Some(agent_task.run_id.as_str())))
-        .or_else(|| {
-            metadata
-                .and_then(|metadata| metadata.get("agent_task_run_id"))
-                .and_then(|run_id| non_empty_string(run_id.as_str()))
-        })
-        .or_else(|| durable_run_id.clone());
-
-    if durable_run_id.is_none() && agent_task_run_id.is_none() {
-        return None;
-    }
-
-    Some(json!({
-        "durable_run_id": durable_run_id,
-        "agent_task_run_id": agent_task_run_id,
-    }))
-}
-
-fn metadata_run_id(metadata: &serde_json::Value) -> Option<String> {
-    ["durable_run_id", "run_id", "record_run_id"]
-        .iter()
-        .find_map(|key| metadata.get(*key))
-        .and_then(|run_id| non_empty_string(run_id.as_str()))
-}
-
-fn non_empty_string(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
 fn daemon_job_store() -> &'static JobStore {
     DAEMON_JOB_STORE.get_or_init(JobStore::default)
 }
@@ -4562,6 +4802,94 @@ mod tests {
         self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
         RunnerExecPrepareRequest,
     };
+
+    #[test]
+    fn staged_startup_recovery_records_preparation_failure_on_the_original_job_route() {
+        crate::test_support::with_isolated_home(|_| {
+            register_enqueue_test_driver(); // This driver intentionally has no staged-source support.
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("jobs.json");
+            let old_state = write_state("127.0.0.1:31001".parse().unwrap()).unwrap();
+            generation_store::seed(&old_state).unwrap();
+            let old = JobStore::open_without_reconciliation(&path)
+                .unwrap()
+                .with_daemon_lease(old_state.lease_id.clone());
+            let mut envelope = RunnerExecutionEnvelope::planned("staged-recovery", "test");
+            envelope.dispatch = Some(homeboy_runner_contract::RunnerExecutionDispatch {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner_staged_execution".to_string(),
+                command: vec!["true".to_string()],
+                cwd: Some("/tmp".to_string()),
+                env: Default::default(),
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                extension_env_providers: Vec::new(),
+            });
+            envelope.metadata =
+                json!({"staged_source_artifact": null, "staged_workspace_materialization": null});
+            let job = old
+                .submit_runner_api_request(homeboy_runner_contract::RunnerApiSubmitRequest {
+                    schema: homeboy_runner_contract::RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
+                    api_version: homeboy_runner_contract::RUNNER_API_V1,
+                    submission_key: "staged-recovery".to_string(),
+                    envelope: envelope.clone(),
+                    workspace_claim_binding: None,
+                    workspace_owner_lease: None,
+                    credential_delivery: None,
+                })
+                .unwrap();
+            old.select_staged_direct_execution(job.id, "lab").unwrap();
+            old.adopt_queued_staged_execution_for_local_runner(
+                job.id,
+                &envelope,
+                LocalRunnerJob {
+                    runner_id: "lab".to_string(),
+                    command: vec!["true".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                    lifecycle: None,
+                    workspace_claim_binding: None,
+                    workspace_owner_lease: None,
+                },
+                None,
+                json!({}),
+                None,
+            )
+            .unwrap();
+            generation_store::record_job(&job.id.to_string(), &old_state.lease_id).unwrap();
+            drop(old);
+            let replacement = write_state("127.0.0.1:31002".parse().unwrap()).unwrap();
+            let reopened = JobStore::open_without_reconciliation(&path)
+                .unwrap()
+                .with_daemon_lease(replacement.lease_id.clone());
+            recover_staged_direct_jobs_after_owner_death(
+                &reopened,
+                "different-lease",
+                &replacement,
+            )
+            .unwrap();
+            assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Queued);
+            recover_staged_direct_jobs_after_owner_death(
+                &reopened,
+                &old_state.lease_id,
+                &replacement,
+            )
+            .unwrap();
+            assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Failed);
+            assert!(reopened.events(job.id).unwrap().iter().any(|event| {
+                event.data.as_ref().is_some_and(|data| {
+                    data["phase"] == "staged_direct_recovery_preparation_failed"
+                })
+            }));
+            assert_eq!(
+                generation_store::endpoint_for_job(&job.id.to_string())
+                    .unwrap()
+                    .unwrap()
+                    .lease_id,
+                replacement.lease_id
+            );
+        });
+    }
 
     #[test]
     fn network_control_plane_submission_binds_actor_to_submit_credential() {
@@ -4599,6 +4927,42 @@ mod tests {
             smoke_store.save().expect("smoke auth store");
             authorize_control_plane_write(Some(json!({})), &unauthenticated)
                 .expect_err("loopback smoke grant cannot submit durable work");
+        });
+    }
+
+    #[test]
+    fn provider_effect_reconcile_http_matches_the_canonical_service_response() {
+        crate::test_support::with_isolated_home(|_| {
+            let request = homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest {
+                schema: homeboy_extension_contract::api::v1::EXTENSION_API_DEPLOYMENT_PROVIDER_RECONCILE_REQUEST_SCHEMA.to_string(),
+                api_version: homeboy_extension_contract::api::v1::EXTENSION_API_V1,
+                effect_id: homeboy_control_plane_contract::EffectId("missing-effect".to_string()),
+                request_digest: "digest".to_string(),
+                recovery_fence: 1,
+                result: homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderResult {
+                    exit_code: 0,
+                    evidence: json!({"provider":"verified"}),
+                    error: None,
+                },
+                authoritative_evidence: json!({"provider_job":"verified-42"}),
+            };
+            let direct = crate::control_plane::reconcile_deployment_provider_effect(&request);
+            let response = route_with_body(
+                "POST",
+                "/v1/control-plane/provider-effects/reconcile",
+                Some(serde_json::to_value(&request).expect("request JSON")),
+                &JobStore::default(),
+            );
+
+            assert_eq!(response.status_code, 200);
+            assert_eq!(
+                response.body["endpoint"],
+                "control_plane.provider_effects.reconcile"
+            );
+            assert_eq!(
+                response.body["body"],
+                serde_json::to_value(direct).expect("response JSON")
+            );
         });
     }
 
@@ -6294,7 +6658,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_request_run_ref_metadata_prefers_lifecycle_run_id() {
+    fn canonical_run_ref_metadata_prefers_lifecycle_run_id() {
         let lifecycle = RunnerJobLifecycleMetadata {
             source: Some("runner-daemon".to_string()),
             kind: Some("runner.exec".to_string()),
@@ -6303,7 +6667,7 @@ mod tests {
             active_cell_count: None,
         };
 
-        let metadata = exec_request_run_ref_metadata(
+        let metadata = canonical_run_ref_metadata(
             Some(&lifecycle),
             None,
             Some(&json!({ "run_id": "metadata-run" })),
@@ -6763,15 +7127,19 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The daemon supervisor is detached from this launcher. It must not inherit
+    // the lifecycle lock and strand later recovery after the launcher exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    let file = options.open(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+    })?;
     if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
         return Err(Error::internal_unexpected(format!(
             "daemon lifecycle operation already in progress; lock is held at {}",
@@ -6818,53 +7186,117 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
-    acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
+    acquire_daemon_job_admission_fence_with_wait(Duration::from_secs(5))
+}
+
+/// A destructive lifecycle action must not wait indefinitely behind a Cook that
+/// has preflighted a daemon but has not persisted its durable job yet.
+pub(super) fn acquire_daemon_job_admission_fence_with_wait(
+    wait: Duration,
+) -> Result<DaemonAdmissionFence> {
+    const RETRY: Duration = Duration::from_millis(500);
+
+    let deadline = Instant::now() + wait;
+    loop {
+        match try_acquire_daemon_job_admission_fence()? {
+            Some(fence) => return Ok(fence),
+            None if Instant::now() >= deadline => {
+                return Err(daemon_admission_fence_timeout_error(wait));
+            }
+            None => {}
+        }
+        std::thread::sleep(RETRY.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn try_acquire_daemon_job_admission_fence() -> Result<Option<DaemonAdmissionFence>> {
+    let (state_lock, _) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    if state.shared_holders > 0 || state.exclusive_held {
+        return Ok(None);
+    }
+    state.exclusive_held = true;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            return Err(error);
+        }
+    };
+    match try_lock_file_exclusive(&file, "daemon admission") {
+        Ok(true) => Ok(Some(DaemonAdmissionFence { file })),
+        Ok(false) => {
+            release_daemon_admission_exclusive();
+            Ok(None)
+        }
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            Err(error)
+        }
+    }
+}
+
+fn daemon_admission_fence_timeout_error(wait: Duration) -> Error {
+    let path = state_path()
+        .map(|state| state.with_file_name("admission.lock"))
+        .unwrap_or_else(|_| PathBuf::from("daemon admission lock"));
+    daemon_admission_fence_timeout_error_at(&path, wait)
+}
+
+fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "daemon_admission_fence",
+        "timed out waiting for daemon admission; no daemon recovery or lease cleanup was performed",
+        Some(path.display().to_string()),
+        Some(vec![
+            "Wait for the concurrent admission to finish, then retry `homeboy daemon recover --yes`."
+                .to_string(),
+            "Run `homeboy daemon status` to inspect durable job evidence before retrying."
+                .to_string(),
+        ]),
+    )
+    .with_retryable(true);
+    error.details = serde_json::json!({
+        "classification": "daemon_admission_fence_timeout",
+        "lock_path": path,
+        "wait_ms": wait.as_millis(),
+        "lifecycle_mutation": "not_started",
+    });
+    error
 }
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+    let _guard = acquire_daemon_admission_lock()?;
     operation()
 }
 
-enum DaemonAdmissionLockMode {
-    Shared,
-    Exclusive,
-}
-
-fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> {
-    let state = state_path()?;
-    let parent = state
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(parent.join("admission.lock"))
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("open daemon admission lock".to_string()),
-            )
+fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    while state.exclusive_held {
+        state = state_changed.wait(state).map_err(|_| {
+            Error::internal_unexpected("daemon admission process state is poisoned")
         })?;
+    }
+    state.shared_holders += 1;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_shared();
+            return Err(error);
+        }
+    };
     #[cfg(unix)]
-    if unsafe {
-        libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            match mode {
-                DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
-                DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
-            },
-        )
-    } != 0
-    {
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
+        release_daemon_admission_shared();
         return Err(Error::internal_io(
             std::io::Error::last_os_error().to_string(),
             Some("lock daemon admission".to_string()),
@@ -6877,14 +7309,10 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let flags = match mode {
-            DaemonAdmissionLockMode::Shared => 0,
-            DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
-        };
         if unsafe {
             LockFileEx(
                 file.as_raw_handle(),
-                flags,
+                0,
                 0,
                 u32::MAX,
                 u32::MAX,
@@ -6892,15 +7320,41 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             )
         } == 0
         {
+            release_daemon_admission_shared();
             return Err(Error::internal_io(
                 std::io::Error::last_os_error().to_string(),
                 Some("lock daemon admission".to_string()),
             ));
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = mode;
-    Ok(file)
+    Ok(DaemonAdmissionGuard { file })
+}
+
+fn open_daemon_admission_lock() -> Result<(PathBuf, File)> {
+    let state = state_path()?;
+    let parent = state
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let path = parent.join("admission.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open daemon admission lock".to_string()),
+            )
+        })?;
+    Ok((path, file))
 }
 
 /// Acquires a non-blocking exclusive advisory lock backed by the OS. Platforms
@@ -6978,13 +7432,51 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
-pub(super) struct DaemonAdmissionFence(File);
+pub(super) struct DaemonAdmissionFence {
+    file: File,
+}
+
+struct DaemonAdmissionGuard {
+    file: File,
+}
+
+#[derive(Default)]
+struct DaemonAdmissionProcessState {
+    shared_holders: usize,
+    exclusive_held: bool,
+}
+
+fn daemon_admission_process_state() -> &'static (Mutex<DaemonAdmissionProcessState>, Condvar) {
+    static STATE: OnceLock<(Mutex<DaemonAdmissionProcessState>, Condvar)> = OnceLock::new();
+    STATE.get_or_init(|| {
+        (
+            Mutex::new(DaemonAdmissionProcessState::default()),
+            Condvar::new(),
+        )
+    })
+}
+
+fn release_daemon_admission_shared() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.shared_holders = state.shared_holders.saturating_sub(1);
+        state_changed.notify_all();
+    }
+}
+
+fn release_daemon_admission_exclusive() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.exclusive_held = false;
+        state_changed.notify_all();
+    }
+}
 
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
-            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN);
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
         }
         #[cfg(windows)]
         unsafe {
@@ -6994,13 +7486,39 @@ impl Drop for DaemonAdmissionFence {
 
             let mut overlapped: OVERLAPPED = std::mem::zeroed();
             let _ = UnlockFileEx(
-                self.0.as_raw_handle(),
+                self.file.as_raw_handle(),
                 0,
                 u32::MAX,
                 u32::MAX,
                 &mut overlapped,
             );
         }
+        release_daemon_admission_exclusive();
+    }
+}
+
+impl Drop for DaemonAdmissionGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            let _ = UnlockFileEx(
+                self.file.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
+        }
+        release_daemon_admission_shared();
     }
 }
 

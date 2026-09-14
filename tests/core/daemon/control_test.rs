@@ -55,10 +55,8 @@ struct FakeEnsureState {
 #[test]
 fn stale_start_cleanup_waits_for_cook_generation_admission() {
     with_isolated_home(|_| {
-        let cook_preflight = super::super::acquire_daemon_admission_lock(
-            super::super::DaemonAdmissionLockMode::Shared,
-        )
-        .expect("Cook preflight acquires generation admission");
+        let cook_preflight = super::super::acquire_daemon_admission_lock()
+            .expect("Cook preflight acquires generation admission");
         let (attempt_tx, attempt_rx) = mpsc::channel();
         let (finished_tx, finished_rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -479,7 +477,7 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     let store = loop {
-        if let Some(store) = super::process_durable_store_path(process.id(), true) {
+        if let Some(store) = super::process_durable_store_path(process.id(), false) {
             break store;
         }
         assert!(Instant::now() < deadline, "procfs store path");

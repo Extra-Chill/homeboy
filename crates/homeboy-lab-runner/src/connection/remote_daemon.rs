@@ -981,7 +981,7 @@ fn ensure_remote_daemon_inner(
         registry_lock_held,
         daemon_recovery_capabilities,
     } = request;
-    let mut status = remote_daemon_status(client, homeboy)?;
+    let mut status = remote_daemon_status(client, homeboy, runner_id)?;
     probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
     if let Some(lease_id) = orphan_lease_id {
         if let Some(fence) = admission_fence {
@@ -1000,6 +1000,7 @@ fn ensure_remote_daemon_inner(
             return Ok(remote_daemon_adopt_orphan(
                 client,
                 homeboy,
+                runner_id,
                 lease_id,
                 confirmed_no_pid_job_ids,
             )?);
@@ -1065,12 +1066,13 @@ fn ensure_remote_daemon_inner(
                 .lease_id
                 .as_deref()
                 .expect("replacement requires lease");
-            remote_daemon_force_stop(client, homeboy, lease_id)?;
+            remote_daemon_force_stop(client, homeboy, runner_id, lease_id)?;
             let replacement =
                 remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)?;
             Ok(verify_remote_daemon_replacement(
                 client,
                 homeboy,
+                runner_id,
                 &replacement,
                 configured_identity,
             )?)
@@ -1104,7 +1106,8 @@ fn journal_ensure_running_replay(
     if replacement_operation_id.is_none() {
         return Ok(());
     }
-    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
+    let command =
+        remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
     let write = if registry_lock_held {
         crate::generation_store::record_replacement_operation_replay_locked(
             runner_id,
@@ -1444,8 +1447,9 @@ fn active_job_recovery_guidance(active_jobs: usize) -> String {
 pub(super) fn remote_daemon_status(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    remote_daemon_status_with_timeout(client, homeboy, REMOTE_DAEMON_STATUS_TIMEOUT, None)
+    remote_daemon_status_with_timeout(client, homeboy, runner_id, REMOTE_DAEMON_STATUS_TIMEOUT)
 }
 
 pub(super) fn bounded_remote_daemon_status_with_timeout(
@@ -1454,27 +1458,25 @@ pub(super) fn bounded_remote_daemon_status_with_timeout(
     runner_id: &str,
     timeout: Duration,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    remote_daemon_status_with_timeout(client, homeboy, timeout, Some(runner_id))
+    remote_daemon_status_with_timeout(client, homeboy, runner_id, timeout)
 }
 
 fn remote_daemon_status_with_timeout(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     timeout: Duration,
-    runner_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    let command = format!("{} daemon status", shell::quote_arg(homeboy));
+    let command = remote_daemon_command(runner_id, homeboy, "daemon status");
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
-    if let Some(runner_id) = runner_id {
-        crate::readonly_probe::record_probe_outcome(
-            "runner_remote_daemon_status",
-            Some(runner_id),
-            started,
-            timeout,
-            &output,
-        );
-    }
+    crate::readonly_probe::record_probe_outcome(
+        "runner_remote_daemon_status",
+        Some(runner_id),
+        started,
+        timeout,
+        &output,
+    );
     if !output.success {
         return Err(command_failure_message(
             "remote daemon status failed",
@@ -1611,8 +1613,8 @@ mod tests {
             let result = remote_daemon_status_with_timeout(
                 &client,
                 daemon.to_str().expect("daemon path"),
+                "slow-runner",
                 Duration::from_millis(100),
-                Some("slow-runner"),
             );
 
             assert!(result.is_err());
@@ -1625,6 +1627,18 @@ mod tests {
             assert_eq!(degradations[0].probe, "runner_remote_daemon_status");
             assert_eq!(degradations[0].runner_id.as_deref(), Some("slow-runner"));
         });
+    }
+
+    #[test]
+    fn daemon_lifecycle_command_uses_the_runner_scoped_state_directory() {
+        assert_eq!(
+            remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
+            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/primary\" /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0"
+        );
+        assert_eq!(
+            remote_daemon_command("runner/a", "/opt/homeboy", "daemon status"),
+            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/primary\" /opt/homeboy daemon status"
+        );
     }
 }
 
@@ -1820,7 +1834,8 @@ fn remote_daemon_ensure_running(
     runner_id: &str,
     replacement_operation_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemon, RemoteDaemonEnsureError> {
-    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
+    let command =
+        remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
         return Err(RemoteDaemonEnsureError::Other(command_failure_message(
@@ -2147,26 +2162,39 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 pub(super) fn remote_daemon_ensure_running_command(
     homeboy: &str,
+    runner_id: &str,
     replacement_operation_id: Option<&str>,
 ) -> String {
+    remote_daemon_command(
+        runner_id,
+        homeboy,
+        &format!(
+            "daemon ensure-running {} --addr 127.0.0.1:0",
+            replacement_operation_id
+                .map(|id| format!("--replacement-operation-id {}", shell::quote_arg(id)))
+                .unwrap_or_default(),
+        ),
+    )
+}
+
+fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
+    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
     format!(
-        "{} daemon ensure-running {} --addr 127.0.0.1:0",
+        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/{runner_segment}/primary\" {} {args}",
         shell::quote_arg(homeboy),
-        replacement_operation_id
-            .map(|id| format!("--replacement-operation-id {}", shell::quote_arg(id)))
-            .unwrap_or_default(),
     )
 }
 
 pub(super) fn remote_daemon_force_stop(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     lease_id: &str,
 ) -> std::result::Result<(), String> {
-    let command = format!(
-        "{} daemon stop --lease-id {}",
-        shell::quote_arg(homeboy),
-        shell::quote_arg(lease_id),
+    let command = remote_daemon_command(
+        runner_id,
+        homeboy,
+        &format!("daemon stop --lease-id {}", shell::quote_arg(lease_id),),
     );
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
@@ -2201,10 +2229,11 @@ pub(super) fn remote_daemon_force_stop(
 fn verify_remote_daemon_replacement(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     replacement: &RemoteDaemon,
     configured_identity: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
-    let mut status = remote_daemon_status(client, homeboy)?;
+    let mut status = remote_daemon_status(client, homeboy, runner_id)?;
     probe_remote_daemon_endpoint(client, &mut status, None);
     let daemon = status.daemon.ok_or_else(|| {
         "remote stale-daemon replacement re-probe returned no daemon state".to_string()
@@ -2243,10 +2272,15 @@ fn verify_remote_daemon_replacement(
 fn remote_daemon_adopt_orphan(
     client: &SshClient,
     homeboy: &str,
+    runner_id: &str,
     lease_id: &str,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
 ) -> std::result::Result<RemoteDaemon, String> {
-    let command = remote_daemon_adopt_orphan_command(homeboy, lease_id, confirmed_no_pid_job_ids);
+    let command = remote_daemon_command(
+        runner_id,
+        homeboy,
+        &remote_daemon_adopt_orphan_args(lease_id, confirmed_no_pid_job_ids),
+    );
     let output = client.execute(&command);
     if !output.success {
         return Err(command_failure_message(
@@ -2293,13 +2327,23 @@ pub(super) fn remote_daemon_adopt_orphan_command(
     lease_id: &str,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
 ) -> String {
+    format!(
+        "{} {}",
+        shell::quote_arg(homeboy),
+        remote_daemon_adopt_orphan_args(lease_id, confirmed_no_pid_job_ids),
+    )
+}
+
+fn remote_daemon_adopt_orphan_args(
+    lease_id: &str,
+    confirmed_no_pid_job_ids: &[uuid::Uuid],
+) -> String {
     let confirmations = confirmed_no_pid_job_ids
         .iter()
         .map(|job_id| format!(" --confirm-untracked-child-dead {job_id}"))
         .collect::<String>();
     format!(
-        "{} daemon adopt-orphan --lease-id {}{} --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy),
+        "daemon adopt-orphan --lease-id {}{} --addr 127.0.0.1:0",
         shell::quote_arg(lease_id),
         confirmations,
     )

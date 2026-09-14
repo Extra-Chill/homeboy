@@ -4900,12 +4900,11 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
             skipped.push(queue_skip(&record, Some(&plan), &error));
             continue;
         }
-        // The queue admission is allowed to bind a route. Persist that exact
-        // plan before claiming it so execution cannot reload and re-derive a
-        // different provider or credential contract.
-        persist_controller_plan_in_store(lifecycle_store, &record.run_id, &plan)?;
-        match mark_running_in_store(lifecycle_store, &record.run_id) {
-            Ok(claimed) => {
+        // Plan binding and the queued-to-running transition share one config
+        // lock. Preflight is deliberately outside that lock, but its result is
+        // never persisted unless this consumer still owns the queued record.
+        match lifecycle_store.bind_controller_plan_and_claim_queued_run(&record.run_id, &plan)? {
+            Some(claimed) => {
                 return Ok(AgentTaskQueuedRunClaim {
                     record: Some(claimed),
                     skipped,
@@ -4913,11 +4912,9 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
                     admission_limit_reached: false,
                 })
             }
-            Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
-                quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
-                skipped.push(queue_skip(&record, Some(&plan), &error));
-            }
-            Err(error) => return Err(error),
+            // A concurrent consumer or operator changed the record after
+            // preflight. Do not turn that normal CAS loss into a quarantine.
+            None => continue,
         }
     }
 
@@ -5171,6 +5168,26 @@ pub fn quarantine_queued_run_exact_in_store(
                 None,
             )
         })
+}
+
+/// Return the immutable receiver acceptance receipt for one dispatch intent.
+pub fn dispatch_acceptance_receipt_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+) -> Result<Option<Value>> {
+    let run_id = require_literal_run_id(run_id)?;
+    Ok(lifecycle_store
+        .read_record(&run_id)?
+        .metadata
+        .get("cook_dispatch_acceptance_receipts")
+        .and_then(Value::as_array)
+        .and_then(|receipts| {
+            receipts
+                .iter()
+                .find(|receipt| receipt["operation_key"] == operation_key)
+        })
+        .cloned())
 }
 
 fn normalized_operator_quarantine_reason(reason: &str) -> String {
@@ -6000,13 +6017,14 @@ pub fn run_record_exists_readonly_in_store(
     lifecycle_store.record_exists_readonly(&sanitize_run_id(run_id))
 }
 
-/// `run_record_exists_resolved` against explicitly injected durable lifecycle
-/// roots.
+/// Non-initializing resolved existence check against explicitly injected
+/// durable lifecycle roots. Routing must not run startup migration while
+/// deciding which machine owns a read-only command.
 pub fn run_record_exists_resolved_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<bool> {
-    lifecycle_store.record_exists(&resolve_run_id_in_store(lifecycle_store, run_id)?)
+    lifecycle_store.record_exists_readonly(&resolve_run_id_in_store(lifecycle_store, run_id)?)
 }
 
 // The ambient `mark_resuming()` shim that used to sit here is gone. The resume
@@ -6596,6 +6614,23 @@ where
     if let Some(reservation_metadata) = reservation_metadata {
         metadata.extend(reservation_metadata);
     }
+    let transport_runtime_recovery = source.state.is_terminal()
+        && source.provider_handles.is_empty()
+        && source.runner_job_id().is_none()
+        && source
+            .lab_handoff
+            .as_ref()
+            .is_none_or(|handoff| handoff.state != AgentTaskLabHandoffState::Accepted)
+        && source.metadata["provider_executions_consumed"].as_u64() == Some(0)
+        && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(&source);
+    let previous_controller_runtime = transport_runtime_recovery
+        .then(|| {
+            source
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned()
+        })
+        .flatten();
     let mut record = submit_plan_with_runtime_admission_in_store(
         lifecycle_store,
         &plan,
@@ -6605,6 +6640,28 @@ where
         admission_status,
         admit_runtime,
     )?;
+    if let Some(previous) = previous_controller_runtime {
+        let recovered = lifecycle_store.mutate_record(&record.run_id, |child| {
+            let current = child
+                .metadata
+                .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+                .cloned()
+                .unwrap_or(Value::Null);
+            child.metadata["controller_runtime_recovery"] = json!({
+                "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
+                "reason": "retryable_pre_execution_transport_failure",
+                "source_run_id": source.run_id,
+                "previous": previous,
+                "current": current,
+                "provider_executions_consumed": 0,
+                "recovered_at": now_timestamp(),
+            });
+            true
+        })?;
+        record = recovered.ok_or_else(|| {
+            Error::internal_unexpected("persisted transport runtime recovery child is unavailable")
+        })?;
+    }
     if let Some(mut acceptance) = source.acceptance.clone() {
         // A repair is a new candidate, but it retains the rejected verdict and
         // evidence as lineage instead of erasing the reviewer decision.
@@ -7593,10 +7650,11 @@ fn substantive_candidate_in_store(
     lifecycle_store: Option<&AgentTaskLifecycleStore>,
 ) -> Option<(String, String)> {
     // Candidate recovery is a bounded scan. Avoid the aggregate reader's
-    // reconciliation path when this controller record never projected one.
+    // reconciliation path or record-projection backfill when this controller
+    // record never projected one.
     let record = match lifecycle_store {
-        Some(store) => store.read_record(run_id).ok()?,
-        None => exact_record(run_id).ok()?,
+        Some(store) => store.read_record_bounded(run_id).ok()?,
+        None => store::read_record_bounded(&sanitize_run_id(run_id)).ok()?,
     };
     let aggregate_path = record.aggregate_path?;
     if !std::path::Path::new(&aggregate_path).exists() {

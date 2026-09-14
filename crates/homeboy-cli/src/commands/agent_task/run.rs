@@ -1265,12 +1265,9 @@ mod preview_tests {
                     "id": "declared.agent-task-executor",
                     "backend": "declared",
                     "invocation": { "argv": ["true"] },
-                    "provider_defaults": {
-                        "declared": {
-                            "secret_env": [required.clone()],
-                            "required_secret_env": [required],
-                        },
-                    },
+                    "secret_env_requirements": [{
+                        "env": [required]
+                    }],
                 }))
                 .expect("declared provider"),
             ],
@@ -1281,32 +1278,15 @@ mod preview_tests {
     }
 
     #[test]
-    fn backend_preview_readiness_injects_sole_default_fallback_credentials() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let credential = root.path().join("credential.json");
-        let readiness = root.path().join("readiness.js");
-        std::fs::write(&credential, r#"{"token":"fallback-token"}"#).expect("credential");
-        std::fs::write(
-            &readiness,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_FALLBACK_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='fallback-token',classification:token==='fallback-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
-        )
-        .expect("readiness script");
+    fn backend_preview_does_not_select_unrelated_account_default_credentials() {
         let catalog = provider::AgentTaskProviderCatalog {
             providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "fallback.agent-task-executor",
-                "backend": "fallback",
+                "id": "sample-runtime.agent-task-executor",
+                "backend": "sample-runtime",
                 "invocation": { "argv": ["true"] },
-                "readiness_invocation": { "argv": ["node", readiness] },
                 "provider_defaults": {
-                    "only": {
-                        "required_secret_env": ["PREVIEW_FALLBACK_TOKEN"],
-                        "secret_env_sources": {
-                            "PREVIEW_FALLBACK_TOKEN": {
-                                "source": "json-file",
-                                "path": credential,
-                                "field": "token"
-                            }
-                        }
+                    "unused-account": {
+                        "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
                     }
                 }
             }))
@@ -1314,7 +1294,42 @@ mod preview_tests {
             ..Default::default()
         };
 
-        assert_eq!(ready_cook_backends(&catalog), vec!["fallback"]);
+        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
+    }
+
+    #[test]
+    fn backend_preview_readiness_injects_unconditional_declared_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let credential = root.path().join("credential.json");
+        let readiness = root.path().join("readiness.js");
+        std::fs::write(&credential, r#"{"token":"required-token"}"#).expect("credential");
+        std::fs::write(
+            &readiness,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_REQUIRED_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='required-token',classification:token==='required-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
+        )
+        .expect("readiness script");
+        let catalog = provider::AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(serde_json::json!({
+                "id": "sample-runtime.agent-task-executor",
+                "backend": "sample-runtime",
+                "invocation": { "argv": ["true"] },
+                "readiness_invocation": { "argv": ["node", readiness] },
+                "secret_env_requirements": [{
+                    "env": ["PREVIEW_REQUIRED_TOKEN"],
+                    "secret_env_sources": {
+                        "PREVIEW_REQUIRED_TOKEN": {
+                            "source": "json-file",
+                            "path": credential,
+                            "field": "token"
+                        }
+                    }
+                }]
+            }))
+            .expect("provider")],
+            ..Default::default()
+        };
+
+        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
     }
 
     #[test]
@@ -2575,12 +2590,8 @@ where
             .plan,
     )?;
     let pre_execution_runtime_recovery =
-        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            &record,
-            local_override.is_some(),
-        );
-    let dispatcher = if pre_execution_runtime_recovery || local_override.is_some() {
+        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
+    let dispatcher = if local_override.is_some() {
         None
     } else {
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
@@ -2602,7 +2613,9 @@ where
     let mut options = if terminal_review_form_continuation {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)?
     } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)?
+        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+            &recipe, dispatcher,
+        )?
     } else if local_override.is_some() {
         agent_task_service::reconstruct_options_with_local_placement_override(&recipe)?
     } else {
@@ -2697,14 +2710,9 @@ where
             let dispatched: CmdResult<Value> = (|| {
                 let record = lifecycle_store.read_record(run_id)?;
                 let pre_execution_runtime_recovery =
-                    agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-                        recipe, &record, false,
-                    );
-                let dispatcher = if pre_execution_runtime_recovery {
-                    None
-                } else {
-                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?
-                };
+                    agent_task_service::pre_execution_runtime_recovery_is_eligible(recipe, &record);
+                let dispatcher =
+                    reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
                 let attempt = recipe
                     .attempts
                     .iter()
@@ -2718,7 +2726,9 @@ where
                         )
                     })?;
                 let mut options = if pre_execution_runtime_recovery {
-                    agent_task_service::reconstruct_options_for_pre_execution_recovery(recipe)?
+                    agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+                        recipe, dispatcher,
+                    )?
                 } else {
                     agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
                 };
@@ -3086,12 +3096,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         }
     };
     let pre_execution_runtime_recovery =
-        agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            &record,
-            local_override.is_some(),
-        );
-    let dispatcher = match if pre_execution_runtime_recovery || local_override.is_some() {
+        agent_task_service::pre_execution_runtime_recovery_is_eligible(&recipe, &record);
+    let dispatcher = match if local_override.is_some() {
         Ok(None)
     } else {
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
@@ -3156,7 +3162,9 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     let mut options = match if terminal_review || historical_terminal {
         agent_task_service::reconstruct_adoption_options_with_dispatcher(&recipe, dispatcher)
     } else if pre_execution_runtime_recovery {
-        agent_task_service::reconstruct_options_for_pre_execution_recovery(&recipe)
+        agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+            &recipe, dispatcher,
+        )
     } else if local_override.is_some() {
         agent_task_service::reconstruct_options_with_local_placement_override(&recipe)
     } else {
@@ -3766,6 +3774,14 @@ fn cook_provision_repository(args: &AgentTaskCookArgs) -> Option<String> {
         .or_else(|| {
             args.repository_identity
                 .as_ref()
+                .and_then(|identity| identity.get("component_id"))
+                .and_then(Value::as_str)
+                .filter(|component| !component.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            args.repository_identity
+                .as_ref()
                 .and_then(|identity| identity.get("repository_name"))
                 .and_then(Value::as_str)
                 .filter(|repository| !repository.trim().is_empty())
@@ -3892,7 +3908,11 @@ pub(crate) fn resolve_cook_destination(
         Some(head) => head,
         None => derived_cook_branch(&task_url)?,
     };
-    args.to_worktree = Some(format!("{repo}@{}", slugify_cook_branch(&head)));
+    let handle_repository = cook_component_id(&args).unwrap_or(repo);
+    args.to_worktree = Some(format!(
+        "{handle_repository}@{}",
+        slugify_cook_branch(&head)
+    ));
     if args.head.is_none() {
         args.head = Some(head);
     }
@@ -3908,7 +3928,7 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         .or(args.dispatch.cwd.as_deref())
         .map(Path::new);
     let component = cook_component_id(args)
-        .map(homeboy::core::component::registered_by_id)
+        .map(cook_registered_component_by_id)
         .transpose()?
         .flatten()
         .map(|component| PathBuf::from(component.local_path));
@@ -3948,7 +3968,7 @@ fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::
         })
         .or_else(|| {
             cook_component_id(args).and_then(|repo| {
-                homeboy::core::component::registered_by_id(repo)
+                cook_registered_component_by_id(repo)
                     .ok()
                     .flatten()
                     .map(|component| PathBuf::from(component.local_path))
@@ -4247,15 +4267,14 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
     args.dispatch.repo = Some(selected.repository_name.clone());
     let component_id = match args.component.as_deref() {
         Some(component_id) => {
-            let component =
-                homeboy::core::component::registered_by_id(component_id)?.ok_or_else(|| {
-                    homeboy::core::Error::validation_invalid_argument(
-                        "component",
-                        format!("--component `{component_id}` is not a registered component"),
-                        Some(component_id.to_string()),
-                        None,
-                    )
-                })?;
+            let component = cook_registered_component_by_id(component_id)?.ok_or_else(|| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "component",
+                    format!("--component `{component_id}` is not a registered component"),
+                    Some(component_id.to_string()),
+                    None,
+                )
+            })?;
             let component_remote = component
                 .remote_url
                 .as_deref()
@@ -4284,7 +4303,7 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
     };
     args.component = component_id.clone();
     let component_cwd = match component_id.as_deref() {
-        Some(component_id) => homeboy::core::component::registered_by_id(component_id)?
+        Some(component_id) => cook_registered_component_by_id(component_id)?
             .map(|component| durable_component_cwd(&component, &selected.repository_name))
             .transpose()?,
         None => None,
@@ -4314,8 +4333,7 @@ fn bind_cook_repository_identity_from_config(
     let (repository_name, component_id, identity) =
         cook_repository_identity_for_selection(&repo, args.component.as_deref())?;
     args.dispatch.repo = Some(repository_name);
-    args.component =
-        homeboy::core::component::registered_by_id(&component_id)?.map(|component| component.id);
+    args.component = cook_registered_component_by_id(&component_id)?.map(|component| component.id);
     let repository_path = (args.component.is_none() && Path::new(&repo).is_dir()).then_some(repo);
     let mut identity = identity;
     if let Some(repository_path) = repository_path {
@@ -4520,28 +4538,22 @@ fn cook_component_id(args: &AgentTaskCookArgs) -> Option<&str> {
 fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
-    let components = homeboy::core::component::inventory::registered_base()?;
-    if let Some(component) = components
-        .iter()
-        .find(|component| component.id == repository_name)
-        .cloned()
-    {
-        return Ok(vec![component]);
-    }
     let repository_name = normalize_repository_name(repository_name);
-    let matches = components
-        .into_iter()
-        .filter(|component| {
-            component
-                .aliases
-                .iter()
-                .any(|alias| normalize_repository_name(alias) == repository_name)
-                || component
-                    .remote_url
-                    .as_deref()
-                    .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
-        })
-        .collect::<Vec<_>>();
+    let primary_matches = cook_components_matching_repository_name(
+        homeboy::core::component::inventory::registered_primary()?,
+        &repository_name,
+    );
+    if !primary_matches.is_empty() {
+        if primary_matches.len() > 1 {
+            return Err(repository_component_identity_ambiguity_error(
+                repository_name,
+                &primary_matches,
+            ));
+        }
+        return Ok(primary_matches);
+    }
+    let components = homeboy::core::component::inventory::registered_base()?;
+    let matches = cook_components_matching_repository_name(components, &repository_name);
     if matches.len() > 1 {
         return Err(repository_component_identity_ambiguity_error(
             repository_name,
@@ -4549,6 +4561,37 @@ fn cook_components_for_repository_name(
         ));
     }
     Ok(matches)
+}
+
+fn cook_components_matching_repository_name(
+    components: Vec<homeboy::core::component::Component>,
+    repository_name: &str,
+) -> Vec<homeboy::core::component::Component> {
+    components
+        .into_iter()
+        .filter(|component| {
+            normalize_repository_name(&component.id) == repository_name
+                || component
+                    .aliases
+                    .iter()
+                    .any(|alias| normalize_repository_name(alias) == repository_name)
+                || component
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
+        })
+        .collect()
+}
+
+fn cook_registered_component_by_id(
+    component_id: &str,
+) -> homeboy::core::Result<Option<homeboy::core::component::Component>> {
+    if let Some(component) =
+        homeboy::core::component::inventory::registered_primary_by_id(component_id)?
+    {
+        return Ok(Some(component));
+    }
+    homeboy::core::component::registered_by_id(component_id)
 }
 
 fn select_cook_repository_identity(
@@ -5438,7 +5481,7 @@ fn cook_component_workspace(
 }
 
 fn component_workspace(component_id: &str, workspace: &Path) -> homeboy::core::Result<PathBuf> {
-    let Some(component) = homeboy::core::component::registered_by_id(component_id)? else {
+    let Some(component) = cook_registered_component_by_id(component_id)? else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "component workspace",
             format!("configured component `{component_id}` is no longer registered"),
@@ -8357,14 +8400,21 @@ pub(super) fn placement_update(args: PlacementUpdateArgs) -> CmdResult<Value> {
             None,
         ));
     }
+    let idempotency_key = args
+        .idempotency_key
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::PlacementUpdate,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "placement-update",
+                &idempotency_key,
+            ),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -8389,6 +8439,7 @@ pub(super) fn run_resume_with_executor(
     idempotency_key: Option<String>,
     executor: SharedAgentTaskExecutor,
 ) -> CmdResult<Value> {
+    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement =
         homeboy::agents::orchestration::execute_resume_action_from_current_environment(
             &run_id,
@@ -8396,8 +8447,13 @@ pub(super) fn run_resume_with_executor(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
-                idempotency_key: idempotency_key
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                effect_id: homeboy_control_plane_contract::action_effect_id(
+                    "cli",
+                    &run_id,
+                    "resume",
+                    &idempotency_key,
+                ),
+                idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
                 parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
@@ -8405,19 +8461,38 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    let exit_code = match homeboy::agents::agent_task_action_result::resume(&acknowledgement)? {
+    let resume_result = homeboy::agents::agent_task_action_result::resume(&acknowledgement)?;
+    let exit_code = match &resume_result {
         homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
             exit_code,
             ..
-        } => exit_code,
+        } => *exit_code,
         homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
             terminal,
             ..
-        } => i32::from(terminal) * 2,
+        } => i32::from(*terminal) * 2,
     };
     Ok((
-        serde_json::to_value(acknowledgement)
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        // Historical terminal transport recovery has always returned the
+        // aggregate-shaped status cursor. Keep that compatibility projection
+        // while the mutation itself remains a durable action acknowledgement.
+        serde_json::to_value(match (&resume_result, acknowledgement.outcome) {
+            (
+                homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+                    aggregate,
+                    ..
+                },
+                homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
+            ) => aggregate,
+            _ => {
+                return Ok((
+                    serde_json::to_value(acknowledgement)
+                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                    exit_code,
+                ))
+            }
+        })
+        .map_err(|error| Error::internal_json(error.to_string(), None))?,
         exit_code,
     ))
 }
@@ -8449,47 +8524,22 @@ where
         args.allow_provider_rotation,
         args.provider_rotations,
     );
-    if !route_override.is_empty() {
-        let retry = agent_task_service::retry_with_provider_route_override(
-            &args.run_id,
-            args.new_run_id.as_deref(),
-            args.run,
-            args.force,
-            route_override,
-        )?;
-        if args.run && retry.run && retry.record.metadata["cook_id"].is_string() {
-            return continue_cook_with_queued_execution(
-                CookContinueArgs {
-                    cook_or_attempt_id: retry.record.run_id,
-                    preflight: false,
-                    rearm: false,
-                    artifact_id: None,
-                    timeout_ms: None,
-                    review_form_timeout_ms: None,
-                    backend: None,
-                    selector: None,
-                    model: None,
-                    allow_provider_rotation: false,
-                    provider_rotations: None,
-                    full: false,
-                },
-                executor,
-                reconstruct_dispatcher,
-                true,
-            );
-        }
-        let mut value = serde_json::to_value(retry.record).unwrap_or(Value::Null);
-        value["provider_route_override"] = json!(true);
-        return Ok((value, 0));
-    }
+    let idempotency_key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-            idempotency_key: args
-                .idempotency_key
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.run_id,
+                "retry",
+                &idempotency_key,
+            ),
+            idempotency_key,
             actor: "homeboy-cli".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -8498,16 +8548,30 @@ where
                 data: serde_json::json!({
                     "new_run_id": args.new_run_id,
                     "force": args.force,
+                    "provider_route": (!route_override.is_empty()).then(|| serde_json::json!({
+                        "backend": route_override.backend,
+                        "selector": route_override.selector,
+                        "model": route_override.model,
+                        "allow_provider_rotation": route_override.allow_provider_rotation,
+                        "provider_rotations": route_override.provider_rotations,
+                    })),
                 }),
             },
             confirmed: true,
         },
     )?;
     let retry = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
-    let execute = args.run && retry.runnable;
+    // Reservation is acknowledged independently from execution. Only the call
+    // that created the successor may dispatch it; a replayed acknowledgement
+    // must be inspected or resumed through the durable lifecycle instead.
+    let execute = args.run && retry.created;
     if execute {
         let record = retry.record;
         if record.metadata["cook_id"].is_string() {
+            // The retry acknowledgement is already durable, so this dispatch is
+            // free to report the Cook outcome it produced. Returning the
+            // acknowledgement instead would exit 0 and hide a durable failure
+            // from `agent-task retry --run`.
             return continue_cook_with_queued_execution(
                 CookContinueArgs {
                     cook_or_attempt_id: record.run_id,
@@ -8528,7 +8592,7 @@ where
                 true,
             );
         }
-        return run_submitted_with_executor(record.run_id, None, executor);
+        let _ = run_submitted_with_executor(record.run_id, None, executor)?;
     }
     Ok((
         serde_json::to_value(acknowledgement)

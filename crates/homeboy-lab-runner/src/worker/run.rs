@@ -1050,7 +1050,7 @@ fn reverse_worker_lab_offload(raw: &str) -> Result<serde_json::Value> {
 
 /// A staged job's source is runner-owned durable storage, not a controller path.
 /// Verify and extract it before the normal queue executor consumes the command.
-fn materialize_staged_source_artifact(
+pub(crate) fn materialize_staged_source_artifact(
     runner_id: &str,
     job_id: &str,
     envelope: &mut RunnerExecutionEnvelope,
@@ -1113,22 +1113,22 @@ fn materialize_staged_source_artifact(
         .as_mut()
         .ok_or_else(|| Error::internal_unexpected("staged runner job has no execution dispatch"))?;
     dispatch.cwd = Some(workspace.display().to_string());
-    Ok(None)
+    Ok(Some(open_staged_workspace_directory(&workspace)?))
 }
 
-struct StagedWorkspaceDirectory {
+pub(crate) struct StagedWorkspaceDirectory {
     #[cfg(unix)]
     directory: File,
 }
 
 impl StagedWorkspaceDirectory {
     #[cfg(unix)]
-    fn fd(&self) -> std::os::fd::RawFd {
+    pub(crate) fn fd(&self) -> std::os::fd::RawFd {
         self.directory.as_raw_fd()
     }
 }
 
-fn verify_staged_workspace_before_execution(
+pub(crate) fn verify_staged_workspace_before_execution(
     runner_id: &str,
     envelope: &RunnerExecutionEnvelope,
     authority: Option<&StagedWorkspaceDirectory>,
@@ -1138,6 +1138,26 @@ fn verify_staged_workspace_before_execution(
         .get("staged_workspace_materialization")
         .filter(|workspace| !workspace.is_null())
     else {
+        if envelope
+            .metadata
+            .get("staged_source_artifact")
+            .filter(|source| !source.is_null())
+            .is_some()
+        {
+            let authority = authority.ok_or_else(|| {
+                Error::internal_unexpected(
+                    "staged source workspace authority was not retained until execution",
+                )
+            })?;
+            let cwd = envelope
+                .dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.cwd.as_deref())
+                .ok_or_else(|| {
+                    Error::internal_unexpected("staged runner job has no execution cwd")
+                })?;
+            verify_staged_workspace_path(authority, cwd)?;
+        }
         return Ok(());
     };
     let workspace = serde_json::from_value(raw.clone()).map_err(|error| {
@@ -1153,6 +1173,68 @@ fn verify_staged_workspace_before_execution(
     })?;
     verify_controller_workspace(runner_id, &workspace, Some(authority))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn open_staged_workspace_directory(path: &std::path::Path) -> Result<StagedWorkspaceDirectory> {
+    use std::fs::OpenOptions;
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY);
+    let directory = options.open(path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "staged_source_artifact",
+            format!("open extracted runner workspace without following links: {error}"),
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    Ok(StagedWorkspaceDirectory { directory })
+}
+
+#[cfg(not(unix))]
+fn open_staged_workspace_directory(_path: &std::path::Path) -> Result<StagedWorkspaceDirectory> {
+    Err(Error::validation_invalid_argument(
+        "staged_source_artifact",
+        "staged source workspaces require Unix no-follow verification",
+        None,
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn verify_staged_workspace_path(authority: &StagedWorkspaceDirectory, path: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let current = open_staged_workspace_directory(std::path::Path::new(path))?;
+    let retained = authority.directory.metadata().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("stat retained staged workspace".to_string()),
+        )
+    })?;
+    let current = current.directory.metadata().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("stat staged workspace path".to_string()),
+        )
+    })?;
+    if retained.dev() != current.dev() || retained.ino() != current.ino() {
+        return Err(Error::validation_invalid_argument(
+            "staged_source_artifact",
+            "staged source workspace path was replaced after materialization",
+            Some(path.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_staged_workspace_path(_authority: &StagedWorkspaceDirectory, _path: &str) -> Result<()> {
+    unreachable!("non-Unix staged workspaces cannot be materialized")
 }
 
 #[cfg(unix)]
@@ -1552,7 +1634,9 @@ fn non_empty_run_id(run_id: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod provenance_tests {
-    use super::reverse_worker_lab_offload;
+    use super::{
+        open_staged_workspace_directory, reverse_worker_lab_offload, verify_staged_workspace_path,
+    };
     use sha2::{Digest, Sha256};
 
     #[test]
@@ -1572,5 +1656,23 @@ mod provenance_tests {
             reverse_worker_lab_offload(&reference).expect("referenced Lab metadata")["sync_mode"],
             "snapshot"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_staged_workspace_authority_refuses_path_replacement_before_spawn() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(workspace.join("source.bin"), b"sealed source").expect("write source");
+        let authority = open_staged_workspace_directory(&workspace).expect("retain workspace");
+
+        std::fs::rename(&workspace, root.path().join("replaced")).expect("move workspace");
+        std::fs::create_dir(&workspace).expect("replace workspace path");
+        std::fs::write(workspace.join("source.bin"), b"replacement").expect("write replacement");
+
+        let error = verify_staged_workspace_path(&authority, &workspace.display().to_string())
+            .expect_err("replacement must be refused before spawn");
+        assert!(error.message.contains("was replaced after materialization"));
     }
 }

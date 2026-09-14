@@ -24,10 +24,10 @@
 //! - `runner_readiness[].secret_env`
 //! - `secret_requirements[]` that are not explicitly `required: false`
 //! - `secret_env_requirements[]` with no `when` condition
-//! - the `required_secret_env` of a *sole* `provider_defaults` entry — when a
-//!   provider declares exactly one provider default, that default is what
-//!   dispatch uses unless the request overrides it, so its explicitly-required
-//!   credentials are unconditionally required.
+//!
+//! Account-scoped `provider_defaults` stay request-scoped. Catalog status does
+//! not treat a sole unused alternative as unconditionally required. Native
+//! provider-owned auth is not a Homeboy-invented credential list.
 //!
 //! Request-conditional requirements (`secret_env_requirements[].when`, and the
 //! `secret_env` of a provider default named by the request) stay owned by the
@@ -209,52 +209,7 @@ fn declared_credentials(provider: &AgentTaskExecutorProvider) -> Vec<DeclaredCre
         }
     }
 
-    for env in sole_provider_default_required_secret_env(provider) {
-        push_declared_credential(
-            &mut declared,
-            &env,
-            "provider_defaults.required_secret_env",
-            None,
-            None,
-        );
-    }
-
     declared
-}
-
-/// `required_secret_env` of the provider's sole declared provider default.
-///
-/// When a provider declares exactly one provider default, dispatch uses it
-/// unless the request names another, so anything that default marks explicitly
-/// required is unconditionally required. With two or more declared defaults the
-/// choice is request-dependent and this returns nothing rather than guessing.
-///
-/// Only `required_secret_env` is read — never the broader `secret_env` list,
-/// which routinely carries derivable or optional companions (access tokens,
-/// expiry stamps) that must not make a provider look undispatchable.
-fn sole_provider_default_required_secret_env(provider: &AgentTaskExecutorProvider) -> Vec<String> {
-    if provider.provider_defaults.len() != 1 {
-        return Vec::new();
-    }
-    let Some(provider_default) = provider.provider_defaults.values().next() else {
-        return Vec::new();
-    };
-    let Some(provider_default) = provider_default.as_object() else {
-        return Vec::new();
-    };
-    for key in ["required_secret_env", "requiredSecretEnv"] {
-        match provider_default.get(key) {
-            Some(Value::String(name)) => return vec![name.clone()],
-            Some(Value::Array(items)) => {
-                return items
-                    .iter()
-                    .filter_map(|item| item.as_str().map(str::to_string))
-                    .collect()
-            }
-            _ => {}
-        }
-    }
-    Vec::new()
 }
 
 /// Resolve a provider's declared credentials against the observed scope.
@@ -400,52 +355,54 @@ mod tests {
         serde_json::from_value(value).expect("valid provider fixture")
     }
 
-    /// The exact shape the claude-code runtime publishes: one provider default
-    /// that names its own required credential (#11479).
-    fn claude_code_shaped_provider(
-        auth_path: Option<&std::path::Path>,
-    ) -> AgentTaskExecutorProvider {
-        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
-        let secret_env_sources = auth_path.map_or_else(
-            || serde_json::json!({}),
-            |path| {
-                serde_json::json!({
-                    required.clone(): { "source": "json-file", "path": path, "field": "token" }
-                })
-            },
-        );
+    fn unused_account_default_provider() -> AgentTaskExecutorProvider {
         provider(serde_json::json!({
-            "id": "claude-code.agent-task-executor",
-            "backend": "claude-code",
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
             "capabilities": ["cli_runtime", "provider_owned_auth"],
             "secret_env_requirements": [{
                 "source": "provider_default",
-                "env": [required.clone()],
-                "when": { "any": [{ "path": "executor.config.provider", "equals": "claude-code" }] }
+                "env": ["UNUSED_ACCOUNT_TOKEN"],
+                "when": { "any": [{ "path": "executor.config.provider", "equals": "unused-account" }] }
             }],
             "provider_defaults": {
-                "claude-code": {
+                "unused-account": {
                     "secret_env": [
-                        required.clone(),
-                        format!("{required}_ACCESS_TOKEN"),
-                        format!("{required}_EXPIRES_AT")
+                        "UNUSED_ACCOUNT_TOKEN",
+                        "UNUSED_ACCOUNT_ACCESS_TOKEN",
+                        "UNUSED_ACCOUNT_EXPIRES_AT"
                     ],
-                    "required_secret_env": [required.clone()],
+                    "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"],
                     "optional_secret_env": [
-                        format!("{required}_ACCESS_TOKEN"),
-                        format!("{required}_EXPIRES_AT")
-                    ],
-                    "secret_env_sources": secret_env_sources
+                        "UNUSED_ACCOUNT_ACCESS_TOKEN",
+                        "UNUSED_ACCOUNT_EXPIRES_AT"
+                    ]
                 }
             }
         }))
     }
 
-    fn required_credential(provider: &AgentTaskExecutorProvider) -> String {
-        sole_provider_default_required_secret_env(provider)
-            .into_iter()
-            .next()
-            .expect("required credential")
+    fn unconditional_credential_provider(
+        env: &str,
+        auth_path: Option<&std::path::Path>,
+    ) -> AgentTaskExecutorProvider {
+        let secret_env_sources = auth_path.map_or_else(
+            || serde_json::json!({}),
+            |path| {
+                serde_json::json!({
+                    env: { "source": "json-file", "path": path, "field": "token" }
+                })
+            },
+        );
+        provider(serde_json::json!({
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
+            "secret_env_requirements": [{
+                "source": "provider_default",
+                "env": [env],
+                "secret_env_sources": secret_env_sources
+            }]
+        }))
     }
 
     #[test]
@@ -464,48 +421,32 @@ mod tests {
     }
 
     #[test]
-    fn a_sole_provider_default_required_credential_makes_an_unconfigured_provider_undispatchable() {
-        let provider = claude_code_shaped_provider(None);
-        let required = required_credential(&provider);
-        let readiness = provider_credential_readiness(&provider);
+    fn an_unselected_account_default_is_not_a_catalog_credential() {
+        let readiness = provider_credential_readiness(&unused_account_default_provider());
 
         assert!(
-            !readiness.dispatchable,
-            "a backend whose required credential is absent is declared, not dispatchable"
+            readiness.dispatchable,
+            "an unused account alternative is request-scoped, not catalog-required"
         );
-        assert_eq!(
-            readiness.missing,
-            vec![required.clone()],
-            "the reason must name the exact credential"
-        );
-        assert_eq!(
-            readiness.reason(),
-            Some(format!("missing credential {required}"))
-        );
-    }
-
-    #[test]
-    fn optional_companions_of_a_required_credential_are_not_treated_as_required() {
-        let readiness = provider_credential_readiness(&claude_code_shaped_provider(None));
-
-        // `secret_env` also lists the access token and expiry stamp. Those
-        // are derivable/optional; reporting them would make every provider
-        // that caches a token look broken.
+        assert!(readiness.missing.is_empty());
+        assert!(readiness.requirements.is_empty());
+        assert!(readiness.reason().is_none());
         assert!(
             !readiness
                 .missing
                 .iter()
                 .any(|env| env.contains("ACCESS_TOKEN") || env.contains("EXPIRES_AT")),
-            "only explicitly required credentials block dispatch: {:?}",
+            "account-default companions must not block catalog dispatch: {:?}",
             readiness.missing
         );
     }
 
     #[test]
-    fn a_configured_credential_makes_the_provider_dispatchable() {
+    fn a_configured_unconditional_credential_makes_the_provider_dispatchable() {
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
         let auth = tempfile::NamedTempFile::new().expect("auth file");
         std::fs::write(auth.path(), r#"{"token":"refresh-token-value"}"#).expect("write auth");
-        let provider = claude_code_shaped_provider(Some(auth.path()));
+        let provider = unconditional_credential_provider(&required, Some(auth.path()));
         let readiness = provider_credential_readiness(&provider);
 
         assert!(
@@ -521,12 +462,12 @@ mod tests {
         // Only a `when`-gated declaration: the plan-level preflight owns it
         // once a request exists, so catalog status must not pre-judge it.
         let readiness = provider_credential_readiness(&provider(serde_json::json!({
-            "id": "codex.agent-task-executor",
-            "backend": "codex",
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
             "secret_env_requirements": [{
                 "source": "provider_default",
-                "env": ["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"],
-                "when": { "any": [{ "path": "executor.config.provider", "equals": "codex" }] }
+                "env": ["SELECTED_ACCOUNT_TOKEN"],
+                "when": { "any": [{ "path": "executor.config.provider", "equals": "selected-account" }] }
             }]
         })));
 
@@ -538,8 +479,8 @@ mod tests {
     fn an_unconditional_secret_env_requirement_blocks_dispatch() {
         let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
         let readiness = provider_credential_readiness(&provider(serde_json::json!({
-            "id": "example.agent-task-executor",
-            "backend": "example",
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
             "secret_env_requirements": [{
                 "source": "provider_default",
                 "env": [required.clone()]
@@ -553,10 +494,10 @@ mod tests {
     #[test]
     fn an_explicitly_optional_secret_requirement_does_not_block_dispatch() {
         let readiness = provider_credential_readiness(&provider(serde_json::json!({
-            "id": "example.agent-task-executor",
-            "backend": "example",
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
             "secret_requirements": [{
-                "name": "EXAMPLE_OPTIONAL_KEY",
+                "name": "SAMPLE_OPTIONAL_KEY",
                 "required": false
             }]
         })));
@@ -570,11 +511,11 @@ mod tests {
         // Which default runs is a request decision when more than one is
         // declared, so nothing here is unconditionally required.
         let readiness = provider_credential_readiness(&provider(serde_json::json!({
-            "id": "wordpress.codebox-agent-task-executor",
-            "backend": "wp-codebox",
+            "id": "sample-runtime.agent-task-executor",
+            "backend": "sample-runtime",
             "provider_defaults": {
-                "openai": { "required_secret_env": ["OPENAI_API_KEY"] },
-                "claude-code": { "required_secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"] }
+                "first-account": { "required_secret_env": ["FIRST_ACCOUNT_TOKEN"] },
+                "second-account": { "required_secret_env": ["SECOND_ACCOUNT_TOKEN"] }
             }
         })));
 
@@ -584,8 +525,8 @@ mod tests {
 
     #[test]
     fn the_preflight_error_is_a_configuration_failure_naming_the_credential() {
-        let provider = claude_code_shaped_provider(None);
-        let required = required_credential(&provider);
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let provider = unconditional_credential_provider(&required, None);
         let error = preflight_provider_credentials(&provider)
             .expect_err("a missing required credential must fail fast");
 
@@ -603,14 +544,15 @@ mod tests {
 
     #[test]
     fn backend_preflight_ignores_backends_that_do_not_resolve() {
-        let providers = vec![claude_code_shaped_provider(None)];
+        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+        let providers = vec![unconditional_credential_provider(&required, None)];
 
         // Resolution failures belong to the runner-readiness validator; this
         // preflight must not shadow them with a credential error.
         preflight_provider_credentials_for_backend(&providers, "no-such-backend", None)
             .expect("unresolvable backends are not this preflight's error");
 
-        preflight_provider_credentials_for_backend(&providers, "claude-code", None)
+        preflight_provider_credentials_for_backend(&providers, "sample-runtime", None)
             .expect_err("a resolvable backend with a missing credential fails");
     }
 }

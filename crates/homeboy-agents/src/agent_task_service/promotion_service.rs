@@ -507,6 +507,7 @@ mod tests {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         }
     }
 

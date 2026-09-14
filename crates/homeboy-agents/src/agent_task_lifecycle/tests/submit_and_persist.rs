@@ -71,6 +71,46 @@ fn parallel_local_cook_submissions_publish_their_runner_pid_atomically() {
 }
 
 #[test]
+fn concurrent_queue_consumers_bind_only_the_winning_preflight_plan() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let run_id = "queue-cas-plan";
+    let original = AgentTaskPlan::new("queue-cas-original", Vec::new());
+    store
+        .submit_plan_with_runtime_admission(&original, run_id, |_| Ok(json!({})))
+        .expect("queued run");
+    let left_plan = AgentTaskPlan::new("queue-cas-left", Vec::new());
+    let right_plan = AgentTaskPlan::new("queue-cas-right", Vec::new());
+    let barrier = Arc::new(Barrier::new(3));
+
+    let results = std::thread::scope(|scope| {
+        let handles = [left_plan.clone(), right_plan.clone()].map(|plan| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                store
+                    .bind_controller_plan_and_claim_queued_run(run_id, &plan)
+                    .expect("atomic queue claim")
+                    .is_some()
+            })
+        });
+        barrier.wait();
+        handles.map(|handle| handle.join().expect("queue consumer"))
+    });
+
+    assert_eq!(results.into_iter().filter(|claimed| *claimed).count(), 1);
+    let record = store.read_record(run_id).expect("claimed record");
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    let bound = store.read_controller_plan(run_id).expect("winning plan");
+    assert!(bound == left_plan || bound == right_plan);
+    assert_ne!(
+        bound, original,
+        "the original plan was replaced exactly once"
+    );
+}
+
+#[test]
 fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

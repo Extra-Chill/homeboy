@@ -2858,7 +2858,8 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
         ]);
         assert_eq!(first["physical_count"], 2);
         assert_eq!(first["runs"][0]["run_id"], "page-z");
-        assert_eq!(first["record_health"]["legacy"], 1);
+        assert_eq!(first["record_health"]["healthy"], 1);
+        assert_eq!(first["record_health"]["legacy"], 0);
         let cursor = first["next_cursor"]
             .as_str()
             .expect("continuation after legacy row")
@@ -2878,6 +2879,50 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
         assert_eq!(second["runs"][0]["run_id"], "page-a");
         assert_eq!(second["record_health"]["healthy"], 1);
         assert_eq!(second["next_cursor"], Value::Null);
+    });
+}
+
+#[test]
+fn list_page_scopes_record_health_to_the_returned_task_url() {
+    with_isolated_home(|_| {
+        let task_url = "https://example.test/issues/42";
+        let mut matching = test_plan();
+        matching.tasks[0].workspace.task_url = Some(task_url.to_string());
+        agent_task_lifecycle::submit_plan(&matching, Some("filtered-z"))
+            .expect("persist matching record");
+        persist_discovery_record(
+            "unrelated-m-legacy",
+            "fix/unrelated",
+            AgentTaskRunState::Queued,
+        );
+
+        let lifecycle =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+        let observation = lifecycle
+            .open_observation_initialized()
+            .expect("observation store");
+        let mut unrelated = observation
+            .get_run("unrelated-m-legacy")
+            .expect("read unrelated fixture")
+            .expect("unrelated fixture exists");
+        unrelated.metadata_json["agent_task_run"]["schema"] = json!("homeboy/agent-task-run/v0");
+        observation
+            .upsert_imported_run(&unrelated)
+            .expect("persist unrelated legacy row");
+
+        let page = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--task-url".to_string(),
+            task_url.to_string(),
+            "--limit".to_string(),
+            "2".to_string(),
+        ]);
+        assert_eq!(page["runs"][0]["run_id"], "filtered-z");
+        assert_eq!(page["record_health"]["healthy"], 1);
+        assert_eq!(page["record_health"]["legacy"], 0);
     });
 }
 

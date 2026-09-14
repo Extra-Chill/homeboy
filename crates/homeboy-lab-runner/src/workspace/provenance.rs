@@ -1077,6 +1077,7 @@ mod tests {
             snapshot_hash: "sha256:verified-source".to_string(),
             synced_at: "2026-01-01T00:00:00Z".to_string(),
             sync_excludes: vec![".git".to_string(), ".git/**".to_string()],
+            repository_integrity_evidence: None,
         }
     }
 

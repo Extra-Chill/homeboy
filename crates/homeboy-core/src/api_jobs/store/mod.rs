@@ -2208,24 +2208,27 @@ impl JobStore {
         )
     }
 
-    /// Fallible variant used by the daemon request boundary so a failed durable
-    /// queue commit can roll back a just-registered workspace owner.
-    pub(crate) fn try_run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner<
-        T,
-        F,
-    >(
+    /// Start the standard direct-child worker for either a newly admitted local
+    /// job or a remote job atomically adopted by the caller. The adoption
+    /// transaction supplies `created`; replayed adoptions therefore retain the
+    /// original UUID without spawning another worker.
+    pub(crate) fn try_run_capacity_queued_local_child_background_with_existing_job<T, F>(
         &self,
         request: LocalRunnerJobRequest,
         capacity: usize,
+        existing_job: Option<(Job, bool)>,
         run: F,
     ) -> Result<(JobRunner, bool)>
     where
         T: Serialize + Send + 'static,
         F: FnOnce(JobHandle) -> Result<T> + Send + 'static,
     {
-        let (job, created) = self.durable_transaction(|inner| {
-            self.create_or_reuse_active_local_runner_job_inner(inner, request.clone())
-        })?;
+        let (job, created) = match existing_job {
+            Some(job) => job,
+            None => self.durable_transaction(|inner| {
+                self.create_or_reuse_active_local_runner_job_inner(inner, request.clone())
+            })?,
+        };
         let job_id = job.id;
         // An idempotent resubmission reused an already-enqueued job that already
         // has its own worker. Do not spawn a second worker for it — return a
@@ -2575,10 +2578,20 @@ impl JobStore {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
         self.durable_transaction(|inner| {
-            inner
+            let job = inner
                 .jobs
                 .get(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
+            if let Some(current_lease_id) = self.daemon_lease_id.as_deref() {
+                if job.job.daemon_lease_id.as_deref() != Some(current_lease_id) {
+                    return Err(Error::validation_invalid_argument(
+                        "daemon_lease_id",
+                        "local child reservation belongs to a different daemon generation",
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
+            }
             if let Some((runner_id, capacity)) = runner_capacity {
                 let active = inner.jobs.values().filter(|candidate| {
                     candidate.job.id != job_id

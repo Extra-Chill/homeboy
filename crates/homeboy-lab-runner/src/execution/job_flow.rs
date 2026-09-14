@@ -178,6 +178,7 @@ where
     }
 
     let deadline = Instant::now() + runner_exec_wait_timeout(&flow.runner.settings);
+    let mut observed_terminal_daemon_job = job.status.is_terminal();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
@@ -220,6 +221,7 @@ where
                     // Project terminal work through the normal lifecycle instead
                     // of claiming a cancelled remote command still runs.
                     job = cancelled_job.clone();
+                    observed_terminal_daemon_job = true;
                     continue;
                 }
             }
@@ -252,6 +254,7 @@ where
         }
         std::thread::sleep(Duration::from_millis(200));
         job = poll(&job)?;
+        observed_terminal_daemon_job = job.status.is_terminal();
         if let Ok(events) = events(&job) {
             let events =
                 redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names);
@@ -311,6 +314,11 @@ where
             )?;
         }
     }
+    settle_generation_job_ownership_after_terminal_snapshot(
+        &flow.runner.id,
+        &terminal_snapshot,
+        observed_terminal_daemon_job,
+    )?;
     after_events()?;
     let mirrored = if flow.mirror_evidence {
         mirror(&job, &job_events, &result).map_err(|error| {
@@ -516,10 +524,123 @@ fn control_plane_terminal_job_status(
     }
 }
 
+/// Releases generation capacity only for a terminal daemon snapshot whose event
+/// read has already completed. Controller-derived terminality is not authority
+/// to settle the daemon job's durable owner.
+fn settle_generation_job_ownership_after_terminal_snapshot(
+    runner_id: &str,
+    terminal_snapshot: &RunnerJobLogSnapshot,
+    observed_terminal_daemon_job: bool,
+) -> Result<bool> {
+    if !observed_terminal_daemon_job || !terminal_snapshot.job.status.is_terminal() {
+        return Ok(false);
+    }
+    super::super::generation_store::settle_observed_terminal_job(
+        runner_id,
+        &terminal_snapshot.job.id.to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{generation_store, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
     use homeboy_control_plane_contract::ControlPlaneRunState;
+
+    fn direct_session() -> RunnerSession {
+        RunnerSession {
+            runner_id: "runner-a".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("server-a".to_string()),
+            controller_id: Some("controller-a".to_string()),
+            broker_url: None,
+            remote_daemon_address: Some("daemon-a:4000".to_string()),
+            local_port: Some(4000),
+            local_url: Some("http://daemon-a:4000".to_string()),
+            tunnel_pid: None,
+            tunnel_process_start_identity: None,
+            proxy_forward: None,
+            remote_daemon_pid: Some(42),
+            remote_daemon_lease_id: Some("lease-a".to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+lease-a".to_string()),
+            connected_at: "2026-09-10T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    #[test]
+    fn failed_read_only_terminal_snapshot_retains_evidence_and_releases_generation_capacity() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let session = direct_session();
+            let job_id = uuid::Uuid::new_v4();
+            generation_store::record_job("runner-a", &session, &job_id.to_string())
+                .expect("record accepted job");
+            let terminal = RunnerJobLogSnapshot {
+                job: Job {
+                    id: job_id,
+                    operation: "runner.exec --read-only-artifact".to_string(),
+                    status: JobStatus::Failed,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                    started_at_ms: Some(1),
+                    finished_at_ms: Some(2),
+                    event_count: 0,
+                    source_snapshot: None,
+                    path_materialization_plan: None,
+                    stale_reason: None,
+                    daemon_lease_id: Some("lease-a".to_string()),
+                    target_runner_id: Some("runner-a".to_string()),
+                    target_project_id: None,
+                    claim_id: None,
+                    claimed_by_runner_id: None,
+                    claimed_at_ms: None,
+                    claim_expires_at_ms: None,
+                    artifacts: Vec::new(),
+                    runner_job_projection: None,
+                },
+                events: Vec::new(),
+            };
+
+            assert!(
+                terminal.job.status.is_terminal(),
+                "terminal evidence is retained"
+            );
+            assert_eq!(
+                terminal.job.operation, "runner.exec --read-only-artifact",
+                "terminal snapshot retains the failed retrieval identity"
+            );
+            assert!(settle_generation_job_ownership_after_terminal_snapshot(
+                "runner-a", &terminal, true
+            )
+            .expect("settle terminal job-flow snapshot"));
+            assert!(
+                generation_store::status_job_owners("runner-a", Some(&session))
+                    .expect("read generation owners")
+                    .iter()
+                    .all(|owner| owner.job_ids.is_empty())
+            );
+            assert!(!generation_store::requires_generation_preserving_refresh(
+                "runner-a",
+                Some(&session)
+            )
+            .expect("check retained generation ownership"));
+            generation_store::with_admission_fence(
+                "runner-a",
+                Some(&session),
+                "connect",
+                |fence| {
+                    assert!(fence.is_none(), "settled job must not block capacity");
+                    Ok(())
+                },
+            )
+            .expect("check admission fence");
+        });
+    }
 
     #[test]
     fn agent_task_terminal_state_bounds_stale_runner_job_polling() {

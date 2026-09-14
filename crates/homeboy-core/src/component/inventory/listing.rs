@@ -1,4 +1,8 @@
-use crate::component::{discover_from_portable, portable::read_portable_config, Component};
+use crate::component::{
+    discover_from_portable,
+    portable::{infer_portable_component_id, read_portable_config},
+    Component,
+};
 use crate::error::{Error, Result};
 use crate::project;
 use std::collections::HashSet;
@@ -262,6 +266,25 @@ pub fn registered_by_id(id: &str) -> Result<Option<Component>> {
     registered_by_id_core(None, id)
 }
 
+/// Resolve the standalone registration for an unscoped component operation.
+///
+/// Project attachments intentionally take precedence in [`registered_by_id`],
+/// because they carry project-owned deployment configuration. Callers that
+/// select a repository outside a project scope instead need the component's
+/// durable primary registration.
+pub fn registered_primary_by_id(id: &str) -> Result<Option<Component>> {
+    crate::engine::identifier::validate_component_id(id)?;
+    load_standalone_component_core(None, id)
+}
+
+/// List standalone component registrations without project attachments.
+///
+/// This preserves the durable component identity for unscoped operations while
+/// [`registered`] and [`registered_by_id`] retain project attachment precedence.
+pub fn registered_primary() -> Result<Vec<Component>> {
+    load_standalone_components_core(None)
+}
+
 /// [`registered_by_id`] against an already-resolved config root (#7505).
 pub fn registered_by_id_in_root(config_root: &Path, id: &str) -> Result<Option<Component>> {
     registered_by_id_core(Some(config_root), id)
@@ -503,6 +526,10 @@ fn find_sibling_portable_component(parent: &Path, id: &str) -> Option<Component>
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+        // Reading the manifest ID avoids Git enrichment for unrelated siblings.
+        if infer_portable_component_id(&path).ok().as_deref() != Some(id) {
             continue;
         }
         let Some(component) = discover_from_portable(&path) else {

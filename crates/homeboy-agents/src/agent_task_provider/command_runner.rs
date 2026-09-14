@@ -1113,14 +1113,14 @@ fn run_materialized_provider_command_once_contained(
                 run_id,
                 &request.request.task_id,
                 attempt,
-                child.id(),
+                child.identity().expect("supervised identity").root_pid,
             );
         } else {
             let _ = crate::agent_task_lifecycle::record_provider_execution_process(
                 run_id,
                 &request.request.task_id,
                 attempt,
-                child.id(),
+                child.identity().expect("supervised identity").root_pid,
             );
         }
     }
@@ -1169,7 +1169,7 @@ fn run_materialized_provider_command_once_contained(
             )),
         );
     }
-    let stdout_reader = child.stdout.take().map(|stdout| {
+    let stdout_reader = child.take_stdout().map(|stdout| {
         spawn_provider_output_reader(
             stdout,
             Arc::clone(&stdout_capture),
@@ -1178,7 +1178,7 @@ fn run_materialized_provider_command_once_contained(
             stdout_runtime_capture.map(|capture| capture.file),
         )
     });
-    let stderr_reader = child.stderr.take().map(|stderr| {
+    let stderr_reader = child.take_stderr().map(|stderr| {
         spawn_provider_output_reader(
             stderr,
             Arc::clone(&stderr_capture),
@@ -1188,7 +1188,7 @@ fn run_materialized_provider_command_once_contained(
         )
     });
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.take_stdin() {
         let _ = Write::write_all(&mut stdin, &input);
     }
 
@@ -1209,10 +1209,13 @@ fn run_materialized_provider_command_once_contained(
         WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS,
         WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS,
     );
-    let (status, killed_for_liveness, timed_out) = loop {
+    let (status, killed_for_liveness, timed_out, cancelled) = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false, false),
+            Ok(Some(status)) => break (Some(status), false, false, false),
             Ok(None) => {
+                if execution.cancellation.is_cancelled() {
+                    break (None, false, false, true);
+                }
                 let elapsed = started.elapsed();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let mut progressed = false;
@@ -1255,14 +1258,14 @@ fn run_materialized_provider_command_once_contained(
                     }
                 }
                 if elapsed >= process_timeout {
-                    break (None, false, true);
+                    break (None, false, true, false);
                 }
                 if let Some(liveness_timeout) = liveness_timeout {
                     let progress_age = started.elapsed().saturating_sub(Duration::from_millis(
                         last_progress_ms.load(Ordering::SeqCst),
                     ));
                     if progress_age >= liveness_timeout {
-                        break (None, true, false);
+                        break (None, true, false, false);
                     }
                     // Wake up at the earlier of process timeout and liveness deadline.
                     let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
@@ -1276,7 +1279,7 @@ fn run_materialized_provider_command_once_contained(
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(_) => break (None, false, false),
+            Err(_) => break (None, false, false, false),
         }
     };
 
@@ -1289,7 +1292,7 @@ fn run_materialized_provider_command_once_contained(
     // `status.is_none()` without a Homeboy-initiated kill means the wait loop
     // itself failed. The child is then still unreaped and still running, so it
     // needs the live termination path rather than a leader-exited reap.
-    let containment_cleanup = if killed_for_liveness || timed_out || status.is_none() {
+    let containment_cleanup = if killed_for_liveness || timed_out || cancelled || status.is_none() {
         child.terminate_live()
     } else {
         child.reap_after_exit()
@@ -1308,6 +1311,22 @@ fn run_materialized_provider_command_once_contained(
     let stderr_capture = stderr_capture.lock().expect("stderr capture");
     let stdout = stdout_capture.full_text();
     let stderr = stderr_capture.text();
+
+    if cancelled {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Cancelled,
+            AgentTaskFailureClassification::Provider,
+            "agent_task.provider_cancelled",
+            "provider execution cancelled".to_string(),
+            json!({
+                "provider": provider.id,
+                "command": command,
+                "cancellation_requested": true,
+                "cancellation_acknowledged": cancellation_acknowledged,
+            }),
+        );
+    }
 
     if killed_for_liveness {
         let (status, classification, message) = classify_stall_or_rate_limit(
@@ -2718,13 +2737,13 @@ fn run_provider_readiness_invocation_with_timeout(
         .supervise(child)
         .map_err(|error| format!("failed to guard provider readiness invocation: {error}"))?;
     let (stdin_sender, stdin_receiver) = mpsc::sync_channel(1);
-    let stdin_writer = child.stdin.take().map(|mut stdin| {
+    let stdin_writer = child.take_stdin().map(|mut stdin| {
         std::thread::spawn(move || {
             let _ = stdin_sender.send(stdin.write_all(&input));
         })
     });
-    let stdout_reader = child.stdout.take().map(spawn_readiness_output_reader);
-    let stderr_reader = child.stderr.take().map(spawn_readiness_output_reader);
+    let stdout_reader = child.take_stdout().map(spawn_readiness_output_reader);
+    let stderr_reader = child.take_stderr().map(spawn_readiness_output_reader);
     let mut stdin_complete = stdin_writer.is_none();
     let terminal = loop {
         if !stdin_complete {
@@ -3110,7 +3129,7 @@ pub fn probe_provider_executor_resolves(
         }
     };
 
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
+    let stderr_reader = child.take_stderr().map(|mut stderr| {
         let (send, receive) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut buffer = Vec::new();

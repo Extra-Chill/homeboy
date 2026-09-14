@@ -233,6 +233,7 @@ pub mod contract_lab_routing;
 #[cfg(test)]
 mod contract_lab_routing_tests;
 pub mod contract_output_routing;
+pub mod control_plane;
 pub mod daemon;
 pub mod db;
 pub mod deferred_workload;

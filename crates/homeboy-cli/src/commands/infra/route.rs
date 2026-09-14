@@ -17,7 +17,7 @@ use homeboy::runner::runners::{self, RunnerExecOptions};
 use homeboy_lab_contract::lab::transport_failure::{
     preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportOperation,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
@@ -1847,6 +1847,28 @@ fn renew_unmaterialized_replay_claim_before_materialization() -> homeboy::core::
 #[derive(Debug)]
 struct CliCookAdmissionReplayDriver;
 
+#[derive(Debug)]
+struct CliQueuedRetryReplayDriver;
+
+impl homeboy::core::daemon::orchestration::QueuedRetryReplayDriver for CliQueuedRetryReplayDriver {
+    fn replay(&self, run_id: &str) -> homeboy::core::Result<serde_json::Value> {
+        let scoped_run_ids = HashSet::from([run_id.to_string()]);
+        let result = crate::agents::agent_task_service::run_next_with_cook_dispatcher(
+            Arc::new(
+                crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+            ),
+            reconstruct_cook_attempt_dispatcher,
+            Some(&scoped_run_ids),
+        )?;
+        Ok(serde_json::json!({
+            "claimed": result.value.is_some(),
+            "exit_code": result.exit_code,
+            "queue_skips": result.skipped,
+            "queue_admission": result.queue_admission,
+        }))
+    }
+}
+
 impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     for CliCookAdmissionReplayDriver
 {
@@ -2054,6 +2076,9 @@ fn validate_replay_intent(
 pub(crate) fn register_unmaterialized_cook_replay_driver() {
     homeboy::core::daemon::orchestration::register_cook_admission_replay_driver(Arc::new(
         CliCookAdmissionReplayDriver,
+    ));
+    homeboy::core::daemon::orchestration::register_queued_retry_replay_driver(Arc::new(
+        CliQueuedRetryReplayDriver,
     ));
 }
 
@@ -3107,6 +3132,35 @@ fn annotate_cook_controller_preparation_error(mut error: Error, runner_id: &str)
     )
 }
 
+fn inject_effective_validation_dependency_setting(
+    settings: &crate::commands::utils::args::SettingArgs,
+    profile_values: &[(String, serde_json::Value)],
+    mut args: Vec<String>,
+) -> homeboy::core::Result<Vec<String>> {
+    let Some(value) = settings.effective_json_override("validation_dependencies", profile_values)
+    else {
+        return Ok(args);
+    };
+    let metadata = serde_json::to_string(&value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize effective validation dependency setting".to_string()),
+        )
+    })?;
+    let insertion = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    args.splice(
+        insertion..insertion,
+        [
+            "--homeboy-validation-dependencies-json".to_string(),
+            metadata,
+        ],
+    );
+    Ok(args)
+}
+
 fn inline_portable_settings_profiles(
     cli: &Cli,
     args: &[String],
@@ -3125,7 +3179,7 @@ fn inline_portable_settings_profiles(
         _ => return Ok(args.to_vec()),
     };
     if settings.settings_json_file.is_empty() {
-        return Ok(args.to_vec());
+        return inject_effective_validation_dependency_setting(settings, &[], args.to_vec());
     }
 
     let profile_values = settings.settings_profile_json_overrides()?;
@@ -3170,7 +3224,7 @@ fn inline_portable_settings_profiles(
             Error::internal_unexpected("settings profile normalization lost the portable command")
         })?;
     let mut portable_profile_args = Vec::with_capacity(profile_values.len() * 2);
-    for (key, value) in profile_values {
+    for (key, value) in &profile_values {
         let value = serde_json::to_string(&value).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -3181,7 +3235,7 @@ fn inline_portable_settings_profiles(
         portable_profile_args.push(format!("{key}={value}"));
     }
     rewritten.splice(insertion..insertion, portable_profile_args);
-    Ok(rewritten)
+    inject_effective_validation_dependency_setting(settings, &profile_values, rewritten)
 }
 
 fn credential_shaped_setting_key(key: &str, value: &serde_json::Value) -> Option<String> {
@@ -3756,6 +3810,10 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
+    let idempotency_key = retry
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement =
         homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
             &retry.run_id,
@@ -3763,10 +3821,13 @@ fn materialize_agent_task_retry_handoff(
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
                 action: homeboy_control_plane_contract::ControlPlaneAction::Retry,
-                idempotency_key: retry
-                    .idempotency_key
-                    .clone()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                effect_id: homeboy_control_plane_contract::action_effect_id(
+                    "cli",
+                    &retry.run_id,
+                    "retry",
+                    &idempotency_key,
+                ),
+                idempotency_key,
                 actor: "homeboy-cli-lab-route".to_string(),
                 expected_updated_at: None,
                 parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
@@ -3779,6 +3840,7 @@ fn materialize_agent_task_retry_handoff(
                 },
                 confirmed: true,
             },
+            retry.run,
             validate_generic_lab_command_replay_workspace,
         )?;
     let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;

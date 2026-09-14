@@ -2,6 +2,42 @@
 
 use super::support::*;
 
+#[derive(Parser)]
+struct FinalizePrCli {
+    #[command(flatten)]
+    args: FinalizePrArgs,
+}
+
+#[test]
+fn finalize_pr_parses_supplied_review_form_spec_and_authorship() {
+    for spec in ["{}", "@/tmp/review-form.json", "-"] {
+        let cli = FinalizePrCli::try_parse_from([
+            "homeboy",
+            "--recover",
+            "cook-9866-attempt-1",
+            "--review-form",
+            spec,
+            "--review-form-tool",
+            "OpenCode",
+            "--review-form-model",
+            "openai/gpt-5.6-terra",
+            "--review-form-author",
+            "operator@example.test",
+        ])
+        .expect("parse supplied review form");
+        assert_eq!(cli.args.review_form.as_deref(), Some(spec));
+        assert_eq!(cli.args.review_form_tool.as_deref(), Some("OpenCode"));
+        assert_eq!(
+            cli.args.review_form_model.as_deref(),
+            Some("openai/gpt-5.6-terra")
+        );
+        assert_eq!(
+            cli.args.review_form_author.as_deref(),
+            Some("operator@example.test")
+        );
+    }
+}
+
 #[test]
 fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
     with_isolated_home(|_| {
@@ -1877,11 +1913,37 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("load historical recipe");
         assert!(
-            homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
                 &loaded_recipe,
                 &persisted_record,
-                false,
             )
+        );
+        let mut executed = persisted_record.clone();
+        executed.metadata["provider_executions_consumed"] = json!(1);
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &executed,
+            ),
+            "executed provider work retains its immutable runtime pin"
+        );
+        let mut in_flight = persisted_record.clone();
+        in_flight.state = agent_task_lifecycle::AgentTaskRunState::Running;
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &in_flight,
+            ),
+            "in-flight work retains its immutable runtime pin"
+        );
+        let mut ambiguous = persisted_record.clone();
+        ambiguous.metadata["runner_job_id"] = json!("still-owned-runner-job");
+        assert!(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
+                &loaded_recipe,
+                &ambiguous,
+            ),
+            "ambiguous runner ownership retains its immutable runtime pin"
         );
 
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
@@ -1919,7 +1981,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
 }
 
 #[test]
-fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions() {
+fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_executions() {
     with_temp_home(|| {
         let root = tempfile::tempdir().expect("workspace root");
         let primary = root.path().join("primary");
@@ -2028,14 +2090,20 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
             serde_json::from_slice(&std::fs::read(&recipe_path).expect("read persisted recipe"))
                 .expect("parse persisted recipe");
         persisted_recipe["runtime_generation"] = "homeboy 0.1.0+historical".into();
-        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "local" });
+        persisted_recipe["promotion_transport"]["attempt_dispatch"] = json!({ "kind": "lab" });
         std::fs::write(
             &recipe_path,
             serde_json::to_vec_pretty(&persisted_recipe).expect("encode historical recipe"),
         )
-        .expect("persist historical local recipe");
+        .expect("persist historical transport recipe");
+        let previous_runtime = test_lifecycle_store()
+            .read_record(run_id)
+            .expect("read historical transport attempt")
+            .metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            .clone();
 
         let executor = Arc::new(CountingCookExecutor::default());
+        let dispatcher = Arc::new(CountingCookDispatcher::default());
         let (retried, exit_code) = retry_with(
             RetryArgs {
                 run_id: run_id.to_string(),
@@ -2050,35 +2118,39 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
                 provider_rotations: None,
             },
             executor.clone(),
-            |_| Ok(None),
+            |_| Ok(Some(dispatcher.clone())),
         )
         .expect("queued retry recovers under the current runtime");
 
-        // Provider execution succeeded, but this fixture produces no patch
-        // artifact, so Cook must retain its durable failure exit contract.
+        // The transport accepted the recovered attempt, then this fixture
+        // returns without a provider result, so Cook records a new
+        // pre-execution failure rather than replaying the old runtime.
         assert_eq!(exit_code, 1, "{retried:#?}");
-        assert_eq!(retried["status"], "durable_failure");
+        assert_eq!(retried["status"], "pre_execution_failure");
         assert_eq!(
-            executor.executions.load(Ordering::SeqCst),
+            dispatcher.prepared.load(Ordering::SeqCst),
             1,
-            "{retried:#?}"
+            "the current transport must be revalidated before recovery: {retried:#?}"
         );
+        assert_eq!(dispatcher.dispatched.load(Ordering::SeqCst), 1);
         let recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("read recovered recipe");
         let recovered = test_lifecycle_store()
             .read_record(&recipe.attempts.last().expect("replacement attempt").run_id)
             .expect("read recovered replacement");
         assert_eq!(recovered.metadata["retry_of"], run_id);
-        assert_eq!(recovered.metadata["provider_executions_consumed"], 1);
+        assert_eq!(recovered.metadata["provider_executions_consumed"], 0);
+        assert_eq!(
+            recovered.metadata["controller_runtime_recovery"]["previous"],
+            previous_runtime
+        );
+        assert_eq!(
+            recovered.metadata["controller_runtime_recovery"]["current"],
+            recovered.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+        );
         assert_eq!(
             recovered.metadata["controller_identity"],
             homeboy::core::build_identity::current().display
-        );
-        assert!(
-            !homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
-                &recipe, &recovered, false,
-            ),
-            "provider execution restores the strict historical runtime fence"
         );
     });
 }
@@ -4824,6 +4896,53 @@ fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
     });
 }
 
+#[test]
+fn reconcile_apply_accounts_for_each_record_in_a_cook_scope() {
+    with_temp_home(|| {
+        let cook_id = "run-cli-reconcile-scope";
+        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+        )
+        .expect("Cook parent");
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&attempt_id)).expect("Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            &attempt_id,
+        )
+        .expect("Cook index");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["attempt_run_id"] = json!(&attempt_id);
+        })
+        .expect("bind accepted child");
+
+        let (value, exit_code) = reconcile_run(ReconcileArgs {
+            run_id: cook_id.to_string(),
+            dry_run: false,
+            apply: true,
+            idempotency_key: Some("cli-reconcile-scope-1".to_string()),
+        })
+        .expect("scoped reconcile action");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["requested_run_id"], cook_id);
+        assert_eq!(value["acknowledgements"].as_array().map(Vec::len), Some(2));
+        for run_id in [cook_id, attempt_id.as_str()] {
+            let record = agent_task_lifecycle::exact_record(run_id).expect("action record");
+            assert_eq!(
+                record.metadata["cook_operation_claims"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(1),
+                "{run_id} receives its own action claim"
+            );
+        }
+    });
+}
+
 /// A provider that reserved a terminal result keeps the run joinable, so
 /// cancellation is deliberately not applied. That must be reported as the
 /// deferral it is — never as a completed cancellation — and it must not spend
@@ -4865,11 +4984,16 @@ fn cancel_command_reports_a_deferred_cancellation_without_claiming_the_run_is_ca
 #[test]
 fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
     with_temp_home(|| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("run-retry-source"))
-            .expect("submitted");
+        let source_run_id = format!("run-retry-{}", "x".repeat(120));
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(&source_run_id)).expect("submitted");
+        // Retry admission requires a terminal run, which is the only state an
+        // operator actually retries from. Cancelling through the lifecycle is
+        // the fixture's terminal precondition rather than a raw state write.
+        agent_task_lifecycle::cancel_run(&source_run_id, Some("fixture terminalization"))
+            .expect("terminalize the retried source run");
 
         let (value, exit_code) = retry(RetryArgs {
-            run_id: "run-retry-source".to_string(),
+            run_id: source_run_id.clone(),
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
             force: false,
@@ -4901,14 +5025,14 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
         assert_eq!(acknowledgement.result.data["record"]["state"], "queued");
         assert_eq!(
             acknowledgement.result.data["record"]["metadata"]["retry_of"],
-            json!("run-retry-source")
+            json!(source_run_id)
         );
         assert_eq!(
             value,
             serde_json::to_value(&acknowledgement).expect("serialize canonical acknowledgement")
         );
         let replay = retry(RetryArgs {
-            run_id: "run-retry-source".to_string(),
+            run_id: source_run_id,
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
             force: false,

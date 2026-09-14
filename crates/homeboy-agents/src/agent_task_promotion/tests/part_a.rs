@@ -49,6 +49,7 @@ fn promotion_rejects_missing_or_mismatched_recovered_controller_projection() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         };
 
         let missing = promote_with_provider_in_observation_store(
@@ -117,6 +118,7 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
             &observation_store,
@@ -211,6 +213,7 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
         &mut |_| Ok(()),
@@ -300,6 +303,7 @@ fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -359,6 +363,7 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -438,6 +443,7 @@ fn promote_exports_committed_changes_when_executor_reports_no_patch_artifact() {
         gates: VerifyGateOptions::default(),
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
 
     let error = promote_with_provider(options("trunk"), &mut provider)
@@ -509,6 +515,7 @@ fn spoofed_generated_patch_provenance_does_not_change_promotion_artifact_id() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -582,6 +589,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
         &mut |report| {
@@ -643,6 +651,7 @@ fn promotion_checkpoints_applied_target_before_gate_transport_failure() {
         },
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
     let checkpoint = serde_json::to_value(&checkpoints[0]).expect("checkpoint value");
     let resumed = resume_promoted_patch(resume_options(), &worktree_path, &checkpoint)
@@ -778,6 +787,7 @@ fn promotion_validates_declared_base_before_mutating_the_target_worktree() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         };
 
         let mut provider = FakePromotionWorkspaceProvider {

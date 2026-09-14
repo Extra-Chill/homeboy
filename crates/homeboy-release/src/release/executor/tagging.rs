@@ -138,6 +138,10 @@ pub(crate) fn run_git_tag(
     // Bind the tag operation to the exact release commit for durable operator
     // summaries and recovery evidence; GitOutput itself only records streams.
     data["head"] = serde_json::json!(head_commit);
+    // Name the tag this step created. Rollback has to undo exactly the tag this
+    // run made, and without the name it could only record that some tag was
+    // created while leaving it behind (#14577).
+    data["tag"] = serde_json::json!(tag_name);
 
     if !output.success {
         let mut hints = Vec::new();
@@ -242,13 +246,17 @@ fn inspect_release_tag_state(component: &Component, tag_name: &str) -> Result<Re
     })
 }
 
-/// Best-effort check for whether a published GitHub Release exists for `tag_name`.
+/// Whether a published GitHub Release exists for `tag_name`.
 ///
-/// Returns `Some(true)`/`Some(false)` when GitHub is reachable and the
-/// repository resolves, or `None` when it cannot be determined (no remote, `gh`
-/// unavailable/unauthenticated, or a non-GitHub remote). Callers that must not
-/// move a published release should treat `None` conservatively.
-pub(crate) fn github_release_exists_for_tag(component: &Component, tag_name: &str) -> Option<bool> {
+/// Returns `None` only when the component has no GitHub remote at all, which
+/// means there is no Release to protect. Every other outcome -- published,
+/// absent, or unanswerable -- is carried in the [`GhReleaseLookup`] so callers
+/// guarding a destructive tag move can tell "there is no release" from "nobody
+/// answered", and can name the actual blocker instead of guessing at one.
+pub(crate) fn github_release_lookup_for_tag(
+    component: &Component,
+    tag_name: &str,
+) -> Option<github_release::GhReleaseLookup> {
     component
         .remote_url
         .clone()
@@ -258,21 +266,24 @@ pub(crate) fn github_release_exists_for_tag(component: &Component, tag_name: &st
             ))
         })
         .and_then(|remote_url| homeboy_core::git::release_download::parse_github_url(&remote_url))
-        .and_then(|github| {
-            if !github_release::gh_is_available()
-                || !github_release::gh_is_authenticated(&github, &component.github)
-            {
-                return None;
-            }
-
+        .map(|github| {
             let repo_flag = format!("{}/{}", github.owner, github.repo);
-            Some(github_release::gh_release_exists(
-                &github,
-                &component.github,
-                tag_name,
-                &repo_flag,
-            ))
+            github_release::gh_release_lookup(&github, &component.github, tag_name, &repo_flag)
         })
+}
+
+/// Back-compatible view of [`github_release_lookup_for_tag`] for callers that
+/// only need "is it definitely published".
+///
+/// An unanswerable lookup collapses to `None` here, the same as it always has.
+/// Guards that must refuse on an unanswerable lookup call
+/// `github_release_lookup_for_tag` directly so they can report the reason.
+pub(crate) fn github_release_exists_for_tag(component: &Component, tag_name: &str) -> Option<bool> {
+    match github_release_lookup_for_tag(component, tag_name)? {
+        github_release::GhReleaseLookup::Published => Some(true),
+        github_release::GhReleaseLookup::Absent => Some(false),
+        github_release::GhReleaseLookup::Indeterminate(_) => None,
+    }
 }
 
 fn build_existing_tag_failure(

@@ -9,6 +9,7 @@ use super::*;
 pub(crate) struct PathMaterializationPlanner {
     pub(crate) args: Vec<String>,
     pub(crate) extra_workspaces: Vec<ExtraLabWorkspace>,
+    pub(crate) validation_dependency_ids: Option<Vec<String>>,
 }
 
 impl PathMaterializationPlanner {
@@ -18,8 +19,19 @@ impl PathMaterializationPlanner {
         source_path: &Path,
         allow_dirty_lab_workspace: bool,
     ) -> Result<Self> {
-        let (args, workspace_ref_resolutions) = resolve_path_setting_workspace_refs_in_args(args)?;
-        let mut extra_workspaces = lab_extra_workspaces(source_path)?;
+        let (args, validation_dependency_settings) =
+            crate::lab_workspaces_deps::take_validation_dependency_settings(args)?;
+        let (args, workspace_ref_resolutions) = resolve_path_setting_workspace_refs_in_args(&args)?;
+        let validation_dependency_ids = validation_dependency_settings
+            .as_ref()
+            .map(|settings| {
+                homeboy_core::hygiene::effective_validation_dependency_ids(source_path, settings)
+            })
+            .transpose()?;
+        let mut extra_workspaces = lab_extra_workspaces(
+            source_path,
+            validation_dependency_settings.as_deref().unwrap_or(&[]),
+        )?;
         extra_workspaces.extend(provider_config_extra_workspaces(&args, source_path)?);
         extra_workspaces.extend(agent_task_plan_extra_workspaces(&args, source_path)?);
         extra_workspaces.extend(agent_task_fanout_extra_workspaces(&args, source_path)?);
@@ -56,6 +68,7 @@ impl PathMaterializationPlanner {
         Ok(Self {
             args,
             extra_workspaces,
+            validation_dependency_ids,
         })
     }
 }
@@ -114,6 +127,43 @@ fn load_primary_rig_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn planner_stages_and_strips_the_controller_selected_dependency() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let source = root.path().join("source");
+        let selected = root.path().join("selected");
+        std::fs::create_dir_all(&source).expect("source");
+        std::fs::create_dir_all(&selected).expect("selected");
+        std::fs::write(
+            source.join("homeboy.json"),
+            r#"{"validation_dependencies":["missing-manifest-dependency"]}"#,
+        )
+        .expect("manifest");
+        let args = vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+            "--homeboy-validation-dependencies-json".to_string(),
+            serde_json::json!([selected.clone()]).to_string(),
+        ];
+
+        let plan = PathMaterializationPlanner::plan(&args, None, &source, false)
+            .expect("plan selected dependency");
+
+        assert_eq!(
+            plan.validation_dependency_ids.as_deref(),
+            Some(&[selected.display().to_string()][..])
+        );
+        assert!(plan
+            .args
+            .iter()
+            .all(|arg| arg != "--homeboy-validation-dependencies-json"));
+        assert!(plan
+            .extra_workspaces
+            .iter()
+            .any(|workspace| workspace.path == selected.canonicalize().unwrap()));
+    }
 
     #[test]
     fn planner_combines_provider_settings_and_rig_passthrough_inputs_before_staging() {

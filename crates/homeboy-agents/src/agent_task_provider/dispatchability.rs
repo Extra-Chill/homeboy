@@ -1509,18 +1509,16 @@ mod tests {
             "id": "revocable.agent-task-executor",
             "backend": "revocable",
             "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "provider_defaults": {
-                "revocable": {
-                    "required_secret_env": ["HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN"],
-                    "secret_env_sources": {
-                        "HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN": {
-                            "source": "json-file",
-                            "path": auth_path,
-                            "field": "token"
-                        }
+            "secret_env_requirements": [{
+                "env": ["HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN"],
+                "secret_env_sources": {
+                    "HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN": {
+                        "source": "json-file",
+                        "path": auth_path,
+                        "field": "token"
                     }
                 }
-            }
+            }]
         }))
         .expect("provider fixture")
     }
@@ -1870,11 +1868,9 @@ mod tests {
             serde_json::from_value(json!({
                 "id": "credential.provider",
                 "backend": "credential",
-                "provider_defaults": {
-                    "credential": {
-                        "required_secret_env": ["HOMEBOY_TEST_DISPATCHABILITY_MISSING_CREDENTIAL"]
-                    }
-                }
+                "secret_env_requirements": [{
+                    "env": ["HOMEBOY_TEST_DISPATCHABILITY_MISSING_CREDENTIAL"]
+                }]
             }))
             .expect("credential provider");
         let model_provider: super::super::AgentTaskExecutorProvider =

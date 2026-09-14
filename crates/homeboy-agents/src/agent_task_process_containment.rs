@@ -36,7 +36,7 @@ use std::ops::{Deref, DerefMut};
 use std::process::{Child, Command};
 
 use homeboy_core::engine::command::{
-    terminate_process_tree_and_reap, terminate_remaining_process_group, ControllerChildGuard,
+    ExecutionCleanup, ExecutionIdentity, ExecutionOwner, ExecutionOwnerPrep,
 };
 
 /// Owns the process group of one spawned agent-task child.
@@ -45,11 +45,9 @@ use homeboy_core::engine::command::{
 /// (the process-group isolation is installed on the [`Command`]) and call
 /// [`AgentTaskProcessContainment::attach`] immediately after spawning.
 pub(crate) struct AgentTaskProcessContainment {
-    /// Also held for its `Drop`, which closes the liveness pipe the forked
-    /// death guard watches — that closure is what makes controller death kill
-    /// the tree.
-    guard: ControllerChildGuard,
-    leader_pid: Option<u32>,
+    prep: Option<ExecutionOwnerPrep>,
+    owner: Option<ExecutionOwner>,
+    identity: Option<ExecutionIdentity>,
     reaped: bool,
 }
 
@@ -58,35 +56,45 @@ impl AgentTaskProcessContainment {
     /// `command`. Must be called before `command.spawn()`.
     pub(crate) fn prepare(command: &mut Command) -> std::io::Result<Self> {
         Ok(Self {
-            guard: ControllerChildGuard::prepare(command)?,
-            leader_pid: None,
+            prep: Some(ExecutionOwner::prepare(command)?),
+            owner: None,
+            identity: None,
             reaped: false,
         })
     }
 
     /// Start the death guard for `child`. Called after spawn so the guard
     /// cannot inherit the standard library's private spawn error pipe.
-    pub(crate) fn attach(&mut self, child: &Child) -> std::io::Result<()> {
-        self.leader_pid = Some(child.id());
-        self.guard.attach(child)
+    pub(crate) fn attach(&mut self, child: Child) -> std::io::Result<&mut ExecutionOwner> {
+        let prep = self
+            .prep
+            .take()
+            .ok_or_else(|| std::io::Error::other("process containment already attached"))?;
+        let owner = prep.attach(child)?;
+        self.identity = Some(owner.identity());
+        self.owner = Some(owner);
+        Ok(self.owner.as_mut().expect("attached owner"))
     }
 
     /// Transfer the spawned child into an unwind-safe supervisor and attach the
     /// controller death guard. An attach failure still drops the supervisor,
     /// which terminates the group and waits the child before returning.
-    pub(crate) fn supervise(self, child: Child) -> std::io::Result<AgentTaskProcessSupervisor> {
-        let mut supervisor = AgentTaskProcessSupervisor {
+    pub(crate) fn supervise(mut self, child: Child) -> std::io::Result<AgentTaskProcessSupervisor> {
+        self.attach(child)?;
+        Ok(AgentTaskProcessSupervisor {
             containment: self,
-            child,
             cleanup_complete: false,
-        };
-        supervisor.containment.attach(&supervisor.child)?;
-        Ok(supervisor)
+        })
     }
 
-    /// The pid of the contained group leader, once attached.
+    /// The pid of the contained workload group leader, once attached.
     pub(crate) fn leader_pid(&self) -> Option<u32> {
-        self.leader_pid
+        self.identity
+            .map(|identity| identity.recovery_process_group())
+    }
+
+    pub(crate) fn owner_mut(&mut self) -> Option<&mut ExecutionOwner> {
+        self.owner.as_mut()
     }
 
     /// Terminate the contained tree while its leader is still running, then
@@ -95,45 +103,24 @@ impl AgentTaskProcessContainment {
     ///
     /// This replaces `Child::kill`, which signals only the direct child and
     /// leaves its build/test descendants running.
-    pub(crate) fn terminate_live(&mut self, child: &mut Child) -> Result<(), String> {
-        match terminate_process_tree_and_reap(child) {
-            Ok(_) => {
-                self.reaped = true;
-                Ok(())
+    pub(crate) fn terminate_live(&mut self) -> Result<(), String> {
+        let Some(owner) = self.owner.as_mut() else {
+            return Err("process containment was not attached to a child".to_string());
+        };
+        match owner.drain_and_reap() {
+            Ok(outcome) => {
+                self.reaped = outcome.cleanup == ExecutionCleanup::Complete;
+                outcome.into_root_status().map(|_| ()).map_err(|error| {
+                    format!(
+                        "could not terminate the contained provider process group{}: {error}",
+                        self.leader_suffix()
+                    )
+                })
             }
-            Err(primary_error) => {
-                // A supervision error must not become an early return that
-                // leaves the direct child unreaped. Retry group cleanup, then
-                // independently kill and wait for the child as a final fallback.
-                let group_error = self
-                    .leader_pid
-                    .and_then(|pid| terminate_remaining_process_group(pid).err());
-                let kill_error = child
-                    .kill()
-                    .err()
-                    .filter(|error| error.kind() != std::io::ErrorKind::InvalidInput);
-                let wait_error = child.wait().err();
-                // Reaping the direct child does not prove descendants in its
-                // process group are gone. Leave the containment live when
-                // group cleanup failed so Drop retries the group.
-                self.reaped = group_error.is_none() && wait_error.is_none();
-
-                let mut details = vec![primary_error.to_string()];
-                if let Some(error) = group_error {
-                    details.push(format!("fallback group cleanup failed: {error}"));
-                }
-                if let Some(error) = kill_error {
-                    details.push(format!("fallback child kill failed: {error}"));
-                }
-                if let Some(error) = wait_error {
-                    details.push(format!("fallback child reap failed: {error}"));
-                }
-                Err(format!(
-                    "could not terminate the contained provider process group{}: {}",
-                    self.leader_suffix(),
-                    details.join("; ")
-                ))
-            }
+            Err(primary_error) => Err(format!(
+                "could not terminate the contained provider process group{}: {primary_error}",
+                self.leader_suffix()
+            )),
         }
     }
 
@@ -147,31 +134,30 @@ impl AgentTaskProcessContainment {
         if self.reaped {
             return Ok(());
         }
-        let Some(leader_pid) = self.leader_pid else {
+        let Some(owner) = self.owner.as_mut() else {
             self.reaped = true;
             return Ok(());
         };
-        match terminate_remaining_process_group(leader_pid) {
-            Ok(()) => {
-                self.reaped = true;
-                Ok(())
+        match owner.try_wait_outcome() {
+            Ok(Some(outcome)) => {
+                self.reaped = outcome.cleanup == ExecutionCleanup::Complete;
+                outcome.into_root_status().map(|_| ()).map_err(|error| {
+                    format!(
+                        "contained provider process group{} outlived its leader and did not exit: {error}",
+                        self.leader_suffix()
+                    )
+                })
             }
-            Err(primary_error) => {
-                let retry_error = terminate_remaining_process_group(leader_pid).err();
-                self.reaped = retry_error.is_none();
-                Err(format!(
-                    "contained provider process group{} outlived its leader and did not exit: {primary_error}{}",
-                    self.leader_suffix(),
-                    retry_error
-                        .map(|error| format!("; cleanup retry failed: {error}"))
-                        .unwrap_or_default()
-                ))
-            }
+            Ok(None) => self.terminate_live(),
+            Err(error) => Err(format!(
+                "contained provider process group{} outlived its leader and did not exit: {error}",
+                self.leader_suffix()
+            )),
         }
     }
 
     fn leader_suffix(&self) -> String {
-        self.leader_pid
+        self.leader_pid()
             .map(|pid| format!(" (leader pid {pid})"))
             .unwrap_or_default()
     }
@@ -193,7 +179,6 @@ impl Drop for AgentTaskProcessContainment {
 /// waits the direct child, without attempting to drain descendant-held pipes.
 pub(crate) struct AgentTaskProcessSupervisor {
     containment: AgentTaskProcessContainment,
-    child: Child,
     cleanup_complete: bool,
 }
 
@@ -202,8 +187,12 @@ impl AgentTaskProcessSupervisor {
         self.containment.leader_pid()
     }
 
+    pub(crate) fn identity(&self) -> Option<ExecutionIdentity> {
+        self.containment.identity
+    }
+
     pub(crate) fn terminate_live(&mut self) -> Result<(), String> {
-        let result = self.containment.terminate_live(&mut self.child);
+        let result = self.containment.terminate_live();
         if result.is_ok() {
             self.cleanup_complete = true;
         }
@@ -211,36 +200,30 @@ impl AgentTaskProcessSupervisor {
     }
 
     pub(crate) fn reap_after_exit(&mut self) -> Result<(), String> {
-        let group_result = self.containment.reap_after_exit();
-        let wait_result = self.child.wait().map(|_| ()).map_err(|error| {
-            format!(
-                "could not reap contained provider child{}: {error}",
-                self.containment.leader_suffix()
-            )
-        });
-        self.cleanup_complete = group_result.is_ok() && wait_result.is_ok();
-        group_result.and(wait_result)
+        let result = self.containment.reap_after_exit();
+        self.cleanup_complete = result.is_ok();
+        result
     }
 }
 
 impl Deref for AgentTaskProcessSupervisor {
-    type Target = Child;
+    type Target = ExecutionOwner;
 
     fn deref(&self) -> &Self::Target {
-        &self.child
+        self.containment.owner.as_ref().expect("supervised owner")
     }
 }
 
 impl DerefMut for AgentTaskProcessSupervisor {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.child
+        self.containment.owner.as_mut().expect("supervised owner")
     }
 }
 
 impl Drop for AgentTaskProcessSupervisor {
     fn drop(&mut self) {
         if !self.cleanup_complete {
-            let _ = self.containment.terminate_live(&mut self.child);
+            let _ = self.containment.terminate_live();
         }
     }
 }
@@ -283,7 +266,7 @@ mod tests {
 
     /// Spawn a contained shell that leaves one background descendant behind and
     /// exits immediately, returning `(child, descendant_pid)`.
-    fn spawn_leaking_child(script: &str) -> (AgentTaskProcessContainment, Child, u32) {
+    fn spawn_leaking_child(script: &str) -> (AgentTaskProcessContainment, u32) {
         let mut command = Command::new("sh");
         command
             .args(["-c", script])
@@ -292,34 +275,46 @@ mod tests {
             .stderr(Stdio::null());
         let mut containment =
             AgentTaskProcessContainment::prepare(&mut command).expect("prepare containment");
-        let mut child = command.spawn().expect("spawn contained child");
-        containment.attach(&child).expect("attach death guard");
+        let child = command.spawn().expect("spawn contained child");
+        let owner = containment.attach(child).expect("attach death guard");
 
         // Read one line rather than to EOF: the background descendant holds the
         // inherited stdout pipe open, which is precisely the hang this
         // containment exists to prevent.
-        let stdout = child.stdout.take().expect("piped stdout");
+        let stdout = owner.take_stdout().expect("piped stdout");
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
         reader.read_line(&mut line).expect("read descendant pid");
         let descendant_pid: u32 = line.trim().parse().expect("descendant pid");
 
-        (containment, child, descendant_pid)
+        (containment, descendant_pid)
     }
 
     /// The #11477 regression: the provider exits cleanly and its build/test
     /// descendant keeps running. A clean leader exit must still reap the group.
     #[test]
     fn reaping_after_leader_exit_kills_a_surviving_descendant() {
-        let (mut containment, mut child, descendant_pid) =
-            spawn_leaking_child("sleep 30 & echo $!; exit 0");
+        let (mut containment, descendant_pid) = spawn_leaking_child("sleep 30 & echo $!; exit 0");
 
-        child.wait().expect("leader exits on its own");
+        let owner = containment.owner_mut().expect("attached owner");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if owner.try_wait().expect("leader wait").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "leader did not exit on its own");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        #[cfg(target_os = "linux")]
+        assert!(
+            !homeboy_core::process::pid_is_running(descendant_pid),
+            "the execution supervisor must drain descendants before exiting"
+        );
+        #[cfg(not(target_os = "linux"))]
         assert!(
             homeboy_core::process::pid_is_running(descendant_pid),
             "descendant must outlive its leader for this to test anything"
         );
-
         containment
             .reap_after_exit()
             .expect("surviving group members are reaped");
@@ -334,12 +329,12 @@ mod tests {
     /// whole tree, not just the direct child.
     #[test]
     fn terminating_a_live_leader_kills_its_descendants() {
-        let (mut containment, mut child, descendant_pid) =
-            spawn_leaking_child("sleep 30 & echo $!; sleep 30");
-        let leader_pid = child.id();
+        let (mut containment, descendant_pid) =
+            spawn_leaking_child("trap '' TERM; sleep 30 & echo $!; wait");
+        let leader_pid = containment.leader_pid().expect("leader");
 
         containment
-            .terminate_live(&mut child)
+            .terminate_live()
             .expect("contained tree terminates");
 
         assert!(
@@ -367,14 +362,15 @@ mod tests {
                 .stderr(Stdio::null());
             let containment =
                 AgentTaskProcessContainment::prepare(&mut command).expect("prepare containment");
-            let mut child = command.spawn().expect("spawn contained child");
-            let stdout = child.stdout.take().expect("piped stdout");
+            let child = command.spawn().expect("spawn contained child");
+            let mut supervisor = containment.supervise(child).expect("supervise child");
+            let stdout = supervisor.take_stdout().expect("piped stdout");
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
             reader.read_line(&mut line).expect("read descendant pid");
-            leader_pid = child.id();
+            leader_pid = supervisor.identity().expect("identity").wait_pid;
             descendant_pid = line.trim().parse().expect("descendant pid");
-            let _supervisor = containment.supervise(child).expect("supervise child");
+            let _supervisor = supervisor;
             panic!("force post-spawn unwind");
         }));
 

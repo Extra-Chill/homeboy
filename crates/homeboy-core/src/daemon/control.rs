@@ -2933,7 +2933,27 @@ fn spawn_and_wait_for_lease_attempt(
         read_status,
         || thread::sleep(STARTUP_LEASE_POLL),
     )? {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            let validation = super::validate_lease_file(Path::new(&result.state_path))?;
+            let state = validation
+                .state
+                .filter(|state| {
+                    validation.fresh
+                        && validation.running
+                        && validation.reachable
+                        && state.lease_id == result.lease_id
+                        && state.startup_token == startup_token
+                })
+                .ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "daemon startup lease changed before generation activation",
+                    )
+                })?;
+            // A restart can leave a registry naming the dead generation. Publish
+            // the verified replacement before accepting controller submissions.
+            generation_store::activate(&state)?;
+            Ok(result)
+        }
         Err(observation) => {
             let cleanup = cleanup_startup_attempt(pid, startup_token)?;
             cleanup_evidence.extend(cleanup);

@@ -1865,6 +1865,35 @@ pub struct SettingArgs {
 }
 
 impl SettingArgs {
+    pub fn effective_json_override(
+        &self,
+        key: &str,
+        profile_values: &[(String, serde_json::Value)],
+    ) -> Option<serde_json::Value> {
+        let mut value = profile_values
+            .iter()
+            .filter(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.clone())
+            .last();
+        if let Some((_, string)) = self
+            .setting
+            .iter()
+            .filter(|(candidate, _)| candidate == key)
+            .last()
+        {
+            value = Some(serde_json::Value::String(string.clone()));
+        }
+        if let Some((_, json)) = self
+            .setting_json
+            .iter()
+            .filter(|(candidate, _)| candidate == key)
+            .last()
+        {
+            value = Some(json.clone());
+        }
+        value
+    }
+
     pub fn settings_overrides(&self) -> homeboy::core::Result<Vec<(String, String)>> {
         Ok(self.setting.clone())
     }
@@ -1965,6 +1994,40 @@ mod tests {
             args.settings_json_overrides()
                 .expect("explicit json settings"),
             vec![("mode".to_string(), serde_json::json!("cli-json"))]
+        );
+    }
+
+    #[test]
+    fn effective_json_override_applies_profile_string_and_json_precedence() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"validation_dependencies":["profile-dependency"]}"#,
+        )
+        .expect("write profile");
+        let args = SettingArgs {
+            settings_json_file: vec![path],
+            setting: vec![(
+                "validation_dependencies".to_string(),
+                "string-dependency".to_string(),
+            )],
+            setting_json: vec![(
+                "validation_dependencies".to_string(),
+                serde_json::json!(["selected-dependency"]),
+            )],
+        };
+
+        let profile_values = args
+            .settings_profile_json_overrides()
+            .expect("profile values");
+        assert_eq!(
+            args.effective_json_override("validation_dependencies", &profile_values),
+            Some(serde_json::json!(["selected-dependency"]))
+        );
+        assert_eq!(
+            args.effective_json_override("missing", &profile_values),
+            None
         );
     }
 

@@ -4093,10 +4093,17 @@ pub(crate) fn dispatch_cook_follow_up(
             // claim is written onto exists.
             let operation_key = retry_dispatch_operation_key(&next_run_id);
             ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
-            match lifecycle_store.claim_cook_operation(
+            let dispatch_intent = serde_json::json!({
+                "schema": "homeboy/cook-dispatch-intent/v1",
+                "run_id": next_run_id,
+                "operation_key": operation_key,
+            });
+            match agent_task_lifecycle::claim_operation_with_intent_in_store(
+                lifecycle_store,
                 &next_run_id,
                 &operation_key,
                 RETRY_DISPATCH_CLAIM_LEASE,
+                &dispatch_intent,
             )? {
                 agent_task_lifecycle::ClaimOutcome::Acquired => {
                     dispatcher.dispatch_attempt(
@@ -4104,18 +4111,56 @@ pub(crate) fn dispatch_cook_follow_up(
                         &next_run_id,
                         Some(baseline.capability()),
                     )?;
+                    // The accepting daemon writes this receipt atomically with
+                    // its handoff ownership. A dispatcher return alone is not
+                    // acceptance evidence and cannot complete this operation.
+                    let receipt = agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                        lifecycle_store,
+                        &next_run_id,
+                        &operation_key,
+                    )?
+                    .ok_or_else(|| {
+                        Error::internal_unexpected(
+                            "retry dispatcher returned without a durable receiver acceptance receipt",
+                        )
+                    })?;
                     lifecycle_store.complete_cook_operation(
                         &next_run_id,
                         &operation_key,
-                        serde_json::json!({ "dispatched_run_id": next_run_id }),
+                        serde_json::json!({
+                            "dispatched_run_id": next_run_id,
+                            "dispatch_receipt": receipt,
+                        }),
                     )?;
+                }
+                agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+                    // A receiver receipt survives a controller crash after the
+                    // handoff succeeded and before this controller completed
+                    // its claim. Complete from that acceptance evidence rather
+                    // than issuing a second dispatch.
+                    if let Some(receipt) =
+                        agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                            lifecycle_store,
+                            &next_run_id,
+                            &operation_key,
+                        )?
+                    {
+                        lifecycle_store.complete_cook_operation(
+                            &next_run_id,
+                            &operation_key,
+                            serde_json::json!({
+                                "dispatched_run_id": next_run_id,
+                                "dispatch_receipt": receipt,
+                                "recovered": true,
+                            }),
+                        )?;
+                    }
                 }
                 // The retry was already durably dispatched (completed) or is
                 // owned by a concurrent pass (lease held). Either way, do not
                 // send a second handoff; the persisted plan and run state carry
                 // the existing dispatch forward.
-                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
-                | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
+                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {}
             }
         } else {
             ensure_cook_attempt_admitted(lifecycle_store, cook_id)?;
@@ -4329,6 +4374,101 @@ fn provider_timeout_ms(
                 .max()
         })
         .or(Some(crate::agent_task_timeout::DEFAULT_PROVIDER_TIMEOUT_MS))
+}
+
+/// The runner records this only after every observable progress channel stayed
+/// empty. Classify only the current terminal completion, not prior attempts.
+/// It is not a wall-clock timeout: keep the distinction at Cook's operator-facing
+/// boundary rather than suggesting a larger timeout.
+fn startup_without_output_liveness_diagnostic(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<&crate::agent_task::AgentTaskDiagnostic> {
+    aggregate
+        .outcomes
+        .last()?
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.class == "agent_task.provider_liveness_timeout"
+                && diagnostic.data["deadline"] == "liveness"
+                && [
+                    "stdout_bytes",
+                    "stderr_bytes",
+                    "runtime_progress_events",
+                    "workspace_progress_events",
+                ]
+                .iter()
+                .all(|field| diagnostic.data[*field].as_u64() == Some(0))
+        })
+}
+
+/// Project the bounded no-output liveness evidence into Cook's durable result.
+///
+/// The provider's terminal diagnostic remains the authority on the underlying
+/// execution. This projection makes its actionable meaning visible without
+/// reclassifying the attempt as a timeout or manufacturing a retry that could
+/// repeat an opaque startup.
+fn make_startup_without_output_actionable(
+    lifecycle_store: Option<&AgentTaskLifecycleStore>,
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    run_id: &str,
+) {
+    let Some(diagnostic) = startup_without_output_liveness_diagnostic(aggregate) else {
+        return;
+    };
+    let mut diagnostic_value = homeboy_core::redaction::redact_json(&serde_json::json!({
+        "class": diagnostic.class,
+        "message": redact_diagnostic_text(&diagnostic.message),
+        "data": diagnostic.data,
+    }));
+    bound_diagnostic_value(&mut diagnostic_value, 0);
+    let status = AgentTaskCookRecoveryAction {
+        action: "status".to_string(),
+        command: lifecycle_store.map_or_else(
+            || cook_recovery_command(run_id, &["status", run_id]),
+            |store| cook_recovery_command_in_store(store, run_id, &["status", run_id]),
+        ),
+    };
+    let diagnose = AgentTaskCookRecoveryAction {
+        action: "diagnose".to_string(),
+        command: lifecycle_store.map_or_else(
+            || cook_recovery_command(run_id, &["diagnose", run_id]),
+            |store| cook_recovery_command_in_store(store, run_id, &["diagnose", run_id]),
+        ),
+    };
+
+    report.value.terminal_phase = Some("provider_startup".to_string());
+    report.value.terminal_failure_classification =
+        Some("provider_startup_without_output".to_string());
+    report.value.stop_reason = Some(
+        "provider startup produced no stdout, stderr, structured progress, or workspace activity before its bounded liveness diagnostic; this is not a provider timeout. Inspect the durable status and diagnostics before choosing a recovery path.".to_string(),
+    );
+    report.value.primary_failure = Some(AgentTaskCookPrimaryFailure {
+        schema: "homeboy/agent-task-cook-primary-failure/v1",
+        provider_id: diagnostic.data["provider"]
+            .as_str()
+            .unwrap_or("provider")
+            .to_string(),
+        operation: "startup_without_output".to_string(),
+        phase: "provider_startup".to_string(),
+        exit_code: 1,
+        stderr_excerpt: truncate_diagnostic_text(&redact_diagnostic_text(&diagnostic.message)),
+        evidence_ref: format!("homeboy://agent-task/run/{run_id}/status"),
+        next_action: status.clone(),
+        diagnostic: Some(diagnostic_value.clone()),
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "provider_startup".to_string();
+        context.reason_code = "provider_startup_without_output".to_string();
+        context.diagnostic = Some(diagnostic_value);
+        context.recovery_legal = true;
+        context.recovery_reason =
+            "read-only status and diagnostic inspection are safe; no timeout increase or retry is implied"
+                .to_string();
+        context.legal_actions = vec![status.clone(), diagnose.clone()];
+        context.next_actions = vec![status, diagnose];
+    }
 }
 
 fn make_provider_timeout_actionable(
@@ -4853,10 +4993,18 @@ fn reconstruct_existing_cook_options(
 ) -> Result<CookRequest> {
     if adoption_or_historical_continuation {
         super::reconstruct_adoption_options_with_dispatcher(recipe, attempt_dispatcher)
-    } else if pre_execution_runtime_recovery {
-        super::reconstruct_options_for_pre_execution_recovery(recipe)
     } else if local_placement_override {
         super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
+    } else if pre_execution_runtime_recovery {
+        match attempt_dispatcher {
+            Some(dispatcher) => {
+                super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+                    recipe,
+                    Some(dispatcher),
+                )
+            }
+            None => super::reconstruct_options_for_pre_execution_recovery(recipe),
+        }
     } else {
         super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher)
     }
@@ -5594,13 +5742,9 @@ fn run_cook_spine(
         && requested_record
             .as_ref()
             .is_some_and(|record| transport_admission_reset_available(Some(record)));
-    let pre_execution_runtime_recovery = requested_record.as_ref().is_some_and(|record| {
-        super::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            record,
-            local_placement_override,
-        )
-    });
+    let pre_execution_runtime_recovery = requested_record
+        .as_ref()
+        .is_some_and(|record| super::pre_execution_runtime_recovery_is_eligible(&recipe, record));
     let mut options = if existing_recipe {
         let mut reconstructed = reconstruct_existing_cook_options(
             &recipe,
@@ -7184,6 +7328,12 @@ fn run_cook_spine(
                 &aggregate,
                 &run_id,
             );
+            make_startup_without_output_actionable(
+                Some(lifecycle_store),
+                &mut report,
+                &aggregate,
+                &run_id,
+            );
             if report.value.terminal_phase.is_none() {
                 if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
                     record.metadata["provider_executions_consumed"]
@@ -8516,17 +8666,11 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
     std::fs::write(&alternates, format!("{}/objects\n", common_dir.trim())).map_err(|error| {
         Error::internal_io(error.to_string(), Some(alternates.display().to_string()))
     })?;
-    let Some(resolved) =
-        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base))?
+    let Some(resolved) = tolerate_retryable_cook_base_resolution(
+        crate::agent_task_promotion::capture_declared_base(graph.path(), Some(base)),
+    )?
     else {
-        return Ok(CookBasePreparation {
-            schema: "homeboy/cook-base-preparation/v1",
-            declared_base: base.to_string(),
-            base_sha: None,
-            provenance: "base_unresolved",
-            remote_freshness: "deferred",
-            topology: None,
-        });
+        return Ok(deferred_cook_base_preparation(base));
     };
     let topology = preflight_cook_workspace_resolved_base_ancestry(
         target,
@@ -8545,6 +8689,28 @@ pub fn prepare_cook_workspace_base(target: &Path, base: &str) -> Result<CookBase
         remote_freshness: "checked",
         topology,
     })
+}
+
+fn deferred_cook_base_preparation(base: &str) -> CookBasePreparation {
+    CookBasePreparation {
+        schema: "homeboy/cook-base-preparation/v1",
+        declared_base: base.to_string(),
+        base_sha: None,
+        provenance: "base_unresolved",
+        remote_freshness: "deferred",
+        topology: None,
+    }
+}
+
+/// Preview must not present an unverified fallback as an admitted base. A
+/// retryable authoritative probe instead produces the same deferred contract as
+/// an unavailable declared base, so replay cannot silently claim parity.
+fn tolerate_retryable_cook_base_resolution<T>(result: Result<Option<T>>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if error.retryable == Some(true) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn preflight_cook_workspace_resolved_base_ancestry(

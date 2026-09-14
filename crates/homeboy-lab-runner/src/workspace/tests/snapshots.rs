@@ -215,7 +215,9 @@ fn workspace_snapshots_render_metadata_for_synced_workspace() {
         assert_eq!(snapshot.source_dirty, Some(false));
         assert_eq!(snapshot.run_id.as_deref(), Some("run-figma-1"));
         assert!(snapshot.created_at.contains('T'));
-        assert!(snapshot.exec_command.contains("homeboy runner exec --cwd"));
+        assert!(snapshot
+            .exec_command
+            .contains("homeboy runner exec --workspace-ref"));
     });
 }
 
@@ -1074,6 +1076,7 @@ fn sync_options(path: String, run_id: Option<String>) -> RunnerWorkspaceSyncOpti
         git_fetch_refs: Vec::new(),
         snapshot_includes: Vec::new(),
         allow_dirty_lab_workspace: false,
+        validation_dependency_ids: None,
         run_isolation_token: run_id,
     }
 }

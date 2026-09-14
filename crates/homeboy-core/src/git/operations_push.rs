@@ -13,6 +13,8 @@ struct PushBulkInput {
     #[serde(default)]
     tags: bool,
     #[serde(default)]
+    atomic: bool,
+    #[serde(default)]
     force_with_lease: bool,
     #[serde(default)]
     remote_url: Option<String>,
@@ -29,6 +31,13 @@ struct PushBulkInput {
 pub struct PushOptions {
     /// Push tags as well (`--follow-tags`).
     pub tags: bool,
+    /// Update every ref in the push or none of them (`--atomic`).
+    ///
+    /// Without this, git updates refs independently: a remote that rejects the
+    /// branch per-ref (branch protection, a rejected non-fast-forward) still
+    /// accepts the tag from the same push, stranding a tag on a commit that
+    /// never reached the branch.
+    pub atomic: bool,
     /// Use `--force-with-lease` for safe force-pushes (e.g. after a rebase).
     /// Deliberately the only force flavour exposed — never plain `--force`.
     pub force_with_lease: bool,
@@ -70,6 +79,9 @@ pub fn push_at(
         args.push(format!("http.https://{host}/.extraheader="));
     }
     args.push("push".to_string());
+    if options.atomic {
+        args.push("--atomic".to_string());
+    }
     if options.tags {
         args.push("--follow-tags".to_string());
     }
@@ -141,6 +153,7 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
         )
     })?;
     let push_tags = input.tags;
+    let atomic = input.atomic;
     let force_with_lease = input.force_with_lease;
     let remote_url = input.remote_url;
     let token = input.token;
@@ -151,6 +164,7 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
             Some(id),
             PushOptions {
                 tags: push_tags,
+                atomic,
                 force_with_lease,
                 remote_url: remote_url.clone(),
                 token: token.clone(),

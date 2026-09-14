@@ -364,6 +364,7 @@ fn sync_workspace_in_roots_with_deadline(
                 &local_path,
                 &remote_path,
                 &excludes,
+                options.validation_dependency_ids.as_deref(),
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
@@ -574,6 +575,7 @@ fn sync_workspace_in_roots_with_deadline(
                 &local_path,
                 &remote_path,
                 &excludes,
+                options.validation_dependency_ids.as_deref(),
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
@@ -844,6 +846,7 @@ fn materialize_git_fallback_filesystem_snapshot(
         local_path,
         &remote_path,
         excludes,
+        options.validation_dependency_ids.as_deref(),
     ) {
         Ok(dependencies) => dependencies,
         Err(error) => {
@@ -2458,9 +2461,16 @@ fn write_metadata_and_sync_validation_dependencies(
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
+    selected_dependency_ids: Option<&[String]>,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
     write_workspace_metadata(runner, metadata)?;
-    sync_validation_dependency_workspaces(runner, local_path, remote_path, excludes)
+    sync_validation_dependency_workspaces(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        selected_dependency_ids,
+    )
 }
 
 /// Remove a just-materialized run checkout after a later sync step fails.
