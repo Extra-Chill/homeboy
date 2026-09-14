@@ -569,6 +569,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                                 .provider_transport
                                 .provider_invocation
                                 .clone(),
+                            repository_integrity_evidence: None,
                         },
                         &observation_store,
                         |checkpoint| {

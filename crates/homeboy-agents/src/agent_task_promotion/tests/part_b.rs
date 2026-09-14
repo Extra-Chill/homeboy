@@ -245,6 +245,7 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
             &store,
@@ -346,6 +347,7 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
             &observation_store,
@@ -437,6 +439,7 @@ fn follow_up_promotion_records_and_forwards_verified_chain_baseline() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -507,6 +510,7 @@ fn promote_recoverable_candidate_retains_patch_larger_than_256_kib() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -551,6 +555,7 @@ fn canonical_recoverable_candidates_reject_aggregate_byte_overflow() {
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &store,
         )
@@ -616,6 +621,7 @@ fn promote_recoverable_candidate_reports_distinct_patch_review_choices() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -654,6 +660,7 @@ fn promote_recoverable_candidate_keeps_same_patch_from_distinct_attempts() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -762,6 +769,7 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -839,6 +847,7 @@ fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -903,6 +912,7 @@ fn adoption_scopes_a_rebased_two_file_candidate_to_its_parent() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut FakePromotionWorkspaceProvider {
             workspace_path: Some(repo.clone()),
@@ -991,6 +1001,7 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -1076,6 +1087,7 @@ fn adoption_rejects_merge_candidates_without_a_related_advanced_base() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut FakePromotionWorkspaceProvider {
             workspace_path: Some(repo),
@@ -1130,6 +1142,7 @@ fn adoption_rejects_an_unrelated_historical_task_base() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut FakePromotionWorkspaceProvider {
             workspace_path: Some(repo),
@@ -1196,6 +1209,7 @@ fn promote_exports_all_agent_commits_after_the_recorded_task_base() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut FakePromotionWorkspaceProvider {
             workspace_path: Some(repo.clone()),
@@ -1257,6 +1271,7 @@ fn shared_patch_preflight_rejects_execution_hash_and_normalization_failures() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         };
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
 
@@ -1298,6 +1313,7 @@ fn execution_revalidates_artifact_bytes_after_passing_preflight() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         };
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         preflight_patch_artifact_admission_in_observation_store(&outcome, &options, &store)
@@ -1364,6 +1380,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         },
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
     let previous = serde_json::json!({
         "schema": "homeboy/agent-task-promotion-report/v1",
@@ -1461,6 +1478,7 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
         gates: VerifyGateOptions::default(),
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
     let checkpoint = serde_json::json!({
         "schema": "homeboy/agent-task-promotion-report/v1",
@@ -1529,6 +1547,7 @@ fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
         },
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
     let previous = serde_json::json!({
         "schema": "homeboy/agent-task-promotion-report/v1",
@@ -1622,6 +1641,7 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -1718,6 +1738,7 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -1796,6 +1817,7 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -1885,6 +1907,7 @@ fn typed_plan_and_legacy_gate_keep_contiguous_gate_ids() {
             },
             provider_command: None,
             provider_invocation: None,
+        repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -1939,6 +1962,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -2025,6 +2049,7 @@ fn promotion_hydrates_destination_package_execution_projections_before_gates() {
                 },
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
         )
@@ -2096,6 +2121,7 @@ fn promotion_can_disable_candidate_dependency_hydration() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -2155,6 +2181,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
                 },
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
         )
@@ -2233,6 +2260,7 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -2291,6 +2319,7 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
         &mut |_| {
@@ -2342,6 +2371,7 @@ fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
         },
         provider_command: None,
         provider_invocation: None,
+        repository_integrity_evidence: None,
     };
     let previous = serde_json::json!({
         "schema": "homeboy/agent-task-promotion-report/v1",
@@ -2411,6 +2441,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
         &mut |saved| {

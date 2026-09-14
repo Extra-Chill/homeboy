@@ -133,7 +133,13 @@ pub(crate) fn snapshot_identity(
     excludes: &[String],
     includes: &[String],
 ) -> Result<String> {
-    homeboy_core::repository_integrity::verify_tracked_symlink_portability(local_path, "HEAD")?;
+    let repository_integrity_evidence =
+        homeboy_core::repository_integrity::collect_operator_policy_evidence(local_path)?;
+    homeboy_core::repository_integrity::verify_tracked_symlink_portability(
+        local_path,
+        "HEAD",
+        repository_integrity_evidence.as_ref(),
+    )?;
     let head =
         git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
     let status = snapshot_git_output(local_path, &["status", "--porcelain=v1"], excludes)

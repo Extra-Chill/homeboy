@@ -384,6 +384,11 @@ pub(crate) fn promote_attempt_in_store(
         Some(artifact_id) => Some(artifact_id),
         None => canonical_cook_patch_artifact_id_in_store(lifecycle_store, options, run_id)?,
     };
+    let repository_integrity_evidence = source_path
+        .as_deref()
+        .map(homeboy_core::repository_integrity::collect_operator_policy_evidence)
+        .transpose()?
+        .flatten();
     let observation_store = lifecycle_store.open_observation_initialized()?;
     promote_with_checkpoint_in_observation_store(
         AgentTaskPromotionRequest {
@@ -402,6 +407,7 @@ pub(crate) fn promote_attempt_in_store(
             gates: options.gates.clone(),
             provider_command: options.provider_transport.provider_command.clone(),
             provider_invocation: options.provider_transport.provider_invocation.clone(),
+            repository_integrity_evidence,
         },
         &observation_store,
         |checkpoint| {
@@ -533,6 +539,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         gates: options.gates.clone(),
         provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
+        repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_readonly()?;
     if outcome.status != crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable {
@@ -670,6 +677,7 @@ pub(crate) fn canonical_cook_patch_artifact_id_in_store(
         gates: options.gates.clone(),
         provider_command: options.provider_transport.provider_command.clone(),
         provider_invocation: options.provider_transport.provider_invocation.clone(),
+        repository_integrity_evidence: None,
     };
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let canonical = canonical_recoverable_patch_artifacts_in_observation_store(
@@ -1106,6 +1114,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     gates: options.gates.clone(),
                     provider_command: options.provider_transport.provider_command.clone(),
                     provider_invocation: options.provider_transport.provider_invocation.clone(),
+                    repository_integrity_evidence: None,
                 },
                 &target_path,
                 &serde_json::to_value(&promotion)
@@ -1747,6 +1756,7 @@ fn verify_replacement_gates_owned(
             gates,
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &target_path,
         &serde_json::to_value(&original)
@@ -2407,6 +2417,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             gates: options.gates.clone(),
             provider_command: options.provider_transport.provider_command.clone(),
             provider_invocation: options.provider_transport.provider_invocation.clone(),
+            repository_integrity_evidence: None,
         },
         std::path::Path::new(path),
         &checkpoint,
@@ -3176,6 +3187,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         inherited_gate_evidence: None,
         protected_branches: options.finalization.protected_branches.clone(),
         draft_pr: options.finalization.draft_pr,
+        repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
 }
 
@@ -4571,6 +4583,7 @@ fn manual_finalization_options(
             "trunk".to_string(),
         ],
         draft_pr: false,
+        repository_integrity_evidence: None,
     })
 }
 
@@ -6429,6 +6442,7 @@ fn ambiguous_promotion_artifact_ids(
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
     )
     .map(|canonical| {

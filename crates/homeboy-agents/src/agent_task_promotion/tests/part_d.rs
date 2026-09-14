@@ -60,6 +60,7 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
                     gates: VerifyGateOptions::default(),
                     provider_command: None,
                     provider_invocation: None,
+                    repository_integrity_evidence: None,
                 },
                 &mut provider,
                 &observation_store,
@@ -105,6 +106,7 @@ fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
             gates: VerifyGateOptions::default(),
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -189,6 +191,7 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -260,6 +263,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -325,6 +329,7 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
                 gates: VerifyGateOptions::default(),
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
             &observation_store,
@@ -432,6 +437,7 @@ fn promote_dry_run_validates_provider_request_without_applying() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -483,6 +489,7 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
                 },
                 provider_command: None,
                 provider_invocation: None,
+                repository_integrity_evidence: None,
             },
             &mut provider,
         )
@@ -545,6 +552,7 @@ fn promote_applies_normalized_lab_sandbox_patch_with_fake_workspace_provider() {
             },
             provider_command: None,
             provider_invocation: None,
+            repository_integrity_evidence: None,
         },
         &mut provider,
     )
@@ -635,6 +643,13 @@ fn promotion_report_serializes_generic_command_evidence() {
         ])],
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
+        repository_integrity_evidence: Some(
+            homeboy_core::repository_integrity::RepositoryIntegrityEvidence {
+                origin: "ssh://example.test/homeboy.git".to_string(),
+                symlink_exceptions: Vec::new(),
+                sha256: "sha256:admitted".to_string(),
+            },
+        ),
         verified_base: None,
         provenance: Value::Null,
         operator_notification: AgentTaskPromotionNotification {
@@ -646,6 +661,10 @@ fn promotion_report_serializes_generic_command_evidence() {
     };
 
     let value = serde_json::to_value(report).expect("serialize report");
+    assert_eq!(
+        value["repository_integrity_evidence"]["sha256"],
+        "sha256:admitted"
+    );
 
     assert_eq!(
         value["command_evidence"][0]["command"][0].as_str(),

@@ -4,6 +4,7 @@ use super::*;
 pub use crate::agent_task_gate::AgentTaskGateSetupEvidence;
 use crate::agent_task_review_dossier::{AgentTaskPublicContract, AgentTaskPublicContractEvidence};
 use homeboy_core::git::GitIdentityProof;
+use homeboy_core::repository_integrity::RepositoryIntegrityEvidence;
 
 pub const AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA: &str =
     "homeboy/agent-task-manual-candidate-binding/v1";
@@ -314,6 +315,9 @@ pub struct AgentTaskPrFinalizationOptions {
     pub protected_branches: Vec<String>,
     /// Create a draft PR for a new publication. Existing PR state is preserved.
     pub draft_pr: bool,
+    /// Evidence from the durable promotion receipt. Finalization must not
+    /// discover mutable operator policy at its target checkout.
+    pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 pub use homeboy_source_snapshot_contract::source_snapshot::{
-    default_sync_excludes, SourceSnapshot, SourceSnapshotPolicy,
+    default_sync_excludes, RepositoryIntegrityEvidence, SourceSnapshot, SourceSnapshotPolicy,
 };
 
 use crate::git;
@@ -87,6 +87,10 @@ pub(crate) fn collect_local_with_policy(
         snapshot_hash,
         synced_at: chrono::Utc::now().to_rfc3339(),
         sync_excludes: policy.sync_excludes.clone(),
+        repository_integrity_evidence:
+            crate::repository_integrity::collect_operator_policy_evidence(path)
+                .ok()
+                .flatten(),
     }
 }
 
@@ -134,6 +138,7 @@ pub(crate) fn existing_remote_with_policy(
         snapshot_hash: format!("sha256:{:x}", hasher.finalize()),
         synced_at: chrono::Utc::now().to_rfc3339(),
         sync_excludes: policy.sync_excludes.clone(),
+        repository_integrity_evidence: None,
     }
 }
 
