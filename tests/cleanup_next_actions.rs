@@ -409,6 +409,17 @@ fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
 #[test]
 #[cfg(unix)]
 fn daemon_recover_replaces_a_dead_idle_lease() {
+    assert_dead_idle_lease_recovery(&["daemon", "recover", "--yes"]);
+}
+
+#[test]
+#[cfg(unix)]
+fn cleanup_submission_automatically_recovers_a_dead_idle_daemon() {
+    assert_dead_idle_lease_recovery(&["cleanup", "--include", "runtime-tmp", "--apply"]);
+}
+
+#[cfg(unix)]
+fn assert_dead_idle_lease_recovery(command: &[&str]) {
     let fixture = HermeticTestContext::new();
     let _daemon = HermeticDaemonGuard::new(&fixture, TestBinary::HomeboyFixture);
     let invocation_dir = fixture.root().join("operator-cwd");
@@ -450,15 +461,39 @@ fn daemon_recover_replaces_a_dead_idle_lease() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    let recovered = run_homeboy(
-        &fixture,
-        &invocation_dir,
-        &["daemon", "recover", "--yes"],
-        &path,
-    );
+    let recovered = run_homeboy(&fixture, &invocation_dir, command, &path);
     assert_eq!(recovered["success"], true, "{recovered:#}");
-    assert_eq!(recovered["data"]["fresh"], true, "{recovered:#}");
-    assert_eq!(recovered["data"]["active_jobs"], 0, "{recovered:#}");
+    if command[0] == "cleanup" {
+        let job_id = recovered["data"]["job_id"]
+            .as_str()
+            .expect("submitted cleanup job");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let job = run_homeboy(
+                &fixture,
+                &invocation_dir,
+                &["cleanup", "status", job_id],
+                &path,
+            );
+            assert_eq!(job["success"], true, "{job:#}");
+            match job["data"]["status"].as_str() {
+                Some("succeeded") => break,
+                Some("queued" | "running") => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "cleanup did not complete: {job:#}"
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                _ => panic!("unexpected cleanup outcome: {job:#}"),
+            }
+        }
+    } else {
+        assert_eq!(recovered["data"]["fresh"], true, "{recovered:#}");
+        assert_eq!(recovered["data"]["active_jobs"], 0, "{recovered:#}");
+    }
+    let status = run_homeboy(&fixture, &invocation_dir, &["daemon", "status"], &path);
+    assert_eq!(status["data"]["fresh"], true, "{status:#}");
 }
 
 #[cfg(unix)]
