@@ -124,6 +124,11 @@ pub struct LogsArgs {
     pub cursor: Option<String>,
 }
 #[derive(Args, Debug)]
+pub struct MigrateEventHistoryArgs {
+    /// Exact durable run ID whose recoverable historical event history should be migrated.
+    pub run_id: String,
+}
+#[derive(Args, Debug)]
 pub struct EvidenceArgs {
     /// Durable run or Cook ID whose evidence to retrieve.
     pub run_id: String,

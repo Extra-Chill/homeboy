@@ -1,9 +1,4 @@
-//! Run log and event projection: builds `agent-task logs` / bridge-status event
-//! streams from aggregates, runner-job events, and durable local provider
-//! executions. Extracted from `lifecycle_ops` to keep that module within the
-//! god-file threshold (#9927).
-
-use serde_json::Value;
+//! Canonical ledger projection for `agent-task logs` and control-plane events.
 
 use super::*;
 
@@ -53,8 +48,6 @@ pub fn control_plane_event_retention_in_store(
     crate::orchestration::event_retention(run, &events)
 }
 
-/// One non-reconciling read from the durable record and aggregate. Raw runner
-/// transport is retained only inside the bounded canonical event data.
 fn event_page_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -77,38 +70,7 @@ fn event_stream_in_store(
     homeboy_control_plane_contract::RunId,
     Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
 )> {
-    // Logs are terminal inspection, not runner reconciliation. The durable
-    // record remains readable when a runner is unavailable or wedged.
     let record = status_in_store(lifecycle_store, run_id)?;
-    let run_id = record.run_id.clone();
-    // `run_id` is already the resolved identity, so this is the store's own
-    // exact aggregate read rather than the alias-resolving lifecycle_ops one.
-    let (events, artifact_refs, raw_events) = match lifecycle_store.read_aggregate(&run_id) {
-        Ok(aggregate) => {
-            let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-            (aggregate.events, refs, Vec::new())
-        }
-        Err(_) => {
-            let raw_events = runner_job_raw_events(&record);
-            // Before any aggregate exists, a local (in-process) cook that is
-            // actively running the provider otherwise shows only "task submitted".
-            // Surface the durable running provider execution so `agent-task logs`
-            // distinguishes active provider execution from a hung preflight (#8396).
-            let progress = runner_job_progress_events(&record).unwrap_or_else(|| {
-                let mut events = queued_events(&record.tasks);
-                events.extend(local_provider_execution_events(&record));
-                events
-            });
-            let mut artifact_refs = record.artifact_refs.clone();
-            artifact_refs.extend(local_provider_execution_artifact_refs(&record));
-            (progress, artifact_refs, raw_events)
-        }
-    };
-    let events = if raw_events.is_empty() {
-        normalize_progress_events(&record, &events, &artifact_refs)?
-    } else {
-        normalize_runner_job_events(&raw_events, &record, &artifact_refs)?
-    };
     let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
         Error::validation_invalid_argument(
             "run_id",
@@ -117,12 +79,10 @@ fn event_stream_in_store(
             None,
         )
     })?;
-    let action_receipts = lifecycle_store
+    let events = lifecycle_store
         .open_observation_readonly()?
-        .control_plane_event_receipt_digests(&run)?
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    let events = append_control_plane_action_events(&record, events, &action_receipts)?;
+        .control_plane_event_stream(&run)?
+        .unwrap_or_default();
     Ok((run, events))
 }
 
@@ -136,277 +96,4 @@ fn control_plane_event_read_error(
     } else {
         homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
     }
-}
-
-fn append_control_plane_action_events(
-    record: &AgentTaskRunRecord,
-    mut events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
-    action_receipts: &std::collections::BTreeSet<String>,
-) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
-    let task_id = record
-        .tasks
-        .first()
-        .map(|task| task.task_id.as_str())
-        .unwrap_or(record.run_id.as_str());
-    let claims = record
-        .metadata
-        .get("cook_operation_claims")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|claim| {
-            claim["operation_key"]
-                .as_str()
-                .is_some_and(|key| key.starts_with("control-plane-action:"))
-        });
-    for claim in claims {
-        let operation_key = claim["operation_key"].as_str().expect("filtered claim key");
-        let accepted_key =
-            crate::orchestration::action_event_idempotency_key(operation_key, "action.accepted");
-        if action_receipts.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
-            accepted_key.as_bytes(),
-        )) {
-            continue;
-        }
-        let mut accepted = control_plane_event(
-            record,
-            events.len() as u64 + 1,
-            task_id,
-            "action.accepted",
-            claim["leased_at"].as_str().map(str::to_string),
-            "control-plane",
-            homeboy_core::redaction::redact_json(&json!({
-                "operation_key": claim["operation_key"],
-                "request": claim["intent"],
-            })),
-            std::iter::empty(),
-        )?;
-        accepted.task = None;
-        events.push(accepted);
-        let Some(result) = claim.get("result") else {
-            continue;
-        };
-        let kind = match result["outcome"].as_str() {
-            Some("already_satisfied") => "action.already_satisfied",
-            Some("failed") => "action.failed",
-            _ => "action.succeeded",
-        };
-        let mut terminal = control_plane_event(
-            record,
-            events.len() as u64 + 1,
-            task_id,
-            kind,
-            claim["completed_at"].as_str().map(str::to_string),
-            "control-plane",
-            homeboy_core::redaction::redact_json(result),
-            std::iter::empty(),
-        )?;
-        terminal.task = None;
-        events.push(terminal);
-    }
-    Ok(events)
-}
-
-fn local_provider_execution_artifact_refs(
-    record: &AgentTaskRunRecord,
-) -> Vec<AgentTaskArtifactRef> {
-    record.metadata["provider_executions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|execution| {
-            let task_id = execution
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| record.tasks.first().map(|task| task.task_id.clone()))
-                .unwrap_or_else(|| record.run_id.clone());
-            [
-                ("provider-runtime-stdout", "stdout"),
-                ("provider-runtime-stderr", "stderr"),
-            ]
-            .into_iter()
-            .filter_map(move |(kind, stream)| {
-                execution
-                    .pointer(&format!("/runtime_evidence/{stream}"))
-                    .and_then(Value::as_str)
-                    .filter(|uri| !uri.trim().is_empty())
-                    .map(|uri| AgentTaskArtifactRef {
-                        task_id: task_id.clone(),
-                        kind: kind.to_string(),
-                        uri: uri.to_string(),
-                        role: None,
-                        label: Some(format!("provider {stream} (bounded capture)")),
-                        semantic_key: None,
-                        size_bytes: None,
-                    })
-            })
-        })
-        .collect()
-}
-
-/// Synthesize progress events from durable local provider executions. `reserve_provider_execution` records each attempt
-/// (backend, model, started_at, `state:"running"`) before the scheduler blocks
-/// on the backend, but until an aggregate exists `agent-task logs` shows only
-/// "task submitted". Terminal reservations are also projected because a
-/// cancellation can complete before an aggregate imports the provider outcome.
-pub(super) fn local_provider_execution_events(
-    record: &AgentTaskRunRecord,
-) -> Vec<AgentTaskProgressEvent> {
-    let Some(executions) = record
-        .metadata
-        .get("provider_executions")
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    executions
-        .iter()
-        .filter_map(|execution| {
-            let state = match execution.get("state").and_then(Value::as_str) {
-                Some("running") => AgentTaskState::Running,
-                Some("cancelled") => AgentTaskState::Cancelled,
-                Some("timed_out") => AgentTaskState::TimedOut,
-                Some("failed") => AgentTaskState::Failed,
-                _ => return None,
-            };
-            let task_id = execution
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| record.tasks.first().map(|task| task.task_id.clone()))
-                .unwrap_or_else(|| record.run_id.clone());
-            let backend = execution
-                .get("backend")
-                .and_then(Value::as_str)
-                .unwrap_or("provider");
-            let mut message = format!(
-                "provider execution {}: {backend}",
-                execution["state"].as_str().unwrap_or("unknown")
-            );
-            if let Some(model) = execution.get("model").and_then(Value::as_str) {
-                if !model.is_empty() {
-                    message.push_str(&format!(" ({model})"));
-                }
-            }
-            if let Some(started_at) = execution.get("started_at").and_then(Value::as_str) {
-                message.push_str(&format!("; started {started_at}"));
-            }
-            Some(AgentTaskProgressEvent {
-                task_id,
-                state,
-                attempt: execution
-                    .get("attempt")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1) as u32,
-                message: Some(message),
-            })
-        })
-        .collect()
-}
-
-fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTaskProgressEvent>> {
-    let events = record.metadata.get("runner_job_events")?.as_array()?;
-    let task_id = record
-        .tasks
-        .first()
-        .map(|task| task.task_id.clone())
-        .unwrap_or_else(|| record.run_id.clone());
-    Some(
-        events
-            .iter()
-            .map(|event| AgentTaskProgressEvent {
-                task_id: task_id.clone(),
-                state: AgentTaskState::Running,
-                attempt: 0,
-                message: event
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| {
-                        event
-                            .pointer("/data/message")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    }),
-            })
-            .collect(),
-    )
-}
-
-fn runner_job_raw_events(record: &AgentTaskRunRecord) -> Vec<Value> {
-    record
-        .metadata
-        .get("runner_job_events")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn normalize_runner_job_events(
-    raw_events: &[Value],
-    record: &AgentTaskRunRecord,
-    artifact_refs: &[AgentTaskArtifactRef],
-) -> Result<Vec<homeboy_control_plane_contract::ControlPlaneEvent>> {
-    let task_id = record
-        .tasks
-        .first()
-        .map(|task| task.task_id.clone())
-        .unwrap_or_else(|| record.run_id.clone());
-    let provider = record
-        .provider_handles
-        .first()
-        .map(|handle| handle.backend.clone());
-
-    raw_events
-        .iter()
-        .enumerate()
-        .map(|(index, raw)| {
-            let data = raw.get("data").cloned().unwrap_or(Value::Null);
-            let kind = raw
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("progress");
-            let phase =
-                string_field(&data, "phase").or_else(|| string_field(&record.metadata, "phase"));
-            let activity = string_field(&data, "activity")
-                .or_else(|| string_field(&data, "status_note"))
-                .or_else(|| string_field(&data, "progress"));
-            let timestamp_ms = raw.get("timestamp_ms").and_then(Value::as_i64);
-            let occurred_at = timestamp_ms
-                .and_then(chrono::DateTime::from_timestamp_millis)
-                .map(|value| value.to_rfc3339());
-            control_plane_event(
-                record,
-                (index + 1) as u64,
-                &task_id,
-                &format!("runner.{kind}"),
-                occurred_at,
-                "lab-runner",
-                json!({
-                    "state": AgentTaskState::Running,
-                    "message": raw
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| string_field(&data, "message")),
-                    "provider": string_field(&data, "provider")
-                        .or_else(|| string_field(&data, "backend"))
-                        .or_else(|| provider.clone()),
-                    "phase": phase,
-                    "activity": activity,
-                    "heartbeat_at_ms": matches!(kind, "progress" | "status").then_some(timestamp_ms).flatten(),
-                    "progress": { "attempt": 0 },
-                    "transport": data,
-                }),
-                artifact_refs
-                    .iter()
-                    .filter(|reference| reference.task_id == task_id),
-            )
-        })
-        .collect()
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_string)
 }

@@ -5741,3 +5741,129 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
         );
     });
 }
+
+#[test]
+fn migrate_event_history_backfills_terminal_run_without_changing_state() {
+    with_temp_home(|| {
+        let run_id = "cli-migrate-event-history";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let mut record = store.read_record(run_id).expect("submitted record");
+        record.state = AgentTaskRunState::Succeeded;
+        record.metadata["provider_executions"] = json!([{
+            "key": "task-a:1",
+            "task_id": "task-a",
+            "attempt": 1,
+            "backend": "opencode",
+            "state": "running",
+            "started_at": "2026-07-24T00:00:00Z"
+        }]);
+        record.metadata["cook_operation_claims"] = json!([{
+            "operation_key": "control-plane-action:cancel:unreceipted",
+            "leased_at": "2026-07-24T00:00:03Z",
+            "completed_at": "2026-07-24T00:00:04Z",
+            "intent": { "action": "cancel" },
+            "result": { "outcome": "succeeded" }
+        }]);
+        if let Some(metadata) = record.metadata.as_object_mut() {
+            metadata.remove("durable_event_history");
+        }
+        record.artifact_refs = vec![agent_task_lifecycle::AgentTaskArtifactRef {
+            task_id: "task-a".to_string(),
+            kind: "patch".to_string(),
+            uri: "file:///tmp/cli-historical.patch".to_string(),
+            role: Some("review".to_string()),
+            label: Some("historical patch".to_string()),
+            semantic_key: None,
+            size_bytes: Some(16),
+        }];
+        store
+            .open_observation_initialized()
+            .expect("observation")
+            .upsert_imported_run(&homeboy::core::observation::RunRecord {
+                id: record.run_id.clone(),
+                kind: "agent-task".to_string(),
+                component_id: Some(record.plan_id.clone()),
+                started_at: record.submitted_at.clone(),
+                finished_at: Some("2026-07-24T00:00:10Z".to_string()),
+                status: "pass".to_string(),
+                command: Some("homeboy agent-task".to_string()),
+                cwd: None,
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: json!({
+                    "schema": "homeboy/agent-task-observation-record/v1",
+                    "agent_task_run": record,
+                }),
+            })
+            .expect("historical terminal run");
+
+        let before = store.read_record(run_id).expect("unmarked terminal");
+        let (pre_logs, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("pre-migration logs");
+        assert!(
+            pre_logs["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .all(|event| event["data"]["state"] != "running"),
+            "reads must not migrate provider progress"
+        );
+
+        let args = MigrateEventHistoryArgs {
+            run_id: run_id.to_string(),
+        };
+        let (first, status) = migrate_event_history(args).expect("first migration");
+        assert_eq!(status, 0);
+        assert_eq!(first["state"], "succeeded");
+        assert_eq!(first["run_id"], run_id);
+        assert_eq!(
+            first["durable_event_history"],
+            "homeboy/durable-progress/v1"
+        );
+
+        let after = store.read_record(run_id).expect("migrated record");
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.artifact_refs, before.artifact_refs);
+        assert_eq!(
+            after.metadata["provider_executions"],
+            before.metadata["provider_executions"]
+        );
+        let (logs_page, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("migrated logs");
+        let events = logs_page["events"].as_array().expect("events");
+        assert!(events.iter().any(|event| event["data"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("provider execution running"))));
+        assert!(events
+            .iter()
+            .any(|event| event["kind"] == "action.accepted"));
+        let artifacts = agent_task_lifecycle::artifacts(run_id).expect("artifacts remain readable");
+        assert_eq!(artifacts.run_id, run_id);
+        assert_eq!(
+            after.artifact_refs[0].uri,
+            "file:///tmp/cli-historical.patch"
+        );
+
+        let (second, status) = migrate_event_history(MigrateEventHistoryArgs {
+            run_id: run_id.to_string(),
+        })
+        .expect("second migration");
+        assert_eq!(status, 0);
+        assert_eq!(second, first);
+        let (replay_logs, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("replay logs");
+        assert_eq!(replay_logs["events"], logs_page["events"]);
+    });
+}

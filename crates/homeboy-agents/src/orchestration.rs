@@ -78,7 +78,9 @@ const RUN_CURSOR_SCHEMA: &str = "homeboy/control-plane-run-cursor/v1";
 const MISSION_CURSOR_SCHEMA: &str = "homeboy/control-plane-mission-cursor/v1";
 const TASK_CURSOR_SCHEMA: &str = "homeboy/control-plane-task-cursor/v1";
 const ATTEMPT_CURSOR_SCHEMA: &str = "homeboy/control-plane-attempt-cursor/v1";
-const EVENT_CURSOR_SCHEMA: &str = "homeboy/control-plane-event-cursor/v1";
+const EVENT_CURSOR_SCHEMA: &str = "homeboy/control-plane-event-cursor/v2";
+const EVENT_CURSOR_SCHEMA_V1: &str = "homeboy/control-plane-event-cursor/v1";
+pub(crate) const EVENT_STREAM_DURABLE_PROGRESS: &str = "homeboy/durable-progress/v1";
 const INTERNAL_ACTION_EVENT_KEY_PREFIX: &str = "homeboy-internal-action:";
 const INTERNAL_PROGRESS_EVENT_KEY_PREFIX: &str = "homeboy-internal-progress:";
 const RUN_CURSOR_BOUND: usize = 1024;
@@ -141,6 +143,7 @@ struct EventCursorPayload {
     schema: String,
     run_id: String,
     sequence: u64,
+    stream: String,
 }
 
 /// Lookup used by [`OrchestrationService`]. Callers inject stores or test
@@ -283,26 +286,29 @@ impl EventLookup for LifecycleStoreLookup {
         cursor: Option<&homeboy_control_plane_contract::EventCursor>,
     ) -> Result<Option<homeboy_control_plane_contract::ControlPlaneEventPage>, ControlPlaneError>
     {
-        let events = self
-            .store
-            .open_observation_readonly()
-            .map_err(map_lifecycle_error)?
-            .control_plane_event_stream(id)
-            .map_err(map_lifecycle_error)?;
-        events
-            .map(|events| event_page(id.clone(), events, cursor))
-            .transpose()
+        match crate::agent_task_lifecycle::control_plane_events_in_store(
+            &self.store,
+            id.as_str(),
+            cursor,
+        ) {
+            Ok(page) => Ok(Some(page)),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn event_retention(
         &self,
         id: &RunId,
     ) -> Result<Option<ControlPlaneEventRetention>, ControlPlaneError> {
-        self.store
-            .open_observation_readonly()
-            .map_err(map_lifecycle_error)?
-            .control_plane_event_retention(id)
-            .map_err(map_lifecycle_error)
+        match crate::agent_task_lifecycle::control_plane_event_retention_in_store(
+            &self.store,
+            id.as_str(),
+        ) {
+            Ok(retention) => Ok(Some(retention)),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -2828,7 +2834,12 @@ pub(crate) fn prepare_control_plane_event_append(
     normalize_event_references(&mut request.artifacts)?;
     normalize_event_references(&mut request.evidence)?;
     request.data = homeboy_core::redaction::redact_json(&request.data);
-    validate_event_scope(record, &request)?;
+    if !request
+        .idempotency_key
+        .starts_with(INTERNAL_PROGRESS_EVENT_KEY_PREFIX)
+    {
+        validate_event_scope(record, &request)?;
+    }
     let idempotency_digest =
         homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
     let request_digest = homeboy_engine_primitives::content_hash::sha256_hex(
@@ -3880,11 +3891,20 @@ pub fn event_page(
     events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
+    event_page_for_stream(run, events, cursor, EVENT_STREAM_DURABLE_PROGRESS)
+}
+
+fn event_page_for_stream(
+    run: RunId,
+    events: Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
+    cursor: Option<&homeboy_control_plane_contract::EventCursor>,
+    stream: &str,
+) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage, ControlPlaneError> {
     use homeboy_control_plane_contract::{ControlPlaneEventPage, CONTROL_PLANE_EVENT_PAGE_SCHEMA};
 
     let (earliest_sequence, latest_sequence) = validate_event_stream(&run, &events)?;
     let after = cursor
-        .map(|cursor| decode_event_cursor(cursor, &run))
+        .map(|cursor| decode_event_cursor(cursor, &run, stream))
         .transpose()?
         .unwrap_or(0);
     if cursor.is_some() && events.is_empty() {
@@ -3909,7 +3929,7 @@ pub fn event_page(
     let has_more = remaining.next().is_some();
     let next_cursor = page_events
         .last()
-        .map(|event| encode_event_cursor(&run, event.sequence))
+        .map(|event| encode_event_cursor_for_stream(&run, event.sequence, stream))
         .or_else(|| cursor.cloned().map(Ok))
         .transpose()?;
 
@@ -3959,22 +3979,36 @@ fn validate_event_stream(
     ))
 }
 
+#[cfg(test)]
 fn encode_event_cursor(run: &RunId, sequence: u64) -> Result<EventCursor, ControlPlaneError> {
+    encode_event_cursor_for_stream(run, sequence, EVENT_STREAM_DURABLE_PROGRESS)
+}
+
+fn encode_event_cursor_for_stream(
+    run: &RunId,
+    sequence: u64,
+    stream: &str,
+) -> Result<EventCursor, ControlPlaneError> {
     let bytes = serde_json::to_vec(&EventCursorPayload {
         schema: EVENT_CURSOR_SCHEMA.to_string(),
         run_id: run.as_str().to_string(),
         sequence,
+        stream: stream.to_string(),
     })
     .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
     EventCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))
 }
 
-fn decode_event_cursor(cursor: &EventCursor, run: &RunId) -> Result<u64, ControlPlaneError> {
-    if let Ok(sequence) = cursor.as_str().parse::<u64>() {
-        return (sequence > 0).then_some(sequence).ok_or_else(|| {
-            ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
-        });
+fn decode_event_cursor(
+    cursor: &EventCursor,
+    run: &RunId,
+    stream: &str,
+) -> Result<u64, ControlPlaneError> {
+    if cursor.as_str().parse::<u64>().is_ok() {
+        return Err(ControlPlaneError::cursor_expired(format!(
+            "control-plane event cursor v1 numeric offset is not valid for stream {stream}; retry without a cursor to reset"
+        )));
     }
     if cursor.as_str().len() > RUN_CURSOR_BOUND {
         return Err(ControlPlaneError::invalid_argument(
@@ -3986,16 +4020,35 @@ fn decode_event_cursor(cursor: &EventCursor, run: &RunId) -> Result<u64, Control
         .map_err(|_| {
             ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
         })?;
-    let payload: EventCursorPayload = serde_json::from_slice(&bytes).map_err(|_| {
+    let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
         ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
     })?;
-    if payload.schema != EVENT_CURSOR_SCHEMA
-        || payload.run_id != run.as_str()
-        || payload.sequence == 0
-    {
+    match payload.get("schema").and_then(Value::as_str) {
+        Some(EVENT_CURSOR_SCHEMA_V1) => {
+            return Err(ControlPlaneError::cursor_expired(format!(
+                "control-plane event cursor v1 is not valid for stream {stream}; retry without a cursor to reset"
+            )))
+        }
+        Some(EVENT_CURSOR_SCHEMA) => {}
+        _ => {
+            return Err(ControlPlaneError::invalid_argument(
+                "control-plane event cursor is invalid",
+            ))
+        }
+    }
+    let payload: EventCursorPayload = serde_json::from_value(payload).map_err(|_| {
+        ControlPlaneError::invalid_argument("control-plane event cursor is invalid")
+    })?;
+    if payload.run_id != run.as_str() || payload.sequence == 0 {
         return Err(ControlPlaneError::invalid_argument(
             "control-plane event cursor is invalid for this run",
         ));
+    }
+    if payload.stream != stream {
+        return Err(ControlPlaneError::cursor_expired(format!(
+            "control-plane event cursor stream {} is not valid for stream {stream}; retry without a cursor to reset",
+            payload.stream
+        )));
     }
     Ok(payload.sequence)
 }
@@ -5465,7 +5518,7 @@ mod tests {
         register_reference_in_store, review_failure_reasons, validate_event_scope,
         validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
         RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
-        RunSnapshotPage, REVIEW_EVIDENCE_BOUND,
+        RunSnapshotPage, EVENT_STREAM_DURABLE_PROGRESS, REVIEW_EVIDENCE_BOUND,
     };
     use crate::agent_task_lifecycle::{
         AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -5473,6 +5526,7 @@ mod tests {
     };
     use crate::agent_task_schedule::AgentTaskPlan;
     use crate::agent_tasks::AgentTaskState;
+    use base64::Engine;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionEligibilityReport,
         ControlPlaneActionIntent, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -5915,7 +5969,10 @@ mod tests {
         assert!(first.has_more);
         let cursor = first.next_cursor.as_ref().expect("next cursor");
         assert_ne!(cursor.as_str(), "100");
-        assert_eq!(decode_event_cursor(cursor, &run).expect("cursor"), 100);
+        assert_eq!(
+            decode_event_cursor(cursor, &run, EVENT_STREAM_DURABLE_PROGRESS).expect("cursor"),
+            100
+        );
 
         let second = event_page(
             run,
@@ -5949,9 +6006,22 @@ mod tests {
         assert_eq!(page.events[0].sequence, 5);
 
         let legacy = EventCursor::new("4").expect("legacy cursor");
-        let page =
-            event_page(run.clone(), vec![event(&run, 5)], Some(&legacy)).expect("legacy v1 cursor");
-        assert_eq!(page.events[0].sequence, 5);
+        let error = event_page(run.clone(), vec![event(&run, 5)], Some(&legacy))
+            .expect_err("legacy numeric cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::CursorExpired);
+
+        let v1_bytes = serde_json::to_vec(&json!({
+            "schema": "homeboy/control-plane-event-cursor/v1",
+            "run_id": run.as_str(),
+            "sequence": 4,
+        }))
+        .expect("v1 cursor payload");
+        let v1 =
+            EventCursor::new(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v1_bytes))
+                .expect("v1 cursor");
+        let error =
+            event_page(run.clone(), vec![event(&run, 5)], Some(&v1)).expect_err("v1 schema cursor");
+        assert_eq!(error.class, ControlPlaneErrorClass::CursorExpired);
 
         let error = event_page(run, Vec::new(), Some(&retained_boundary))
             .expect_err("fully evicted stream");
@@ -6892,18 +6962,20 @@ mod tests {
                 durable_events.events[0].data["acknowledgement"],
                 first.acknowledgement
             );
-            let legacy_logs =
+            let logs =
                 crate::agent_task_lifecycle::logs_in_store(&service.lookup.store, run.as_str())
-                    .expect("legacy synthesized logs");
-            let action_kinds: Vec<_> = legacy_logs
-                .events
-                .iter()
-                .filter(|event| event.kind.starts_with("action."))
-                .map(|event| event.kind.as_str())
-                .collect();
-            assert!(
-                action_kinds.is_empty(),
-                "ledger-backed claims are not synthesized"
+                    .expect("canonical logs");
+            assert_eq!(
+                logs.events
+                    .iter()
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                durable_events
+                    .events
+                    .iter()
+                    .map(|event| event.kind.as_str())
+                    .collect::<Vec<_>>(),
+                "CLI logs and service events share the canonical ledger"
             );
             let mut conflicting = request;
             conflicting.parameters.data = json!({ "reason": "different reason" });
@@ -7665,7 +7737,65 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 acknowledgement
             );
-            assert_eq!(service.events(&run, None).expect("events").events.len(), 2);
+            let events = service.events(&run, None).expect("events");
+            let action_kinds: Vec<_> = events
+                .events
+                .iter()
+                .filter(|event| event.kind.starts_with("action."))
+                .map(|event| event.kind.as_str())
+                .collect();
+            assert_eq!(
+                action_kinds,
+                ["action.accepted", "action.already_satisfied"]
+            );
+            let observation = service
+                .lookup
+                .store
+                .open_observation_initialized()
+                .expect("store");
+            for index in 0..101 {
+                let progress = ControlPlaneEventAppendRequest {
+                    schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+                    idempotency_key: format!("retention-{index}"),
+                    actor: "test".to_string(),
+                    kind: "run.progress".to_string(),
+                    source: ControlPlaneEventSource {
+                        component: "test".to_string(),
+                        instance: None,
+                    },
+                    occurred_at: None,
+                    task: None,
+                    attempt: None,
+                    execution: None,
+                    data: json!({}),
+                    artifacts: Vec::new(),
+                    evidence: Vec::new(),
+                };
+                observation
+                    .append_control_plane_event(
+                        &run,
+                        &progress,
+                        &format!("{index:064x}"),
+                        &"f".repeat(64),
+                    )
+                    .expect("evict action payloads");
+            }
+            let record = service
+                .lookup
+                .store
+                .read_record(run.as_str())
+                .expect("record");
+            service
+                .lookup
+                .store
+                .write_record(&record)
+                .expect("write after retention");
+            assert!(service
+                .events(&run, None)
+                .expect("retained events")
+                .events
+                .iter()
+                .all(|event| !event.kind.starts_with("action.")));
         });
     }
 
