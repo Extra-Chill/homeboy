@@ -415,6 +415,7 @@ impl ReleaseExecuteArgs {
             head: self.head,
             from_artifacts: self.from_artifacts.clone(),
             protected_branch: self.protected_branch,
+            protected_branch_resume: false,
         }
     }
 
@@ -1184,6 +1185,7 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             head: false,
             from_artifacts: None,
             protected_branch: false,
+            protected_branch_resume: false,
         },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
