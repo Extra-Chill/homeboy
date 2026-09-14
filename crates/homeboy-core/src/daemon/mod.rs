@@ -7122,15 +7122,19 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-        })?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The daemon supervisor is detached from this launcher. It must not inherit
+    // the lifecycle lock and strand later recovery after the launcher exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    let file = options.open(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+    })?;
     if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
         return Err(Error::internal_unexpected(format!(
             "daemon lifecycle operation already in progress; lock is held at {}",
