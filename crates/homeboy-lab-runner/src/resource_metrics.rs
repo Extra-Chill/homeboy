@@ -419,7 +419,7 @@ fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::path::PathBuf> {
     let directory = std::path::Path::new("/proc")
         .join(pid.to_string())
         .join("root")
-        .join(mount_point.strip_prefix('/').ok()?)
+        .join(mount_point.strip_prefix('/')?)
         .join(relative);
     directory.is_dir().then_some(directory)
 }
