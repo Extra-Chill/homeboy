@@ -4854,16 +4854,8 @@ fn validate_cook_destination_identity(
 }
 
 fn validate_cook_worktree_root(path: &Path, reference: &str) -> homeboy::core::Result<()> {
-    if homeboy::core::git::repo_root(path).is_some() {
-        Ok(())
-    } else {
-        Err(homeboy::core::Error::validation_invalid_argument(
-            "to_worktree",
-            "Cook destination must be a Git worktree",
-            Some(reference.to_string()),
-            None,
-        ))
-    }
+    homeboy::core::worktree_provider::require_linked_worktree_mutation_path(path, reference)
+        .map(|_| ())
 }
 
 fn repository_identity_error(

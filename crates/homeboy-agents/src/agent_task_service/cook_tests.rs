@@ -5858,7 +5858,7 @@ fn failed_pre_provider_run_does_not_leave_unattributed_evidence_dirt() {
 }
 
 #[test]
-fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
+fn primary_checkout_is_rejected_before_detached_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary checkout");
         let git = |args: &[&str]| {
@@ -5899,10 +5899,19 @@ fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
             record.metadata["pre_execution_failure"]["phase"],
             "cook_pre_execution"
         );
-        assert!(!record.metadata["pre_execution_failure"]["message"]
+        assert!(record.metadata["pre_execution_failure"]["message"]
             .as_str()
             .expect("primary-checkout diagnostic")
-            .is_empty());
+            .contains("primary or non-linked checkout"));
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["workspace_admission"]["admission"],
+            "rejected"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["workspace_admission"]
+                ["next_action"],
+            "use_dedicated_linked_worktree"
+        );
     });
 }
 

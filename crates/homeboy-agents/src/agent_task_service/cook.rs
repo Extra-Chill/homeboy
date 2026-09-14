@@ -8200,9 +8200,10 @@ fn validate_cook_workspace_with_adopted_candidate(
             None,
         ));
     };
-    let target = std::fs::canonicalize(&target).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(target.display().to_string()))
-    })?;
+    let target = homeboy_core::worktree_provider::require_linked_worktree_mutation_path(
+        &target,
+        &options.workspace.to_worktree,
+    )?;
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
     }
