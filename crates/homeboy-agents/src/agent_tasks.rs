@@ -215,7 +215,7 @@ pub mod review_dossier {
         AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
         AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
         AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewProfile,
-        AgentTaskReviewTestStep, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+        AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
     };
 }
 
