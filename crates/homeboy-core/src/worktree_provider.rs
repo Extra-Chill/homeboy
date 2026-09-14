@@ -531,15 +531,14 @@ pub fn resolve_native_worktree_mutation_target_by_path(
     NativeWorktreeProvider.resolve_for_mutation_by_path(path)
 }
 
-/// Require the filesystem shape Git uses for a linked worktree before Homeboy
-/// can mutate it. A primary checkout has a `.git` directory, while a
-/// linked worktree has Git's `.git` pointer file.
+/// Require Git's registered linked-worktree identity before Homeboy can mutate
+/// a path. This excludes primary, separate-git-dir, submodule, and forged
+/// gitfile checkouts.
 pub fn require_linked_worktree_mutation_path(path: &Path, reference: &str) -> Result<PathBuf> {
-    let path = std::fs::canonicalize(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    if path.join(".git").is_file() {
-        return Ok(path);
-    }
+    let reason = match worktree::verify_linked_worktree_root(path) {
+        Ok(path) => return Ok(path),
+        Err(error) => error,
+    };
 
     let mut error = Error::validation_invalid_argument(
         "to_worktree",
@@ -551,10 +550,11 @@ pub fn require_linked_worktree_mutation_path(path: &Path, reference: &str) -> Re
     );
     error.details["workspace_admission"] = serde_json::json!({
         "schema": "homeboy/linked-worktree-mutation-admission/v1",
-        "workspace": path,
+        "workspace": reference,
         "classification": "primary_or_non_linked_checkout",
         "admission": "rejected",
         "next_action": "use_dedicated_linked_worktree",
+        "reason": reason.message,
     });
     Err(error)
 }
