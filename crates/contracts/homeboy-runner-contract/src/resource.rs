@@ -38,6 +38,13 @@ pub struct RunnerCgroupMemoryEvidence {
     /// `observed`, `partial`, `unavailable`, or `unsupported`.
     pub status: String,
     pub source: String,
+    /// The metric scope. `child_cgroup` is a group-level observation and can
+    /// include processes other than the launched child.
+    pub scope: String,
+    /// Attribution of a cgroup `oom_kill` event to the launched child. This is
+    /// `unknown` unless a runtime independently proves isolation or identifies
+    /// the kernel victim.
+    pub oom_kill_attribution: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_limit_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,6 +64,8 @@ impl Default for RunnerCgroupMemoryEvidence {
         Self {
             status: "unsupported".to_string(),
             source: "unsupported".to_string(),
+            scope: "unavailable".to_string(),
+            oom_kill_attribution: "unknown".to_string(),
             memory_limit_bytes: None,
             memory_current_bytes: None,
             memory_peak_bytes: None,
@@ -115,6 +124,8 @@ mod tests {
             "cgroup_memory": {
                 "status": "unsupported",
                 "source": "unsupported",
+                "scope": "unavailable",
+                "oom_kill_attribution": "unknown",
             },
             "source": "process-tree",
         });
@@ -130,6 +141,8 @@ mod tests {
             cgroup_memory: RunnerCgroupMemoryEvidence {
                 status: "unsupported".to_string(),
                 source: "unsupported".to_string(),
+                scope: "unavailable".to_string(),
+                oom_kill_attribution: "unknown".to_string(),
                 ..RunnerCgroupMemoryEvidence::default()
             },
             source: "process-tree".to_string(),
@@ -176,6 +189,8 @@ mod tests {
             "cgroup_memory": {
                 "status": "observed",
                 "source": "linux_cgroup_v2",
+                "scope": "child_cgroup",
+                "oom_kill_attribution": "unknown",
                 "memory_limit_bytes": 1024,
                 "memory_current_bytes": 512,
                 "memory_peak_bytes": 768,

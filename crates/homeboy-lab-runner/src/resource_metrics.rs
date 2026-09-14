@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+#[cfg(target_os = "linux")]
+use std::io::{Read, Seek, SeekFrom};
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -307,7 +309,7 @@ fn os_str_bytes(value: &OsStr) -> usize {
 /// exist when the child is killed before it can write its own diagnostics.
 #[cfg(target_os = "linux")]
 struct CgroupMemoryCollector {
-    directory: Option<std::path::PathBuf>,
+    files: Option<CgroupMemoryFiles>,
     before: Option<CgroupMemorySnapshot>,
 }
 
@@ -323,12 +325,20 @@ struct CgroupMemorySnapshot {
     oom_kill_count: Option<u64>,
 }
 
+#[cfg(target_os = "linux")]
+struct CgroupMemoryFiles {
+    memory_limit: Option<std::fs::File>,
+    memory_current: Option<std::fs::File>,
+    memory_peak: Option<std::fs::File>,
+    memory_events: Option<std::fs::File>,
+}
+
 impl CgroupMemoryCollector {
     #[cfg(target_os = "linux")]
     fn start(pid: u32) -> Self {
-        let directory = cgroup_v2_directory_for_pid(pid);
-        let before = directory.as_deref().map(read_cgroup_memory_snapshot);
-        Self { directory, before }
+        let mut files = cgroup_v2_directory_for_pid(pid).map(open_cgroup_memory_files);
+        let before = files.as_mut().map(read_cgroup_memory_snapshot);
+        Self { files, before }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -338,10 +348,10 @@ impl CgroupMemoryCollector {
 
     #[cfg(target_os = "linux")]
     fn finish(self) -> RunnerCgroupMemoryEvidence {
-        let Some(directory) = self.directory else {
+        let Some(mut files) = self.files else {
             return cgroup_memory_unavailable();
         };
-        let after = read_cgroup_memory_snapshot(&directory);
+        let after = read_cgroup_memory_snapshot(&mut files);
         let before = self.before.unwrap_or_default();
         cgroup_memory_evidence(before, after)
     }
@@ -373,6 +383,10 @@ fn cgroup_memory_evidence(
         }
         .to_string(),
         source: "linux_cgroup_v2".to_string(),
+        scope: "child_cgroup".to_string(),
+        // A counter delta establishes a cgroup event, not which member was
+        // selected by the kernel OOM killer.
+        oom_kill_attribution: "unknown".to_string(),
         memory_limit_bytes: after.memory_limit_bytes.or(before.memory_limit_bytes),
         memory_current_bytes: after.memory_current_bytes,
         memory_peak_bytes: after.memory_peak_bytes,
@@ -387,6 +401,7 @@ fn cgroup_memory_unavailable() -> RunnerCgroupMemoryEvidence {
     RunnerCgroupMemoryEvidence {
         status: "unavailable".to_string(),
         source: "linux_cgroup_v2".to_string(),
+        scope: "unavailable".to_string(),
         ..RunnerCgroupMemoryEvidence::default()
     }
 }
@@ -394,21 +409,55 @@ fn cgroup_memory_unavailable() -> RunnerCgroupMemoryEvidence {
 #[cfg(target_os = "linux")]
 fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::path::PathBuf> {
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
-    let relative = cgroup_v2_relative_path(&membership)?;
-    let root = std::path::Path::new("/sys/fs/cgroup");
-    let directory = root.join(relative);
+    let mountinfo = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).ok()?;
+    let membership = cgroup_v2_membership_path(&membership)?;
+    let (mount_root, mount_point) = cgroup_v2_mount(&mountinfo)?;
+    let relative = cgroup_relative_to_mount(&membership, &mount_root)?;
+    // Resolve through the target's root namespace. Containerized children can
+    // mount cgroup-v2 at a namespace-local root that is not visible at the
+    // runner's `/sys/fs/cgroup` path.
+    let directory = std::path::Path::new("/proc")
+        .join(pid.to_string())
+        .join("root")
+        .join(mount_point.strip_prefix('/').ok()?)
+        .join(relative);
     directory.is_dir().then_some(directory)
 }
 
 #[cfg(target_os = "linux")]
-fn cgroup_v2_relative_path(membership: &str) -> Option<std::path::PathBuf> {
-    let path = membership.lines().find_map(|line| {
+fn cgroup_v2_membership_path(membership: &str) -> Option<String> {
+    membership.lines().find_map(|line| {
         let mut fields = line.splitn(3, ':');
         (fields.next() == Some("0") && fields.next() == Some(""))
             .then(|| fields.next())
             .flatten()
-    })?;
-    let relative = std::path::Path::new(path.trim_start_matches('/'));
+            .map(str::to_string)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_mount(mountinfo: &str) -> Option<(String, String)> {
+    mountinfo.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let separator = fields.iter().position(|field| *field == "-")?;
+        (fields.get(separator + 1) == Some(&"cgroup2"))
+            .then(|| Some((fields.get(3)?.to_string(), fields.get(4)?.to_string())))
+            .flatten()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_relative_to_mount(membership: &str, mount_root: &str) -> Option<std::path::PathBuf> {
+    let mount_root = mount_root.trim_end_matches('/');
+    let relative = if mount_root.is_empty() {
+        membership.trim_start_matches('/')
+    } else {
+        membership
+            .strip_prefix(mount_root)?
+            .strip_prefix('/')
+            .unwrap_or("")
+    };
+    let relative = std::path::Path::new(relative);
     relative
         .components()
         .all(|component| matches!(component, std::path::Component::Normal(_)))
@@ -416,18 +465,29 @@ fn cgroup_v2_relative_path(membership: &str) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_cgroup_memory_snapshot(directory: &std::path::Path) -> CgroupMemorySnapshot {
-    CgroupMemorySnapshot {
-        memory_limit_bytes: read_cgroup_u64(directory, "memory.max", true),
-        memory_current_bytes: read_cgroup_u64(directory, "memory.current", false),
-        memory_peak_bytes: read_cgroup_u64(directory, "memory.peak", false),
-        oom_kill_count: read_cgroup_event_count(directory, "oom_kill"),
+fn open_cgroup_memory_files(directory: std::path::PathBuf) -> CgroupMemoryFiles {
+    let open = |name| std::fs::File::open(directory.join(name)).ok();
+    CgroupMemoryFiles {
+        memory_limit: open("memory.max"),
+        memory_current: open("memory.current"),
+        memory_peak: open("memory.peak"),
+        memory_events: open("memory.events"),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn read_cgroup_u64(directory: &std::path::Path, name: &str, accepts_max: bool) -> Option<u64> {
-    let value = std::fs::read_to_string(directory.join(name)).ok()?;
+fn read_cgroup_memory_snapshot(files: &mut CgroupMemoryFiles) -> CgroupMemorySnapshot {
+    CgroupMemorySnapshot {
+        memory_limit_bytes: read_cgroup_u64(files.memory_limit.as_mut(), true),
+        memory_current_bytes: read_cgroup_u64(files.memory_current.as_mut(), false),
+        memory_peak_bytes: read_cgroup_u64(files.memory_peak.as_mut(), false),
+        oom_kill_count: read_cgroup_event_count(files.memory_events.as_mut(), "oom_kill"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_u64(file: Option<&mut std::fs::File>, accepts_max: bool) -> Option<u64> {
+    let value = read_cgroup_file(file)?;
     let value = value.trim();
     if accepts_max && value == "max" {
         return None;
@@ -436,14 +496,23 @@ fn read_cgroup_u64(directory: &std::path::Path, name: &str, accepts_max: bool) -
 }
 
 #[cfg(target_os = "linux")]
-fn read_cgroup_event_count(directory: &std::path::Path, name: &str) -> Option<u64> {
-    let events = std::fs::read_to_string(directory.join("memory.events")).ok()?;
+fn read_cgroup_event_count(file: Option<&mut std::fs::File>, name: &str) -> Option<u64> {
+    let events = read_cgroup_file(file)?;
     events.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
         (fields.next() == Some(name))
             .then(|| fields.next()?.parse().ok())
             .flatten()
     })
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_file(file: Option<&mut std::fs::File>) -> Option<String> {
+    let file = file?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut value = String::new();
+    file.read_to_string(&mut value).ok()?;
+    Some(value)
 }
 
 struct ResourceMetricsCollector {
@@ -1011,6 +1080,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    #[cfg(target_os = "linux")]
+    use std::os::unix::process::ExitStatusExt;
+
     #[test]
     fn heartbeat_payload_includes_elapsed_pid_and_optional_resources() {
         let payload = runner_command_heartbeat_data(
@@ -1337,6 +1409,66 @@ mod tests {
             !output.metrics.cgroup_memory.status.is_empty(),
             "unsupported cgroup telemetry must be explicit rather than look like a successful zero"
         );
+        #[cfg(target_os = "linux")]
+        assert!(
+            output.metrics.cgroup_memory.memory_peak_bytes.is_some()
+                || output.metrics.cgroup_memory.status != "observed",
+            "a fully observed normal exit must retain cgroup peak memory"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_runner_preserves_ordinary_sigkill_as_non_oom() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "kill -KILL $$"]);
+
+        let output = measured_command_output(&mut command, &HashMap::new(), None)
+            .expect("runner captures signal termination");
+
+        assert_eq!(output.output.status.signal(), Some(libc::SIGKILL));
+        assert_eq!(output.metrics.cgroup_memory.oom_kill_delta, Some(0));
+        assert_eq!(output.metrics.cgroup_memory.oom_kill_attribution, "unknown");
+    }
+
+    /// This test uses the production measurement boundary but only runs when a
+    /// disposable cgroup-limited container explicitly opts in. Running an OOM
+    /// allocator in an unconstrained developer cgroup would be unsafe.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_runner_controlled_oom_is_authoritative_when_enabled() {
+        if std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_none() {
+            return;
+        }
+        let test_binary = std::env::current_exe().expect("test binary path");
+        let mut command = Command::new(test_binary);
+        command.args([
+            "resource_metrics::tests::synthetic_memory_hog",
+            "--exact",
+            "--nocapture",
+        ]);
+
+        let output = measured_command_output(&mut command, &HashMap::new(), None)
+            .expect("runner retains metrics after child OOM kill");
+
+        assert_eq!(output.output.status.signal(), Some(libc::SIGKILL));
+        assert_eq!(output.metrics.cgroup_memory.status, "observed");
+        assert_eq!(output.metrics.cgroup_memory.oom_kill_delta, Some(1));
+        assert_eq!(output.metrics.cgroup_memory.scope, "child_cgroup");
+        assert_eq!(output.metrics.cgroup_memory.oom_kill_attribution, "unknown");
+        assert!(output.metrics.cgroup_memory.memory_peak_bytes.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn synthetic_memory_hog() {
+        if std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_none() {
+            return;
+        }
+        let mut chunks = Vec::new();
+        loop {
+            chunks.push(vec![0_u8; 1024 * 1024]);
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -1359,6 +1491,8 @@ mod tests {
 
         assert_eq!(evidence.status, "observed");
         assert_eq!(evidence.oom_kill_delta, Some(1));
+        assert_eq!(evidence.scope, "child_cgroup");
+        assert_eq!(evidence.oom_kill_attribution, "unknown");
         assert_eq!(evidence.memory_limit_bytes, Some(64));
         assert_eq!(evidence.memory_peak_bytes, Some(64));
     }
@@ -1388,13 +1522,25 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cgroup_membership_rejects_escape_paths() {
+    fn cgroup_membership_and_mount_resolution_are_namespace_aware() {
         assert_eq!(
-            cgroup_v2_relative_path("0::/runner/job\n"),
-            Some(std::path::PathBuf::from("runner/job"))
+            cgroup_v2_membership_path("0::/runner/job\n"),
+            Some("/runner/job".to_string())
         );
-        assert!(cgroup_v2_relative_path("0::/../../etc\n").is_none());
-        assert!(cgroup_v2_relative_path("1:name=/legacy\n").is_none());
+        assert_eq!(
+            cgroup_relative_to_mount("/runner/job", "/runner"),
+            Some(std::path::PathBuf::from("job"))
+        );
+        assert_eq!(
+            cgroup_relative_to_mount("/runner", "/runner"),
+            Some(std::path::PathBuf::new())
+        );
+        assert_eq!(
+            cgroup_v2_mount("36 25 0:32 /runner /sys/fs/cgroup rw - cgroup2 cgroup rw\n"),
+            Some(("/runner".to_string(), "/sys/fs/cgroup".to_string()))
+        );
+        assert!(cgroup_relative_to_mount("/runner/../../etc", "/runner").is_none());
+        assert!(cgroup_v2_membership_path("1:name=/legacy\n").is_none());
     }
 
     #[test]
