@@ -2511,33 +2511,34 @@ pub fn reconstruct_options_with_local_placement_override(
 
 /// Reconstruct an attempt that failed before any provider execution. There is
 /// no executed provider behavior to preserve, so a current controller may
-/// replace the stale runtime and local dispatcher under continuation admission.
+/// replace the stale runtime under continuation admission.
 pub fn reconstruct_options_for_pre_execution_recovery(
     recipe: &AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
 ) -> Result<CookRequest> {
-    reconstruct_recipe_options(recipe, None, false, false)
+    // Recovery still dispatches through the exact persisted transport. Rebuilding
+    // it here validates current runner compatibility before lifecycle rearm.
+    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
 }
 
 /// Whether an attempt that never reached provider execution may be rebuilt by
-/// the current controller without replaying a historical external transport.
-/// A queued retry proves that boundary through its immutable retry origin.
-pub fn local_pre_execution_runtime_recovery_is_eligible(
+/// the current controller without replaying provider work. A queued retry proves
+/// that boundary through its immutable retry origin and controller-local owner.
+pub fn pre_execution_runtime_recovery_is_eligible(
     recipe: &AgentTaskCookRecipe,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     explicit_local_override: bool,
 ) -> bool {
-    let local_transport = explicit_local_override
-        || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local");
-    if !local_transport {
-        return false;
-    }
+    let dispatch_kind = recipe.promotion_transport["attempt_dispatch"]["kind"].as_str();
+    let local_transport = explicit_local_override || dispatch_kind == Some("local");
     if super::cook_pre_execution::retryable_pre_execution_failure(record) {
-        return true;
+        return local_transport;
     }
 
     let origin = &record.metadata["retry_origin"]["pre_execution_failure"];
     let current_runtime = homeboy_core::build_identity::current().display;
     record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+        && (local_transport || dispatch_kind == Some("lab"))
         && recipe.runtime_generation != current_runtime
         && record.metadata["controller_identity"].as_str() == Some(current_runtime.as_str())
         && record.metadata["retry_of"].is_string()
@@ -2545,8 +2546,12 @@ pub fn local_pre_execution_runtime_recovery_is_eligible(
         && record.metadata["provider_run_ids"]
             .as_array()
             .is_some_and(Vec::is_empty)
+        && record.metadata["provider_executions"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+        && agent_task_lifecycle::is_controller_local(record)
         && (origin["retryable"] == Value::Bool(true)
-            || origin["phase"].as_str() == Some("local_retry_supervisor"))
+            || (local_transport && origin["phase"].as_str() == Some("local_retry_supervisor")))
         && origin["provider_executions_consumed"].as_u64() == Some(0)
 }
 
@@ -3671,6 +3676,78 @@ mod tests {
         ));
         reconstruct_options(&historical)
             .expect_err("historical provider replay retains runtime pin");
+    }
+
+    #[test]
+    fn transport_retry_recovery_requires_zero_execution_controller_local_lineage() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let (mut historical, _) = persist_recipe_run(&store, &lifecycle_store);
+        historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
+        historical.promotion_transport["attempt_dispatch"] = serde_json::json!({
+            "kind": "lab",
+            "queue": "cook-lab",
+        });
+        store.persist_recipe(&historical).unwrap();
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.metadata["controller_identity"] =
+                    serde_json::json!(homeboy_core::build_identity::current().display);
+                record.metadata["retry_of"] = serde_json::json!("transport-failure");
+                record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+                record.metadata["provider_run_ids"] = serde_json::json!([]);
+                record.metadata["provider_executions"] = serde_json::json!([]);
+                record.metadata["retry_origin"] = serde_json::json!({
+                    "pre_execution_failure": {
+                        "retryable": true,
+                        "provider_executions_consumed": 0,
+                    }
+                });
+                true
+            })
+            .unwrap();
+
+        let record = lifecycle_store.read_record("run").unwrap();
+        assert!(pre_execution_runtime_recovery_is_eligible(
+            &historical,
+            &record,
+            false,
+        ));
+        let options = reconstruct_options_for_pre_execution_recovery(
+            &historical,
+            Some(Arc::new(LabLikeDispatcher)),
+        )
+        .expect("current Lab dispatcher validates the persisted transport before recovery");
+        assert_eq!(options.identity.cook_id, historical.cook_id);
+        assert_eq!(options.identity.initial_run_id, "run");
+        assert!(options.provider_transport.attempt_dispatcher.is_some());
+
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                true
+            })
+            .unwrap();
+        assert!(!pre_execution_runtime_recovery_is_eligible(
+            &historical,
+            &lifecycle_store.read_record("run").unwrap(),
+            false,
+        ));
+
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+                record.metadata["runner_id"] = serde_json::json!("ambiguous-runner");
+                true
+            })
+            .unwrap();
+        assert!(!pre_execution_runtime_recovery_is_eligible(
+            &historical,
+            &lifecycle_store.read_record("run").unwrap(),
+            false,
+        ));
     }
 
     #[test]

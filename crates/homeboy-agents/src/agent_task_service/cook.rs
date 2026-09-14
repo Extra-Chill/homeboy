@@ -4994,7 +4994,7 @@ fn reconstruct_existing_cook_options(
     if adoption_or_historical_continuation {
         super::reconstruct_adoption_options_with_dispatcher(recipe, attempt_dispatcher)
     } else if pre_execution_runtime_recovery {
-        super::reconstruct_options_for_pre_execution_recovery(recipe)
+        super::reconstruct_options_for_pre_execution_recovery(recipe, attempt_dispatcher)
     } else if local_placement_override {
         super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
     } else {
@@ -5735,11 +5735,7 @@ fn run_cook_spine(
             .as_ref()
             .is_some_and(|record| transport_admission_reset_available(Some(record)));
     let pre_execution_runtime_recovery = requested_record.as_ref().is_some_and(|record| {
-        super::local_pre_execution_runtime_recovery_is_eligible(
-            &recipe,
-            record,
-            local_placement_override,
-        )
+        super::pre_execution_runtime_recovery_is_eligible(&recipe, record, local_placement_override)
     });
     let mut options = if existing_recipe {
         let mut reconstructed = reconstruct_existing_cook_options(

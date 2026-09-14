@@ -1877,7 +1877,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
         let loaded_recipe = homeboy::agents::agent_task_service::load_recipe(cook_id)
             .expect("load historical recipe");
         assert!(
-            homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
                 &loaded_recipe,
                 &persisted_record,
                 false,
@@ -2075,7 +2075,7 @@ fn cook_retry_run_recovers_a_historical_runtime_after_zero_provider_executions()
             homeboy::core::build_identity::current().display
         );
         assert!(
-            !homeboy::agents::agent_task_service::local_pre_execution_runtime_recovery_is_eligible(
+            !homeboy::agents::agent_task_service::pre_execution_runtime_recovery_is_eligible(
                 &recipe, &recovered, false,
             ),
             "provider execution restores the strict historical runtime fence"
