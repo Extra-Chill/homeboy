@@ -1146,6 +1146,24 @@ pub fn terminal_transport_recovery_required(run_id: &str) -> bool {
 /// completed child run back into execution during controller reconciliation.
 pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    terminal_run_result_for_record(record, true)
+}
+
+/// Read terminal evidence without consulting runner authority. Daemon job
+/// reconciliation calls this while runner status itself is being resolved.
+pub(crate) fn persisted_terminal_run_result(
+    run_id: &str,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    terminal_run_result_for_record(record, false)
+}
+
+fn terminal_run_result_for_record(
+    record: agent_task_lifecycle::AgentTaskRunRecord,
+    recover_missing_aggregate: bool,
+) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -1160,7 +1178,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
 
     let aggregate = match agent_task_lifecycle::read_aggregate(&record.run_id) {
         Ok(aggregate) => aggregate,
-        Err(_) => {
+        Err(_) if recover_missing_aggregate => {
             // A terminal Lab result may have been persisted before its typed
             // aggregate projection. Reconcile only that recorded terminal
             // evidence; never resume or rerun the provider for this path.
@@ -1180,6 +1198,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
         )
             })?
         }
+        Err(error) => return Err(error),
     };
     Ok(Some(AgentTaskRunResult {
         exit_code: aggregate_exit_code(&aggregate),
@@ -1283,11 +1302,15 @@ pub fn retry_with_provider_route_override(
     Ok(retry)
 }
 
+/// Retrying an unmaterialized admission *is* a request to admit it again, so
+/// the rearm is not conditioned on the caller's dispatch intent. A reservation
+/// that left the replacement admission inert would need a second, unrelated
+/// reconcile pass before anything could happen.
 fn reconcile_unmaterialized_cook_retry(
     retry: &mut AgentTaskRetryServiceResult,
-    run: bool,
+    _run: bool,
 ) -> Result<()> {
-    if run && agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
+    if agent_task_lifecycle::is_unmaterialized_cook_admission(&retry.record) {
         agent_task_lifecycle::rearm_unmaterialized_cook_admission(&retry.record.run_id)?;
         crate::agent_task_service::reconcile_unmaterialized_cook_admission(&retry.record.run_id)?;
         retry.record = agent_task_lifecycle::exact_record(&retry.record.run_id)?;
@@ -2299,12 +2322,14 @@ fn retryable_cook_attempt(
             None,
         )
     })?;
-    if !super::recipe_exists(cook_id)? {
+    let recipe_store =
+        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    if !recipe_store.recipe_exists(cook_id) {
         // Legacy runs predate durable recipes. Retain their established generic
         // lifecycle retry behavior rather than inventing Cook ownership.
         return Ok(None);
     }
-    let recipe = super::load_recipe(cook_id)?;
+    let recipe = recipe_store.load_recipe(cook_id)?;
     let source_recipe_attempt = recipe.attempts.iter().find(|recipe_attempt| {
         recipe_attempt.attempt == attempt && recipe_attempt.run_id == source.run_id
     });
@@ -2315,7 +2340,7 @@ fn retryable_cook_attempt(
             Some(source.run_id.clone()),
             Some(vec![format!(
                 "Continue the owning Cook with: {}",
-                super::cook_continue_command(None, &source.run_id, false, None)
+                super::cook_continue_command_for_record(source, &source.run_id, false, None)
             )]),
         ));
     };
@@ -2620,6 +2645,17 @@ pub fn retry_admission(run_id: &str) -> Result<()> {
     retry_admission_with_preflight(run_id, retry_plan_supported_by_generic_action)
 }
 
+/// Verify retry eligibility against the lifecycle installation that produced
+/// the report rather than the process's ambient home.
+pub(crate) fn retry_admission_in_root(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    let source = lifecycle_store.read_record(run_id)?;
+    retry_admission_in_store(lifecycle_store, &source, true)?;
+    Ok(())
+}
+
 /// Read-only Cook retry admission for control-plane projections. Unlike the
 /// executable admission path, this deliberately does not normalize placement
 /// metadata while rendering status.
@@ -2634,7 +2670,9 @@ pub(crate) enum RetryProjectionAdmission {
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let source = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, run_id)?;
+    // Eligibility is part of resource projection. Reading through the ordinary
+    // lifecycle accessor can backfill that same projection and recurse here.
+    let source = lifecycle_store.read_record_bounded(run_id)?;
     if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;
         return Ok(RetryProjectionAdmission::DurableCook);
@@ -2680,19 +2718,21 @@ fn retry_admission_in_store(
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     require_latest_attempt: bool,
 ) -> Result<Option<CookRetryAttempt>> {
+    let recipe_store =
+        super::cook_recipe::CookRecipeStore::from_data_root(lifecycle_store.data_root());
     let has_cook_ownership = source
         .metadata
         .get("cook_id")
         .and_then(serde_json::Value::as_str)
-        .map(super::recipe_exists)
-        .transpose()?
+        .map(|cook_id| recipe_store.recipe_exists(cook_id))
         .unwrap_or(false);
     let retry = retryable_cook_attempt(lifecycle_store, source)?;
     if require_latest_attempt && has_cook_ownership {
         let cook_id = source.metadata["cook_id"]
             .as_str()
             .expect("recipe-backed Cook ownership has a cook id");
-        if super::load_recipe(cook_id)?
+        if recipe_store
+            .load_recipe(cook_id)?
             .attempts
             .last()
             .map(|attempt| attempt.run_id.as_str())
@@ -3426,6 +3466,88 @@ mod tests {
         assert_eq!(record.metadata["cook_id"], "local-retry-cook");
         assert!(record
             .has_live_pending_local_cook_supervisor(started_at + chrono::Duration::seconds(1)));
+    }
+
+    #[test]
+    fn cook_retry_reads_the_recipe_from_the_injected_lifecycle_root() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+            let workspace = tempfile::tempdir().expect("workspace");
+            let cook_id = "rooted-retry-cook";
+            let run_id = "rooted-retry-attempt-1";
+            let plan = one_task_plan("rooted-retry-plan", workspace.path());
+            agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(run_id))
+                .expect("persist source attempt");
+            store
+                .mutate_record(run_id, |record| {
+                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.metadata["cook_id"] = json!(cook_id);
+                    record.metadata["cook_attempt"] = json!(1);
+                    record.metadata["provider_executions_consumed"] = json!(0);
+                    record.metadata["pre_execution_failure"] = json!({
+                        "phase": "runner_preflight",
+                        "retryable": true,
+                    });
+                    true
+                })
+                .expect("mark retryable source attempt");
+            let recipe_store = super::super::cook_recipe::CookRecipeStore::from_data_root(
+                store.data_root().to_path_buf(),
+            );
+            recipe_store
+                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                    schema: super::super::cook_recipe::COOK_RECIPE_SCHEMA.to_string(),
+                    cook_id: cook_id.to_string(),
+                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                        attempt: 1,
+                        run_id: run_id.to_string(),
+                        plan: plan.clone(),
+                    }],
+                    promotion_transport: json!({
+                        "provider_command": null,
+                        "provider_invocation": null,
+                        "attempt_dispatch": { "kind": "local" },
+                    }),
+                    gate_policy: json!({
+                        "verify": [],
+                        "private_verify": [],
+                        "private_gate_reveal": "summary_only",
+                    }),
+                    retry_budget: json!({
+                        "max_attempts": 2,
+                        "execution_budget": plan.options.execution_budget,
+                    }),
+                    finalization: json!({
+                        "no_finalize": true,
+                        "base": "main",
+                        "head": null,
+                        "title": "title",
+                        "commit_message": "message",
+                        "protected_branches": [],
+                        "ai_tool": "test",
+                        "ai_model": null,
+                        "ai_used_for": "test",
+                        "to_worktree": "target",
+                        "source_worktree_path": null,
+                        "task_base_sha": null,
+                    }),
+                    source_refs: Vec::new(),
+                    runtime_generation: homeboy_core::build_identity::current().display,
+                    sensitive_mappings: Vec::new(),
+                    harvest_context: Default::default(),
+                })
+                .expect("persist recipe in injected root");
+            let source = store.read_record(run_id).expect("read source attempt");
+
+            let retry = retryable_cook_attempt(&store, &source)
+                .expect("read rooted recipe")
+                .expect("Cook retry");
+
+            assert_eq!(retry.cook_id, cook_id);
+            assert_eq!(retry.attempt, 1);
+            assert!(retry.replaces_source_attempt);
+        });
     }
 
     /// A supervisor that has begun supervising still owns its run. Admitting

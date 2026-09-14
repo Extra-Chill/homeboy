@@ -37,6 +37,7 @@ fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCoo
         primary_failure: None,
         moving_base_recovery: None,
         failure_context: None,
+        report_stores: None,
     }
 }
 

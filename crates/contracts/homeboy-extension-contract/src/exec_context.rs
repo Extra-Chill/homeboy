@@ -16,6 +16,10 @@ pub const EXTENSION_PATH: &str = "HOMEBOY_EXTENSION_PATH";
 pub const PROJECT_PATH: &str = "HOMEBOY_PROJECT_PATH";
 /// Filesystem path to the component directory.
 pub const COMPONENT_PATH: &str = "HOMEBOY_COMPONENT_PATH";
+/// Filesystem path to shared extension script libraries in the active runtime.
+pub const SHARED_LIB_DIR: &str = "HOMEBOY_SHARED_LIB_DIR";
+/// Filesystem path to agent runtime packages in the active runtime.
+pub const AGENT_RUNTIMES_DIR: &str = "HOMEBOY_AGENT_RUNTIMES_DIR";
 
 /// Run only specific steps (comma-separated). Scripts should skip steps not in this list.
 pub const STEP: &str = "HOMEBOY_STEP";

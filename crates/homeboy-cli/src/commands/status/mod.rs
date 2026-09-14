@@ -18,7 +18,7 @@ use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
 use homeboy_engine_primitives::command::{
-    wait_with_bounded_output_supervised_with_progress, CommandProgress, ControllerChildGuard,
+    wait_with_bounded_output_supervised_with_progress_owned, CommandProgress, ExecutionOwner,
     SupervisedCommandTermination,
 };
 use homeboy_release::release::version;
@@ -274,13 +274,7 @@ fn run_isolated_probe(
         .env("HOMEBOY_STATUS_PROBE_CHILD", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let guard = ControllerChildGuard::prepare(&mut command)
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-    let mut child = command
-        .spawn()
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-    guard
-        .attach(&child)
+    let mut owner = ExecutionOwner::spawn(&mut command)
         .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
     // Leave headroom below the command-wide 30-second status deadline for the
     // parent to kill the child and serialize its partial snapshot.
@@ -290,12 +284,13 @@ fn run_isolated_probe(
         .then_some(remaining.min(GLOBAL_STATUS_PROBE_BUDGET))
         .unwrap_or(remaining);
     let mut latest_progress = None;
-    let supervised = wait_with_bounded_output_supervised_with_progress(
-        &mut child,
+    let supervised = wait_with_bounded_output_supervised_with_progress_owned(
+        &mut owner,
         STATUS_PROBE_CAPTURE_LIMIT,
         remaining,
         None,
         STATUS_PROBE_HEARTBEAT,
+        None,
         || false,
         |heartbeat| {
             if let Some(progress) = heartbeat.progress {

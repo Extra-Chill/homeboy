@@ -454,6 +454,7 @@ mod tools {
             component_id(input),
             git::PushOptions {
                 tags: bool_input(input, "tags"),
+                atomic: bool_input(input, "atomic"),
                 force_with_lease: bool_input(input, "force_with_lease"),
                 remote_url: optional_string(input, &["remote_url"]).map(str::to_string),
                 token: None,

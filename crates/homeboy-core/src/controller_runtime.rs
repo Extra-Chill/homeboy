@@ -1094,8 +1094,11 @@ pub fn materialize_source_commit(source: &str, commit: &str, identity: &str) -> 
             None,
         ));
     }
-    let target =
-        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{commit}"))?;
+    let target = crate::cleanup::acquire_managed_cargo_target(
+        &format!("controller-runtime:{commit}"),
+        &checkout,
+        None,
+    )?;
     let build = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy"])
         .env("CARGO_TARGET_DIR", target.target_dir())
@@ -1581,20 +1584,12 @@ fn recover_pin_unlocked(
         )
     })?;
     let checkout = temporary.path().join("source");
-    run_command(
-        "git",
-        [
-            "-C",
-            &source.display().to_string(),
-            "worktree",
-            "add",
-            "--detach",
-            &checkout.display().to_string(),
-            &revision,
-        ],
+    let mut worktree = RecoveryWorktree::add(source, &checkout, &revision)?;
+    let target = crate::cleanup::acquire_managed_cargo_target(
+        &format!("controller-runtime:{revision}"),
+        &checkout,
+        None,
     )?;
-    let target =
-        crate::cleanup::acquire_shared_cargo_target(&format!("controller-runtime:{revision}"))?;
     let build = Command::new("cargo")
         .args(["build", "--release", "--bin", "homeboy"])
         .env("CARGO_TARGET_DIR", target.target_dir())
@@ -1607,17 +1602,6 @@ fn recover_pin_unlocked(
             )
         })?;
     if !build.success() {
-        let _ = run_command(
-            "git",
-            [
-                "-C",
-                &source.display().to_string(),
-                "worktree",
-                "remove",
-                "--force",
-                &checkout.display().to_string(),
-            ],
-        );
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
             "controller runtime recovery build failed",
@@ -1628,17 +1612,6 @@ fn recover_pin_unlocked(
     let built = target.target_dir().join("release/homeboy");
     let actual = executable_digest(&built)?;
     if actual != expected {
-        let _ = run_command(
-            "git",
-            [
-                "-C",
-                &source.display().to_string(),
-                "worktree",
-                "remove",
-                "--force",
-                &checkout.display().to_string(),
-            ],
-        );
         return Err(Error::validation_invalid_argument(
             "controller_runtime",
             format!(
@@ -1650,21 +1623,66 @@ fn recover_pin_unlocked(
     }
     verify_artifact(&built, expected, identity)?;
     publish_pin(&built, &destination, expected)?;
-    let _ = run_command(
-        "git",
-        [
-            "-C",
-            &source.display().to_string(),
-            "worktree",
-            "remove",
-            "--force",
-            &checkout.display().to_string(),
-        ],
-    );
     let mut recovered = runtime.clone();
     recovered["originating"]["pinned_executable"] = json!(destination);
     validate_pin(&recovered)?;
+    worktree.remove()?;
     Ok(recovered)
+}
+
+/// Owns a controller recovery checkout after Git has registered it. Dropping
+/// the guard finalizes registration on every error path after `worktree add`.
+struct RecoveryWorktree {
+    source: PathBuf,
+    checkout: PathBuf,
+    registered: bool,
+}
+
+impl RecoveryWorktree {
+    fn add(source: &Path, checkout: &Path, revision: &str) -> Result<Self> {
+        run_command(
+            "git",
+            [
+                "-C",
+                &source.display().to_string(),
+                "worktree",
+                "add",
+                "--detach",
+                &checkout.display().to_string(),
+                revision,
+            ],
+        )?;
+        Ok(Self {
+            source: source.to_path_buf(),
+            checkout: checkout.to_path_buf(),
+            registered: true,
+        })
+    }
+
+    fn remove(&mut self) -> Result<()> {
+        if !self.registered {
+            return Ok(());
+        }
+        run_command(
+            "git",
+            [
+                "-C",
+                &self.source.display().to_string(),
+                "worktree",
+                "remove",
+                "--force",
+                &self.checkout.display().to_string(),
+            ],
+        )?;
+        self.registered = false;
+        Ok(())
+    }
+}
+
+impl Drop for RecoveryWorktree {
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
 }
 
 fn runtime_root() -> Result<PathBuf> {
@@ -3411,6 +3429,98 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .expect("make fake controller executable");
         executable_digest(path).expect("hash fake controller")
+    }
+
+    fn recovery_source(temporary: &Path) -> (PathBuf, String) {
+        let source = temporary.join("source");
+        std::fs::create_dir(&source).expect("create recovery source");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .expect("run git setup")
+                .success());
+        }
+        std::fs::write(source.join("fixture"), "fixture").expect("write recovery fixture");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .expect("stage recovery fixture")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "fixture"])
+            .current_dir(&source)
+            .status()
+            .expect("commit recovery fixture")
+            .success());
+        let revision = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .expect("read recovery revision");
+        (
+            source,
+            String::from_utf8(revision.stdout)
+                .unwrap()
+                .trim()
+                .to_string(),
+        )
+    }
+
+    fn recovery_worktree_registered(source: &Path, checkout: &Path) -> bool {
+        String::from_utf8(
+            Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .current_dir(source)
+                .output()
+                .expect("list recovery worktrees")
+                .stdout,
+        )
+        .unwrap()
+        .lines()
+        .any(|line| line == format!("worktree {}", checkout.display()))
+    }
+
+    #[test]
+    fn recovery_worktree_guard_unregisters_on_failure_and_concurrent_finalization() {
+        let temporary = tempfile::tempdir().expect("temporary recovery repository");
+        let (source, revision) = recovery_source(temporary.path());
+        let failed = temporary.path().join("failed");
+        let result = (|| -> Result<()> {
+            let _worktree = RecoveryWorktree::add(&source, &failed, &revision)?;
+            Err(Error::internal_unexpected("simulated recovery failure"))
+        })();
+        assert!(result.is_err());
+        assert!(
+            !recovery_worktree_registered(&source, &failed),
+            "a failure after worktree add must deregister the checkout"
+        );
+
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for name in ["first", "second"] {
+                let checkout = temporary.path().join(name);
+                let source = &source;
+                let revision = &revision;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let worktree = RecoveryWorktree::add(source, &checkout, revision)
+                        .expect("add concurrent recovery worktree");
+                    barrier.wait();
+                    drop(worktree);
+                    assert!(
+                        !recovery_worktree_registered(source, &checkout),
+                        "concurrent recovery finalization must deregister {name}"
+                    );
+                });
+            }
+        });
     }
 
     #[test]

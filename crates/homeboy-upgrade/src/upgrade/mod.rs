@@ -24,7 +24,8 @@ pub use helpers::{
     run_upgrade_with_method, version_is_newer,
 };
 pub use operation::{
-    load_upgrade_operation_status, UpgradeOperationStatus, UpgradePromotionWaitStatus,
+    load_upgrade_operation_status, UpgradeOperationFailure, UpgradeOperationStatus,
+    UpgradePromotionWaitStatus,
 };
 pub use planning::resolve_binary_on_path;
 pub use release_catalog::{

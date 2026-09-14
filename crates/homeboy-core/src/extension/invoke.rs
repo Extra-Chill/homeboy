@@ -726,6 +726,103 @@ mod tests {
         });
     }
 
+    #[test]
+    fn build_exec_env_binds_active_shared_runtime_assets_for_hashed_extensions() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let config_root = homeboy_core::paths::homeboy().expect("isolated config root");
+            let shared_source = home.path().join("materialized-assets").join("shared-lib");
+            std::fs::create_dir_all(&shared_source).expect("shared library source");
+            std::fs::write(
+                shared_source.join("fixture-helper.sh"),
+                "fixture_helper() { printf shared-runtime; }\n",
+            )
+            .expect("shared helper");
+
+            let shared_lib_dir = homeboy_core::paths::extensions_in_root(&config_root)
+                .join("scripts")
+                .join("lib");
+            std::fs::create_dir_all(shared_lib_dir.parent().expect("shared lib parent"))
+                .expect("shared lib parent");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&shared_source, &shared_lib_dir)
+                .expect("link shared library into active runtime");
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_dir(&shared_source, &shared_lib_dir)
+                .expect("link shared library into active runtime");
+
+            let agent_runtimes_dir = homeboy_core::paths::agent_runtimes_in_root(&config_root);
+            std::fs::create_dir_all(&agent_runtimes_dir).expect("agent runtimes");
+            std::fs::write(agent_runtimes_dir.join("fixture-runtime"), "active")
+                .expect("agent runtime asset");
+
+            let hashed_extension_source = home
+                .path()
+                .join("extension-snapshots")
+                .join("fixture-9f86d081884c7d65");
+            std::fs::create_dir_all(&hashed_extension_source).expect("hashed extension source");
+
+            // The root resolver is pinned by the isolated-home context, not the
+            // ambient HOME inherited by the extension child.
+            std::env::set_var("HOME", "/primary-home-must-not-be-selected");
+            let env = build_exec_env(
+                "fixture",
+                None,
+                None,
+                "{}",
+                Some(&hashed_extension_source.to_string_lossy()),
+                None,
+                None,
+                None,
+            );
+
+            for (name, expected) in [
+                (exec_context::SHARED_LIB_DIR, &shared_lib_dir),
+                (exec_context::AGENT_RUNTIMES_DIR, &agent_runtimes_dir),
+            ] {
+                assert_eq!(
+                    env.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.as_str()),
+                    Some(expected.to_string_lossy().as_ref()),
+                    "{name} must name the active runtime asset directory"
+                );
+            }
+
+            let result = execute_extension_command(
+                "sh -c '. \"$HOMEBOY_SHARED_LIB_DIR/fixture-helper.sh\"; fixture_helper; test -f \"$HOMEBOY_AGENT_RUNTIMES_DIR/fixture-runtime\"'",
+                &[],
+                Some(&hashed_extension_source.to_string_lossy()),
+                &env,
+                ExtensionExecutionMode::Captured,
+            )
+            .expect("execute fixture child");
+            assert_eq!(
+                result.exit_code, 0,
+                "fixture child failed: {}",
+                result.output.stderr
+            );
+            assert_eq!(result.output.stdout, "shared-runtime");
+        });
+    }
+
+    #[test]
+    fn build_exec_env_omits_missing_shared_runtime_asset_bindings() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let env = build_exec_env("fixture", None, None, "{}", None, None, None, None);
+
+            assert!(
+                !env.iter()
+                    .any(|(key, _)| key == exec_context::SHARED_LIB_DIR),
+                "missing shared library assets must not produce a bogus binding"
+            );
+            assert!(
+                !env.iter()
+                    .any(|(key, _)| key == exec_context::AGENT_RUNTIMES_DIR),
+                "missing agent runtime assets must not produce a bogus binding"
+            );
+        });
+    }
+
     /// The toolchain PATH is forwarded from the rig provider, never fabricated.
     ///
     /// This used to assert only `PATH.is_some()`. That was true while this code

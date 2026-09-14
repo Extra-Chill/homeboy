@@ -116,8 +116,7 @@ pub fn require_dependency_hygiene_for_source_with_settings(
     settings: &[(String, serde_json::Value)],
     options: DependencyHygieneOptions,
 ) -> Result<Vec<CheckoutHygieneSnapshot>> {
-    let mut checkouts = dependency_checkouts_for_source(source_path)?;
-    checkouts.extend(dependency_checkouts_for_settings(source_path, settings)?);
+    let mut checkouts = dependency_checkouts_for_settings(source_path, settings)?;
     if let Some(extension_path) = extension_path {
         checkouts.push(DependencyCheckout {
             id: "extension".to_string(),
@@ -227,33 +226,11 @@ pub struct DependencyCheckout {
     pub path: PathBuf,
 }
 
-fn dependency_checkouts_for_source(source_path: &Path) -> Result<Vec<DependencyCheckout>> {
-    let ids = validation_dependency_ids(source_path)?;
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    ids.into_iter()
-        .map(|id| {
-            let path = resolve_validation_dependency_path(source_path, &id)?;
-            Ok(DependencyCheckout {
-                id,
-                role: "validation_dependency".to_string(),
-                path,
-            })
-        })
-        .collect()
-}
-
 fn dependency_checkouts_for_settings(
     source_path: &Path,
     settings: &[(String, serde_json::Value)],
 ) -> Result<Vec<DependencyCheckout>> {
-    let ids = settings
-        .iter()
-        .filter(|(key, _)| key == "validation_dependencies")
-        .flat_map(|(_, value)| validation_dependency_ids_from_value(value))
-        .collect::<Vec<_>>();
+    let ids = effective_validation_dependency_ids(source_path, settings)?;
 
     ids.into_iter()
         .map(|id| {
@@ -267,17 +244,42 @@ fn dependency_checkouts_for_settings(
         .collect()
 }
 
-fn validation_dependency_ids_from_value(value: &serde_json::Value) -> Vec<String> {
-    let Some(dependencies) = value.as_array() else {
-        return Vec::new();
+/// Select validation dependencies for one invocation. An explicit setting
+/// replaces the manifest declaration, including an explicit empty array.
+pub fn effective_validation_dependency_ids(
+    source_path: &Path,
+    settings: &[(String, serde_json::Value)],
+) -> Result<Vec<String>> {
+    if let Some((_, value)) = settings
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "validation_dependencies")
+    {
+        return validation_dependency_ids_from_value(value);
+    }
+    validation_dependency_ids(source_path)
+}
+
+fn validation_dependency_ids_from_value(value: &serde_json::Value) -> Result<Vec<String>> {
+    let invalid = || {
+        Error::validation_invalid_argument(
+            "validation_dependencies",
+            "expected an array of nonempty dependency strings; use [] for no dependencies",
+            None,
+            None,
+        )
     };
+    let dependencies = value.as_array().ok_or_else(invalid)?;
 
     dependencies
         .iter()
-        .filter_map(|item| item.as_str())
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
+        .map(|item| {
+            item.as_str()
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .ok_or_else(invalid)
+        })
         .collect()
 }
 
@@ -346,7 +348,7 @@ fn collect_validation_dependency_ids(value: &serde_json::Value, ids: &mut Vec<St
     );
 }
 
-fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) -> Result<PathBuf> {
+pub fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) -> Result<PathBuf> {
     let expanded = shellexpand::tilde(dependency).to_string();
     let explicit = Path::new(&expanded);
     if explicit.is_dir() {
@@ -1340,6 +1342,107 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::ValidationMultipleErrors);
         assert_eq!(err.details["checkouts"][0]["dirty"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn explicit_validation_dependency_settings_replace_manifest_declarations() {
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join(PORTABLE_CONFIG_FILE),
+            r#"{"validation_dependencies":["dirty-manifest"]}"#,
+        )
+        .unwrap();
+
+        let selected = effective_validation_dependency_ids(
+            source.path(),
+            &[(
+                "validation_dependencies".to_string(),
+                serde_json::json!(["clean-selected"]),
+            )],
+        )
+        .expect("explicit selection");
+        assert_eq!(selected, ["clean-selected"]);
+
+        let empty = effective_validation_dependency_ids(
+            source.path(),
+            &[("validation_dependencies".to_string(), serde_json::json!([]))],
+        )
+        .expect("empty explicit selection");
+        assert!(empty.is_empty());
+
+        let manifest =
+            effective_validation_dependency_ids(source.path(), &[]).expect("manifest fallback");
+        assert_eq!(manifest, ["dirty-manifest"]);
+
+        for invalid in [
+            serde_json::json!("typo"),
+            serde_json::json!([" "]),
+            serde_json::json!([1]),
+        ] {
+            let error = effective_validation_dependency_ids(
+                source.path(),
+                &[("validation_dependencies".to_string(), invalid)],
+            )
+            .expect_err("invalid explicit selection must fail closed");
+            assert_eq!(error.details["field"], "validation_dependencies");
+        }
+    }
+
+    #[test]
+    fn hygiene_uses_the_clean_explicit_dependency_instead_of_a_dirty_manifest_dependency() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let manifest_dependency = root.path().join("manifest-dependency");
+        let selected_dependency = root.path().join("selected-dependency");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&manifest_dependency).unwrap();
+        fs::create_dir_all(&selected_dependency).unwrap();
+        init_repo(&manifest_dependency);
+        fs::write(manifest_dependency.join("dirty.txt"), "dirty\n").unwrap();
+        let _remote = init_repo_with_upstream(&selected_dependency);
+        fs::write(
+            source.join(PORTABLE_CONFIG_FILE),
+            serde_json::json!({
+                "validation_dependencies": [manifest_dependency.display().to_string()]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let settings = vec![(
+            "validation_dependencies".to_string(),
+            serde_json::json!([selected_dependency.display().to_string()]),
+        )];
+        let snapshots = require_checkout_hygiene_without_lifecycle(
+            dependency_checkouts_for_settings(&source, &settings).unwrap(),
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect("clean explicit dependency should replace dirty manifest dependency");
+
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots[0].path,
+            selected_dependency
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+
+        fs::write(selected_dependency.join("dirty.txt"), "dirty\n").unwrap();
+        let error = require_checkout_hygiene_without_lifecycle(
+            dependency_checkouts_for_settings(&source, &settings).unwrap(),
+            DependencyHygieneOptions { allow_stale: false },
+        )
+        .expect_err("dirty explicitly selected dependency must be rejected");
+        assert_eq!(
+            error.details["checkouts"][0]["path"],
+            selected_dependency
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
     }
 
     #[test]

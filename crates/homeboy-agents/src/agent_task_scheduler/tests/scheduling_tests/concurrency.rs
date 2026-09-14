@@ -386,6 +386,8 @@ pub(super) mod concurrency_tests {
         let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
+        plan.options.resource_budget.max_active_units = Some(2);
+        plan.options.resource_budget.default_task_units = 1;
         for task in &mut plan.tasks {
             task.limits.exclusive_resource_keys = vec!["cache:shared".to_string()];
         }
@@ -414,6 +416,8 @@ pub(super) mod concurrency_tests {
                 && event.message.as_deref().is_some_and(|message| {
                     message.contains("waiting for exclusive resource 'cache:shared'")
                         && message.contains("held by 'task-1'")
+                        && message.contains("queue_position=1")
+                        && message.contains("active_units=1/2")
                         && message.contains("ms elapsed")
                 })
         }));

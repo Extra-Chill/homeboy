@@ -1605,6 +1605,10 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
         lifecycle_store,
         run_id,
     )? {
+        let continuation = super::cook_recovery_command_with_prefix(
+            &super::cook_recovery_command_prefix_for_record(&record),
+            &["cook-continue", run_id],
+        );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -1613,8 +1617,7 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `{}` after the runner artifact can be harvested.",
-                super::cook_continue_command(None, run_id, false, None)
+                "Retry `{continuation}` after the runner artifact can be harvested."
             )]),
         )
         .with_retryable(true));
@@ -1651,6 +1654,10 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
             aggregate.as_ref(),
         )?
     {
+        let continuation = super::cook_recovery_command_with_prefix(
+            &super::cook_recovery_command_prefix_for_record(&record),
+            &["cook-continue", run_id],
+        );
         return Err(Error::validation_invalid_argument(
             "cook_continuation.artifact_projection",
             format!(
@@ -1659,8 +1666,7 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
             ),
             Some(run_id.to_string()),
             Some(vec![format!(
-                "Retry `{}` after the runner artifact can be harvested.",
-                super::cook_continue_command(None, run_id, false, None)
+                "Retry `{continuation}` after the runner artifact can be harvested."
             )]),
         )
         .with_retryable(true));
@@ -2512,36 +2518,54 @@ pub fn reconstruct_options_for_pre_execution_recovery(
     reconstruct_recipe_options(recipe, None, false, false)
 }
 
+/// Reconstruct a pre-execution recovery that must revalidate its current
+/// transport before provider work can resume.
+pub fn reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+    recipe: &AgentTaskCookRecipe,
+    attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
+) -> Result<CookRequest> {
+    reconstruct_recipe_options(recipe, attempt_dispatcher, false, true)
+}
+
 /// Whether an attempt that never reached provider execution may be rebuilt by
-/// the current controller without replaying a historical external transport.
-/// A queued retry proves that boundary through its immutable retry origin.
-pub fn local_pre_execution_runtime_recovery_is_eligible(
+/// the current controller. A queued retry proves that boundary through its
+/// immutable retry origin.
+pub fn pre_execution_runtime_recovery_is_eligible(
     recipe: &AgentTaskCookRecipe,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-    explicit_local_override: bool,
 ) -> bool {
-    let local_transport = explicit_local_override
-        || recipe.promotion_transport["attempt_dispatch"]["kind"].as_str() == Some("local");
-    if !local_transport {
-        return false;
-    }
-    if super::cook_pre_execution::retryable_pre_execution_failure(record) {
+    let zero_provider_executions = record.metadata["provider_executions_consumed"].as_u64()
+        == Some(0)
+        && record.metadata["provider_run_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty);
+    let unambiguous_transport_ownership = record.provider_handles.is_empty()
+        && record.runner_job_id().is_none()
+        && record.lab_handoff.as_ref().is_none_or(|handoff| {
+            handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
+        });
+    if record.state.is_terminal()
+        && zero_provider_executions
+        && unambiguous_transport_ownership
+        && super::cook_pre_execution::retryable_pre_execution_failure(record)
+    {
         return true;
     }
 
     let origin = &record.metadata["retry_origin"]["pre_execution_failure"];
+    let transport_recovery = &record.metadata["controller_runtime_recovery"];
     let current_runtime = homeboy_core::build_identity::current().display;
     record.state == agent_task_lifecycle::AgentTaskRunState::Queued
         && recipe.runtime_generation != current_runtime
         && record.metadata["controller_identity"].as_str() == Some(current_runtime.as_str())
         && record.metadata["retry_of"].is_string()
-        && record.metadata["provider_executions_consumed"].as_u64() == Some(0)
-        && record.metadata["provider_run_ids"]
-            .as_array()
-            .is_some_and(Vec::is_empty)
+        && zero_provider_executions
+        && unambiguous_transport_ownership
         && (origin["retryable"] == Value::Bool(true)
             || origin["phase"].as_str() == Some("local_retry_supervisor"))
         && origin["provider_executions_consumed"].as_u64() == Some(0)
+        && transport_recovery["schema"] == "homeboy/controller-runtime-pre-execution-recovery/v1"
+        && transport_recovery["reason"] == "retryable_pre_execution_transport_failure"
 }
 
 /// Reconstruct the policy used to adopt an already-prepared candidate. Adoption
@@ -4104,6 +4128,71 @@ mod tests {
             "review_ready"
         );
         assert!(aggregate.is_none());
+    }
+
+    #[test]
+    fn continuation_projection_preflight_renders_the_injected_placement() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let (recipe, plan) = persist_recipe_run(&store, &lifecycle_store);
+        lifecycle_store
+            .mutate_record("run", |record| {
+                let identity = homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                    repository: "fixture".to_string(),
+                    workspace: "fixture".to_string(),
+                    task: "task".to_string(),
+                    candidate: None,
+                    base: None,
+                };
+                record.metadata["execution_placement_decision"] = serde_json::to_value(
+                    homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+                        "fixture",
+                        "v1",
+                        identity,
+                        homeboy_lab_runner_contract::Placement::Local,
+                    ),
+                )
+                .unwrap();
+                true
+            })
+            .unwrap();
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            id: "unprojected-patch".to_string(),
+            kind: "patch".to_string(),
+            ..Default::default()
+        });
+        agent_task_lifecycle::record_run_aggregate_in_store(
+            &lifecycle_store,
+            "run",
+            &plan,
+            &aggregate,
+        )
+        .unwrap();
+
+        let reconciling = reconcile_recipe_attempt_for_continuation_in_stores(
+            &store,
+            &lifecycle_store,
+            &recipe,
+            "run",
+        )
+        .expect_err("unprojected patch blocks continuation reconciliation");
+        let observing =
+            preflight_recipe_attempt_for_continuation_in_store(&lifecycle_store, &recipe, "run")
+                .expect_err("unprojected patch blocks continuation observation");
+
+        for error in [reconciling, observing] {
+            assert!(
+                error.details["tried"]
+                    .as_array()
+                    .is_some_and(|tried| tried.iter().any(|remediation| remediation
+                        .as_str()
+                        .is_some_and(|remediation| remediation
+                            .contains("homeboy --placement local agent-task cook-continue run")))),
+                "{:?}",
+                error.details
+            );
+        }
     }
 
     /// A claim whose owner died is recoverable work. Recovery is decided from

@@ -87,6 +87,62 @@ impl AuditTiming {
         self.extend_from_timer(timer);
     }
 
+    /// Attribution self-check for a coarse phase: compare the phase span's wall
+    /// time against the sum of the child spans recorded while the phase was
+    /// open, and surface the gap when it is significant.
+    ///
+    /// `children_start` is the `timing.spans` length captured immediately before
+    /// the phase's work began; every span at or after that index except the
+    /// phase span itself counts as attributed. Index-based windows are what make
+    /// the check survive new span ids — a future setup span is a child by
+    /// construction, no id list to forget to update, and unspanned work is
+    /// exactly the residue this check exists to expose (#14566: 99.8% of the
+    /// `detectors` phase landed in no child span and every optimization guess
+    /// about it was unfalsifiable).
+    ///
+    /// Children summing to MORE than the wall is the expected parallel shape
+    /// (concurrent detectors overlap), so the gap clamps at zero and stays
+    /// quiet. The warning is emitted twice on purpose: an `eprintln!` an
+    /// operator sees live — `eprintln!` rather than `log_status!` for the same
+    /// reason [`AuditTiming::log_detector_summary`] gives, CI is never a
+    /// terminal — and a `<phase>.unattributed` span with status `warning` that
+    /// survives into the serialized `timing.spans[]` for post-mortem diffs.
+    pub(crate) fn warn_unattributed_phase_time(&mut self, phase_id: &str, children_start: usize) {
+        let wall = self
+            .spans
+            .iter()
+            .rev()
+            .find(|span| span.id == phase_id)
+            .and_then(|span| span.duration_ms);
+        let Some(wall) = wall else {
+            return;
+        };
+        let attributed: f64 = self
+            .spans
+            .iter()
+            .skip(children_start)
+            .filter(|span| span.id != phase_id)
+            .filter_map(|span| span.duration_ms)
+            .sum();
+        let unattributed = (wall - attributed).max(0.0);
+        if unattributed < UNATTRIBUTED_WARN_FRACTION * wall
+            || unattributed < UNATTRIBUTED_WARN_FLOOR_MS
+        {
+            return;
+        }
+        eprintln!(
+            "[audit] Warning: {} of the {} phase is unattributed ({:.0}% of wall) — work ran inside the phase without a timing span",
+            format_millis(unattributed),
+            phase_id,
+            unattributed / wall * 100.0
+        );
+        self.spans.push(AuditTimingSpan {
+            id: format!("{phase_id}.unattributed"),
+            status: "warning".to_string(),
+            duration_ms: Some(unattributed),
+        });
+    }
+
     /// Drain a generic phase timer into the audit-facing span list.
     fn extend_from_timer(&mut self, timer: homeboy_engine_primitives::phase_timing::PhaseTimer) {
         self.spans.extend(
@@ -199,6 +255,26 @@ const DETECTOR_SPAN_PREFIX: &str = "detector.";
 
 /// Timing id of the aggregate span covering the whole detector phase.
 const DETECTOR_PHASE_SPAN_ID: &str = "detectors";
+
+/// Fraction of a phase's wall time that may land in no child span before
+/// [`AuditTiming::warn_unattributed_phase_time`] warns.
+///
+/// The measured failure this guards against was 99.8% unattributed; a healthy
+/// phase's residue is merge and log overhead in the low single-digit percent.
+/// 10% sits far enough above that residue to never false-positive on a
+/// well-instrumented phase while still firing at one-tenth of the failure it
+/// exists to catch — and at 10% of an expensive phase the gap is already large
+/// enough to misdirect optimization work, which is the failure mode that
+/// matters.
+const UNATTRIBUTED_WARN_FRACTION: f64 = 0.10;
+
+/// Absolute floor, in milliseconds, under which
+/// [`AuditTiming::warn_unattributed_phase_time`] stays quiet regardless of
+/// fraction. A 200ms phase with 30ms of unspanned glue is 15% unattributed and
+/// not worth a warning; the same fraction of an 800s phase is the #14566
+/// failure. The floor keeps small components from training operators to ignore
+/// the signal.
+const UNATTRIBUTED_WARN_FLOOR_MS: f64 = 1_000.0;
 
 /// How many detector spans [`AuditTiming::log_detector_summary`] names
 /// individually. The full audit records 40+ detector spans; one line each would
@@ -340,6 +416,117 @@ mod tests {
                 "elapsed_ms": 12.5,
             })
         );
+    }
+
+    fn span(id: &str, duration_ms: f64) -> super::AuditTimingSpan {
+        super::AuditTimingSpan {
+            id: id.to_string(),
+            status: "ok".to_string(),
+            duration_ms: Some(duration_ms),
+        }
+    }
+
+    /// The #14566 shape: a phase wall of 518.6s whose 42 recorded children sum
+    /// to 1.1s must produce a visible `detectors.unattributed` warning span.
+    #[test]
+    fn unattributed_check_warns_when_children_do_not_cover_wall() {
+        let mut timing = super::AuditTiming::default();
+        let children_start = timing.spans.len();
+        timing
+            .spans
+            .push(span("detector.facade_passthrough", 300.0));
+        timing.spans.push(span("detector.docs", 200.0));
+        timing.spans.push(span("detector.duplication.exact", 600.0));
+        timing.spans.push(span("detectors", 518_600.0));
+
+        timing.warn_unattributed_phase_time("detectors", children_start);
+
+        let warning = timing
+            .spans
+            .iter()
+            .find(|span| span.id == "detectors.unattributed")
+            .expect("significant unattributed time must record a warning span");
+        assert_eq!(warning.status, "warning");
+        let unattributed = warning.duration_ms.expect("warning span carries the gap");
+        // 518.6s wall - 1.1s children ≈ 517.5s unattributed.
+        assert!((unattributed - 517_500.0).abs() < 1.0);
+    }
+
+    /// Concurrent detectors legitimately record more child time than wall
+    /// time — the overlap IS the speedup. That shape is fully attributed.
+    #[test]
+    fn unattributed_check_is_quiet_when_parallel_children_exceed_wall() {
+        let mut timing = super::AuditTiming::default();
+        let children_start = timing.spans.len();
+        timing.spans.push(span("detector.dead_code", 6_000.0));
+        timing.spans.push(span("detectors", 5_000.0));
+
+        timing.warn_unattributed_phase_time("detectors", children_start);
+
+        assert!(timing
+            .spans
+            .iter()
+            .all(|span| span.id != "detectors.unattributed"));
+    }
+
+    /// Spans recorded before the phase window belong to other phases and must
+    /// not be credited against this phase's wall — otherwise a phase with zero
+    /// children of its own could hide behind an expensive earlier phase.
+    #[test]
+    fn unattributed_check_does_not_credit_other_phases_spans() {
+        let mut timing = super::AuditTiming::default();
+        timing
+            .spans
+            .push(span("discovery_fingerprinting", 50_000.0));
+        let children_start = timing.spans.len();
+        timing.spans.push(span("detectors", 5_000.0));
+
+        timing.warn_unattributed_phase_time("detectors", children_start);
+
+        let warning = timing
+            .spans
+            .iter()
+            .find(|span| span.id == "detectors.unattributed")
+            .expect("the phase has no children of its own, so the full wall is unattributed");
+        assert_eq!(
+            warning.duration_ms,
+            Some(5_000.0),
+            "the earlier phase's span must not reduce this phase's gap"
+        );
+    }
+
+    /// Below the absolute floor the check stays quiet even at a high fraction:
+    /// 400ms of unspanned glue in a half-second phase is 80% unattributed and
+    /// still not worth an operator's attention.
+    #[test]
+    fn unattributed_check_ignores_small_absolute_gaps() {
+        let mut timing = super::AuditTiming::default();
+        let children_start = timing.spans.len();
+        timing.spans.push(span("detector.docs", 100.0));
+        timing.spans.push(span("detectors", 500.0));
+
+        timing.warn_unattributed_phase_time("detectors", children_start);
+
+        assert!(timing
+            .spans
+            .iter()
+            .all(|span| span.id != "detectors.unattributed"));
+    }
+
+    /// The phase span itself is not its own child; without the exclusion the
+    /// gap would always clamp to zero and the check could never fire.
+    #[test]
+    fn unattributed_check_excludes_the_phase_span_from_children() {
+        let mut timing = super::AuditTiming::default();
+        let children_start = timing.spans.len();
+        timing.spans.push(span("detectors", 10_000.0));
+
+        timing.warn_unattributed_phase_time("detectors", children_start);
+
+        assert!(timing
+            .spans
+            .iter()
+            .any(|span| span.id == "detectors.unattributed"));
     }
 }
 

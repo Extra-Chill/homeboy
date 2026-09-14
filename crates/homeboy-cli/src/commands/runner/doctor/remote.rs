@@ -248,17 +248,13 @@ pub fn report(
         "Make the remote workspace root writable by the runner user",
     ));
 
-    let artifact_store_available = (!scoped)
-        .then(|| probes::remote_artifact_store_available(client, &artifact_root))
-        .unwrap_or(false);
-    if !scoped {
-        checks.push(checks::path_writable_check(
-            "artifact_store.available",
-            artifact_store_available,
-            Path::new(&artifact_root),
-            "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
-        ));
-    }
+    let artifact_store_available = probes::remote_artifact_store_available(client, &artifact_root);
+    checks.push(checks::path_writable_check(
+        "artifact_store.available",
+        artifact_store_available,
+        Path::new(&artifact_root),
+        "Create the artifact root or configure HOMEBOY_ARTIFACT_ROOT to a writable directory",
+    ));
 
     if options.scope == RunnerDoctorScope::LabOffload {
         checks.extend(probes::lab_homeboy_path_checks(

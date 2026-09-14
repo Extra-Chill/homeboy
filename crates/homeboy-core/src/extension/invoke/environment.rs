@@ -358,6 +358,28 @@ pub(crate) fn build_exec_env(
         env.push((exec_context::EXTENSION_PATH.to_string(), mp.to_string()));
     }
 
+    // Installed extensions can be immutable snapshots while their shared script
+    // libraries and runner packages live at the active runtime root.
+    if let Ok(config_root) = homeboy_core::paths::homeboy() {
+        let shared_lib_dir = homeboy_core::paths::extensions_in_root(&config_root)
+            .join("scripts")
+            .join("lib");
+        if shared_lib_dir.is_dir() {
+            env.push((
+                exec_context::SHARED_LIB_DIR.to_string(),
+                shared_lib_dir.to_string_lossy().to_string(),
+            ));
+        }
+
+        let agent_runtimes_dir = homeboy_core::paths::agent_runtimes_in_root(&config_root);
+        if agent_runtimes_dir.is_dir() {
+            env.push((
+                exec_context::AGENT_RUNTIMES_DIR.to_string(),
+                agent_runtimes_dir.to_string_lossy().to_string(),
+            ));
+        }
+    }
+
     if let Ok(helper_pairs) = runtime_helper::ensure_all_helpers() {
         env.extend(helper_pairs);
     }

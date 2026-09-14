@@ -479,7 +479,7 @@ fn candidate_attribution_reads_command_env_store_identity_from_procfs() {
 
     let deadline = Instant::now() + Duration::from_secs(1);
     let store = loop {
-        if let Some(store) = super::process_durable_store_path(process.id(), true) {
+        if let Some(store) = super::process_durable_store_path(process.id(), false) {
             break store;
         }
         assert!(Instant::now() < deadline, "procfs store path");

@@ -71,6 +71,46 @@ fn parallel_local_cook_submissions_publish_their_runner_pid_atomically() {
 }
 
 #[test]
+fn concurrent_queue_consumers_bind_only_the_winning_preflight_plan() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = Arc::new(AgentTaskLifecycleStore::new(context.path_roots()));
+    let run_id = "queue-cas-plan";
+    let original = AgentTaskPlan::new("queue-cas-original", Vec::new());
+    store
+        .submit_plan_with_runtime_admission(&original, run_id, |_| Ok(json!({})))
+        .expect("queued run");
+    let left_plan = AgentTaskPlan::new("queue-cas-left", Vec::new());
+    let right_plan = AgentTaskPlan::new("queue-cas-right", Vec::new());
+    let barrier = Arc::new(Barrier::new(3));
+
+    let results = std::thread::scope(|scope| {
+        let handles = [left_plan.clone(), right_plan.clone()].map(|plan| {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                store
+                    .bind_controller_plan_and_claim_queued_run(run_id, &plan)
+                    .expect("atomic queue claim")
+                    .is_some()
+            })
+        });
+        barrier.wait();
+        handles.map(|handle| handle.join().expect("queue consumer"))
+    });
+
+    assert_eq!(results.into_iter().filter(|claimed| *claimed).count(), 1);
+    let record = store.read_record(run_id).expect("claimed record");
+    assert_eq!(record.state, AgentTaskRunState::Running);
+    let bound = store.read_controller_plan(run_id).expect("winning plan");
+    assert!(bound == left_plan || bound == right_plan);
+    assert_ne!(
+        bound, original,
+        "the original plan was replaced exactly once"
+    );
+}
+
+#[test]
 fn persisted_plan_retry_keeps_supervisor_ownership_until_runner_pid_is_published() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -740,6 +780,317 @@ fn replay_claim_consumption_validates_token_and_generation_exactly_once() {
         );
         assert!(record.tasks.is_empty());
     });
+}
+
+#[test]
+fn replay_claim_consumption_rejects_an_expired_lease_without_extending_it() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-replay-expired-consume";
+        record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(9);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "claimed",
+                "fence": 9,
+                "token": "expired-token",
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("seed expired claim");
+
+        assert!(
+            !consume_unmaterialized_cook_replay_claim(cook_id, 9, "expired-token")
+                .expect("expired claim is rejected")
+        );
+        let record = exact_record(cook_id).expect("read unchanged expired claim");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "claimed"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
+            "2000-01-01T00:00:00+00:00"
+        );
+    });
+}
+
+#[test]
+fn replay_claim_renewal_rejects_an_expired_lease_without_materializing_it() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-replay-expired-renew";
+        record_unmaterialized_cook_admission_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            json!({ "placement": { "candidate_runner_refs": ["lab"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = json!(10);
+            record.metadata["unmaterialized_cook_admission"]["state"] = json!("replaying");
+            record.metadata["unmaterialized_cook_admission"]["lease"] = json!({
+                "state": "consumed",
+                "fence": 10,
+                "token": "expired-token",
+                "owner": {
+                    "pid": std::process::id(),
+                    "process_start_identity": homeboy_core::process::process_start_identity(
+                        std::process::id(),
+                    )
+                    .expect("inspect test process")
+                    .expect("test process identity"),
+                },
+                "expires_at": "2000-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("seed expired consumed claim");
+
+        assert!(
+            !renew_unmaterialized_cook_replay_claim(cook_id, 10, "expired-token")
+                .expect("expired claim cannot be renewed")
+        );
+        let record = exact_record(cook_id).expect("read unchanged expired lease");
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "replaying"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "consumed"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["expires_at"],
+            "2000-01-01T00:00:00+00:00"
+        );
+    });
+}
+
+#[test]
+fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-launcher-supervision-fence";
+    record_detached_cook_handoff_parent_in_store(&store, cook_id).expect("persist handoff parent");
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "active-launcher")
+        .expect("claim handoff parent");
+    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 42,
+    };
+
+    assert!(record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "stale-launcher",
+        4242,
+        identity.clone(),
+        "supervisor-stale",
+    )
+    .is_err());
+    let pending = store.read_record(cook_id).expect("read fenced parent");
+    assert_eq!(
+        pending.metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor"
+    );
+    assert!(pending.metadata["detached_cook_handoff"]["child_pid"].is_null());
+
+    let supervised = record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        identity,
+        "supervisor-active",
+    )
+    .expect("owner publishes complete supervision handoff");
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["child_pid"],
+        4242
+    );
+    assert_eq!(
+        supervised.metadata["detached_cook_handoff"]["supervisor_job_id"],
+        "supervisor-active"
+    );
+}
+
+#[test]
+fn daemon_terminalization_requires_its_projected_supervision_generation() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-supervisor-terminal-fence";
+    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 42,
+    };
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "active-launcher")
+        .expect("claim handoff parent");
+
+    let pending = fail_supervised_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        &identity,
+        "child exited",
+    )
+    .expect("an unprojected daemon is a no-op");
+    assert_eq!(pending.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        pending.metadata["detached_cook_handoff"]["admission_state"],
+        "pre_supervisor"
+    );
+
+    record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        identity.clone(),
+        "supervisor-active",
+    )
+    .expect("publish supervision");
+    let stale = fail_supervised_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "stale-launcher",
+        4242,
+        &identity,
+        "stale child exited",
+    )
+    .expect("a stale daemon is a no-op");
+    assert_eq!(stale.state, AgentTaskRunState::Queued);
+
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                json!("cancel_requested");
+            true
+        })
+        .expect("request cancellation");
+    let cancelling = fail_supervised_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        &identity,
+        "owned child exited during cancellation",
+    )
+    .expect("cancellation owns terminalization");
+    assert_eq!(cancelling.state, AgentTaskRunState::Queued);
+    assert_eq!(
+        cancelling.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] = json!("open");
+            true
+        })
+        .expect("reopen fixture fence");
+
+    let failed = fail_supervised_detached_cook_handoff_parent_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        &identity,
+        "owned child exited",
+    )
+    .expect("the projected daemon terminalizes its parent");
+    assert_eq!(failed.state, AgentTaskRunState::Failed);
+    assert_eq!(
+        failed.metadata["detached_cook_handoff"]["admission_state"],
+        "failed"
+    );
+}
+
+#[test]
+fn cancellation_request_closes_every_first_attempt_admission_gate() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-cancellation-request-fence";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "active-launcher")
+        .expect("claim handoff parent");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                json!("cancel_requested");
+            true
+        })
+        .expect("close cancellation fence");
+    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 42,
+    };
+
+    assert!(require_detached_cook_handoff_fence_open_in_store(&store, cook_id).is_err());
+    assert!(record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        "active-launcher",
+        4242,
+        identity,
+        "supervisor-active",
+    )
+    .is_err());
+    assert!(reserve_detached_cook_handoff_materialization_in_store(
+        &store,
+        cook_id,
+        "cancelled-attempt",
+    )
+    .is_err());
+}
+
+#[test]
+fn replacement_launcher_reclaims_a_dead_pre_supervisor_owner() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-dead-launcher-reclaim";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "dead-launcher")
+        .expect("claim handoff parent");
+    let mut owner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn launcher owner fixture");
+    let identity = homeboy_core::process::process_start_identity(owner.id())
+        .expect("inspect launcher owner")
+        .expect("launcher owner has stable identity");
+    store
+        .mutate_record(cook_id, |record| {
+            record.metadata["detached_cook_handoff"]["launcher_pid"] = json!(owner.id());
+            record.metadata["detached_cook_handoff"]["launcher_start_identity"] =
+                serde_json::to_value(identity).unwrap();
+            true
+        })
+        .unwrap();
+    owner.kill().expect("kill launcher owner fixture");
+    owner.wait().expect("reap launcher owner fixture");
+
+    let reclaimed =
+        claim_detached_cook_handoff_parent_in_store(&store, cook_id, "replacement-launcher")
+            .expect("dead launcher ownership is reclaimable");
+
+    assert_eq!(
+        reclaimed.metadata["detached_cook_handoff"]["launcher_id"],
+        "replacement-launcher"
+    );
+    assert_eq!(
+        reclaimed.metadata["detached_cook_handoff"]["launcher_pid"],
+        std::process::id()
+    );
 }
 
 #[test]

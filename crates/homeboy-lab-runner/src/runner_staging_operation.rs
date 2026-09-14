@@ -27,6 +27,7 @@ pub const REMOTE_RUNNER_STAGING_SCHEMA: &str = "homeboy/remote-runner-staging/v2
 pub const REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA: &str = "homeboy/remote-runner-staging-receipt/v1";
 pub const REMOTE_RUNNER_STAGING_CAPABILITY_V1: &str = "remote-runner-staging/v1";
 pub const REMOTE_RUNNER_STAGING_CAPABILITY: &str = "remote-runner-staging/v2";
+pub const DIRECT_RUNNER_STAGED_EXECUTION_CAPABILITY: &str = "direct-runner-staged-execution/v1";
 pub const REMOTE_RUNNER_SOURCE_MATERIALIZATION_CAPABILITY: &str =
     "remote-runner-source-materialization/v2";
 pub const REMOTE_RUNNER_SOURCE_ARTIFACT_CAPABILITY: &str = "remote-runner-source-artifact/v1";

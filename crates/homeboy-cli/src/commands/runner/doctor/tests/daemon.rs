@@ -164,6 +164,139 @@ fn remote_default_artifact_root_rejects_empty_home() {
 }
 
 #[test]
+fn remote_artifact_store_availability_contract_handles_existing_missing_and_unusable_roots() {
+    let root = tempfile::tempdir().expect("artifact fixture root");
+    let existing = root.path().join("existing");
+    std::fs::create_dir(&existing).expect("existing artifact root");
+    let missing = root.path().join("missing");
+    let unusable_parent = root.path().join("not-a-directory");
+    std::fs::write(&unusable_parent, "not a directory").expect("unusable artifact parent");
+
+    assert!(artifact_store_contract_succeeds(&existing));
+    assert!(artifact_store_contract_succeeds(&missing));
+    // A non-directory cannot be an artifact root or a writable parent for one.
+    assert!(!artifact_store_contract_succeeds(&unusable_parent));
+    assert!(!artifact_store_contract_succeeds(
+        &unusable_parent.join("child")
+    ));
+}
+
+fn artifact_store_contract_succeeds(path: &std::path::Path) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(probes::remote_artifact_store_available_command(
+            &path.display().to_string(),
+        ))
+        .status()
+        .expect("run artifact-store availability contract")
+        .success()
+}
+
+#[test]
+fn remote_writable_probes_execute_home_relative_and_absolute_path_semantics() {
+    let home = tempfile::tempdir().expect("isolated HOME");
+    let home_path = home.path();
+
+    let artifacts = home_path.join(".local/share/homeboy/artifacts");
+    std::fs::create_dir_all(&artifacts).expect("home-relative artifacts");
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command("~/.local/share/homeboy/artifacts"),
+    ));
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command("~/.local/share/homeboy/artifacts"),
+    ));
+
+    let spaced = home_path.join("artifact store");
+    std::fs::create_dir(&spaced).expect("spaced path");
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command("~/artifact store"),
+    ));
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command("~/artifact store"),
+    ));
+
+    let meta_name = "art$(touch pwned);.store";
+    std::fs::create_dir(home_path.join(meta_name)).expect("metacharacter path");
+    let meta_path = format!("~/{meta_name}");
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command(&meta_path),
+    ));
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command(&meta_path),
+    ));
+    assert!(!home_path.join("pwned").exists());
+
+    let absolute = artifacts.to_string_lossy().into_owned();
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command(&absolute),
+    ));
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command(&absolute),
+    ));
+
+    assert!(probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command("~/missing-root"),
+    ));
+    assert!(!probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command("~/missing-root"),
+    ));
+
+    let unwritable = home_path.join("unwritable");
+    std::fs::create_dir(&unwritable).expect("unwritable path");
+    let original = std::fs::metadata(&unwritable)
+        .expect("unwritable metadata")
+        .permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&unwritable, readonly).expect("make unwritable");
+    let artifact_unwritable = probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command("~/unwritable"),
+    );
+    let path_unwritable = probe_with_home(
+        home_path,
+        &probes::remote_path_writable_command("~/unwritable"),
+    );
+    let child_unwritable = probe_with_home(
+        home_path,
+        &probes::remote_artifact_store_available_command("~/unwritable/child"),
+    );
+    // Root can write through read-only mode bits; compare against the shell's
+    // absolute-path verdict rather than assuming the test user's privileges.
+    let absolute_unwritable = std::process::Command::new("sh")
+        .args(["-c", "test -w \"$1\"", "sh"])
+        .arg(&unwritable)
+        .status()
+        .expect("absolute writable probe")
+        .success();
+    std::fs::set_permissions(&unwritable, original).expect("restore unwritable");
+    assert_eq!(artifact_unwritable, absolute_unwritable);
+    assert_eq!(path_unwritable, absolute_unwritable);
+    assert_eq!(child_unwritable, absolute_unwritable);
+}
+
+fn probe_with_home(home: &std::path::Path, command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("HOME", home)
+        .current_dir(home)
+        .status()
+        .expect("run remote path probe")
+        .success()
+}
+
+#[test]
 fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
     let runner = Runner {
         id: "lab".to_string(),

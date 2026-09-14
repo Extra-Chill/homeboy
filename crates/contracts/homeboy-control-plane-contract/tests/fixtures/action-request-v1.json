@@ -1,5 +1,6 @@
 {
   "schema": "homeboy/control-plane-action-request/v1",
+  "effect_id": "fixture:run-1:resume:resume-run-1",
   "action": "resume",
   "idempotency_key": "resume-run-1",
   "actor": "external-client",

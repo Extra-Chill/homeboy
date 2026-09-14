@@ -426,9 +426,16 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
         supervisor_job_id.to_string(),
         "the executable run and controller job are linked before acceptance"
     );
-    assert!(
-        lifecycle_store.read_record(cook_id).is_err(),
-        "local detach must not persist a zero-task handoff parent"
+    let handoff_parent = lifecycle_store
+        .read_record(cook_id)
+        .expect("the requested Cook identity remains discoverable after handoff");
+    assert_eq!(
+        handoff_parent.metadata["detached_cook_handoff"]["state"],
+        "redirected"
+    );
+    assert_eq!(
+        handoff_parent.metadata["detached_cook_handoff"]["attempt_run_id"],
+        attempt_id
     );
     let job_store = JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json"))
         .expect("open controller job store");
@@ -485,6 +492,266 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     }
 }
 
+/// Cancellation between controller start and the atomic child/supervisor
+/// projection must leave the requested Cook terminal without admitting an
+/// attempt. This drives the real launcher and cancellation CLI paths (#14528).
+#[test]
+fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("pre-projection-cancel");
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "pre-projection-cancel",
+        &checkout,
+        "interrupted-launcher",
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let cook_id = "cancel-interrupted-pre-projection";
+    let pause_marker = context.root().join("controller-started");
+    let mut launcher = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    launcher
+        // Keep the blocked child bounded after its interrupted launcher cannot
+        // publish the token that authorizes Cook materialization.
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "1000")
+        .env(
+            "HOMEBOY_TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH",
+            &pause_marker,
+        )
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            "pre-projection-cancel",
+            "--backend",
+            "fixture",
+            "--prompt",
+            "cancel before child projection",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+    let mut launcher = launcher.spawn().expect("start detached Cook launcher");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !pause_marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "launcher did not reach the controller-start/pre-projection boundary"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let claimed = lifecycle_store
+        .read_record(cook_id)
+        .expect("read paused launcher claim");
+    let launcher_owner_pid = claimed.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .expect("persisted launcher owner PID");
+
+    let mut cancel = context.command(TestBinary::HomeboyFixture);
+    cancel.args(["agent-task", "cancel", cook_id]);
+    let cancelled = bounded_output(cancel);
+    assert!(
+        cancelled.status.success(),
+        "cancel interrupted launcher: {}",
+        String::from_utf8_lossy(&cancelled.stdout)
+    );
+    let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
+    assert_eq!(killed, 0, "interrupt routed launcher owner");
+    launcher.wait().expect("reap interrupted launcher");
+
+    let mut status = context.command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id]);
+    let status = bounded_output(status);
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{status_stdout}");
+    let lifecycle: serde_json::Value =
+        serde_json::from_str(&status_stdout).expect("terminal lifecycle status JSON");
+    assert_eq!(lifecycle["data"]["state"], "cancelled", "{status_stdout}");
+    assert!(
+        lifecycle["data"]["run"].as_str() == Some(cook_id),
+        "the requested durable parent remains the cancellation handle: {status_stdout}"
+    );
+    let crashed_parent = lifecycle_store
+        .read_record(cook_id)
+        .expect("read crashed launcher ownership");
+    let launcher_pid = crashed_parent.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("crashed launcher pid");
+    let launcher_identity = serde_json::from_value(
+        crashed_parent.metadata["detached_cook_handoff"]["launcher_start_identity"].clone(),
+    )
+    .expect("crashed launcher identity");
+    let launcher_state = homeboy::core::process::process_identity_state_with_start_identity(
+        launcher_pid,
+        None,
+        Some(&launcher_identity),
+    );
+    assert!(
+        matches!(
+            launcher_state,
+            homeboy::core::process::ProcessIdentityState::Dead
+                | homeboy::core::process::ProcessIdentityState::IdentityMismatch
+        ),
+        "crashed launcher {launcher_pid} remained {launcher_state:?}: {crashed_parent:?}"
+    );
+    assert!(
+        !lifecycle_store.cook_index_path(cook_id).exists(),
+        "an interrupted pre-projection launcher must not admit an executable Cook"
+    );
+}
+
+/// A launcher crash before the supervisor projection must retain a discoverable
+/// resumable parent without relying on a separate cancellation request (#14528).
+#[test]
+fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
+    let context = HermeticTestContext::new();
+    let (_checkout_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("pre-projection-crash");
+    let (_task_handle, task_worktree) = native_task_worktree(
+        &context,
+        "pre-projection-crash",
+        &checkout,
+        "interrupted-launcher",
+    );
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture worktree");
+    let cook_id = "crash-interrupted-pre-projection";
+    let pause_marker = context.root().join("controller-started");
+    let mut launcher = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    launcher
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "1000")
+        .env(
+            "HOMEBOY_TEST_LOCAL_COOK_PAUSE_AFTER_CONTROLLER_START_PATH",
+            &pause_marker,
+        )
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            "pre-projection-crash",
+            "--backend",
+            "fixture",
+            "--prompt",
+            "crash before child projection",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+    let mut launcher = launcher.spawn().expect("start detached Cook launcher");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !pause_marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "launcher did not reach the controller-start/pre-projection boundary"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let claimed = lifecycle_store
+        .read_record(cook_id)
+        .expect("read paused launcher claim");
+    let launcher_owner_pid = claimed.metadata["detached_cook_handoff"]["launcher_pid"]
+        .as_u64()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .expect("persisted launcher owner PID");
+
+    let killed = unsafe { libc::kill(launcher_owner_pid, libc::SIGKILL) };
+    assert_eq!(killed, 0, "crash routed launcher owner");
+    launcher.wait().expect("reap crashed launcher");
+
+    let mut status = context.command(TestBinary::HomeboyFixture);
+    status.args(["agent-task", "status", cook_id]);
+    let status = bounded_output(status);
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{status_stdout}");
+    let lifecycle: serde_json::Value =
+        serde_json::from_str(&status_stdout).expect("terminal lifecycle status JSON");
+    assert_eq!(lifecycle["data"]["state"], "queued", "{status_stdout}");
+    assert_eq!(
+        lifecycle["data"]["action_eligibility"]["actions"]
+            .as_array()
+            .and_then(|actions| actions.iter().find(|action| action["action"] == "resume"))
+            .and_then(|action| action["availability"].as_str()),
+        Some("unavailable"),
+        "{status_stdout}"
+    );
+    assert!(
+        !lifecycle_store.cook_index_path(cook_id).exists(),
+        "a crashed pre-projection launcher must not admit an executable Cook"
+    );
+
+    let mut replacement = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    replacement
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "10000")
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--run-id",
+            cook_id,
+            "--repo",
+            "pre-projection-crash",
+            "--backend",
+            "fixture",
+            "--prompt",
+            "crash before child projection",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+    let replacement = bounded_output(replacement);
+    assert!(
+        replacement.status.success(),
+        "replacement launcher failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&replacement.stdout),
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    assert!(
+        lifecycle_store.cook_index_path(cook_id).exists(),
+        "replacement launcher must complete durable Cook admission"
+    );
+}
+
 /// Piped stdio is not permission to turn a default local wait into a durable
 /// handoff. This target fails during foreground resolution, which makes the
 /// assertion bounded while proving the launcher did not emit a detach envelope.
@@ -525,6 +792,26 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("local-cook-durability");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            checkout.to_str().expect("fixture checkout path"),
+        ],
+    );
+    std::fs::create_dir_all(checkout.join("docs")).expect("create fixture docs directory");
+    std::fs::write(checkout.join("docs/agent-task-smoke.md"), "before\n")
+        .expect("seed fixture patch input");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &["add", "docs/agent-task-smoke.md"],
+    );
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &["commit", "-m", "seed fixture patch input"],
+    );
     let component_id = "local-cook-durability";
     let (_task_handle, task_worktree) = native_task_worktree(
         &context,
@@ -542,10 +829,10 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let client_stderr = context.root().join("foreground-client.stderr");
     let mut client = context.controller_runtime_command(TestBinary::HomeboyFixture);
     client
-        // This test exercises automatic placement, not live host pressure.
-        .env("GITHUB_ACTIONS", "true")
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "5000")
         .args([
+            "--placement",
+            "local",
             "agent-task",
             "cook",
             "--run-id",
@@ -554,6 +841,8 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
             component_id,
             "--backend",
             "fixture",
+            "--model",
+            "fixture-model",
             "--prompt",
             "complete after the observing client exits",
             "--cwd",
@@ -677,7 +966,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
             .and_then(serde_json::Value::as_array)
             .is_some_and(|artifacts| {
                 artifacts.iter().any(|artifact| {
-                    artifact.get("id").and_then(serde_json::Value::as_str) == Some("changes.patch")
+                    artifact.get("kind").and_then(serde_json::Value::as_str) == Some("patch")
                 })
             });
     assert!(

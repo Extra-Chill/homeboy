@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
 use homeboy::core::component;
+use homeboy::core::plan::PlanStepStatus;
+use homeboy::core::quality::{build_quality_steps, QualityPlanOptions};
 use homeboy::core::scope::{self, Scope};
 use homeboy_deploy::{self as deploy, ReleaseStateStatus};
 use homeboy_release::release::{
@@ -190,6 +192,11 @@ pub struct ReleaseExecuteArgs {
     /// publish, cleanup, and post-release hooks against the tag pointing at HEAD.
     #[arg(long)]
     head: bool,
+
+    /// Prepare a release pull request instead of directly updating the default branch.
+    /// Run again with --head after GitHub has normally merged the release PR.
+    #[arg(long)]
+    protected_branch: bool,
 
     /// Use existing release artifacts from this directory instead of running release.package.
     /// Requires --head.
@@ -407,6 +414,8 @@ impl ReleaseExecuteArgs {
             skip_publish: self.skip_publish,
             head: self.head,
             from_artifacts: self.from_artifacts.clone(),
+            protected_branch: self.protected_branch,
+            protected_branch_resume: false,
         }
     }
 
@@ -876,12 +885,25 @@ fn run_portable_preflight_with(
     let mut gate_results = Vec::new();
     let mut evidence_refs = Vec::new();
     let mut resolved_runner_id = None;
-    for gate in ["audit", "lint", "test"] {
-        if skip_all || skipped.iter().any(|skip| skip == gate) {
+    let quality_steps = build_quality_steps(
+        &QualityPlanOptions::release_preflight(component_id, skip_all).with_granular_skips(skipped),
+    );
+    for step in quality_steps {
+        let gate = step.id.strip_prefix("preflight.").ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "release preflight quality step has invalid ID '{}'",
+                step.id
+            ))
+        })?;
+        if step.status == PlanStepStatus::Disabled {
             gate_results.push(ReleaseReadinessGateResult {
                 gate: gate.to_string(),
                 status: "skipped".to_string(),
-                reason: Some("--skip-checks".to_string()),
+                reason: step
+                    .inputs
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
                 source_sha: Some(commit.clone()),
                 runner_id: None,
                 evidence_refs: Vec::new(),
@@ -985,6 +1007,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "retag",
             "--retag is a recovery operation and requires --recover",
+            None,
+            None,
+        ));
+    }
+    if args.protected_branch && args.recover {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "protected-branch",
+            "--protected-branch has separate prepare and --head finalization phases; it cannot be combined with --recover",
             None,
             None,
         ));
@@ -1119,6 +1149,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             None,
         ));
     }
+    if args.protected_branch {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "protected-branch",
+            "--protected-branch is not supported for batch releases — prepare and finalize one component at a time",
+            None,
+            None,
+        ));
+    }
     if args.from_artifacts.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "from-artifacts",
@@ -1146,6 +1184,8 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             skip_publish: args.skip_publish,
             head: false,
             from_artifacts: None,
+            protected_branch: false,
+            protected_branch_resume: false,
         },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
@@ -1710,6 +1750,7 @@ mod tests {
             owner_run_ref: None,
             retag: false,
             head: false,
+            protected_branch: false,
             from_artifacts: None,
             package_only: false,
             tag: None,
@@ -1888,6 +1929,7 @@ mod tests {
             owner_run_ref: None,
             retag: false,
             head: false,
+            protected_branch: false,
             from_artifacts: None,
             package_only: false,
             tag: None,
@@ -2540,7 +2582,13 @@ jobs:
         .expect("preflight should complete")
         .expect("lab preflight is enabled");
 
-        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "test"]);
+        assert_eq!(*dispatcher.calls.borrow(), vec!["test"]);
+        assert_eq!(readiness.gate_results[0].gate, "audit");
+        assert_eq!(readiness.gate_results[0].status, "skipped");
+        assert_eq!(
+            readiness.gate_results[0].reason.as_deref(),
+            Some("no-release-audit-policy")
+        );
         assert_eq!(readiness.gate_results[1].gate, "lint");
         assert_eq!(readiness.gate_results[1].status, "skipped");
         assert!(release::readiness_is_valid(&readiness));
@@ -2564,7 +2612,7 @@ jobs:
         .expect("dispatch failure is retained as a gate result")
         .expect("lab preflight is enabled");
 
-        assert_eq!(*dispatcher.calls.borrow(), vec!["audit", "lint", "test"]);
+        assert_eq!(*dispatcher.calls.borrow(), vec!["lint", "test"]);
         let lint = readiness
             .gate_results
             .iter()
@@ -2659,7 +2707,7 @@ jobs:
         assert!(readiness
             .gate_results
             .iter()
-            .filter(|gate| ["audit", "lint", "test"].contains(&gate.gate.as_str()))
+            .filter(|gate| gate.status == "passed")
             .all(|gate| gate.provenance.as_ref() == Some(&child_provenance)));
     }
 

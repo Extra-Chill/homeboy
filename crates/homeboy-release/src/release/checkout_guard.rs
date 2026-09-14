@@ -57,6 +57,12 @@ impl ReleaseCheckoutGuard {
         }))
     }
 
+    /// The checkout this guard restores, so rollback can undo non-checkout
+    /// state (a created tag) against the same repository.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
     pub(super) fn restore_after_failure(&self) -> Result<CheckoutRestoreEvidence> {
         self.restore_after_failure_with_hook(|| {})
     }

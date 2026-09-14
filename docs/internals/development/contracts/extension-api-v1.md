@@ -39,8 +39,10 @@ The wire schemas are:
 - `homeboy/extension-api-deployment-provider-inventory-response/v1`
 - `homeboy/extension-api-deployment-provider-resolve-request/v1`
 - `homeboy/extension-api-deployment-provider-resolve-response/v1`
-- `homeboy/extension-api-deployment-provider-invoke-request/v1`
-- `homeboy/extension-api-deployment-provider-invoke-response/v1`
+- `homeboy/extension-api-deployment-provider-submit-request/v1`
+- `homeboy/extension-api-deployment-provider-submit-response/v1`
+- `homeboy/extension-api-deployment-provider-status-request/v1`
+- `homeboy/extension-api-deployment-provider-status-response/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-request/v1`
 - `homeboy/extension-api-recipe-run-provider-inventory-response/v1`
 - `homeboy/extension-api-recipe-run-plan-request/v1`

@@ -29,6 +29,9 @@ pub trait OrchestrationDriver: Send + Sync {
     /// Advance durable Cooks that were admitted before a Lab destination was
     /// eligible. Implementations must not materialize work while blocked.
     fn reconcile_unmaterialized_cook_admissions(&self) -> Result<Value>;
+
+    /// Resume one durable queued retry whose reservation survived its launcher.
+    fn reconcile_queued_retries(&self) -> Result<Value>;
 }
 
 /// CLI-owned execution seam for an already-fenced Cook admission replay.
@@ -41,6 +44,12 @@ pub trait CookAdmissionReplayDriver: Send + Sync {
     /// Start a replay worker. The worker must consume the supplied token at the
     /// lifecycle mutation boundary before it performs any route side effect.
     fn replay(&self, request: &Value) -> Result<Value>;
+}
+
+/// CLI-owned execution seam for a durable retry reservation. The lifecycle
+/// consumer must claim the queued record before dispatching it.
+pub trait QueuedRetryReplayDriver: Send + Sync {
+    fn replay(&self, run_id: &str) -> Result<Value>;
 }
 
 struct NoopCookAdmissionReplayDriver;
@@ -60,6 +69,14 @@ impl CookAdmissionReplayDriver for NoopCookAdmissionReplayDriver {
     }
 }
 
+struct NoopQueuedRetryReplayDriver;
+
+impl QueuedRetryReplayDriver for NoopQueuedRetryReplayDriver {
+    fn replay(&self, _run_id: &str) -> Result<Value> {
+        Ok(Value::Null)
+    }
+}
+
 /// Inert driver used when the agent-task subsystem is not linked or not wired.
 struct NoopOrchestrationDriver;
 
@@ -69,6 +86,10 @@ impl OrchestrationDriver for NoopOrchestrationDriver {
     }
 
     fn reconcile_unmaterialized_cook_admissions(&self) -> Result<Value> {
+        Ok(Value::Null)
+    }
+
+    fn reconcile_queued_retries(&self) -> Result<Value> {
         Ok(Value::Null)
     }
 }
@@ -94,11 +115,27 @@ mod cook_replay_registry {
     }
 }
 
+mod queued_retry_replay_registry {
+    use super::{NoopQueuedRetryReplayDriver, QueuedRetryReplayDriver};
+
+    homeboy_engine_primitives::provider_registry_arc! {
+        provider: dyn QueuedRetryReplayDriver,
+        noop: NoopQueuedRetryReplayDriver,
+        register: pub(super) fn register,
+        active: pub(super) fn active,
+    }
+}
+
 /// Register the CLI replay implementation at startup.
 pub fn register_cook_admission_replay_driver(
     driver: std::sync::Arc<dyn CookAdmissionReplayDriver>,
 ) {
     cook_replay_registry::register(driver);
+}
+
+/// Register the CLI queue consumer at startup.
+pub fn register_queued_retry_replay_driver(driver: std::sync::Arc<dyn QueuedRetryReplayDriver>) {
+    queued_retry_replay_registry::register(driver);
 }
 
 /// Drive one stale-active-run reconcile pass.
@@ -115,9 +152,20 @@ pub fn reconcile_unmaterialized_cook_admissions() -> Result<Value> {
     active_driver().reconcile_unmaterialized_cook_admissions()
 }
 
+/// Drive one queued-retry recovery pass.
+pub fn reconcile_queued_retries() -> Result<Value> {
+    active_driver().reconcile_queued_retries()
+}
+
 /// Invoke the registered replay worker after agents has durably claimed it.
 pub fn replay_unmaterialized_cook_admission(request: &Value) -> Result<Value> {
     cook_replay_registry::active().replay(request)
+}
+
+/// Invoke the registered queue consumer. It must atomically claim `run_id`
+/// before any dispatch so replay and concurrent ticks converge.
+pub fn replay_queued_retry(run_id: &str) -> Result<Value> {
+    queued_retry_replay_registry::active().replay(run_id)
 }
 
 /// Resolve current Lab eligibility through the registered CLI-owned policy.

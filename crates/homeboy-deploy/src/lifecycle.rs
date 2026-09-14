@@ -294,6 +294,9 @@ pub(crate) struct DeployRunIdentity {
 pub(crate) enum DeployTargetStatus {
     Planned,
     Running,
+    /// A process died after dispatching a target but before durable completion.
+    /// Provider evidence must reconcile it; resume never reissues the command.
+    Unknown,
     Succeeded,
     AppliedUnverified,
     Failed,
@@ -360,10 +363,11 @@ impl DeployLifecycleRun {
         }
         for target in &mut self.targets {
             if target.status == DeployTargetStatus::Running {
-                // A process death leaves no reliable remote completion signal. Retry it.
-                target.status = DeployTargetStatus::Planned;
+                // The external command may have completed before the process
+                // died. Preserve that ambiguity for explicit reconciliation.
+                target.status = DeployTargetStatus::Unknown;
                 target.error = Some(
-                    "Recovered interrupted target; retrying from its durable checkpoint"
+                    "Recovery required: target lease expired after dispatch; reconcile authoritative provider evidence before retrying"
                         .to_string(),
                 );
             }
@@ -376,7 +380,9 @@ impl DeployLifecycleRun {
             entry.target == target
                 && matches!(
                     entry.status,
-                    DeployTargetStatus::Succeeded | DeployTargetStatus::AppliedUnverified
+                    DeployTargetStatus::Succeeded
+                        | DeployTargetStatus::AppliedUnverified
+                        | DeployTargetStatus::Unknown
                 )
         })
     }
@@ -489,13 +495,14 @@ mod tests {
     }
 
     #[test]
-    fn resume_recovers_interrupted_targets_without_redeploying_successes() {
+    fn resume_marks_interrupted_targets_unknown_without_redeploying() {
         let mut run = DeployLifecycleRun::new("run".to_string(), identity());
         run.update_target("a", DeployTargetStatus::Succeeded, None, None);
         run.update_target("b", DeployTargetStatus::Running, None, None);
         run.resume(&identity()).expect("matching resume");
         assert!(run.target_skips_mutation_retry("a"));
-        assert_eq!(run.targets[1].status, DeployTargetStatus::Planned);
+        assert_eq!(run.targets[1].status, DeployTargetStatus::Unknown);
+        assert!(run.target_skips_mutation_retry("b"));
     }
 
     #[test]

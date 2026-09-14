@@ -297,7 +297,7 @@ fn current_branch(component: &Component) -> Result<String> {
     })
 }
 
-fn default_branch(component: &Component) -> String {
+pub(super) fn default_branch(component: &Component) -> String {
     git::default_branch_name(std::path::Path::new(&component.local_path))
         .unwrap_or_else(|| "main".to_string())
 }

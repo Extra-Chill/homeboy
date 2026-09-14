@@ -237,14 +237,13 @@ fn run_execution(
             )),
         )
     })?;
-    let mut child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("run repo-local gate {}", execution.argv.join(" "))),
         )
     })?;
-    if let Err(error) = containment.attach(&child) {
-        let _ = containment.terminate_live(&mut child);
+    if let Err(error) = containment.attach(child) {
         return Err(Error::internal_io(
             error.to_string(),
             Some(format!(
@@ -253,7 +252,12 @@ fn run_execution(
             )),
         ));
     }
-    let output = child.wait_with_output().map_err(|error| {
+    let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled_owned(
+        containment.owner_mut().expect("attached gate owner"),
+        65_536,
+        || false,
+    )
+    .map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("run repo-local gate {}", execution.argv.join(" "))),

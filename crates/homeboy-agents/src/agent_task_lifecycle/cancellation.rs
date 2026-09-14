@@ -1,8 +1,17 @@
 use super::*;
 
+const ALREADY_TERMINAL_FIELD: &str = "already_terminal";
+
+enum CancelResolvedOutcome {
+    Cancelled(AgentTaskRunRecord),
+    AlreadyTerminal(AgentTaskRunRecord),
+}
+
 #[cfg(test)]
 thread_local! {
     static AFTER_INITIAL_CANCELLATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_RESOLVED_CANCELLATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static RESOLVED_CANCEL_ERROR: std::cell::RefCell<Option<Error>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -10,9 +19,49 @@ pub(super) fn install_after_initial_cancellation_for_test(hook: impl FnOnce() + 
     AFTER_INITIAL_CANCELLATION.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
+#[cfg(test)]
+pub(crate) fn install_before_resolved_cancellation_for_test(hook: impl FnOnce() + 'static) {
+    BEFORE_RESOLVED_CANCELLATION.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+pub(crate) fn install_resolved_cancel_error_for_test(error: Error) {
+    RESOLVED_CANCEL_ERROR.with(|slot| *slot.borrow_mut() = Some(error));
+}
+
+pub(crate) fn is_already_terminal_cancel_error(error: &Error) -> bool {
+    error.code == ErrorCode::ValidationInvalidArgument
+        && error
+            .details
+            .get("field")
+            .and_then(serde_json::Value::as_str)
+            == Some(ALREADY_TERMINAL_FIELD)
+}
+
+fn already_terminal_error(record: &AgentTaskRunRecord) -> Error {
+    Error::validation_invalid_argument(
+        ALREADY_TERMINAL_FIELD,
+        format!(
+            "agent-task run '{}' is already terminal with state {:?}",
+            record.run_id, record.state
+        ),
+        Some(record.run_id.clone()),
+        None,
+    )
+}
+
 fn run_after_initial_cancellation_for_test() {
     #[cfg(test)]
     AFTER_INITIAL_CANCELLATION.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+fn run_before_resolved_cancellation_for_test() {
+    #[cfg(test)]
+    BEFORE_RESOLVED_CANCELLATION.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
             hook();
         }
@@ -72,7 +121,19 @@ pub fn cancel_run_in_store(
                 return Ok(resolved_record);
             }
         }
-        let record = cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason)?;
+        run_before_resolved_cancellation_for_test();
+        let record = match cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason)?
+        {
+            CancelResolvedOutcome::Cancelled(record) => record,
+            CancelResolvedOutcome::AlreadyTerminal(record)
+                if resolved_run_id != requested_run_id =>
+            {
+                record
+            }
+            CancelResolvedOutcome::AlreadyTerminal(record) => {
+                return Err(already_terminal_error(&record));
+            }
+        };
         // A first child can have been submitted after reservation but before
         // index publication. Cancel it through the reservation link so it
         // cannot remain an unindexed queued record.
@@ -94,6 +155,46 @@ pub fn cancel_run_in_store(
         "Cook alias '{}' changed repeatedly while cancellation was in progress",
         requested_run_id
     )))
+}
+
+/// Cancel an initial detached Cook only when the requesting controller job owns
+/// the launch generation still recorded on the handoff parent.
+pub fn cancel_claimed_detached_cook_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    reason: Option<&str>,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let cook_id = sanitize_run_id(cook_id);
+    let launcher_id = launcher_id.to_string();
+    let authorized = lifecycle_store.with_config_lock(|| {
+        let parent = lifecycle_store.read_record(&cook_id)?;
+        if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
+            return Ok(false);
+        }
+        if !parent.state.is_terminal() {
+            let _ = lifecycle_store.mutate_record_locked_without_terminal_projection(
+                &cook_id,
+                |record| {
+                    if record.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
+                        return false;
+                    }
+                    record.metadata["detached_cook_handoff"]["cancellation_fence"] = json!({
+                        "state": "cancel_requested",
+                        "cancelled_at": now_timestamp(),
+                        "reason": reason.unwrap_or("cancel requested"),
+                    });
+                    record.updated_at = Some(now_timestamp());
+                    true
+                },
+            )?;
+        }
+        Ok(true)
+    })?;
+    if !authorized {
+        return Ok(None);
+    }
+    cancel_run_in_store(lifecycle_store, &cook_id, reason).map(Some)
 }
 
 // The ambient `cancel_exact_run()` shim that used to sit here is gone; its one
@@ -359,7 +460,11 @@ fn cancel_resolved_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: Option<&str>,
-) -> Result<AgentTaskRunRecord> {
+) -> Result<CancelResolvedOutcome> {
+    #[cfg(test)]
+    if let Some(error) = RESOLVED_CANCEL_ERROR.with(|slot| slot.borrow_mut().take()) {
+        return Err(error);
+    }
     // Cook IDs are stable aliases. Match status and logs by following an
     // materialized attempt once one exists; before then the handoff parent is
     // the direct record and remains cancellable.
@@ -497,7 +602,7 @@ fn cancel_resolved_run_in_store(
         attempt.heartbeat_at = now.clone();
         record.updated_at = Some(now);
         lifecycle_store.write_record(&record)?;
-        return Ok(record);
+        return Ok(CancelResolvedOutcome::Cancelled(record));
     }
     // A pending POST may have been accepted despite a lost response. Resolve
     // its key before cancellation so the original job is cancelled rather than
@@ -526,7 +631,7 @@ fn cancel_resolved_run_in_store(
             &lifecycle_store.artifact_root(),
             &record.run_id,
         )?;
-        return Ok(record);
+        return Ok(CancelResolvedOutcome::Cancelled(record));
     }
 
     if matches!(
@@ -536,15 +641,7 @@ fn cancel_resolved_run_in_store(
             | AgentTaskRunState::PartialFailure
             | AgentTaskRunState::Failed
     ) {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            format!(
-                "agent-task run '{}' is already terminal with state {:?}",
-                record.run_id, record.state
-            ),
-            Some(record.run_id),
-            None,
-        ));
+        return Ok(CancelResolvedOutcome::AlreadyTerminal(record));
     }
 
     // A provider can return in the narrow window before its scheduler persists
@@ -567,7 +664,7 @@ fn cancel_resolved_run_in_store(
             json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
         );
         lifecycle_store.write_record(&record)?;
-        return Ok(record);
+        return Ok(CancelResolvedOutcome::Cancelled(record));
     }
 
     // Staging is controller-local work, not a runner child. Persist the request
@@ -612,7 +709,7 @@ fn cancel_resolved_run_in_store(
         );
         lifecycle_store.write_record(&record)?;
         if controller_job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
-            return Ok(record);
+            return Ok(CancelResolvedOutcome::Cancelled(record));
         }
         true
     } else {
@@ -649,7 +746,13 @@ fn cancel_resolved_run_in_store(
                     events: events.clone(),
                 },
             )?;
-            return Ok(record);
+            return Ok(
+                if record.state.is_terminal() && record.state != AgentTaskRunState::Cancelled {
+                    CancelResolvedOutcome::AlreadyTerminal(record)
+                } else {
+                    CancelResolvedOutcome::Cancelled(record)
+                },
+            );
         }
     }
     let runner_id = record.runner_id().map(str::to_string);
@@ -774,8 +877,12 @@ fn cancel_resolved_run_in_store(
             &lifecycle_store.data_root().join("controller-runtimes"),
             &record.run_id,
         )?;
+        return Ok(CancelResolvedOutcome::Cancelled(record));
     }
-    Ok(record)
+    if record.state.is_terminal() {
+        return Ok(CancelResolvedOutcome::AlreadyTerminal(record));
+    }
+    Ok(CancelResolvedOutcome::Cancelled(record))
 }
 
 /// Reconcile an asynchronously cancelled controller-owned staging job. This is
@@ -1256,6 +1363,87 @@ mod tests {
             assert_eq!(cancelled.run_id, attempt_id);
             assert_eq!(cancelled.state, AgentTaskRunState::Succeeded);
             assert!(cook_index_exists(cook_id).expect("inspect durable Cook index"));
+        });
+    }
+
+    #[test]
+    fn cook_alias_cancel_treats_a_just_finished_attempt_as_already_satisfied() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-alias-just-finished";
+            let attempt_id = "cook-alias-just-finished-attempt-1";
+            submit_plan(
+                &AgentTaskPlan::new("just-finished-attempt", Vec::new()),
+                Some(attempt_id),
+            )
+            .expect("persist attempt");
+            record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
+                .expect("index attempt");
+            let attempt_id_for_hook = attempt_id.to_string();
+            install_before_resolved_cancellation_for_test(move || {
+                store::mutate_record(&attempt_id_for_hook, |record| {
+                    set_run_state(record, AgentTaskRunState::Succeeded);
+                    true
+                })
+                .expect("attempt finishes after alias resolve");
+            });
+
+            let cancelled = cancel_run(cook_id, None)
+                .expect("Cook alias cancel admits a just-finished attempt");
+            assert_eq!(cancelled.run_id, attempt_id);
+            assert_eq!(cancelled.state, AgentTaskRunState::Succeeded);
+        });
+    }
+
+    #[test]
+    fn cook_alias_cancel_preserves_unrelated_errors_when_the_attempt_is_terminal() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-alias-preserve-error";
+            let attempt_id = "cook-alias-preserve-error-attempt-1";
+            submit_plan(
+                &AgentTaskPlan::new("preserve-error-attempt", Vec::new()),
+                Some(attempt_id),
+            )
+            .expect("persist attempt");
+            record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
+                .expect("index attempt");
+            let attempt_id_for_hook = attempt_id.to_string();
+            install_before_resolved_cancellation_for_test(move || {
+                store::mutate_record(&attempt_id_for_hook, |record| {
+                    set_run_state(record, AgentTaskRunState::Succeeded);
+                    true
+                })
+                .expect("attempt finishes after alias resolve");
+            });
+            install_resolved_cancel_error_for_test(Error::internal_unexpected(
+                "injected persistence failure",
+            ));
+
+            let error = cancel_run(cook_id, None).expect_err("unrelated error is preserved");
+            assert_eq!(error.code, ErrorCode::InternalUnexpected);
+            assert!(error.message.contains("injected persistence failure"));
+            assert!(!is_already_terminal_cancel_error(&error));
+        });
+    }
+
+    #[test]
+    fn exact_run_cancel_of_a_terminal_attempt_stays_an_error() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let attempt_id = "exact-terminal-attempt";
+            submit_plan(
+                &AgentTaskPlan::new("exact-terminal", Vec::new()),
+                Some(attempt_id),
+            )
+            .expect("persist attempt");
+            store::mutate_record(attempt_id, |record| {
+                set_run_state(record, AgentTaskRunState::Succeeded);
+                true
+            })
+            .expect("terminalize");
+
+            let error =
+                cancel_run(attempt_id, None).expect_err("exact terminal cancel stays strict");
+            assert!(is_already_terminal_cancel_error(&error));
+            assert_eq!(error.details["field"], ALREADY_TERMINAL_FIELD);
         });
     }
 

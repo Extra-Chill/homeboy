@@ -2,8 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-use crate::{ControlPlaneAction, ControlPlaneRun, RunId};
+use crate::{ControlPlaneAction, ControlPlaneRef, ControlPlaneRun, RunId};
 
 pub const CONTROL_PLANE_ACTION_REQUEST_SCHEMA: &str = "homeboy/control-plane-action-request/v1";
 pub const CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA: &str =
@@ -15,6 +16,35 @@ pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
 pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
+pub const CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-quarantine-parameters/v1";
+pub const CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA: &str =
+    "homeboy/control-plane-quarantine-result/v1";
+pub const CONTROL_PLANE_REARM_RESULT_SCHEMA: &str = "homeboy/control-plane-rearm-result/v1";
+pub const CONTROL_PLANE_ACTION_ID_BOUND: usize = 128;
+
+/// Builds the durable effect identity for an action without coupling it to the
+/// independently persisted idempotency key. Existing short identifiers retain
+/// their wire representation; longer inputs use a deterministic digest of each
+/// component so retries remain replayable and collision-resistant.
+pub fn action_effect_id(
+    provenance: &str,
+    target_id: &str,
+    action: &str,
+    idempotency_key: &str,
+) -> EffectId {
+    let legacy = format!("{provenance}:{target_id}:{action}:{idempotency_key}");
+    if legacy.len() <= CONTROL_PLANE_ACTION_ID_BOUND {
+        return EffectId(legacy);
+    }
+
+    let mut digest = Sha256::new();
+    for component in [provenance, target_id, action, idempotency_key] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component.as_bytes());
+    }
+    EffectId(format!("{provenance}:{action}:{:x}", digest.finalize()))
+}
 pub const CONTROL_PLANE_RESUME_RESULT_SCHEMA: &str = "homeboy/control-plane-resume-result/v1";
 pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-placement-update-parameters/v1";
@@ -23,6 +53,116 @@ pub const CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA: &str =
 pub const CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-promote-parameters/v1";
 pub const CONTROL_PLANE_PROMOTE_RESULT_SCHEMA: &str = "homeboy/control-plane-promote-result/v1";
+pub const CONTROL_PLANE_ACTION_INTENT_SCHEMA: &str = "homeboy/control-plane-action-intent/v1";
+pub const CONTROL_PLANE_ACTION_FENCE_SCHEMA: &str = "homeboy/control-plane-action-fence/v1";
+pub const CONTROL_PLANE_EFFECT_LEASE_SCHEMA: &str = "homeboy/control-plane-effect-lease/v1";
+pub const CONTROL_PLANE_EFFECT_AUDIT_SCHEMA: &str = "homeboy/control-plane-effect-audit/v1";
+pub const CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA: &str = "homeboy/control-plane-effect-terminal/v1";
+pub const CONTROL_PLANE_EFFECT_STATUS_SCHEMA: &str = "homeboy/control-plane-effect-status/v1";
+
+/// Stable, caller-derived identity for one external effect. The same intent
+/// must retain this value across restart and reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct EffectId(pub String);
+
+/// Canonical durable resource plus the original external alias, when one was
+/// supplied. Aliases are evidence, never a second authority for the resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionResource {
+    pub resource: ControlPlaneRef,
+    pub run: RunId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_alias: Option<String>,
+}
+
+/// Immutable request persisted before any external action is attempted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionIntent {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub resource: ControlPlaneActionResource,
+    pub request: ControlPlaneActionRequest,
+    pub request_digest: String,
+    pub accepted_at: String,
+}
+
+/// Eligibility snapshot evaluated in the transaction that admits an intent.
+/// A worker must treat a later resource change as a reconciliation boundary,
+/// not silently execute against a different resource version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneActionFence {
+    pub schema: String,
+    pub resource_updated_at: String,
+    pub eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneEffectState {
+    Pending,
+    Leased,
+    Terminal,
+}
+
+/// Fenced, expiring ownership of an outbox effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectLease {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub owner: String,
+    pub fence: u64,
+    pub expires_at: String,
+}
+
+/// Immutable evidence collected by the effect executor before terminalization.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectAudit {
+    pub schema: String,
+    pub observed_at: String,
+    pub evidence: Value,
+}
+
+/// Terminal record written atomically with the acknowledgement and audit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectTerminal {
+    pub schema: String,
+    pub completed_at: String,
+    pub acknowledgement: ControlPlaneActionAcknowledgement,
+    pub audit: ControlPlaneEffectAudit,
+}
+
+/// An authoritative effect observation. `Unknown` is intentionally distinct
+/// from success: callers must reconcile an ambiguous external crash window.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneEffectExecutionState {
+    NotStarted,
+    Running,
+    Succeeded,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneEffectStatus {
+    pub schema: String,
+    pub effect_id: EffectId,
+    pub state: ControlPlaneEffectExecutionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acknowledgement: Option<ControlPlaneActionAcknowledgement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +222,31 @@ pub struct ControlPlaneRetryParameters {
     pub new_run_id: Option<String>,
     #[serde(default)]
     pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_route: Option<ControlPlaneProviderRouteOverride>,
+}
+
+/// Explicit provider route selected for a retry successor. It is part of the
+/// immutable retry intent rather than an untracked execution-time override.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneProviderRouteOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_provider_rotation: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_rotations: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneQuarantineParameters {
+    pub reason: String,
 }
 
 /// A deliberate execution-route change. The control plane accepts only explicit
@@ -96,6 +261,10 @@ pub struct ControlPlanePlacementUpdateParameters {
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneActionRequest {
     pub schema: String,
+    /// Stable identity supplied by the caller and retained in the immutable
+    /// intent. It is distinct from an idempotency key: status is addressed by
+    /// this effect identity after a worker restart.
+    pub effect_id: EffectId,
     pub action: ControlPlaneAction,
     pub idempotency_key: String,
     pub actor: String,
@@ -108,7 +277,7 @@ pub struct ControlPlaneActionRequest {
 
 impl ControlPlaneActionRequest {
     pub fn validate(&self) -> Result<(), crate::ControlPlaneError> {
-        const INPUT_BOUND: usize = 128;
+        const INPUT_BOUND: usize = CONTROL_PLANE_ACTION_ID_BOUND;
         const REASON_BOUND: usize = 1_024;
 
         if self.schema != CONTROL_PLANE_ACTION_REQUEST_SCHEMA {
@@ -117,6 +286,7 @@ impl ControlPlaneActionRequest {
             ));
         }
         for (name, value) in [
+            ("effect_id", self.effect_id.0.as_str()),
             ("idempotency_key", self.idempotency_key.as_str()),
             ("actor", self.actor.as_str()),
         ] {
@@ -138,6 +308,10 @@ impl ControlPlaneActionRequest {
                 CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
             ),
             ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
+            ControlPlaneAction::Quarantine => {
+                ("quarantine", CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA)
+            }
+            ControlPlaneAction::Rearm => ("rearm", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
         };
         if self.parameters.schema != expected_schema {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
@@ -167,6 +341,19 @@ impl ControlPlaneActionRequest {
                     crate::ControlPlaneError::invalid_argument(format!("retry parameters: {error}"))
                 })?;
         }
+        if self.action == ControlPlaneAction::Quarantine {
+            let parameters: ControlPlaneQuarantineParameters =
+                serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
+                    crate::ControlPlaneError::invalid_argument(format!(
+                        "quarantine parameters: {error}"
+                    ))
+                })?;
+            if parameters.reason.trim().is_empty() || parameters.reason.len() > REASON_BOUND {
+                return Err(crate::ControlPlaneError::invalid_argument(format!(
+                    "quarantine reason must contain 1 to {REASON_BOUND} bytes"
+                )));
+            }
+        }
         if self.action == ControlPlaneAction::PlacementUpdate {
             let parameters: ControlPlanePlacementUpdateParameters =
                 serde_json::from_value(self.parameters.data.clone()).map_err(|error| {
@@ -186,6 +373,8 @@ impl ControlPlaneActionRequest {
                 | ControlPlaneAction::PlacementUpdate
                 | ControlPlaneAction::Promote
                 | ControlPlaneAction::Retry
+                | ControlPlaneAction::Quarantine
+                | ControlPlaneAction::Rearm
         ) && !self.confirmed
         {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
@@ -232,6 +421,7 @@ mod tests {
         let run = RunId::new("run-1").expect("run");
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:cancel:request-1".to_string()),
             action: ControlPlaneAction::Cancel,
             idempotency_key: "request-1".to_string(),
             actor: "test".to_string(),
@@ -272,6 +462,45 @@ mod tests {
     }
 
     #[test]
+    fn action_effect_id_preserves_short_persisted_identifiers() {
+        assert_eq!(
+            action_effect_id("cli", "run-1", "retry", "request-1"),
+            EffectId("cli:run-1:retry:request-1".to_string())
+        );
+    }
+
+    #[test]
+    fn action_effect_id_bounds_long_inputs_without_losing_replay_identity() {
+        let run_id = format!("run-{}", "x".repeat(120));
+        let first = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
+        );
+        let replay = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "9b820379-35cf-4ca5-bcd4-1e743ee58b15",
+        );
+        let distinct = action_effect_id(
+            "cli",
+            &run_id,
+            "retry",
+            "c5c72555-8670-4f5c-8937-8eb23d582d3f",
+        );
+
+        assert!(first.0.len() <= CONTROL_PLANE_ACTION_ID_BOUND);
+        assert_eq!(first, replay);
+        assert_ne!(first, distinct);
+        assert_eq!(
+            first.0.split(':').take(2).collect::<Vec<_>>(),
+            ["cli", "retry"]
+        );
+    }
+
+    #[test]
     fn cancel_result_is_versioned_and_distinguishes_unconverged_requests() {
         let result = ControlPlaneCancelResult {
             schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
@@ -295,6 +524,7 @@ mod tests {
     fn placement_update_requires_confirmation_and_explicit_local() {
         let mut request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:placement:placement-1".to_string()),
             action: ControlPlaneAction::PlacementUpdate,
             idempotency_key: "placement-1".to_string(),
             actor: "operator".to_string(),
@@ -310,5 +540,43 @@ mod tests {
         assert!(request.validate().is_ok());
         request.parameters.data = serde_json::json!({ "placement": "auto" });
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn quarantine_and_route_retry_require_typed_payloads() {
+        let mut quarantine = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:quarantine:quarantine-1".to_string()),
+            action: ControlPlaneAction::Quarantine,
+            idempotency_key: "quarantine-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({ "reason": "provider unavailable" }),
+            },
+            confirmed: true,
+        };
+        assert!(quarantine.validate().is_ok());
+        quarantine.parameters.data = serde_json::json!({ "reason": "" });
+        assert!(quarantine.validate().is_err());
+
+        let retry = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: EffectId("fixture:retry:retry-1".to_string()),
+            action: ControlPlaneAction::Retry,
+            idempotency_key: "retry-1".to_string(),
+            actor: "operator".to_string(),
+            expected_updated_at: None,
+            parameters: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA.to_string(),
+                data: serde_json::json!({
+                    "force": false,
+                    "provider_route": { "backend": "replacement" },
+                }),
+            },
+            confirmed: true,
+        };
+        assert!(retry.validate().is_ok());
     }
 }
