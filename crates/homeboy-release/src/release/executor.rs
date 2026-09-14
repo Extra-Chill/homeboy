@@ -42,7 +42,7 @@ pub(crate) use package::{
     build_release_payload, run_extension_release_preflight, run_package, PackageRequest,
 };
 pub(crate) use publish::{publish_response_output, run_publish};
-pub(crate) use release_pr::run_release_pr;
+pub(crate) use release_pr::{require_merged_release_pr, run_release_pr};
 pub(crate) use tagging::{
     github_release_exists_for_tag, github_release_lookup_for_tag, run_git_tag,
     run_tag_availability_preflight,

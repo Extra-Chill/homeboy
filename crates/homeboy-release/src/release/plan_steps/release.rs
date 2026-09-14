@@ -24,6 +24,12 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     hints: &mut Vec<String>,
     reconcile_from: Option<&str>,
 ) -> Result<Vec<PlanStep>> {
+    if options.pipeline.protected_branch_resume {
+        return Ok(build_prepared_release_pr_resume_steps(
+            component,
+            release_scope.tag_name(current_version),
+        ));
+    }
     let mut steps = Vec::new();
     let publish_targets = get_publish_targets(extensions);
     let registry_publish_enabled = component.release.publish_enabled();
@@ -320,6 +326,40 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     }
 
     Ok(steps)
+}
+
+/// Retry only the remote branch/PR boundary after a prepared release branch
+/// was verified locally and against its remote ref. Versioning and tagging are
+/// intentionally absent: the immutable tag belongs to merged-head finalization.
+pub(in crate::release) fn build_prepared_release_pr_resume_steps(
+    component: &Component,
+    tag_name: String,
+) -> Vec<PlanStep> {
+    let branch = format!("release/{tag_name}");
+    vec![
+        ready_step(
+            "git.push",
+            "git.push",
+            format!("Confirm prepared release branch {}", branch),
+            vec!["preflight.remote_sync".to_string()],
+            StepConfig::new()
+                .bool("tags", false)
+                .string("branch", branch.clone()),
+        ),
+        ready_step(
+            "github.release_pr",
+            "github.release_pr",
+            format!("Open release pull request for {}", tag_name),
+            vec!["git.push".to_string()],
+            StepConfig::new()
+                .string(
+                    "base",
+                    super::super::planning_git::default_branch(component),
+                )
+                .string("head", branch)
+                .string("title", format!("release: {}", tag_name)),
+        ),
+    ]
 }
 
 fn build_head_release_steps(

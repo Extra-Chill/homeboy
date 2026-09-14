@@ -11,12 +11,19 @@ pub(in crate::release) fn build_preflight_steps(
     semver_recommendation: Option<&ReleaseSemverRecommendation>,
     extensions: &[ReleaseExtension],
 ) -> Vec<PlanStep> {
-    let default_branch_step = if options.pipeline.head {
+    let default_branch_step = if options.pipeline.head || options.pipeline.protected_branch_resume {
         disabled_step(
             "preflight.default_branch",
             "preflight.default_branch",
             "Validate default branch",
-            string_config("reason", "head-release"),
+            string_config(
+                "reason",
+                if options.pipeline.head {
+                    "head-release"
+                } else {
+                    "prepared-release-pr-resume"
+                },
+            ),
         )
     } else {
         ready_step(

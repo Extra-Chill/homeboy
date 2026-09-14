@@ -188,6 +188,12 @@ fn initial_release_state(
     // Protected-branch finalization tags only after the release PR is merged,
     // so the expected tag intentionally does not exist when this phase starts.
     if options.pipeline.protected_branch {
+        let branch = format!("release/{expected_tag}");
+        super::executor::require_merged_release_pr(
+            component,
+            &super::planning_git::default_branch(component),
+            &branch,
+        )?;
         return Ok(ReleaseState {
             version: Some(version_info.version),
             tag: Some(expected_tag),

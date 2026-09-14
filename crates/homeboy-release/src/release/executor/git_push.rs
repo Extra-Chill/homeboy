@@ -182,21 +182,41 @@ pub(crate) fn run_git_branch_push(
     component_id: &str,
     branch: &str,
 ) -> Result<ReleaseStepResult> {
-    let switch = std::process::Command::new("git")
-        .args(["switch", "-c", branch])
+    let current_branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
         .current_dir(&component.local_path)
         .output()
-        .map_err(|error| {
-            Error::git_command_failed(format!("create release branch {branch}: {error}"))
-        })?;
-    if !switch.status.success() {
+        .map_err(|error| Error::git_command_failed(format!("read current branch: {error}")))?;
+    if !current_branch.status.success() {
         return Ok(step_failed(
             "git.push",
             "git.push",
             Some(serde_json::json!({ "target": format!("origin/{branch}") })),
-            Some(String::from_utf8_lossy(&switch.stderr).trim().to_string()),
+            Some(
+                String::from_utf8_lossy(&current_branch.stderr)
+                    .trim()
+                    .to_string(),
+            ),
             Vec::new(),
         ));
+    }
+    if String::from_utf8_lossy(&current_branch.stdout).trim() != branch {
+        let switch = std::process::Command::new("git")
+            .args(["switch", "-c", branch])
+            .current_dir(&component.local_path)
+            .output()
+            .map_err(|error| {
+                Error::git_command_failed(format!("create release branch {branch}: {error}"))
+            })?;
+        if !switch.status.success() {
+            return Ok(step_failed(
+                "git.push",
+                "git.push",
+                Some(serde_json::json!({ "target": format!("origin/{branch}") })),
+                Some(String::from_utf8_lossy(&switch.stderr).trim().to_string()),
+                Vec::new(),
+            ));
+        }
     }
     let output = homeboy_core::git::push_at(
         Some(component_id),
@@ -539,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn run_git_branch_push_creates_a_release_branch_without_updating_default() {
+    fn run_git_branch_push_reuses_prepared_branch_after_pr_creation_failure_without_tagging() {
         let local = tempfile::tempdir().expect("local tempdir");
         let remote = tempfile::tempdir().expect("remote tempdir");
         git(remote.path(), &["init", "--bare", "-b", "main"]);
@@ -575,9 +595,23 @@ mod tests {
             .expect("push release branch");
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
+        // A failed `gh pr create` leaves this checked-out, pushed branch intact.
+        // The retry must reuse it rather than trying to create it again or tag it.
+        let retry = run_git_branch_push(&component, "fixture", "release/v1.0.0")
+            .expect("reuse prepared release branch");
+        assert_eq!(retry.status, ReleaseStepStatus::Success);
         git(
             remote.path(),
             &["show-ref", "--verify", "refs/heads/release/v1.0.0"],
+        );
+        assert!(
+            !Command::new("git")
+                .args(["show-ref", "--verify", "refs/tags/v1.0.0"])
+                .current_dir(remote.path())
+                .status()
+                .expect("check remote tag")
+                .success(),
+            "PR preparation and its retry must not create the release tag"
         );
         assert_eq!(
             Command::new("git")

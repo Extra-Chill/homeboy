@@ -420,6 +420,10 @@ pub struct ReleasePipelineOptions {
     /// branch directly. With `head`, finalize the normally merged commit.
     #[serde(default)]
     pub protected_branch: bool,
+    /// A validated prepared release branch whose PR creation is being retried.
+    /// This is derived from local and remote Git state; it is not a CLI option.
+    #[serde(skip)]
+    pub(crate) protected_branch_resume: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
