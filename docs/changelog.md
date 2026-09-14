@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.373.14] - 2026-09-14
+
+### Fixed
+- resume protected release PR creation
+- recover zero-execution transport retries
+- prevent lifecycle lock inheritance
+
 ## [0.373.13] - 2026-09-14
 
 ### Fixed
