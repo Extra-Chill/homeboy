@@ -68,7 +68,8 @@ pub use containment::{ContainsQuery, ReleaseContainsReport, ReleaseGapReport};
 pub use context::readiness_provenance;
 pub use control_plane::register_action_delegate;
 pub use executor::artifacts::{
-    write_artifact_source_authority_manifest, ArtifactSourceAuthorityManifest,
+    source_authority_artifacts, write_artifact_source_authority_manifest,
+    ArtifactSourceAuthorityManifest, SourceAuthorityArtifact,
 };
 pub use executor::release_notes_path;
 pub use package_recovery::{package_existing_tag, ReleasePackageResult};

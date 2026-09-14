@@ -1,6 +1,6 @@
 use clap::Args;
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use homeboy::core::component;
@@ -19,9 +19,13 @@ pub struct CandidateArgs {
     #[arg(long, value_name = "SHA")]
     sha: String,
 
-    /// Built assets to attach. Repeat for each asset.
-    #[arg(long = "asset", required = true, value_name = "PATH")]
-    assets: Vec<PathBuf>,
+    /// Source-authority manifest directory created by Homeboy packaging or CI.
+    #[arg(long, value_name = "DIR")]
+    from_artifacts: std::path::PathBuf,
+
+    /// Version recorded in the source-authority manifest.
+    #[arg(long)]
+    version: String,
 
     /// Create the GitHub prerelease. Without this flag, print the immutable publication plan.
     #[arg(long)]
@@ -43,6 +47,7 @@ pub struct CandidatePublication {
 pub struct CandidateAsset {
     pub name: String,
     pub url: String,
+    pub sha256: String,
 }
 
 struct CandidateRepository {
@@ -55,7 +60,14 @@ pub(super) fn run(args: CandidateArgs) -> CmdResult<CandidatePublication> {
     let sha = resolve_sha(Path::new(&component.local_path), &args.sha)?;
     let repo = github_repo(&component)?;
     let tag = format!("candidate-{sha}");
-    let assets = candidate_assets(&repo, &tag, &args.assets)?;
+    let authority = homeboy_release::release::source_authority_artifacts(
+        &args.from_artifacts,
+        &args.component_id,
+        &tag,
+        &args.version,
+        &sha,
+    )?;
+    let assets = candidate_assets(&repo, &tag, &authority)?;
 
     if args.apply {
         ensure_release_is_new(&repo.slug, &tag)?;
@@ -75,7 +87,7 @@ pub(super) fn run(args: CandidateArgs) -> CmdResult<CandidatePublication> {
             "--notes",
             &format!("Immutable candidate publication for source commit `{sha}`."),
         ]);
-        command.args(&args.assets);
+        command.args(authority.iter().map(|asset| asset.path.as_str()));
         let output = command.output().map_err(|error| {
             Error::validation_invalid_argument(
                 "candidate",
@@ -170,20 +182,13 @@ fn github_repo(component: &homeboy::core::component::Component) -> Result<Candid
 fn candidate_assets(
     repository: &CandidateRepository,
     tag: &str,
-    paths: &[PathBuf],
+    paths: &[homeboy_release::release::SourceAuthorityArtifact],
 ) -> Result<Vec<CandidateAsset>> {
     let mut names = std::collections::BTreeSet::new();
     paths
         .iter()
-        .map(|path| {
-            if !path.is_file() {
-                return Err(Error::validation_invalid_argument(
-                    "asset",
-                    "candidate asset must be an existing regular file",
-                    Some(path.display().to_string()),
-                    None,
-                ));
-            }
+        .map(|artifact| {
+            let path = Path::new(&artifact.path);
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -205,6 +210,7 @@ fn candidate_assets(
             }
             Ok(CandidateAsset {
                 name: name.to_string(),
+                sha256: artifact.sha256.clone(),
                 url: format!(
                     "https://{}/{}/releases/download/{tag}/{name}",
                     repository.host, repository.slug
@@ -266,11 +272,19 @@ mod tests {
             host: "github.com".to_string(),
             slug: "example/site".to_string(),
         };
-        let assets = candidate_assets(&repository, "candidate-deadbeef", &[asset])
-            .expect("candidate assets");
+        let assets = candidate_assets(
+            &repository,
+            "candidate-deadbeef",
+            &[homeboy_release::release::SourceAuthorityArtifact {
+                path: asset.display().to_string(),
+                sha256: "a".repeat(64),
+            }],
+        )
+        .expect("candidate assets");
 
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].name, "site.zip");
+        assert_eq!(assets[0].sha256, "a".repeat(64));
         assert_eq!(
             assets[0].url,
             "https://github.com/example/site/releases/download/candidate-deadbeef/site.zip"
