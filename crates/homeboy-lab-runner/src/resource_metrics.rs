@@ -56,7 +56,8 @@ fn require_process_tree_isolation() -> Result<()> {
 // embedded in core api_jobs records) so core has no core -> runner edge.
 // Re-exported so runner-internal call sites resolve unchanged.
 pub use homeboy_runner_contract::{
-    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+    RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
+    RunnerResourceMetrics,
 };
 
 #[derive(Debug)]
@@ -302,12 +303,156 @@ fn os_str_bytes(value: &OsStr) -> usize {
     value.as_encoded_bytes().len()
 }
 
+/// Captures cgroup-v2 evidence outside the child so the terminal metrics still
+/// exist when the child is killed before it can write its own diagnostics.
+#[cfg(target_os = "linux")]
+struct CgroupMemoryCollector {
+    directory: Option<std::path::PathBuf>,
+    before: Option<CgroupMemorySnapshot>,
+}
+
+#[cfg(not(target_os = "linux"))]
+struct CgroupMemoryCollector;
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct CgroupMemorySnapshot {
+    memory_limit_bytes: Option<u64>,
+    memory_current_bytes: Option<u64>,
+    memory_peak_bytes: Option<u64>,
+    oom_kill_count: Option<u64>,
+}
+
+impl CgroupMemoryCollector {
+    #[cfg(target_os = "linux")]
+    fn start(pid: u32) -> Self {
+        let directory = cgroup_v2_directory_for_pid(pid);
+        let before = directory.as_deref().map(read_cgroup_memory_snapshot);
+        Self { directory, before }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn start(_pid: u32) -> Self {
+        Self
+    }
+
+    #[cfg(target_os = "linux")]
+    fn finish(self) -> RunnerCgroupMemoryEvidence {
+        let Some(directory) = self.directory else {
+            return cgroup_memory_unavailable();
+        };
+        let after = read_cgroup_memory_snapshot(&directory);
+        let before = self.before.unwrap_or_default();
+        cgroup_memory_evidence(before, after)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn finish(self) -> RunnerCgroupMemoryEvidence {
+        RunnerCgroupMemoryEvidence::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_evidence(
+    before: CgroupMemorySnapshot,
+    after: CgroupMemorySnapshot,
+) -> RunnerCgroupMemoryEvidence {
+    let oom_kill_delta = match (before.oom_kill_count, after.oom_kill_count) {
+        (Some(before), Some(after)) => Some(after.saturating_sub(before)),
+        _ => None,
+    };
+    let fully_observed = after.memory_current_bytes.is_some()
+        && after.memory_peak_bytes.is_some()
+        && before.oom_kill_count.is_some()
+        && after.oom_kill_count.is_some();
+    RunnerCgroupMemoryEvidence {
+        status: if fully_observed {
+            "observed"
+        } else {
+            "partial"
+        }
+        .to_string(),
+        source: "linux_cgroup_v2".to_string(),
+        memory_limit_bytes: after.memory_limit_bytes.or(before.memory_limit_bytes),
+        memory_current_bytes: after.memory_current_bytes,
+        memory_peak_bytes: after.memory_peak_bytes,
+        oom_kill_count_before: before.oom_kill_count,
+        oom_kill_count_after: after.oom_kill_count,
+        oom_kill_delta,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_unavailable() -> RunnerCgroupMemoryEvidence {
+    RunnerCgroupMemoryEvidence {
+        status: "unavailable".to_string(),
+        source: "linux_cgroup_v2".to_string(),
+        ..RunnerCgroupMemoryEvidence::default()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::path::PathBuf> {
+    let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let relative = cgroup_v2_relative_path(&membership)?;
+    let root = std::path::Path::new("/sys/fs/cgroup");
+    let directory = root.join(relative);
+    directory.is_dir().then_some(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_v2_relative_path(membership: &str) -> Option<std::path::PathBuf> {
+    let path = membership.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        (fields.next() == Some("0") && fields.next() == Some(""))
+            .then(|| fields.next())
+            .flatten()
+    })?;
+    let relative = std::path::Path::new(path.trim_start_matches('/'));
+    relative
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+        .then(|| relative.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_memory_snapshot(directory: &std::path::Path) -> CgroupMemorySnapshot {
+    CgroupMemorySnapshot {
+        memory_limit_bytes: read_cgroup_u64(directory, "memory.max", true),
+        memory_current_bytes: read_cgroup_u64(directory, "memory.current", false),
+        memory_peak_bytes: read_cgroup_u64(directory, "memory.peak", false),
+        oom_kill_count: read_cgroup_event_count(directory, "oom_kill"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_u64(directory: &std::path::Path, name: &str, accepts_max: bool) -> Option<u64> {
+    let value = std::fs::read_to_string(directory.join(name)).ok()?;
+    let value = value.trim();
+    if accepts_max && value == "max" {
+        return None;
+    }
+    value.parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn read_cgroup_event_count(directory: &std::path::Path, name: &str) -> Option<u64> {
+    let events = std::fs::read_to_string(directory.join("memory.events")).ok()?;
+    events.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next() == Some(name))
+            .then(|| fields.next()?.parse().ok())
+            .flatten()
+    })
+}
+
 struct ResourceMetricsCollector {
     supported: bool,
     stop: Option<mpsc::Sender<()>>,
     state: Arc<Mutex<MetricsState>>,
     handle: Option<thread::JoinHandle<()>>,
     guard_limits: Option<RunnerResourceGuardLimits>,
+    cgroup_memory: CgroupMemoryCollector,
     #[cfg(target_os = "linux")]
     registered_root_pid: Option<u32>,
 }
@@ -324,6 +469,7 @@ impl ResourceMetricsCollector {
         let supported = cfg!(target_os = "linux") && std::path::Path::new("/proc").exists();
         let guard_limits = resolved_resource_guard_limits(resource_guard_env, concurrency_limit);
         let state = Arc::new(Mutex::new(MetricsState::default()));
+        let cgroup_memory = CgroupMemoryCollector::start(root_pid);
         if !supported && progress_sink.is_none() {
             return Self {
                 supported,
@@ -331,6 +477,7 @@ impl ResourceMetricsCollector {
                 state,
                 handle: None,
                 guard_limits,
+                cgroup_memory,
                 #[cfg(target_os = "linux")]
                 registered_root_pid: None,
             };
@@ -377,6 +524,7 @@ impl ResourceMetricsCollector {
             state,
             handle: Some(handle),
             guard_limits,
+            cgroup_memory,
             #[cfg(target_os = "linux")]
             registered_root_pid: Some(root_pid),
         }
@@ -394,6 +542,7 @@ impl ResourceMetricsCollector {
             unregister_active_runner(root_pid);
         }
         let state = self.state.lock().expect("resource metrics mutex poisoned");
+        let cgroup_memory = self.cgroup_memory.finish();
         let mut guard_limits = self.guard_limits;
         if let Some(limits) = guard_limits.as_mut() {
             if limits.aggregate_rss_budget_bytes.is_some() {
@@ -414,6 +563,7 @@ impl ResourceMetricsCollector {
                 .then_some(state.child_process_count_peak),
             resource_guard: guard_limits,
             guard_violation: state.guard_violation.clone(),
+            cgroup_memory,
             source: if self.supported {
                 "linux_procfs_process_tree".to_string()
             } else {
@@ -1183,6 +1333,68 @@ mod tests {
             .expect("ordinary measured command execution remains available");
 
         assert!(output.output.status.success());
+        assert!(
+            !output.metrics.cgroup_memory.status.is_empty(),
+            "unsupported cgroup telemetry must be explicit rather than look like a successful zero"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_oom_kill_delta_is_authoritative_evidence() {
+        let evidence = cgroup_memory_evidence(
+            CgroupMemorySnapshot {
+                memory_limit_bytes: Some(64),
+                memory_current_bytes: Some(63),
+                memory_peak_bytes: Some(64),
+                oom_kill_count: Some(4),
+            },
+            CgroupMemorySnapshot {
+                memory_limit_bytes: Some(64),
+                memory_current_bytes: Some(12),
+                memory_peak_bytes: Some(64),
+                oom_kill_count: Some(5),
+            },
+        );
+
+        assert_eq!(evidence.status, "observed");
+        assert_eq!(evidence.oom_kill_delta, Some(1));
+        assert_eq!(evidence.memory_limit_bytes, Some(64));
+        assert_eq!(evidence.memory_peak_bytes, Some(64));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_evidence_does_not_misclassify_an_ordinary_sigkill_as_oom() {
+        let evidence = cgroup_memory_evidence(
+            CgroupMemorySnapshot {
+                memory_limit_bytes: Some(64),
+                memory_current_bytes: Some(24),
+                memory_peak_bytes: Some(32),
+                oom_kill_count: Some(4),
+            },
+            CgroupMemorySnapshot {
+                memory_limit_bytes: Some(64),
+                memory_current_bytes: Some(12),
+                memory_peak_bytes: Some(32),
+                oom_kill_count: Some(4),
+            },
+        );
+
+        assert_eq!(evidence.status, "observed");
+        assert_eq!(evidence.oom_kill_delta, Some(0));
+        assert_ne!(evidence.oom_kill_delta, Some(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_membership_rejects_escape_paths() {
+        assert_eq!(
+            cgroup_v2_relative_path("0::/runner/job\n"),
+            Some(std::path::PathBuf::from("runner/job"))
+        );
+        assert!(cgroup_v2_relative_path("0::/../../etc\n").is_none());
+        assert!(cgroup_v2_relative_path("1:name=/legacy\n").is_none());
     }
 
     #[test]

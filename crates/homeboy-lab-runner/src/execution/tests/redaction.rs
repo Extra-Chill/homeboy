@@ -197,6 +197,7 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
             process_count: 70,
             process_count_limit: 128,
         }),
+        cgroup_memory: Default::default(),
         source: "linux_procfs_process_tree".to_string(),
     });
 

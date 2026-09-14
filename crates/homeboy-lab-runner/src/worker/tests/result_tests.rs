@@ -1,8 +1,8 @@
 use serde_json::json;
 
 use crate::{
-    RunnerExecMode, RunnerExecOutput, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
-    RunnerResourceMetrics,
+    RunnerCgroupMemoryEvidence, RunnerExecMode, RunnerExecOutput, RunnerResourceGuardLimits,
+    RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
 use homeboy_core::api_jobs::{JobArtifactMetadata, JobEvent, JobEventKind};
 use homeboy_core::observation::{ObservationStore, RunRecord};
@@ -360,6 +360,7 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
                     process_count: 70,
                     process_count_limit: 128,
                 }),
+                cgroup_memory: RunnerCgroupMemoryEvidence::default(),
                 source: "linux_procfs_process_tree".to_string(),
             }),
             capture: None,
