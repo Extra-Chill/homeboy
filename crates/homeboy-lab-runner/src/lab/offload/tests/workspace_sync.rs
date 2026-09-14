@@ -75,6 +75,7 @@ fn source_snapshot(local_path: String) -> SourceSnapshot {
         snapshot_hash: "sha256:source".to_string(),
         synced_at: "2026-06-28T00:00:00Z".to_string(),
         sync_excludes: Vec::new(),
+        repository_integrity_evidence: None,
     }
 }
 

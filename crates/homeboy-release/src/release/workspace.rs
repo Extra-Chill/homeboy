@@ -37,9 +37,10 @@ impl ReleaseWorkspace {
         roots: &homeboy_core::paths::PathRoots,
         component: &Component,
         head_release: bool,
+        prepared_release_pr_resume: bool,
     ) -> Result<Self> {
         let store = OperationRecordStore::in_roots(roots);
-        if in_place_eligible(component, head_release) {
+        if in_place_eligible(component, head_release, prepared_release_pr_resume) {
             return Ok(Self {
                 component: component.clone(),
                 output: ReleaseWorkspaceOutput::in_place(&component.local_path),
@@ -558,7 +559,11 @@ fn release_finalization_receipt_matches_record(record: &OperationRecord) -> bool
             )
 }
 
-fn in_place_eligible(component: &Component, head_release: bool) -> bool {
+fn in_place_eligible(
+    component: &Component,
+    head_release: bool,
+    prepared_release_pr_resume: bool,
+) -> bool {
     let path = Path::new(&component.local_path);
     if !git::is_git_repo(&component.local_path) {
         return false;
@@ -568,6 +573,9 @@ fn in_place_eligible(component: &Component, head_release: bool) -> bool {
     }
     if git::status_porcelain(path).as_deref() != Some("") {
         return false;
+    }
+    if prepared_release_pr_resume {
+        return git::head_sha(path).is_some();
     }
     let Some(branch) = git::current_branch(path) else {
         return false;
@@ -705,9 +713,14 @@ mod tests {
             local_path: path.display().to_string(),
             ..Default::default()
         };
-        assert!(in_place_eligible(&component, false));
+        assert!(in_place_eligible(&component, false, false));
+        git(path, &["switch", "-qc", "release/v1.0.0"]);
+        assert!(!in_place_eligible(&component, false, false));
+        assert!(in_place_eligible(&component, false, true));
+        git(path, &["switch", "-q", "main"]);
         std::fs::write(path.join("README.md"), "dirty\n").expect("dirty");
-        assert!(!in_place_eligible(&component, false));
+        assert!(!in_place_eligible(&component, false, false));
+        assert!(!in_place_eligible(&component, false, true));
     }
 
     #[test]
@@ -719,8 +732,8 @@ mod tests {
                 "dirty\n",
             )
             .expect("dirty source");
-            let workspace =
-                ReleaseWorkspace::select(&test_roots(), &component, false).expect("native staging");
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false)
+                .expect("native staging");
             let owner = workspace
                 .output
                 .owner_run_ref

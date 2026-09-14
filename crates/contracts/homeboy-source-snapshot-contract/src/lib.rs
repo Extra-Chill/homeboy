@@ -8,7 +8,10 @@
 pub mod source_snapshot;
 pub mod workspace_content_identity;
 
-pub use source_snapshot::{default_sync_excludes, SourceSnapshot, SourceSnapshotPolicy};
+pub use source_snapshot::{
+    default_sync_excludes, RepositoryIntegrityEvidence, RepositoryIntegritySymlinkException,
+    SourceSnapshot, SourceSnapshotPolicy,
+};
 pub use workspace_content_identity::{
     workspace_content_hash_algorithm, WorkspaceContentManifest, WorkspaceContentManifestEntry,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY, WORKSPACE_CONTENT_PERMISSION_PORTABLE,

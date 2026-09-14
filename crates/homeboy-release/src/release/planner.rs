@@ -5,7 +5,10 @@ use homeboy_core::engine::validation::ValidationCollector;
 use homeboy_core::error::{Error, Result};
 
 use super::context::{load_component, resolve_extensions};
-use super::plan_steps::{build_preflight_steps, build_release_steps_with_reconciliation};
+use super::plan_steps::{
+    build_preflight_steps, build_prepared_release_pr_resume_steps,
+    build_release_steps_with_reconciliation,
+};
 use super::planning_changelog::{build_changelog_plan, generate_changelog_entries};
 use super::planning_policy::release_skip_plan;
 use super::planning_semver::{
@@ -44,6 +47,27 @@ pub(crate) fn plan(component_id: &str, options: &ReleaseOptions) -> Result<Relea
 
     let release_scope = ReleaseScope::resolve(&component, component_id)?;
     let version_info = v.capture(version::read_component_version(&component), "version");
+    if options.pipeline.protected_branch_resume {
+        v.finish()?;
+        let version = version_info
+            .as_ref()
+            .expect("validated release version is present")
+            .version
+            .clone();
+        let mut steps = build_preflight_steps(options, None, &extensions);
+        steps.extend(build_prepared_release_pr_resume_steps(
+            &component,
+            release_scope.tag_name(&version),
+        ));
+        return Ok(ReleasePlan::new(
+            component_id,
+            true,
+            steps,
+            None,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
     if !options.pipeline.head {
         if let Some(info) = version_info.as_ref() {
             if let Some(tag) = authoritative_descendant_release_tag(&release_scope, &info.version)?

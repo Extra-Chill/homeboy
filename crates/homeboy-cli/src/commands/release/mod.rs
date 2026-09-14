@@ -193,6 +193,11 @@ pub struct ReleaseExecuteArgs {
     #[arg(long)]
     head: bool,
 
+    /// Prepare a release pull request instead of directly updating the default branch.
+    /// Run again with --head after GitHub has normally merged the release PR.
+    #[arg(long)]
+    protected_branch: bool,
+
     /// Use existing release artifacts from this directory instead of running release.package.
     /// Requires --head.
     #[arg(long, value_name = "DIR")]
@@ -409,6 +414,8 @@ impl ReleaseExecuteArgs {
             skip_publish: self.skip_publish,
             head: self.head,
             from_artifacts: self.from_artifacts.clone(),
+            protected_branch: self.protected_branch,
+            protected_branch_resume: false,
         }
     }
 
@@ -1004,6 +1011,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             None,
         ));
     }
+    if args.protected_branch && args.recover {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "protected-branch",
+            "--protected-branch has separate prepare and --head finalization phases; it cannot be combined with --recover",
+            None,
+            None,
+        ));
+    }
     let component_ids = resolve_component_ids(&args, &args.components)?;
     validate_positional_component_ids(&args, &component_ids)?;
     if args.package_only {
@@ -1134,6 +1149,14 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             None,
         ));
     }
+    if args.protected_branch {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "protected-branch",
+            "--protected-branch is not supported for batch releases — prepare and finalize one component at a time",
+            None,
+            None,
+        ));
+    }
     if args.from_artifacts.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "from-artifacts",
@@ -1161,6 +1184,8 @@ fn run_execute(args: ReleaseExecuteArgs) -> CmdResult<ReleaseCommandOutput> {
             skip_publish: args.skip_publish,
             head: false,
             from_artifacts: None,
+            protected_branch: false,
+            protected_branch_resume: false,
         },
         skip_github_release: args.no_github_release,
         git_identity: args.git_identity.clone(),
@@ -1725,6 +1750,7 @@ mod tests {
             owner_run_ref: None,
             retag: false,
             head: false,
+            protected_branch: false,
             from_artifacts: None,
             package_only: false,
             tag: None,
@@ -1903,6 +1929,7 @@ mod tests {
             owner_run_ref: None,
             retag: false,
             head: false,
+            protected_branch: false,
             from_artifacts: None,
             package_only: false,
             tag: None,

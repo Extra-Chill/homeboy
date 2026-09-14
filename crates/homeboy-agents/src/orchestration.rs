@@ -1371,6 +1371,7 @@ fn review_promotion_candidates(
                             gates: Default::default(),
                             provider_command: None,
                             provider_invocation: None,
+                            repository_integrity_evidence: None,
                         },
                         observation_store,
                     )

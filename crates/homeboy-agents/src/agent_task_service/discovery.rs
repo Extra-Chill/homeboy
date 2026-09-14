@@ -379,7 +379,7 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (mut records, record_health, physical_count, truncated, next) =
+    let (mut records, _physical_record_health, physical_count, truncated, next) =
         store.read_record_page_with_health(after, limit)?;
     records.retain(|record| !is_fixture_runner_record(record));
     let submitted_after = options
@@ -416,6 +416,14 @@ pub fn discover_runs_page(
         .into_iter()
         .map(|record| discovery_run(record, filter == AgentTaskDiscoveryFilter::Active, now))
         .collect::<Vec<_>>();
+    // The page cursor bounds storage reads, but selectors apply after that read.
+    // Do not present malformed rows from the physical page as health of the
+    // filtered page the caller actually received.
+    let record_health = AgentTaskRecordHealthSummary {
+        schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+        healthy: runs.len(),
+        ..Default::default()
+    };
     Ok(AgentTaskDiscoveryPage {
         schema: "homeboy/agent-task-discovery-page/v1",
         filter: filter_name(filter),
