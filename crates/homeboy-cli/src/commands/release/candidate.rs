@@ -57,6 +57,35 @@ struct CandidateRepository {
 
 pub(super) fn run(args: CandidateArgs) -> CmdResult<CandidatePublication> {
     let component = component::load(&args.component_id)?;
+    let publication = homeboy_release::release::publish_candidate(
+        &component,
+        &args.component_id,
+        &args.sha,
+        &args.from_artifacts,
+        &args.version,
+        args.apply,
+    )?;
+    return Ok((
+        CandidatePublication {
+            component_id: args.component_id,
+            source_sha: publication.source_sha,
+            tag: publication.tag,
+            prerelease: true,
+            latest: false,
+            assets: publication
+                .assets
+                .into_iter()
+                .map(|asset| CandidateAsset {
+                    name: asset.name,
+                    url: asset.url,
+                    sha256: asset.sha256,
+                })
+                .collect(),
+            applied: args.apply,
+        },
+        0,
+    ));
+    #[allow(unreachable_code)]
     let sha = resolve_sha(Path::new(&component.local_path), &args.sha)?;
     let repo = github_repo(&component)?;
     let tag = format!("candidate-{sha}");
