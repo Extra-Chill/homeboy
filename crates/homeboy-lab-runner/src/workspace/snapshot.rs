@@ -17,7 +17,7 @@ use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
     run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
-    ssh_args, ssh_client_for_runner, tar_exclude_args,
+    ssh_args, ssh_client_for_runner,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
@@ -1946,7 +1946,11 @@ pub(crate) fn immutable_replay_snapshot(
             Some("create replay snapshot source".to_string()),
         )
     })?;
+    reject_replay_symlinks(source, source, excludes)?;
     materialize_replay_archive(source, &staged, excludes)?;
+    // Recheck after copying so a directory-to-link race cannot turn an
+    // attested replay source into a different staged object.
+    reject_replay_symlinks(source, source, excludes)?;
     reject_replay_symlinks(&staged, &staged, &[])?;
     let identity = replay_artifact_identity(&staged, excludes)?;
     Ok(ImmutableReplaySnapshot { stage, identity })
@@ -1954,23 +1958,7 @@ pub(crate) fn immutable_replay_snapshot(
 
 fn materialize_replay_archive(source: &Path, staged: &Path, excludes: &[String]) -> Result<()> {
     let manifest = snapshot_input_manifest(source, excludes)?;
-    #[cfg(test)]
-    for entry in &manifest.entries {
-        test_snapshot_directory_discovery_hook::run(&entry.source);
-    }
-    let archive_excludes = excludes
-        .iter()
-        .filter(|pattern| !is_root_input_exclude(pattern))
-        .flat_map(|pattern| snapshot_archive_excludes(pattern))
-        .collect::<Vec<_>>();
-    let command = format!(
-        "({inputs}) | COPYFILE_DISABLE=1 tar --no-xattrs -C {source} {excludes} -cf - --null -T - | tar --no-xattrs -C {staged} -xf -",
-        inputs = snapshot_manifest_tar_input(&manifest),
-        source = shell::quote_arg(&source.display().to_string()),
-        excludes = tar_exclude_args(&archive_excludes),
-        staged = shell::quote_arg(&staged.display().to_string()),
-    );
-    run_shell_command(&command, "construct immutable replay artifact")
+    materialize_selected_snapshot(source, staged, &manifest, None)
 }
 
 fn replay_symlink_error(path: &Path) -> Error {
@@ -2093,7 +2081,7 @@ pub(super) fn materialize_snapshot_piped_before(
     // Resolve this once, before anything reads the tree: every manifest and the
     // staging archive must apply the identical exclude set or they disagree.
     let excludes = &excludes_with_links_to_excluded_targets(local_path, excludes);
-    let source_manifest = snapshot_stable_manifest(local_path, excludes).map_err(|error| {
+    let manifest = snapshot_input_manifest(local_path, excludes).map_err(|error| {
         snapshot_construction_failure(
             "workspace_snapshot",
             local_path,
@@ -2104,21 +2092,15 @@ pub(super) fn materialize_snapshot_piped_before(
             ),
         )
     })?;
-    let mut manifest = snapshot_input_manifest(local_path, excludes)?;
-    let stage =
-        materialize_snapshot_stage_before(local_path, excludes, &manifest, scratch, deadline)
-            .map_err(|mut error| {
-                error.message = format!("{action}: {}", error.message);
-                error
-            })?;
-    // A group that produced no staging output was entirely excluded by the
-    // selected snapshot policy. It is optional transport input, so omit it
-    // rather than giving tar a path that the same staging operation did not
-    // create.
-    manifest
-        .entries
-        .retain(|entry| stage.path().join(&entry.staging_output).exists());
-    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), excludes)?;
+    let source_manifest = manifest.stable_manifest.clone();
+    let stage = materialize_snapshot_stage_before(local_path, &manifest, scratch, deadline)
+        .map_err(|mut error| {
+            error.message = format!("{action}: {}", error.message);
+            error
+        })?;
+    // The stage contains only the selected entries, so reapplying excludes here
+    // would be a second interpretation of policy rather than a verification.
+    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), &[])?;
     let current_manifest = snapshot_stable_manifest(local_path, excludes)?;
     validate_snapshot_stability(
         &source_manifest,
@@ -2129,7 +2111,6 @@ pub(super) fn materialize_snapshot_piped_before(
     )?;
     let command = snapshot_staged_materialization_command(
         &stage.path().join("source"),
-        &manifest,
         target_command,
         scratch,
     );
@@ -2268,14 +2249,22 @@ fn snapshot_manifest_entry_difference(
 pub(super) struct SnapshotInputManifestEntry {
     pub(super) declaration_id: String,
     pub(super) source: PathBuf,
-    pub(super) archive_path: String,
-    pub(super) staging_output: PathBuf,
+}
+
+/// An exact filesystem entry selected by the canonical content traversal.
+#[derive(Debug, Clone)]
+struct SnapshotSelectionEntry {
+    source: PathBuf,
+    relative: PathBuf,
+    kind: String,
 }
 
 /// The typed input contract for one snapshot staging operation.
 #[derive(Debug, Clone)]
 pub(super) struct SnapshotInputManifest {
     pub(super) entries: Vec<SnapshotInputManifestEntry>,
+    stable_manifest: SnapshotStableManifest,
+    selection: Vec<SnapshotSelectionEntry>,
 }
 
 pub(super) fn snapshot_input_manifest(
@@ -2312,13 +2301,89 @@ pub(super) fn snapshot_input_manifest(
         manifest_entries.push(SnapshotInputManifestEntry {
             declaration_id,
             source,
-            archive_path: format!("./{name}"),
-            staging_output: PathBuf::from("source").join(name),
         });
+    }
+    let stable_manifest = snapshot_stable_manifest(local_path, excludes)?;
+    let mut selection = stable_manifest
+        .inventory
+        .entries
+        .iter()
+        .map(|entry| SnapshotSelectionEntry {
+            source: local_path.join(&entry.path),
+            relative: PathBuf::from(&entry.path),
+            kind: entry.kind.clone(),
+        })
+        .collect::<Vec<_>>();
+    // Git and runner metadata are intentionally outside content identity, but
+    // snapshot-git and generic snapshot copies still transport them explicitly.
+    for entry in &manifest_entries {
+        if matches!(
+            entry.source.file_name().and_then(|name| name.to_str()),
+            Some(".git" | ".homeboy")
+        ) {
+            collect_transport_only_selection(&entry.source, local_path, excludes, &mut selection)?;
+        }
     }
     Ok(SnapshotInputManifest {
         entries: manifest_entries,
+        stable_manifest,
+        selection,
     })
+}
+
+fn collect_transport_only_selection(
+    path: &Path,
+    root: &Path,
+    excludes: &[String],
+    selection: &mut Vec<SnapshotSelectionEntry>,
+) -> Result<()> {
+    let relative = path.strip_prefix(root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("select snapshot transport path".to_string()),
+        )
+    })?;
+    if selection.iter().any(|entry| entry.relative == relative) {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("inspect snapshot transport path".to_string()),
+        )
+    })?;
+    let kind = if metadata.file_type().is_symlink() {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else {
+        "file"
+    };
+    selection.push(SnapshotSelectionEntry {
+        source: path.to_path_buf(),
+        relative: relative.to_path_buf(),
+        kind: kind.to_string(),
+    });
+    if metadata.is_dir() {
+        for child in fs::read_dir(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read snapshot transport directory".to_string()),
+            )
+        })? {
+            let child = child.map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read snapshot transport entry".to_string()),
+                )
+            })?;
+            let child = child.path();
+            if !is_excluded(root, &child, excludes, &[]) {
+                collect_transport_only_selection(&child, root, excludes, selection)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Materialize every required manifest entry into one private staging tree.
@@ -2340,16 +2405,14 @@ impl SnapshotStage {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn materialize_snapshot_stage(
     local_path: &Path,
-    excludes: &[String],
     manifest: &SnapshotInputManifest,
     scratch: Option<&Path>,
 ) -> Result<SnapshotStage> {
-    materialize_snapshot_stage_before(local_path, excludes, manifest, scratch, None)
+    materialize_snapshot_stage_before(local_path, manifest, scratch, None)
 }
 
 fn materialize_snapshot_stage_before(
     local_path: &Path,
-    excludes: &[String],
     manifest: &SnapshotInputManifest,
     scratch: Option<&Path>,
     deadline: Option<Instant>,
@@ -2392,149 +2455,147 @@ fn materialize_snapshot_stage_before(
             &error.to_string(),
         )
     })?;
-    let inputs = snapshot_manifest_tar_input(manifest);
-    // The manifest has already removed excluded root inputs. Do not pass those
-    // patterns to tar, whose exclude matching would also remove legitimate
-    // nested directories with the same name. Nested root-anchored exclusions
-    // still need tar because their admitted root input is recursively archived.
-    let archive_excludes = excludes
-        .iter()
-        .filter(|pattern| !is_root_input_exclude(pattern))
-        .flat_map(|pattern| snapshot_archive_excludes(pattern))
-        .collect::<Vec<_>>();
-    let source_archive = format!(
-        "COPYFILE_DISABLE=1 tar --no-xattrs -C {src} {exclude} -cf - --null -T -",
-        src = shell::quote_arg(&local_path.display().to_string()),
-        exclude = tar_exclude_args(&archive_excludes),
-    );
-    let command = format!(
-        "({inputs}) | {source_archive} | tar --no-xattrs -C {stage} -xf - && root={root} && stage={stage} && export root stage && find \"$stage\" -type l -exec sh -c {resolve} sh {{}} \\;",
-        stage = shell::quote_arg(&stage_source.display().to_string()),
-        root = shell::quote_arg(&local_path.display().to_string()),
-        resolve = shell::quote_arg(&format!(
-            // A dangling link resolves to nothing. Leave it staged as-is and keep
-            // going: exiting non-zero here fails the find, and with it the whole
-            // staging command.
-            "stage_link=$1; relative=${{stage_link#\"$stage\"/}}; original=\"$root/$relative\"; target=$(realpath \"$original\" 2>/dev/null) || exit 0; case \"$target\" in \"$root\"|\"$root\"/*) ;; *) rm -f \"$stage_link\" && mkdir -p \"$(dirname \"$stage_link\")\" && COPYFILE_DISABLE=1 tar --no-xattrs -h -C \"$root\" {} -cf - \"$relative\" | tar --no-xattrs -C \"$stage\" -xf - ;; esac",
-            tar_exclude_args(&archive_excludes)
-        )),
-    );
-    run_shell_command_before(&command, "construct workspace snapshot staging", deadline).map_err(
-        |error| {
-            if error.code == ErrorCode::RunnerLabTransportFailure {
-                return error;
-            }
-            let missing = manifest.entries.iter().find(|entry| !entry.source.exists());
-            snapshot_construction_failure(
-                missing
-                    .map(|entry| entry.declaration_id.as_str())
-                    .unwrap_or("staging"),
-                missing
-                    .map(|entry| entry.source.as_path())
-                    .unwrap_or(local_path),
-                Some(&stage_source),
-                &error.message,
-            )
-        },
-    )?;
-    for entry in &manifest.entries {
-        let output = stage.path().join(&entry.staging_output);
-        if output.exists() {
-            continue;
-        }
-        let metadata = fs::metadata(&entry.source).map_err(|error| {
-            snapshot_construction_failure(
-                &entry.declaration_id,
-                &entry.source,
-                Some(&output),
-                &error.to_string(),
-            )
-        })?;
-        if metadata.is_dir() {
-            // Tar may omit an admitted root directory when every child is
-            // excluded. Preserve the empty directory represented by the source
-            // manifest so pre-transport stability compares equivalent trees.
-            fs::create_dir_all(&output).map_err(|error| {
-                snapshot_construction_failure(
-                    &entry.declaration_id,
-                    &entry.source,
-                    Some(&output),
-                    &error.to_string(),
-                )
-            })?;
-        } else {
-            return Err(snapshot_construction_failure(
-                &entry.declaration_id,
-                &entry.source,
-                Some(&output),
-                "required staging output was not materialized",
-            ));
-        }
-    }
+    materialize_selected_snapshot(local_path, &stage_source, manifest, deadline)?;
     Ok(stage)
 }
 
-fn is_root_input_exclude(pattern: &str) -> bool {
-    let root_anchored = pattern.starts_with("./");
-    if !root_anchored && !pattern.ends_with('/') && !pattern.ends_with("/**") {
-        return false;
+/// Materialize exactly the entries selected by `workspace_content_manifest`.
+///
+/// Selection is complete before copying begins. The subsequent manifest checks
+/// reject a changed or incomplete source instead of silently broadening the
+/// archive with a second exclusion implementation.
+fn materialize_selected_snapshot(
+    source_root: &Path,
+    destination: &Path,
+    manifest: &SnapshotInputManifest,
+    deadline: Option<Instant>,
+) -> Result<()> {
+    #[cfg(test)]
+    for entry in &manifest.entries {
+        test_snapshot_directory_discovery_hook::run(&entry.source);
     }
-    let root = pattern
-        .trim_start_matches("./")
-        .trim_end_matches("/**")
-        .trim_end_matches('/');
-    !root.is_empty() && !root.contains('/') && !root.contains('*')
-}
 
-fn snapshot_archive_excludes(pattern: &str) -> Vec<String> {
-    let mut excludes = vec![pattern.to_string()];
-    let directory = if pattern.ends_with('/') {
-        Some(pattern.trim_end_matches('/'))
-    } else {
-        pattern.strip_suffix("/**")
+    let root = content_hash_root(source_root)?;
+    let internal_links = manifest
+        .selection
+        .iter()
+        .filter(|entry| {
+            fs::symlink_metadata(&entry.source)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && entry
+                    .source
+                    .canonicalize()
+                    .is_ok_and(|target| target.starts_with(&root))
+        })
+        .map(|entry| entry.relative.clone())
+        .collect::<Vec<_>>();
+    let is_internal_link =
+        |entry: &SnapshotSelectionEntry| internal_links.contains(&entry.relative);
+    let is_below_internal_link = |entry: &SnapshotSelectionEntry| {
+        internal_links
+            .iter()
+            .any(|link| entry.relative != *link && entry.relative.starts_with(link))
     };
-    if let Some(directory) = directory {
-        if !directory.is_empty() {
-            excludes.push(directory.to_string());
-            excludes.push(format!("{directory}/**"));
-            // Tar does not let a leading `**/` match the archive root. Add the
-            // root form so its policy agrees with the manifest traversal.
-            if let Some(root_directory) = directory.strip_prefix("**/") {
-                excludes.push(root_directory.to_string());
-                excludes.push(format!("{root_directory}/**"));
-            }
-        }
-    }
-    excludes.sort();
-    excludes.dedup();
-    excludes
-}
-
-fn snapshot_manifest_tar_input(manifest: &SnapshotInputManifest) -> String {
-    if manifest.entries.is_empty() {
-        "printf ''".to_string()
-    } else {
-        format!(
-            "printf '%s\\0' {}",
+    let output = |entry: &SnapshotSelectionEntry| destination.join(&entry.relative);
+    let failure = |entry: &SnapshotSelectionEntry, error: &dyn std::fmt::Display| {
+        let declaration_id = manifest
+            .entries
+            .iter()
+            .find(|candidate| entry.source.starts_with(&candidate.source))
+            .map(|candidate| candidate.declaration_id.as_str())
+            .unwrap_or("selection");
+        snapshot_construction_failure(
+            declaration_id,
             manifest
                 .entries
                 .iter()
-                .map(|entry| shell::quote_arg(&entry.archive_path))
-                .collect::<Vec<_>>()
-                .join(" ")
+                .find(|candidate| entry.source.starts_with(&candidate.source))
+                .map(|candidate| candidate.source.as_path())
+                .unwrap_or(entry.source.as_path()),
+            Some(&output(entry)),
+            &error.to_string(),
         )
+    };
+
+    // Create real directories first, so selected paths through an internal
+    // symlink always have their target before the link is recreated.
+    for entry in &manifest.selection {
+        snapshot_selection_deadline(deadline)?;
+        if entry.kind != "directory" || is_internal_link(entry) || is_below_internal_link(entry) {
+            continue;
+        }
+        fs::create_dir_all(output(entry)).map_err(|error| failure(entry, &error))?;
     }
+    for entry in &manifest.selection {
+        snapshot_selection_deadline(deadline)?;
+        if entry.kind == "directory" && is_internal_link(entry) {
+            copy_snapshot_symlink(entry, &output(entry), &failure)?;
+        }
+    }
+    for entry in &manifest.selection {
+        snapshot_selection_deadline(deadline)?;
+        if entry.kind != "file" || is_below_internal_link(entry) {
+            continue;
+        }
+        if is_internal_link(entry) {
+            copy_snapshot_symlink(entry, &output(entry), &failure)?;
+            continue;
+        }
+        let target = output(entry);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| failure(entry, &error))?;
+        }
+        fs::copy(&entry.source, &target).map_err(|error| failure(entry, &error))?;
+    }
+    for entry in &manifest.selection {
+        snapshot_selection_deadline(deadline)?;
+        if entry.kind == "symlink" && !is_below_internal_link(entry) {
+            copy_snapshot_symlink(entry, &output(entry), &failure)?;
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_selection_deadline(deadline: Option<Instant>) -> Result<()> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(Error::new(
+            ErrorCode::RemoteCommandTimeout,
+            "workspace snapshot staging deadline expired while materializing selected files",
+            serde_json::json!({ "stage": "snapshot_selection" }),
+        ));
+    }
+    Ok(())
+}
+
+fn copy_snapshot_symlink(
+    entry: &SnapshotSelectionEntry,
+    destination: &Path,
+    failure: &impl Fn(&SnapshotSelectionEntry, &dyn std::fmt::Display) -> Error,
+) -> Result<()> {
+    let target = fs::read_link(&entry.source).map_err(|error| failure(entry, &error))?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|error| failure(entry, &error))?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, destination).map_err(|error| failure(entry, &error))?;
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        return Err(failure(
+            entry,
+            &"snapshot symlink materialization is unsupported on this platform",
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_staged_materialization_command(
     stage: &Path,
-    manifest: &SnapshotInputManifest,
     target_command: &str,
     scratch: Option<&Path>,
 ) -> String {
-    let inputs = snapshot_manifest_tar_input(manifest);
     let command = format!(
-        "({inputs}) | COPYFILE_DISABLE=1 tar --no-xattrs -C {stage} -cf - --null -T - | {target_command}",
+        "COPYFILE_DISABLE=1 tar --no-xattrs -C {stage} -cf - . | {target_command}",
         stage = shell::quote_arg(&stage.display().to_string()),
     );
     scratch.map_or(command.clone(), |scratch| {

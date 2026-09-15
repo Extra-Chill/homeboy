@@ -1769,7 +1769,7 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     // preserves the declaration identity and staging now fails before transport.
     let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
     fs::remove_dir_all(&overlay).expect("remove overlay after manifest creation");
-    let error = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
+    let error = materialize_snapshot_stage(source.path(), &manifest, Some(scratch.path()))
         .expect_err("missing declared overlay must fail during local staging");
 
     assert_eq!(error.retryable, Some(false));
@@ -1781,10 +1781,10 @@ fn snapshot_staging_rejects_a_disappearing_runtime_overlay_before_ssh() {
     );
     assert!(error.details["staging_output"]
         .as_str()
-        .is_some_and(|path| path.ends_with("/source")));
+        .is_some_and(|path| path.contains("/source/runtime-overlays")));
     assert!(error.details["reason"]
         .as_str()
-        .is_some_and(|reason| reason.contains("tar: ./runtime-overlays: Cannot stat")));
+        .is_some_and(|reason| reason.contains("No such file")));
     assert_eq!(
         error.details["recovery"]["action"],
         "project_lifecycle_recovery"
@@ -1810,7 +1810,7 @@ fn snapshot_staging_runtime_owner_fixture() {
     );
     let source = std::path::PathBuf::from(source);
     let manifest = snapshot_input_manifest(&source, &[]).expect("fixture input manifest");
-    let stage = materialize_snapshot_stage(&source, &[], &manifest, None).expect("fixture stage");
+    let stage = materialize_snapshot_stage(&source, &manifest, None).expect("fixture stage");
     fs::write(&ready, stage.path().display().to_string()).expect("publish fixture stage path");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -1824,7 +1824,7 @@ fn snapshot_staging_runtime_owner_protects_live_stage_and_reclaims_killed_stage(
         let input = source.path().join("input.txt");
         fs::write(&input, "source bytes").expect("write source");
         let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
-        let live = materialize_snapshot_stage(source.path(), &[], &manifest, None)
+        let live = materialize_snapshot_stage(source.path(), &manifest, None)
             .expect("stage with runtime owner");
         let live_path = live.path().to_path_buf();
 
@@ -1890,7 +1890,7 @@ fn snapshot_transport_archives_only_the_admitted_scratch_stage() {
     fs::write(source.path().join("runtime-overlays"), "runtime").expect("overlay");
     fs::write(source.path().join("other"), "other").expect("other input");
     let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
-    let stage = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
+    let stage = materialize_snapshot_stage(source.path(), &manifest, Some(scratch.path()))
         .expect("stage in admitted scratch");
     assert!(stage.path().starts_with(scratch.path()));
 
@@ -2067,6 +2067,117 @@ fn snapshot_staging_keeps_nested_root_ignored_outputs_out_of_repeated_snapshots(
 }
 
 #[test]
+fn snapshot_selection_materializes_nested_globs_exactly_once() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("source");
+    fs::create_dir_all(source.join("nested-worktree/vendor/package"))
+        .expect("nested vendor directory");
+    fs::create_dir_all(source.join("app/npm/_logs")).expect("nested log directory");
+    fs::create_dir_all(source.join("kept empty directory")).expect("empty directory");
+    fs::write(source.join("kept odd [name].txt"), "kept\n").expect("kept odd filename");
+    fs::write(
+        source.join("nested-worktree/vendor/package/index.js"),
+        "excluded\n",
+    )
+    .expect("nested vendor file");
+    fs::write(source.join("app/npm/_logs/debug.log"), "excluded\n").expect("nested log");
+    let excludes = vec![
+        "./vendor/".to_string(),
+        "**/vendor/".to_string(),
+        "**/npm/_logs/**".to_string(),
+        "*.log".to_string(),
+    ];
+
+    let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(&source, &excludes).expect("selected manifest");
+    let stage = materialize_snapshot_stage(&source, &manifest, None).expect("stage");
+    let staged_source = stage.path().join("source");
+    let staged = snapshot_stable_manifest(&staged_source, &[]).expect("staged manifest");
+    let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
+
+    validate_snapshot_stability(&before, &staged, &after, &source, &staged_source)
+        .expect("source, stage, and current manifests agree");
+    assert!(staged_source.join("kept odd [name].txt").is_file());
+    assert!(staged_source.join("kept empty directory").is_dir());
+    assert!(!staged_source.join("nested-worktree/vendor").exists());
+    assert!(!staged_source.join("app/npm/_logs").exists());
+}
+
+#[test]
+fn snapshot_selection_preserves_nested_multi_component_paths() {
+    let source = tempfile::tempdir().expect("source");
+    let nested_log = source.path().join("other/vendor/cache/_logs/run.log");
+    fs::create_dir_all(nested_log.parent().expect("nested log parent"))
+        .expect("nested log directory");
+    fs::write(&nested_log, "nested log\n").expect("nested log");
+    fs::write(source.path().join("kept.txt"), "kept\n").expect("kept source");
+    let excludes = vec!["vendor/cache/_logs".to_string()];
+
+    let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
+    let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
+    let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("snapshot stage");
+    let staged =
+        snapshot_stable_manifest(&stage.path().join("source"), &[]).expect("staged manifest");
+    let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
+
+    validate_snapshot_stability(
+        &before,
+        &staged,
+        &after,
+        source.path(),
+        &stage.path().join("source"),
+    )
+    .expect("selected nested path must survive staging");
+    assert!(stage
+        .path()
+        .join("source/other/vendor/cache/_logs/run.log")
+        .is_file());
+}
+
+#[test]
+fn snapshot_transport_metadata_honors_nested_excludes() {
+    let source = tempfile::tempdir().expect("source");
+    fs::create_dir_all(source.path().join(".homeboy/private/logs")).expect("metadata directory");
+    fs::write(source.path().join(".homeboy/kept.json"), "kept\n").expect("kept metadata");
+    fs::write(
+        source.path().join(".homeboy/private/logs/secret.log"),
+        "excluded\n",
+    )
+    .expect("excluded metadata");
+    let excludes = vec!["./.homeboy/private/**".to_string(), "*.log".to_string()];
+
+    let manifest = snapshot_input_manifest(source.path(), &excludes).expect("selected manifest");
+    let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("stage");
+    let staged = stage.path().join("source/.homeboy");
+
+    assert!(staged.join("kept.json").is_file());
+    assert!(!staged.join("private/logs/secret.log").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_selection_copies_files_from_read_only_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = tempfile::tempdir().expect("source");
+    let read_only = source.path().join("read-only");
+    fs::create_dir_all(&read_only).expect("read-only directory");
+    fs::write(read_only.join("input.txt"), "content\n").expect("source file");
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555)).expect("read-only mode");
+
+    let manifest = snapshot_input_manifest(source.path(), &[]).expect("selected manifest");
+    let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("stage");
+    let staged = stage.path().join("source/read-only");
+
+    assert_eq!(
+        fs::read_to_string(staged.join("input.txt")).expect("staged file"),
+        "content\n"
+    );
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755))
+        .expect("restore source directory mode");
+}
+
+#[test]
 fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
     let workspace = tempfile::tempdir().expect("workspace");
     let source = workspace.path().join("source");
@@ -2078,7 +2189,7 @@ fn snapshot_staging_uses_one_manifest_policy_for_nested_ignored_directories() {
 
     let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
     let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
-    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let stage = materialize_snapshot_stage(&source, &manifest, None).expect("stage");
     let staged =
         snapshot_stable_manifest(&stage.path().join("source"), &excludes).expect("staged manifest");
     let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
@@ -2125,7 +2236,7 @@ fn lab_snapshot_preacceptance_preserves_tracked_build_sources_before_provider_ex
 
     let source_manifest = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
     let input_manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
-    let stage = materialize_snapshot_stage(&source, &excludes, &input_manifest, None)
+    let stage = materialize_snapshot_stage(&source, &input_manifest, None)
         .expect("snapshot preacceptance stage");
     let staged_source = stage.path().join("source");
     let staged_manifest = snapshot_stable_manifest(&staged_source, &[]).expect("staged manifest");
@@ -2184,7 +2295,7 @@ fn snapshot_staging_drops_links_whose_target_the_excludes_remove() {
     let excludes = excludes_with_links_to_excluded_targets(&source, &declared);
     let before = snapshot_stable_manifest(&source, &excludes).expect("source manifest");
     let manifest = snapshot_input_manifest(&source, &excludes).expect("input manifest");
-    let stage = materialize_snapshot_stage(&source, &excludes, &manifest, None).expect("stage");
+    let stage = materialize_snapshot_stage(&source, &manifest, None).expect("stage");
     let staged_source = stage.path().join("source");
     let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
     let after = snapshot_stable_manifest(&source, &excludes).expect("current manifest");
@@ -2240,8 +2351,8 @@ fn snapshot_stability_rejects_a_mixed_staged_tree_even_if_source_is_restored() {
     fs::write(source.path().join("runtime-overlays"), "before").expect("overlay");
     let before = snapshot_stable_manifest(source.path(), &[]).expect("before manifest");
     let manifest = snapshot_input_manifest(source.path(), &[]).expect("input manifest");
-    let stage = materialize_snapshot_stage(source.path(), &[], &manifest, Some(scratch.path()))
-        .expect("stage");
+    let stage =
+        materialize_snapshot_stage(source.path(), &manifest, Some(scratch.path())).expect("stage");
     fs::write(stage.path().join("source/runtime-overlays"), "mixed").expect("mutate stage");
     fs::write(source.path().join("runtime-overlays"), "after").expect("mutate source");
     fs::write(source.path().join("runtime-overlays"), "before").expect("restore source");
@@ -2274,8 +2385,7 @@ fn snapshot_staging_preserves_an_admitted_root_when_every_child_is_excluded() {
 
     let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
     let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
-    let stage = materialize_snapshot_stage(source.path(), &excludes, &manifest, None)
-        .expect("snapshot stage");
+    let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("snapshot stage");
     let staged_source = stage.path().join("source");
     let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
     let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
@@ -2309,8 +2419,7 @@ fn snapshot_staging_preserves_dependency_vendors_for_root_vendor_excludes() {
 
     let before = snapshot_stable_manifest(source.path(), &excludes).expect("source manifest");
     let manifest = snapshot_input_manifest(source.path(), &excludes).expect("input manifest");
-    let stage = materialize_snapshot_stage(source.path(), &excludes, &manifest, None)
-        .expect("snapshot stage");
+    let stage = materialize_snapshot_stage(source.path(), &manifest, None).expect("snapshot stage");
     let staged_source = stage.path().join("source");
     let staged = snapshot_stable_manifest(&staged_source, &excludes).expect("staged manifest");
     let after = snapshot_stable_manifest(source.path(), &excludes).expect("current manifest");
