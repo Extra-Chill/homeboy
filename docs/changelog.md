@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.374.1] - 2026-09-15
+
+### Changed
+- use generation-owned controller job fixtures
+
+### Fixed
+- retire registered dead lease
+
 ## [0.374.0] - 2026-09-14
 
 ### Added
