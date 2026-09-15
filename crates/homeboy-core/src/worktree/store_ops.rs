@@ -647,7 +647,10 @@ fn create_with_store_unlocked(
     }
 
     let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
-    let base_ref = options.from.unwrap_or_else(|| "HEAD".to_string());
+    let base_ref = shared_start_point(
+        &source_checkout,
+        &options.from.unwrap_or_else(|| "HEAD".to_string()),
+    )?;
     git::run_git(
         &source_checkout,
         &[
@@ -847,6 +850,42 @@ fn branch_worktree_registrations(
         }
     }
     Ok(registrations)
+}
+
+/// Resolve the start point a task worktree should branch from.
+///
+/// A declared base names the shared branch the work targets, but a local branch
+/// of that name is only one contributor's copy of it. A primary checkout that is
+/// behind, ahead, or mid-merge would otherwise seed every task worktree with
+/// that drift, and the work would be diverged from its own declared base before
+/// any of it ran.
+///
+/// When the declared base is a local branch tracking a remote, the
+/// remote-tracking ref is the shared base and is used instead. Anything else —
+/// a commit, a tag, an explicit `origin/...` ref, or an untracked local branch —
+/// is already an exact start point and is preserved.
+fn shared_start_point(source: &Path, declared: &str) -> Result<String> {
+    if !branch_exists(source, declared)? {
+        return Ok(declared.to_string());
+    }
+    let upstream = git::run_git(
+        source,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{declared}@{{upstream}}"),
+        ],
+        "git resolve task worktree base upstream",
+    );
+    let Ok(upstream) = upstream else {
+        return Ok(declared.to_string());
+    };
+    let upstream = upstream.trim();
+    if upstream.is_empty() {
+        return Ok(declared.to_string());
+    }
+    Ok(upstream.to_string())
 }
 
 fn branch_exists(source: &Path, branch: &str) -> Result<bool> {
