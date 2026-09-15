@@ -1930,7 +1930,7 @@ fn command_probe_succeeds(mut command: std::process::Command) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn gh_command(
+pub(crate) fn gh_command(
     github: &GitHubRepo,
     config: &GithubConfig,
     args: &[&str],

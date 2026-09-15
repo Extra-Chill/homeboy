@@ -2333,6 +2333,8 @@ pub fn reconcile_status_with_outcome_in_roots(
     Ok(RunnerReconcileStatusOutcome {
         status: status_in_roots(roots, runner_id)?,
         retired_generation_ids: generation_reconcile.retired_generation_ids,
+        retirement_blockers: generation_reconcile.retirement_blockers,
+        retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
     })
 }
 
@@ -2340,6 +2342,8 @@ pub fn reconcile_status_with_outcome_in_roots(
 pub struct RunnerReconcileStatusOutcome {
     pub status: RunnerStatusReport,
     pub retired_generation_ids: Vec<String>,
+    pub retirement_blockers: std::collections::BTreeMap<String, String>,
+    pub retained_evidence_generation_count: usize,
 }
 
 /// Return the persisted controller-side session projection without reconnecting,
@@ -3550,6 +3554,27 @@ pub(crate) fn reverse_broker_artifact_content_at(
 /// transport. Direct sessions read the daemon's persisted job result; reverse
 /// sessions use the broker content endpoint.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
+    if super::generation_store::job_session(runner_id, job_id, None)?.is_none()
+        && super::generation_store::has_retired_evidence_owner(runner_id, None, Some(artifact_id))?
+    {
+        let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+        let artifact = store.get_artifact(artifact_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "retained controller artifact {artifact_id} is missing"
+            ))
+        })?;
+        super::evidence::validate_controller_artifact_bytes(&artifact)?;
+        let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+            method: homeboy_core::http_api::HttpMethod::Get,
+            path: format!(
+                "/runs/{}/artifacts/{}/content",
+                homeboy_core::execution_contract::encode_uri_component(&artifact.run_id),
+                homeboy_core::execution_contract::encode_uri_component(artifact_id)
+            ),
+            body: None,
+        })?;
+        return Ok(response.body);
+    }
     let report = status(runner_id)?;
     let Some(legacy_session) = report.session.filter(|_| report.connected) else {
         return Err(Error::validation_invalid_argument(

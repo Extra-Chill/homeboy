@@ -2215,6 +2215,8 @@ fn parse_compiler_failures(stdout: &str, stderr: &str) -> Option<TestAnalysisInp
             test_file: String::new(),
             error_type: format!("compiler_error:{code}"),
             message,
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
             source_file,
             source_line,
         });
@@ -2802,6 +2804,8 @@ mod tests {
             test_file: String::new(),
             error_type: "assertion".to_string(),
             message: "failed".to_string(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
             source_file: String::new(),
             source_line: 0,
         }
@@ -3782,6 +3786,8 @@ mod tests {
                 test_file: "tests/fails.rs".to_string(),
                 error_type: "AssertionFailed".to_string(),
                 message: "expected true".to_string(),
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
                 source_file: "src/lib.rs".to_string(),
                 source_line: 42,
             }],

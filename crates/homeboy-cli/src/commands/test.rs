@@ -1200,6 +1200,8 @@ fn enrich_test_result_from_persisted_artifacts(
                     "{} test failure(s) reported by persisted test results",
                     counts.failed
                 ),
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
                 source_file: String::new(),
                 source_line: 0,
             }],
@@ -2091,6 +2093,9 @@ mod tests {
                     test_file: "tests/fails.rs".to_string(),
                     error_type: "AssertionFailed".to_string(),
                     message: "expected true".to_string(),
+                    stdout_excerpt: "assertion `left == right` failed\nleft: 1\nright: 2"
+                        .to_string(),
+                    stderr_excerpt: "thread 'tests::fails' panicked".to_string(),
                     source_file: "src/lib.rs".to_string(),
                     source_line: 42,
                 }],
@@ -2148,6 +2153,14 @@ mod tests {
             assert_eq!(findings[0].metadata_json["record_kind"], "failure");
             assert_eq!(findings[0].file.as_deref(), Some("tests/fails.rs"));
             assert_eq!(findings[0].line, Some(42));
+            assert_eq!(
+                findings[0].metadata_json["raw"]["stdout_excerpt"],
+                "assertion `left == right` failed\nleft: 1\nright: 2"
+            );
+            assert_eq!(
+                findings[0].metadata_json["raw"]["stderr_excerpt"],
+                "thread 'tests::fails' panicked"
+            );
             assert_eq!(findings[1].metadata_json["record_kind"], "analysis_cluster");
             assert_eq!(findings[1].metadata_json["count"], 1);
 

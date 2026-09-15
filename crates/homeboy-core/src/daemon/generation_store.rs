@@ -205,6 +205,18 @@ pub(super) fn admitting() -> Result<Option<LocalDaemonEndpoint>> {
     }))
 }
 
+/// Locate a registered generation by its lease so lifecycle recovery can act on
+/// the same state directory that status used to authorize the operation.
+pub(super) fn endpoint_for_lease(lease_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
+    Ok(read_registry()?.and_then(|registry| {
+        registry
+            .generations
+            .generations
+            .get(lease_id)
+            .map(|entry| entry.endpoint.clone())
+    }))
+}
+
 pub(super) fn endpoint_for_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
     Ok(read_registry()?.and_then(|registry| {
         registry.generations.job_owner(job_id).and_then(|owner| {
@@ -533,6 +545,29 @@ mod tests {
             .expect("retire stopped A");
             assert!(endpoint_for_job("job-a").expect("retired A").is_none());
             assert_eq!(admitting().expect("admitting").expect("B").lease_id, "B");
+        });
+    }
+
+    #[test]
+    fn finds_a_generation_by_its_exact_lease() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            let b = state("B", "127.0.0.1:1002");
+            activate(&b).expect("activate B");
+
+            assert_eq!(
+                endpoint_for_lease("A")
+                    .expect("look up A")
+                    .expect("A endpoint")
+                    .state_dir,
+                a.state_path
+                    .strip_suffix("/state.json")
+                    .expect("state path has filename")
+            );
+            assert!(endpoint_for_lease("missing")
+                .expect("look up missing")
+                .is_none());
         });
     }
 
