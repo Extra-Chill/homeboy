@@ -5377,6 +5377,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         git(workspace.path(), &["commit", "-m", "base"]);
         git(workspace.path(), &["push", "-u", "origin", "main"]);
         let destination_root = tempfile::tempdir().expect("candidate worktree root");
+        let destination_source = destination_root.path().join("source");
         let destination = destination_root.path().join("candidate");
         let output = Command::new("git")
             .args([
@@ -5384,7 +5385,7 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
                 "--branch",
                 "main",
                 remote.path().to_str().unwrap(),
-                destination.to_str().expect("candidate path"),
+                destination_source.to_str().expect("candidate source path"),
             ])
             .output()
             .expect("clone candidate");
@@ -5393,9 +5394,16 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
             "candidate clone failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        git(&destination, &["config", "user.email", "test@example.com"]);
-        git(&destination, &["config", "user.name", "Test"]);
-        git(&destination, &["checkout", "-b", "candidate"]);
+        git(
+            &destination_source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                destination.to_str().expect("candidate path"),
+            ],
+        );
         std::fs::write(workspace.path().join("newer-base.txt"), "base only\n").unwrap();
         git(workspace.path(), &["add", "newer-base.txt"]);
         git(workspace.path(), &["commit", "-m", "advance base"]);
@@ -5868,7 +5876,7 @@ fn failed_pre_provider_run_does_not_leave_unattributed_evidence_dirt() {
 }
 
 #[test]
-fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
+fn primary_checkout_is_rejected_before_detached_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary checkout");
         let git = |args: &[&str]| {
@@ -5909,10 +5917,19 @@ fn non_ancestry_workspace_validation_retains_the_generic_pre_execution_phase() {
             record.metadata["pre_execution_failure"]["phase"],
             "cook_pre_execution"
         );
-        assert!(!record.metadata["pre_execution_failure"]["message"]
+        assert!(record.metadata["pre_execution_failure"]["message"]
             .as_str()
             .expect("primary-checkout diagnostic")
-            .is_empty());
+            .contains("primary or non-linked checkout"));
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["workspace_admission"]["admission"],
+            "rejected"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["details"]["workspace_admission"]
+                ["next_action"],
+            "use_dedicated_linked_worktree"
+        );
     });
 }
 
@@ -9898,6 +9915,14 @@ fn local_startup_base_capture_is_durable_and_reported_before_interruption() {
             "origin",
             repository.to_str().expect("repository path"),
         ]);
+        let worktree = temp.path().join("worktree");
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().expect("worktree path"),
+            "HEAD",
+        ]);
 
         let cook_id = "cook-local-startup-base-capture";
         let run_id = format!("{cook_id}-run");
@@ -9909,13 +9934,13 @@ fn local_startup_base_capture_is_durable_and_reported_before_interruption() {
             }),
         );
         options.identity.initial_run_id = run_id.clone();
-        options.workspace.to_worktree = repository.display().to_string();
-        options.workspace.source_worktree_path = Some(repository.clone());
+        options.workspace.to_worktree = worktree.display().to_string();
+        options.workspace.source_worktree_path = Some(worktree.clone());
         options.identity.initial_plan.tasks[0].workspace.root =
-            Some(repository.display().to_string());
+            Some(worktree.display().to_string());
 
         let hook = Arc::new(WorkspaceBaseCaptureHook {
-            workspace: repository,
+            workspace: worktree,
             count: AtomicUsize::new(0),
             fail_after_recipe_persistence: AtomicBool::new(true),
         });

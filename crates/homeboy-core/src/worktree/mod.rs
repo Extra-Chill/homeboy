@@ -66,6 +66,12 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+/// Verify that a path is Git's registered linked-worktree root, rather than a
+/// primary checkout or a directory containing an untrusted `.git` file.
+pub fn verify_linked_worktree_root(path: &Path) -> Result<PathBuf> {
+    store_ops::verify_linked_worktree_root(path)
+}
+
 /// Read a bounded, stable keyset page for the operator-facing worktree list.
 pub fn list_page(options: WorktreeListOptions) -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(|| list_page_with_store(&metadata_dir()?, options))
