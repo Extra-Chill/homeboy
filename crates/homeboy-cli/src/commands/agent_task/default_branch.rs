@@ -40,12 +40,6 @@ pub(crate) fn resolve_default_branch(
     ];
     let mut existing = Vec::<(PathBuf, &str)>::new();
     for (path, source) in candidates.into_iter().flatten() {
-        // A missing Git marker is a deterministic negative answer. Avoid
-        // spawning a bounded probe for an unmaterialized destination, which
-        // must retain Cook's deferred-base fallback behavior.
-        if !path.join(".git").exists() {
-            continue;
-        }
         if let Some(root) = bounded_git_read(
             path,
             &["rev-parse", "--show-toplevel"],
@@ -63,7 +57,8 @@ pub(crate) fn resolve_default_branch(
         }
         let remote = path
             .as_deref()
-            .map(homeboy::core::git::resolve_default_remote)
+            .map(|path| resolve_default_remote(path, started))
+            .transpose()?
             .unwrap_or_else(|| "origin".to_string());
         (
             path,
@@ -113,10 +108,12 @@ pub(crate) fn resolve_default_branch(
     let from = request.explicit_from.unwrap_or(&inferred_from).to_string();
     let (sha, evidence_path) = if let Some(path) = path {
         let sha = resolve_commit(&path, &from, started)?;
-        let remote = homeboy::core::git::resolve_default_remote(&path);
+        let remote = resolve_default_remote(&path, started)?;
         let base_ref = format!("{remote}/{base}");
-        let base_sha =
-            resolve_commit(&path, &base_ref, started)?.or(resolve_commit(&path, &base, started)?);
+        let base_sha = match resolve_commit(&path, &base_ref, started)? {
+            Some(sha) => Some(sha),
+            None => resolve_commit(&path, &base, started)?,
+        };
         if request.compatibility_fallback.is_none() {
             let sha = sha.ok_or_else(|| unavailable_ref_error("from", &from, &remote))?;
             let base_sha = base_sha.ok_or_else(|| unavailable_ref_error("base", &base, &remote))?;
@@ -196,30 +193,31 @@ fn resolve_commit(path: &Path, reference: &str, started: Instant) -> Result<Opti
 }
 
 fn default_remote_branch(path: &Path, started: Instant) -> Result<Option<String>> {
-    let remote = homeboy::core::git::resolve_default_remote(path);
-    let head_ref = format!("refs/remotes/{remote}/HEAD");
-    if let Some(value) = bounded_git_read(
+    homeboy::core::git::default_remote_branch_until(
         path,
-        &["symbolic-ref", "--quiet", "--short", &head_ref],
-        "remote default branch",
-        started,
-    )? {
-        return Ok(Some(value));
-    }
-    for branch in ["main", "trunk", "master"] {
-        let candidate = format!("{remote}/{branch}");
-        if bounded_git_read(
-            path,
-            &["rev-parse", "--verify", "--quiet", &candidate],
-            "remote default branch fallback",
-            started,
-        )?
-        .is_some()
-        {
-            return Ok(Some(candidate));
+        started + DEFAULT_BRANCH_RESOLUTION_TIMEOUT,
+    )
+    .map_err(|error| {
+        if started.elapsed() >= DEFAULT_BRANCH_RESOLUTION_TIMEOUT {
+            default_branch_timeout_error(path, "remote default branch", started.elapsed())
+        } else {
+            error
         }
-    }
-    Ok(None)
+    })
+}
+
+fn resolve_default_remote(path: &Path, started: Instant) -> Result<String> {
+    homeboy::core::git::resolve_default_remote_until(
+        path,
+        started + DEFAULT_BRANCH_RESOLUTION_TIMEOUT,
+    )
+    .map_err(|error| {
+        if started.elapsed() >= DEFAULT_BRANCH_RESOLUTION_TIMEOUT {
+            default_branch_timeout_error(path, "default remote", started.elapsed())
+        } else {
+            error
+        }
+    })
 }
 
 fn bounded_git_read(
@@ -383,6 +381,29 @@ mod tests {
         assert_eq!(resolution.evidence_path, None);
     }
 
+    #[test]
+    fn resolves_default_branch_from_a_component_subdirectory() {
+        let (_fixture, checkout) = default_branch_checkout("main");
+        let component = checkout.join("components").join("database");
+        std::fs::create_dir_all(&component).expect("create component subdirectory");
+
+        let resolution = resolve_default_branch(DefaultBranchRequest {
+            explicit_base: None,
+            explicit_from: None,
+            workspace: None,
+            component: Some(&component),
+            destination: None,
+            compatibility_fallback: None,
+        })
+        .expect("resolve default branch from component subdirectory");
+
+        assert_eq!(resolution.base, "main");
+        assert_eq!(
+            resolution.evidence_path.as_deref(),
+            Some(checkout.to_str().unwrap())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn delayed_git_probe_returns_bounded_destination_resolution_evidence() {
@@ -451,6 +472,76 @@ mod tests {
         assert_eq!(
             error.details["destination_resolution"]["timeout_ms"],
             serde_json::json!(DEFAULT_BRANCH_RESOLUTION_TIMEOUT.as_millis())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delayed_remote_lookup_returns_bounded_destination_resolution_evidence() {
+        let test_name = homeboy::core::test_support::harness_test_name(
+            module_path!(),
+            "delayed_remote_lookup_returns_bounded_destination_resolution_evidence_child",
+        );
+        let output = homeboy::core::test_support::run_child_test(
+            Command::new(std::env::current_exe().expect("current test executable"))
+                .arg("--exact")
+                .arg(&test_name)
+                .arg("--ignored"),
+            &test_name,
+        );
+        assert!(
+            output.status.success(),
+            "delayed remote child failed: {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "runs under the parent test with an isolated delayed Git remote"]
+    fn delayed_remote_lookup_returns_bounded_destination_resolution_evidence_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_fixture, checkout) = default_branch_checkout("main");
+        let bin = tempfile::tempdir().expect("fake git bin");
+        let git = bin.path().join("git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\nif [ \"$1\" = rev-parse ] && [ \"$2\" = --show-toplevel ]; then printf '%s\\n' \"$PWD\"; exit 0; fi\nif [ \"$1\" = remote ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+        )
+        .expect("write delayed remote git");
+        let mut permissions = std::fs::metadata(&git).expect("git metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("make fake git executable");
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var_os("PATH")
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
+
+        let started = Instant::now();
+        let error = resolve_default_branch(DefaultBranchRequest {
+            explicit_base: None,
+            explicit_from: None,
+            workspace: None,
+            component: Some(&checkout),
+            destination: None,
+            compatibility_fallback: Some("main"),
+        })
+        .expect_err("a delayed remote lookup must not block Cook indefinitely");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(7),
+            "remote resolution exceeded its bounded budget"
+        );
+        assert_eq!(
+            error.details["destination_resolution"]["operation"],
+            "remote default branch"
         );
     }
 
