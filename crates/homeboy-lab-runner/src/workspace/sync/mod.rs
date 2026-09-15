@@ -49,13 +49,15 @@ use super::types::{
     RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
-    deterministic_remote_path, git_output, parent_remote_path, run_shell_command_before, ssh_args,
-    ssh_client_for_runner, validate_absolute_path,
+    deterministic_remote_path, git_output, hex_prefix, parent_remote_path,
+    run_shell_command_before, sanitize_path_segment, ssh_args, ssh_client_for_runner,
+    validate_absolute_path,
 };
 use homeboy_core::engine::shell;
 use homeboy_core::server::{
     execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
 };
+use sha2::{Digest, Sha256};
 
 mod snapshots;
 #[cfg(test)]
@@ -455,10 +457,17 @@ fn sync_workspace_in_roots_with_deadline(
                 &includes,
                 workspace_cleanliness,
             );
-            // A prepared source is immutable and keyed by the controller path
-            // plus exact commit. Jobs never execute from it: each receives a
-            // private copied view which preserves #10105's ownership boundary.
-            let prepared_cache = prepared_source_cache_path(workspace_root, &local_path, &git.head);
+            // A prepared source is immutable and keyed by the repository's
+            // remote URL plus exact commit, not by the controller-side
+            // checkout path. Every wave child runs from its own worktree
+            // (`agent_task_scheduler::attempt_workspace`), so keying on the
+            // checkout path made the cache miss for every sibling and every
+            // retry even though they share the identical repository and
+            // lockfile (#14684). Jobs never execute from the cache: each
+            // receives a private copied view which preserves #10105's
+            // ownership boundary.
+            let prepared_cache =
+                prepared_source_cache_path(workspace_root, &git.remote_url, &git.head);
             let reused_prepared_source =
                 materialize_prepared_source_view(&runner, &prepared_cache, &remote_path)?;
             let materialized = if reused_prepared_source {
@@ -645,7 +654,12 @@ pub(crate) fn save_prepared_source_cache(
     };
     let local_path = canonical_workspace_path(local_path)?;
     let commit = git_output(&local_path, &["rev-parse", "HEAD"])?;
-    let cache = prepared_source_cache_path(workspace_root, &local_path, &commit);
+    // Read the repository identity from Git config rather than accept it as a
+    // parameter: every worktree of the same repository shares this config, so
+    // the cache the hydrating child saves under is the same cache a sibling
+    // worktree at the same commit looks up (#14684).
+    let remote_url = git_output(&local_path, &["config", "--get", "remote.origin.url"])?;
+    let cache = prepared_source_cache_path(workspace_root, &remote_url, &commit);
     let cache_root = prepared_source_cache_root(workspace_root);
     let output = run_workspace_shell_command(
         &runner,
@@ -662,13 +676,36 @@ pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, sourc
     )
 }
 
-fn prepared_source_cache_path(workspace_root: &str, local_path: &Path, commit: &str) -> String {
-    let view = deterministic_remote_path(workspace_root, local_path, commit, None);
-    let name = Path::new(&view)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("workspace");
-    format!("{}/{name}", prepared_source_cache_root(workspace_root))
+/// Identify a prepared source by repository plus exact commit, not by the
+/// controller-side checkout path. A remote URL is stable across every
+/// worktree of the same repository — unlike a checkout path, which is unique
+/// per attempt — so siblings and retries of the same repository at the same
+/// commit resolve to the same cache entry instead of each hydrating
+/// independently (#14684).
+fn prepared_source_cache_path(workspace_root: &str, remote_url: &str, commit: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(remote_url.as_bytes());
+    hasher.update(commit.as_bytes());
+    let digest = hex_prefix(&hasher.finalize(), 12);
+    let name = sanitize_path_segment(repository_cache_name(remote_url));
+    format!(
+        "{}/{name}-{digest}",
+        prepared_source_cache_root(workspace_root)
+    )
+}
+
+/// Derive a readable directory-name segment from a repository's remote URL,
+/// stripped of trailing `.git`/`/` noise. Falls back to `workspace` for an
+/// unparseable remote so the cache path is always well-formed.
+fn repository_cache_name(remote_url: &str) -> &str {
+    remote_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("workspace")
 }
 
 fn prepared_source_cache_root(workspace_root: &str) -> String {
