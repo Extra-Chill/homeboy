@@ -198,7 +198,19 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
         .collect()
 }
 
-fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
+pub(crate) fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
+    if artifact.mime.as_deref().is_none_or(str::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "artifact.mime",
+            "terminal artifact is missing controller media type metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    validate_controller_artifact_bytes(artifact)
+}
+
+pub(crate) fn validate_controller_artifact_bytes(artifact: &ArtifactRecord) -> Result<()> {
     if artifact.artifact_type != "file" {
         return Err(Error::validation_invalid_argument(
             "artifact.type",
@@ -224,14 +236,6 @@ fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
         return Err(Error::validation_invalid_argument(
             "artifact.sha256",
             "terminal artifact is missing controller checksum metadata",
-            Some(artifact.id.clone()),
-            None,
-        ));
-    }
-    if artifact.mime.as_deref().is_none_or(str::is_empty) {
-        return Err(Error::validation_invalid_argument(
-            "artifact.mime",
-            "terminal artifact is missing controller media type metadata",
             Some(artifact.id.clone()),
             None,
         ));
@@ -699,6 +703,9 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
     let Some((runner_id, job_id)) = mirrored_runner_job_identity(&run) else {
         return Ok(None);
     };
+    if crate::generation_store::has_retired_evidence_owner(&runner_id, Some(run_id), None)? {
+        return Ok(Some(vec![run]));
+    }
     let runner = load(&runner_id)?;
     let reverse_broker_url = run
         .metadata_json
