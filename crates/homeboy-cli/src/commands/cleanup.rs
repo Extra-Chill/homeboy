@@ -3133,6 +3133,7 @@ fn run_cleanup_category_fixture(_category: &str) -> homeboy::core::Result<()> {
 /// scheduler disabled automatic retention entirely (#12727).
 fn is_bounded_continuation(category: &CleanupInventoryCategory) -> bool {
     category.outcome == CLEANUP_CATEGORY_OUTCOME_TIMED_OUT
+        || (category.failure.is_none() && category.inventory_completeness == "partial")
 }
 
 /// Outcome marker for a category that exhausted its bounded time budget.
@@ -6340,6 +6341,10 @@ mod tests {
         assert_eq!(category[0].category, "external_storage");
         assert_eq!(category[0].inventory_completeness, "partial");
         assert_eq!(category[0].output["unknown_bytes"], 12);
+        assert!(is_bounded_continuation(&category[0]));
+        let mut complete = category.into_iter().next().expect("category");
+        complete.inventory_completeness = "complete".to_string();
+        assert!(!is_bounded_continuation(&complete));
     }
 
     #[test]
