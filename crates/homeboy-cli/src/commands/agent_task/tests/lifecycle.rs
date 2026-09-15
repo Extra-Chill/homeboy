@@ -3722,6 +3722,99 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
 }
 
 #[test]
+fn diagnose_names_the_reason_code_and_preserves_an_oversized_causal_message() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-oversized-git-failure";
+        // A real `git push`/`git commit` stderr routinely exceeds the compact
+        // text limit; the causal message must survive at whatever length it
+        // was recorded, not disappear (#14679).
+        let git_stderr = "remote: rejected fixture push detail. ".repeat(20);
+        let message =
+            format!("committed-change harvest failed while running git push origin fixture-branch: {git_stderr}");
+        assert!(
+            message.len() > 512,
+            "fixture message must exceed the compact text limit"
+        );
+
+        let outcome = AgentTaskOutcome {
+            task_id: "task-a".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some(message.clone()),
+            failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "agent_task.committed_harvest_git_failed".to_string(),
+                message: message.clone(),
+                data: json!({ "command": "git push origin fixture-branch" }),
+            }],
+            ..Default::default()
+        };
+
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(FixtureOutcomeExecutor { outcome }),
+        )
+        .expect("run completed with a failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["root_cause"]["class"],
+            "agent_task.committed_harvest_git_failed"
+        );
+        let root_message = value["root_cause"]["message"]
+            .as_str()
+            .expect("root cause message must not be dropped to null");
+        assert!(root_message.starts_with("committed-change harvest failed while running git push"));
+
+        // `diagnose` must distinguish "found a root cause" from "completed
+        // with nothing to report" (#14679).
+        assert_eq!(value["diagnosis_outcome"], "root_cause_identified");
+
+        // The top-level `summary` is what the generic command envelope prints;
+        // it must name the reason code and the underlying error, not stay empty.
+        let summary = value["summary"]
+            .as_str()
+            .expect("diagnose summary must not be empty");
+        assert!(summary.contains("agent_task.committed_harvest_git_failed"));
+        assert!(summary.contains("committed-change harvest failed while running git push"));
+    });
+}
+
+#[test]
+fn diagnose_summary_is_explicit_when_no_root_cause_is_found() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-no-root-cause";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("job-success");
+        })
+        .expect("persist successful runner record");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose successful runner record");
+
+        assert_eq!(exit_code, 0);
+        assert!(value["root_cause"].is_null());
+        assert_eq!(value["diagnosis_outcome"], "no_root_cause_found");
+        let summary = value["summary"]
+            .as_str()
+            .expect("diagnose summary must not be empty even without a finding");
+        assert!(!summary.trim().is_empty());
+    });
+}
+
+#[test]
 #[cfg(unix)]
 fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_generic_retry() {
     with_temp_home(|| {

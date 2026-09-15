@@ -1958,6 +1958,24 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     }
 
     let ranked_reasons = ranked_diagnostics(nested_reasons);
+    // `diagnose` is the printed recovery verb for a failed run (#14679): a
+    // human-readable summary must exist whenever it runs, and it must say
+    // whether a root cause was actually found rather than leaving `succeeded`
+    // with an empty summary ambiguous between "nothing wrong" and "nothing
+    // reported".
+    let (diagnosis_outcome, summary) = match ranked_reasons.first() {
+        Some(diagnostic) => (
+            "root_cause_identified",
+            format!("{}: {}", diagnostic.class, diagnostic.message),
+        ),
+        None => (
+            "no_root_cause_found",
+            format!(
+                "no root cause diagnostic was found for run {} (state: {:?})",
+                record.run_id, record.state
+            ),
+        ),
+    };
     let root_cause = ranked_reasons
         .first()
         .cloned()
@@ -2004,6 +2022,8 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "schema": "homeboy/agent-task-diagnose/v1",
         "run_id": record.run_id.clone(),
         "state": record.state,
+        "summary": summary,
+        "diagnosis_outcome": diagnosis_outcome,
         "root_cause": root_cause,
         "diagnostic_chain": diagnostic_chain,
         "causal_chain": causal_chain,
@@ -5365,7 +5385,7 @@ fn collected_diagnostic_value_with_details(
     let mut value = json!({
         "task_id": item.task_id,
         "class": item.class,
-        "message": bounded_diagnostic_value(&Value::String(item.message)).unwrap_or(Value::Null),
+        "message": bounded_diagnostic_message(&item.message),
         "source": item.source,
         "owner": owner,
     });
@@ -5465,6 +5485,19 @@ fn structured_details(data: &Value, fields: &[&str]) -> Option<Value> {
     });
     let details = serde_json::Map::from_iter(details);
     (!details.is_empty()).then(|| Value::Object(details))
+}
+
+/// The diagnostic message is the causal answer `diagnose` exists to produce
+/// (#14679): an oversized message must still name the failure, not disappear.
+/// Unlike `bounded_diagnostic_value`'s atomic drop (correct for secondary
+/// `details` payloads), truncate on a char boundary and keep the prefix.
+fn bounded_diagnostic_message(text: &str) -> Value {
+    if text.chars().count() <= COMPACT_TEXT_LIMIT {
+        return Value::String(text.to_string());
+    }
+    let mut truncated: String = text.chars().take(COMPACT_TEXT_LIMIT).collect();
+    truncated.push('…');
+    Value::String(truncated)
 }
 
 fn bounded_diagnostic_value(value: &Value) -> Option<Value> {
@@ -6141,6 +6174,28 @@ mod tests {
             value["details"].get("canonical_path").is_none(),
             "oversized diagnostic text is omitted atomically"
         );
+    }
+
+    /// The `message` field is the causal answer `diagnose` exists to produce
+    /// (#14679): unlike secondary `details` payloads, an oversized message
+    /// must be truncated, not dropped to `null`.
+    #[test]
+    fn oversized_diagnostic_messages_are_truncated_not_dropped() {
+        let oversized = "x".repeat(COMPACT_TEXT_LIMIT + 100);
+        let value = collected_diagnostic_value(CollectedDiagnostic {
+            task_id: "cook".to_string(),
+            class: "agent_task.committed_harvest_git_failed".to_string(),
+            message: oversized.clone(),
+            source: "diagnostics".to_string(),
+            data: Value::Null,
+        });
+
+        let message = value["message"]
+            .as_str()
+            .expect("oversized message must remain a string, not null");
+        assert!(message.chars().count() < oversized.chars().count());
+        assert!(message.starts_with('x'));
+        assert!(message.ends_with('…'));
     }
 
     #[test]
