@@ -4207,6 +4207,9 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
                 .into_iter()
                 .flatten()
                 .any(|path| homeboy::core::git::repo_root(&path).is_some());
+            if args.dispatch.repo.is_some() {
+                return bind_cook_repository_identity_from_config(args);
+            }
             return require_explicit_cook_repo(
                 args,
                 if supplied_git_checkout {
@@ -4539,6 +4542,14 @@ fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
     let repository_name = normalize_repository_name(repository_name);
+    // An exact component ID is the common Cook path. Do not hydrate every
+    // registered primary checkout before selecting it: portable enrichment of
+    // one stale checkout can otherwise block destination resolution.
+    if let Some(component) =
+        homeboy::core::component::inventory::registered_primary_by_id(&repository_name)?
+    {
+        return Ok(vec![component]);
+    }
     let primary_matches = cook_components_matching_repository_name(
         homeboy::core::component::inventory::registered_primary()?,
         &repository_name,
@@ -5185,6 +5196,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
     preflight_cook_execution_request(&mut args, provenance)?;
+    if !args.no_progress {
+        if let Some(progress) = progress {
+            progress(
+                "destination_resolution",
+                None,
+                None,
+                Some("resolving default base and worktree"),
+                None,
+            )?;
+        }
+    }
     let args = resolve_cook_destination(args)?;
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
@@ -5211,6 +5233,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
+    if !no_progress {
+        if let Some(progress) = progress {
+            progress(
+                "destination_provisioning",
+                None,
+                None,
+                Some("checking managed worktree availability"),
+                None,
+            )?;
+        }
+    }
     let provision = provision_cook_destination(&args)?;
 
     run_preflight_cook_execution(
