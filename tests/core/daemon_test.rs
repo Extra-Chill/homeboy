@@ -2259,9 +2259,11 @@ fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
             .with_file_name("operation-lock-exec-child.release");
         // Reaching the test body proves exec closed the CLOEXEC lock descriptor.
         std::fs::write(&ready, "ready").expect("signal exec child readiness");
-        while !release.exists() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(release.exists(), "lifecycle exec child was not released");
         return;
     }
 
@@ -2295,9 +2297,11 @@ fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
         let _ = child.wait();
         panic!("lifecycle exec child did not become ready");
     }
-    acquire_daemon_operation_lock().expect("child exec must not retain lifecycle lock");
+    let reacquired = acquire_daemon_operation_lock();
     std::fs::write(&release, "release").expect("release lifecycle exec child");
-    assert!(child.wait().expect("reap lifecycle exec child").success());
+    let child_status = child.wait().expect("reap lifecycle exec child");
+    let _lock = reacquired.expect("child exec must not retain lifecycle lock");
+    assert!(child_status.success());
 }
 
 #[test]
