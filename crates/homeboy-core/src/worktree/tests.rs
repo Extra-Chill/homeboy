@@ -488,6 +488,77 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
 }
 
 #[test]
+fn create_branches_from_the_shared_base_when_the_primary_checkout_has_drifted() {
+    crate::test_support::with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let upstream = home.path().join("upstream.git");
+        let source = parent.join("drift-fixture");
+        fs::create_dir_all(&source).expect("source directory");
+        run_git(&source, &["init", "-q"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+
+        // The shared base advances with work every task must build on.
+        fs::create_dir_all(&upstream).expect("upstream directory");
+        run_git(&upstream, &["init", "-q", "--bare"]);
+        run_git(
+            &source,
+            &["remote", "add", "origin", &upstream.to_string_lossy()],
+        );
+        run_git(
+            &source,
+            &["push", "-q", "-u", "origin", "HEAD:refs/heads/main"],
+        );
+        run_git(&source, &["branch", "--set-upstream-to=origin/main"]);
+        fs::write(source.join("shared.txt"), "shared base work\n").expect("shared file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "shared base work"]);
+        run_git(&source, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        let shared_base = crate::git::output_optional(&source, &["rev-parse", "origin/main"])
+            .expect("shared base sha");
+
+        // The contributor's own branch then drifts away from that shared base.
+        run_git(&source, &["reset", "-q", "--hard", "HEAD~1"]);
+        fs::write(source.join("local-only.txt"), "unpushed local work\n").expect("local file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "unpushed local work"]);
+        let drifted_head =
+            crate::git::output_optional(&source, &["rev-parse", "HEAD"]).expect("drifted head sha");
+        assert_ne!(drifted_head, shared_base, "the fixture must actually drift");
+
+        let created = create(WorktreeCreateOptions {
+            component_id: source.to_string_lossy().to_string(),
+            branch: "fix/drifted-base".to_string(),
+            from: Some("main".to_string()),
+            task_url: Some("https://example.com/tasks/drift".to_string()),
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect("create from a drifted primary checkout");
+
+        let worktree = Path::new(&created.record.worktree_path);
+        let worktree_head = crate::git::output_optional(worktree, &["rev-parse", "HEAD"])
+            .expect("worktree head sha");
+        assert_eq!(
+            worktree_head, shared_base,
+            "a task worktree starts from the shared base, not the contributor's drift"
+        );
+        assert!(
+            worktree.join("shared.txt").is_file(),
+            "shared base work is present in the task worktree"
+        );
+        assert!(
+            !worktree.join("local-only.txt").is_file(),
+            "unpushed local work does not leak into a task worktree"
+        );
+    });
+}
+
+#[test]
 fn create_accepts_an_existing_repository_path_without_component_registration() {
     crate::test_support::with_isolated_home(|home| {
         let parent = home.path().join("Developer");
