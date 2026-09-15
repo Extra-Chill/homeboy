@@ -1867,6 +1867,60 @@ fn verify_retained_evidence(
     Ok(())
 }
 
+/// Ownership consistency measured before any endpoint is stopped.
+#[derive(Debug, Default)]
+struct OwnershipAudit {
+    retirement_blockers: std::collections::BTreeMap<String, String>,
+    fences_retirement: bool,
+}
+
+/// Classify every persisted owner against the endpoints this registry knows.
+///
+/// Ambiguous ownership is unsafe to act on, because one identity would resolve
+/// to more than one endpoint. A job owner without a live generation is unsafe
+/// too: that endpoint is the inspection and cancellation authority for work
+/// which may still exist. Both fence retirement for the whole runner.
+///
+/// A run/artifact owner that resolves to nothing is already unroutable and
+/// names a generation this registry no longer knows. Retiring an unrelated,
+/// verified-idle generation cannot make that record worse, so it is reported as
+/// a diagnostic rather than fencing every other generation behind it.
+fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> OwnershipAudit {
+    let mut audit = OwnershipAudit::default();
+    for (id, owner) in generations
+        .job_owners
+        .iter()
+        .chain(generations.run_owners.iter())
+        .chain(generations.artifact_owners.iter())
+    {
+        let live = generations
+            .generations
+            .iter()
+            .filter(|(generation, entry)| {
+                owner_matches_generation(owner, generation, &entry.endpoint)
+            })
+            .count();
+        let retired = generations
+            .retired_evidence
+            .iter()
+            .filter(|(generation, endpoint)| owner_matches_generation(owner, generation, endpoint))
+            .count();
+        let owns_job = generations.job_owners.contains_key(id);
+        let ambiguous = live + retired > 1;
+        let unresolved_job_owner = owns_job && live != 1;
+        let dangling_result_owner = !owns_job && live + retired == 0;
+        if !(ambiguous || unresolved_job_owner || dangling_result_owner) {
+            continue;
+        }
+        audit.fences_retirement |= ambiguous || unresolved_job_owner;
+        audit.retirement_blockers.insert(
+            owner.clone(),
+            format!("ownership for {id} resolves to {live} live and {retired} retired generations"),
+        );
+    }
+    audit
+}
+
 pub(crate) fn reconcile(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
@@ -1921,35 +1975,11 @@ fn reconcile_with(
     let Some(generations) = read(runner_id, legacy)? else {
         return Ok(GenerationReconcileResult::default());
     };
-    let mut retirement_blockers = std::collections::BTreeMap::new();
-    for (id, owner) in generations
-        .job_owners
-        .iter()
-        .chain(generations.run_owners.iter())
-        .chain(generations.artifact_owners.iter())
-    {
-        let live = generations
-            .generations
-            .iter()
-            .filter(|(generation, entry)| {
-                owner_matches_generation(owner, generation, &entry.endpoint)
-            })
-            .count();
-        let retired = generations
-            .retired_evidence
-            .iter()
-            .filter(|(generation, endpoint)| owner_matches_generation(owner, generation, endpoint))
-            .count();
-        if live + retired != 1 || (generations.job_owners.contains_key(id) && live != 1) {
-            retirement_blockers.insert(
-                owner.clone(),
-                format!(
-                    "ownership for {id} resolves to {live} live and {retired} retired generations"
-                ),
-            );
-        }
-    }
-    if !retirement_blockers.is_empty() {
+    let OwnershipAudit {
+        mut retirement_blockers,
+        fences_retirement,
+    } = audit_ownership(&generations);
+    if fences_retirement {
         return Ok(GenerationReconcileResult {
             retired_generation_ids: Vec::new(),
             retirement_blockers,
@@ -2867,6 +2897,48 @@ mod tests {
                 ))
             );
         });
+    }
+
+    /// A result owner naming a generation this registry no longer knows is
+    /// already unroutable. It must be reported, but it must not fence the
+    /// retirement of unrelated generations whose ownership is consistent.
+    #[test]
+    fn a_dangling_result_owner_is_reported_without_fencing_consistent_generations() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations
+            .run_owners
+            .insert("run-dangling".to_string(), "lease-removed".to_string());
+
+        let audit = audit_ownership(&generations);
+
+        assert!(
+            !audit.fences_retirement,
+            "an unroutable historical record must not block other retirements: {audit:?}"
+        );
+        assert_eq!(
+            audit
+                .retirement_blockers
+                .get("lease-removed")
+                .map(String::as_str),
+            Some("ownership for run-dangling resolves to 0 live and 0 retired generations"),
+        );
+    }
+
+    /// A job owner is the cancellation and inspection authority for work that
+    /// may still exist, so losing its live endpoint fences retirement.
+    #[test]
+    fn a_job_owner_without_a_live_generation_fences_retirement() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations
+            .job_owners
+            .insert("job-orphan".to_string(), "lease-removed".to_string());
+
+        let audit = audit_ownership(&generations);
+
+        assert!(audit.fences_retirement, "{audit:?}");
+        assert!(audit.retirement_blockers.contains_key("lease-removed"));
     }
 
     #[derive(Default)]
