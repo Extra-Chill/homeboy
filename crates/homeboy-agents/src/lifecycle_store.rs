@@ -1629,6 +1629,25 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             record.metadata["cook_operation_claims"] = claims;
         }
     }
+    let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    let receipts = store
+        .control_plane_event_receipt_digests(&run)?
+        .into_iter()
+        .collect();
+    let ledger = store.control_plane_event_stream(&run)?.unwrap_or_default();
+    let mut events =
+        super::durable_progress::prepared_progress_events(&record, aggregate.as_ref())?;
+    events.extend(super::durable_progress::prepared_unreceipted_action_events(
+        &record, &store, &receipts, &ledger,
+    )?);
+    super::durable_progress::stamp_durable_event_history(&mut record);
     let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);
     if !preserve_terminal {
@@ -1649,20 +1668,14 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         metadata_json,
     };
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
-    if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
-        store.upsert_imported_run_with_mission_and_resource_projection(
-            &projected,
-            mission.as_str(),
-            &resource_projection,
-            preserve_terminal,
-        )?;
-    } else {
-        store.upsert_imported_run_with_resource_projection(
-            &projected,
-            &resource_projection,
-            preserve_terminal,
-        )?;
-    }
+    let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
+    store.upsert_imported_run_with_events(
+        &projected,
+        preserve_terminal,
+        mission.as_ref().map(|mission| mission.as_str()),
+        Some(&resource_projection),
+        &events,
+    )?;
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
             "committed agent-task run record is unavailable: {}",

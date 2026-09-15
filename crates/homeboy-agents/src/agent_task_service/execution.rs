@@ -2799,6 +2799,12 @@ pub fn logs_from_cursor(
     agent_task_lifecycle::logs_from_cursor(run_id, cursor)
 }
 
+pub fn migrate_durable_event_history(
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskEventHistoryMigration> {
+    agent_task_lifecycle::migrate_durable_event_history(run_id)
+}
+
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
     agent_task_lifecycle::artifacts(run_id)
 }

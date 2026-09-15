@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use homeboy_control_plane_contract::RunId;
 use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 use uuid::Uuid;
 
@@ -46,6 +47,113 @@ fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> Run
         next_cursor,
         next_offset,
     }
+}
+
+fn apply_imported_run_in_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    run: &RunRecord,
+    metadata_json: &str,
+    preserve_terminal: bool,
+    mission_id: Option<&str>,
+    resource_projection: Option<&ControlPlaneResourceProjection>,
+) -> rusqlite::Result<bool> {
+    let terminal_guard = if preserve_terminal {
+        " WHERE runs.status = 'running' OR ?6 != 'running'"
+    } else {
+        ""
+    };
+    transaction.execute(
+        &format!(
+            r#"
+                INSERT INTO runs(
+                    id,
+                    kind,
+                    component_id,
+                    started_at,
+                    finished_at,
+                    status,
+                    command,
+                    cwd,
+                    homeboy_version,
+                    git_sha,
+                    rig_id,
+                    metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    component_id = excluded.component_id,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    status = excluded.status,
+                    command = excluded.command,
+                    cwd = excluded.cwd,
+                    homeboy_version = excluded.homeboy_version,
+                    git_sha = excluded.git_sha,
+                    rig_id = excluded.rig_id,
+                    metadata_json = excluded.metadata_json
+                {terminal_guard}
+                "#
+        ),
+        params![
+            run.id,
+            run.kind,
+            run.component_id,
+            run.started_at,
+            run.finished_at,
+            run.status,
+            run.command,
+            run.cwd,
+            run.homeboy_version,
+            run.git_sha,
+            run.rig_id,
+            metadata_json,
+        ],
+    )?;
+    let run_applied = transaction.changes() > 0;
+    if !run_applied {
+        return Ok(false);
+    }
+    if let Some(mission_id) = mission_id {
+        let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
+        transaction.execute(
+            r#"
+                    INSERT INTO control_plane_missions(id, created_at, updated_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(updated_at, excluded.updated_at)
+                    "#,
+            params![mission_id, run.started_at, updated_at],
+        )?;
+        transaction.execute(
+            r#"
+                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(mission_id, run_id) DO NOTHING
+                    "#,
+            params![mission_id, run.id],
+        )?;
+    }
+    if let Some(projection) = resource_projection {
+        let eligibility = serde_json::to_string(&projection.eligibility)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let provenance = serde_json::to_string(&projection.provenance)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        transaction.execute(
+            "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+            params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+        )?;
+        transaction.execute(
+            "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+            params![projection.resource_type, projection.resource_id],
+        )?;
+        for alias in &projection.aliases {
+            transaction.execute(
+                "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                params![projection.resource_type, alias, projection.resource_id],
+            )?;
+        }
+    }
+    Ok(run_applied)
 }
 
 impl ObservationStore {
@@ -1721,6 +1829,26 @@ impl ObservationStore {
         mission_id: Option<&str>,
         resource_projection: Option<&ControlPlaneResourceProjection>,
     ) -> Result<()> {
+        self.upsert_imported_run_with_events(
+            run,
+            preserve_terminal,
+            mission_id,
+            resource_projection,
+            &[],
+        )
+    }
+
+    /// Commit one run projection, optional resource authority, and prepared
+    /// canonical events on the same SQLite transaction. Event failure rolls
+    /// back the run write.
+    pub fn upsert_imported_run_with_events(
+        &self,
+        run: &RunRecord,
+        preserve_terminal: bool,
+        mission_id: Option<&str>,
+        resource_projection: Option<&ControlPlaneResourceProjection>,
+        events: &[PreparedControlPlaneEventAppend],
+    ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
         if crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json).is_none()
@@ -1734,103 +1862,57 @@ impl ObservationStore {
             }
         }
         let metadata_json = serialize_metadata(&run.metadata_json)?;
-        let terminal_guard = if preserve_terminal {
-            " WHERE runs.status = 'running' OR ?6 != 'running'"
+        let bound_run = if events.is_empty() {
+            None
         } else {
-            ""
+            Some(RunId::new(&run.id).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "run.id",
+                    error.to_string(),
+                    Some(run.id.clone()),
+                    None,
+                )
+            })?)
         };
-        execute_with_retry("upsert imported run record", || {
+        let mut captured = None;
+        execute_with_retry("upsert imported run with canonical events", || {
+            captured = None;
             let transaction = self.connection.unchecked_transaction()?;
-            transaction.execute(
-                &format!(
-                    r#"
-                INSERT INTO runs(
-                    id,
-                    kind,
-                    component_id,
-                    started_at,
-                    finished_at,
-                    status,
-                    command,
-                    cwd,
-                    homeboy_version,
-                    git_sha,
-                    rig_id,
-                    metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ON CONFLICT(id) DO UPDATE SET
-                    kind = excluded.kind,
-                    component_id = excluded.component_id,
-                    started_at = excluded.started_at,
-                    finished_at = excluded.finished_at,
-                    status = excluded.status,
-                    command = excluded.command,
-                    cwd = excluded.cwd,
-                    homeboy_version = excluded.homeboy_version,
-                    git_sha = excluded.git_sha,
-                    rig_id = excluded.rig_id,
-                    metadata_json = excluded.metadata_json
-                {terminal_guard}
-                "#
-                ),
-                params![
-                    run.id,
-                    run.kind,
-                    run.component_id,
-                    run.started_at,
-                    run.finished_at,
-                    run.status,
-                    run.command,
-                    run.cwd,
-                    run.homeboy_version,
-                    run.git_sha,
-                    run.rig_id,
-                    metadata_json,
-                ],
+            let run_applied = apply_imported_run_in_tx(
+                &transaction,
+                &run,
+                &metadata_json,
+                preserve_terminal,
+                mission_id,
+                resource_projection,
             )?;
-            if let Some(mission_id) = mission_id {
-                let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
-                transaction.execute(
-                    r#"
-                    INSERT INTO control_plane_missions(id, created_at, updated_at)
-                    VALUES (?1, ?2, ?3)
-                    ON CONFLICT(id) DO UPDATE SET
-                        updated_at = MAX(updated_at, excluded.updated_at)
-                    "#,
-                    params![mission_id, run.started_at, updated_at],
-                )?;
-                transaction.execute(
-                    r#"
-                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(mission_id, run_id) DO NOTHING
-                    "#,
-                    params![mission_id, run.id],
-                )?;
-            }
-            if let Some(projection) = resource_projection {
-                let eligibility = serde_json::to_string(&projection.eligibility)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                let provenance = serde_json::to_string(&projection.provenance)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                transaction.execute(
-                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
-                    params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
-                )?;
-                transaction.execute(
-                    "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
-                    params![projection.resource_type, projection.resource_id],
-                )?;
-                for alias in &projection.aliases {
-                    transaction.execute(
-                        "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
-                        params![projection.resource_type, alias, projection.resource_id],
-                    )?;
+            if run_applied {
+                if let Some(bound_run) = bound_run.as_ref() {
+                    for prepared in events {
+                        if let Err(error) =
+                            super::control_plane_events::append_control_plane_event_on(
+                                &transaction,
+                                bound_run,
+                                &prepared.request,
+                                &prepared.idempotency_digest,
+                                &prepared.request_digest,
+                            )
+                        {
+                            captured = Some(error);
+                            return match transaction.rollback() {
+                                Ok(()) => Ok(()),
+                                Err(rollback_error) => Err(rollback_error),
+                            };
+                        }
+                    }
                 }
             }
             transaction.commit()
         })?;
-        Ok(())
+        match captured {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub fn get_mission(&self, mission_id: &str) -> Result<Option<MissionRecord>> {

@@ -3414,10 +3414,17 @@ fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     assert!(
         messages
             .iter()
-            .any(|message| message.contains("provider execution running")
-                && message.contains("opencode")
-                && message.contains("openai/gpt-5.6-sol")),
+            .any(|message| message.contains("provider execution running")),
         "logs must surface the running provider execution, got: {messages:?}"
+    );
+    let record = lifecycle_store.read_record(run_id).expect("record");
+    assert_eq!(
+        record.metadata["provider_executions"][0]["backend"],
+        "opencode"
+    );
+    assert_eq!(
+        record.metadata["provider_executions"][0]["model"],
+        "openai/gpt-5.6-sol"
     );
 }
 
@@ -3471,14 +3478,14 @@ fn cancelled_local_provider_retains_runtime_evidence_in_terminal_logs() {
                     .is_some_and(|message| message.contains("provider execution cancelled"))
         })
         .expect("cancelled provider event");
-    let stdout_ref = terminal
-        .artifacts
-        .iter()
-        .find(|reference| reference.kind == "provider-runtime-stdout")
-        .expect("bounded stdout reference");
-    assert_eq!(stdout_ref.uri, format!("file://{}", stdout.display()));
+    let _ = terminal;
+    let record = lifecycle_store.read_record(run_id).expect("record");
+    let stdout_uri = record.metadata["provider_executions"][0]["runtime_evidence"]["stdout"]
+        .as_str()
+        .expect("durable stdout evidence");
+    assert_eq!(stdout_uri, format!("file://{}", stdout.display()));
     assert_eq!(
-        std::fs::read_to_string(stdout_ref.uri.strip_prefix("file://").expect("file uri"))
+        std::fs::read_to_string(stdout_uri.strip_prefix("file://").expect("file uri"))
             .expect("retained provider output"),
         "provider emitted diagnostic output\n"
     );
@@ -4654,7 +4661,12 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             )
         });
         assert_eq!(status_record.state, AgentTaskRunState::CandidateRecoverable);
-        assert_eq!(log.events[0].data["state"], "candidate_recoverable");
+        assert!(
+            log.events
+                .iter()
+                .any(|event| event.data["state"] == "candidate_recoverable"),
+            "canonical logs retain the recoverable aggregate state"
+        );
         assert_eq!(artifacts.artifacts[0].id, "recoverable.patch");
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent retry");
@@ -5207,8 +5219,19 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
         assert_eq!(loaded.state, AgentTaskRunState::Failed);
         assert_eq!(loaded.tasks[0].state, AgentTaskState::Failed);
         assert!(loaded.provider_handles.is_empty());
-        assert_eq!(log.events[1].data["state"], "failed");
-        assert_eq!(mirrored_log.events[1].data["state"], "failed");
+        assert!(
+            log.events
+                .iter()
+                .any(|event| event.data["state"] == "failed"),
+            "canonical logs retain the pre-dispatch failure"
+        );
+        assert!(
+            mirrored_log
+                .events
+                .iter()
+                .any(|event| event.data["state"] == "failed"),
+            "mirrored canonical logs retain the pre-dispatch failure"
+        );
         assert_eq!(loaded.metadata["provider_run_ids"], serde_json::json!([]));
         assert_eq!(
             loaded.artifact_refs[0].kind,
@@ -5299,7 +5322,12 @@ fn record_completed_run_exposes_logs_and_artifacts() {
         let artifacts = artifacts_in_store(&lifecycle_store, &record.run_id).expect("artifacts");
 
         assert_eq!(record.state, AgentTaskRunState::Succeeded);
-        assert_eq!(log.events[0].data["state"], "succeeded");
+        assert!(
+            log.events
+                .iter()
+                .any(|event| event.data["state"] == "succeeded"),
+            "canonical logs retain the terminal aggregate state"
+        );
         assert_eq!(artifacts.artifacts[0].id, "patch");
         assert_eq!(artifacts.evidence_refs[0].kind, "transcript");
     }

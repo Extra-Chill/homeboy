@@ -41,6 +41,7 @@ mod control_plane_identities;
 pub mod controller_pin_reference_provider;
 mod conversion;
 mod cook_workspace_restore;
+mod durable_progress;
 mod failure_recording;
 mod health;
 mod lab_handoff_reconciliation;
@@ -74,6 +75,10 @@ pub use cancellation::*;
 pub use control_plane_identities::{
     canonical_control_plane_identities, canonical_control_plane_identities_for_run,
     canonical_fanout_mission, canonical_mission, CanonicalControlPlaneIdentities,
+};
+pub use durable_progress::{
+    migrate_durable_event_history, migrate_durable_event_history_in_store,
+    AgentTaskEventHistoryMigration, EVENT_HISTORY_MIGRATION_SCHEMA,
 };
 pub use failure_recording::*;
 pub use health::*;

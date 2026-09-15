@@ -992,7 +992,7 @@ fn record_lab_offload_proxy_in_store(
     record.updated_at = Some(now_timestamp());
     update_lifecycle_heartbeat(&mut record);
     lifecycle_store.write_record(&record)?;
-    Ok(record)
+    lifecycle_store.read_record(&record.run_id)
 }
 
 fn validate_lab_handoff_plan(durable_plan: Option<&AgentTaskPlan>) -> Result<()> {

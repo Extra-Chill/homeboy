@@ -27,8 +27,8 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 use super::super::CmdResult;
 use super::args::{
     ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
-    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs,
+    MigrateEventHistoryArgs, QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 #[cfg(test)]
 use super::candidate::CandidateState;
@@ -1781,6 +1781,11 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     let cursor = parse_event_cursor(args.cursor.as_deref(), "cursor")?;
     let events = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref())?;
     Ok((serde_json::to_value(events).unwrap_or(Value::Null), 0))
+}
+
+pub(super) fn migrate_event_history(args: MigrateEventHistoryArgs) -> CmdResult<Value> {
+    let report = agent_task_service_direct::migrate_durable_event_history(&args.run_id)?;
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
