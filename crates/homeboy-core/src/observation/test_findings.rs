@@ -131,6 +131,8 @@ mod tests {
             test_file: "tests/AuthTest.php".to_string(),
             error_type: "AssertionFailedError".to_string(),
             message: "Expected 200, got 500".to_string(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
             source_file: "src/Auth.php".to_string(),
             source_line: 44,
         };
@@ -154,6 +156,8 @@ mod tests {
                 test_file: String::new(),
                 error_type: String::new(),
                 message: "Timed out".to_string(),
+                stdout_excerpt: String::new(),
+                stderr_excerpt: String::new(),
                 source_file: "src/Auth.php".to_string(),
                 source_line: 12,
             }],

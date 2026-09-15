@@ -16,6 +16,12 @@ pub struct TestFailure {
     pub error_type: String,
     /// Error message.
     pub message: String,
+    /// Bounded, redacted stdout captured for this exact failed test.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout_excerpt: String,
+    /// Bounded, redacted stderr captured for this exact failed test.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_excerpt: String,
     /// Optional: the source file in the stack trace (deepest non-test frame).
     #[serde(default)]
     pub source_file: String,
