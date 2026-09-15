@@ -4561,7 +4561,10 @@ fn cook_components_for_repository_name(
                 &primary_matches,
             ));
         }
-        return Ok(primary_matches);
+        let selected = &primary_matches[0];
+        return Ok(cook_registered_component_by_id(&selected.id)?
+            .into_iter()
+            .collect());
     }
     let components = homeboy::core::component::inventory::registered_base()?;
     let matches = cook_components_matching_repository_name(components, &repository_name);
