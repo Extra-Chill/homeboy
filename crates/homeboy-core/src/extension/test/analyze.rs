@@ -445,6 +445,8 @@ mod tests {
             test_file: file.to_string(),
             error_type: error_type.to_string(),
             message: message.to_string(),
+            stdout_excerpt: String::new(),
+            stderr_excerpt: String::new(),
             source_file: String::new(),
             source_line: 0,
         }

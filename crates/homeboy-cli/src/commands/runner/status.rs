@@ -351,7 +351,31 @@ pub(super) fn execution_capabilities_with_local_placement(
 
 pub(super) fn reconcile(id: &str) -> CmdResult<RunnerOutput> {
     let outcome = runner::reconcile_status_with_outcome(id)?;
-    reconcile_output(id, outcome.status, outcome.retired_generation_ids)
+    let (mut output, mut exit_code) =
+        reconcile_output(id, outcome.status, outcome.retired_generation_ids)?;
+    if let Some(reconciliation) = output.extra.reconciliation.as_mut() {
+        reconciliation.retirement_blockers = outcome.retirement_blockers;
+        reconciliation.retained_evidence_generation_count =
+            outcome.retained_evidence_generation_count;
+        reconciliation.postcondition = "healthy admission, verified retained evidence, and no blocked draining process retirement";
+        if !reconciliation.retirement_blockers.is_empty() {
+            reconciliation.status = if reconciliation.retired_generation_count > 0 {
+                RunnerReconciliationStatus::PartialProgress
+            } else {
+                RunnerReconciliationStatus::Blocked
+            };
+            if reconciliation.remaining_blocker.is_none() {
+                reconciliation.remaining_blocker =
+                    Some("generation_retirement_blocked".to_string());
+                reconciliation.retry_predicate = Some(
+                    "active work completes or the reported ownership/evidence blocker is resolved"
+                        .to_string(),
+                );
+            }
+            exit_code = 1;
+        }
+    }
+    Ok((output, exit_code))
 }
 
 pub(super) fn reconcile_output(
@@ -418,6 +442,8 @@ pub(super) fn reconciliation_outcome(
             retry_predicate: None,
             retired_generation_count,
             retired_generation_ids,
+            retirement_blockers: Default::default(),
+            retained_evidence_generation_count: 0,
         };
     }
 
@@ -520,6 +546,8 @@ pub(super) fn reconciliation_outcome(
         retry_predicate: Some(retry_predicate),
         retired_generation_count,
         retired_generation_ids,
+        retirement_blockers: Default::default(),
+        retained_evidence_generation_count: 0,
     }
 }
 

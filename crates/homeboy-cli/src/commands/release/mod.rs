@@ -20,6 +20,7 @@ use super::utils::args::DryRunArgs;
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
+mod candidate;
 pub mod changelog;
 pub mod changes;
 pub mod contains;
@@ -57,6 +58,8 @@ impl ReleaseArgs {
 
 #[derive(Subcommand)]
 enum ReleaseSubcommand {
+    /// Publish immutable prerelease assets for one exact commit without advancing latest
+    Candidate(candidate::CandidateArgs),
     /// Show changes since the last version tag
     Changes(changes::ChangesArgs),
     /// Show generated changelog content
@@ -354,6 +357,7 @@ pub struct ReleaseReadinessListOutput {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
+    Candidate(candidate::CandidatePublication),
     Single(Box<ReleaseOutput>),
     Batch(BatchReleaseOutput),
     Package(Box<ReleasePackageOutput>),
@@ -502,6 +506,9 @@ impl ReleaseExecuteArgs {
 
 pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
     match args.command {
+        Some(ReleaseSubcommand::Candidate(args)) => {
+            return map_nested(candidate::run(args), ReleaseCommandOutput::Candidate);
+        }
         Some(ReleaseSubcommand::Changes(args)) => {
             return map_nested(changes::run(args), ReleaseCommandOutput::Changes);
         }

@@ -61,10 +61,16 @@ pub fn download_remote_artifact_with_intent(
     let artifact_root = paths::PathRoots::from_environment()?
         .artifacts()
         .to_path_buf();
-    if let Some(download) =
-        download_direct_runner_artifact(&artifact_root, &token, output.clone(), intent)?
-    {
-        return Ok(download);
+    if !crate::generation_store::has_retired_evidence_owner(
+        &token.runner_id,
+        Some(&token.run_id),
+        None,
+    )? {
+        if let Some(download) =
+            download_direct_runner_artifact(&artifact_root, &token, output.clone(), intent)?
+        {
+            return Ok(download);
+        }
     }
 
     let data = daemon_api_get(

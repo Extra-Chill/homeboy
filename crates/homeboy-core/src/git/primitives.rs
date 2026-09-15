@@ -559,7 +559,9 @@ fn git_stdout_until(
         .map(|value| value.trim().to_string())
 }
 
-fn resolve_default_remote_until(git_root: &Path, deadline: Instant) -> Result<String> {
+/// Resolve the preferred remote without allowing a stalled `git remote` call to
+/// outlive the caller's operation budget.
+pub fn resolve_default_remote_until(git_root: &Path, deadline: Instant) -> Result<String> {
     let remotes = git_stdout_until(git_root, &["remote"], "git remote", deadline)?;
     let remotes: Vec<_> = remotes
         .lines()
@@ -572,6 +574,43 @@ fn resolve_default_remote_until(git_root: &Path, deadline: Instant) -> Result<St
     } else {
         Ok("origin".to_string())
     }
+}
+
+/// Resolve the cached remote-tracking default branch under a shared deadline.
+///
+/// This preserves [`default_remote_branch`]'s local-ref policy for callers that
+/// must not contact a remote, while making both remote selection and each Git
+/// probe obey the supplied deadline.
+pub fn default_remote_branch_until(git_root: &Path, deadline: Instant) -> Result<Option<String>> {
+    let remote = resolve_default_remote_until(git_root, deadline)?;
+    let head_ref = format!("refs/remotes/{remote}/HEAD");
+    let output = run_git_output_with_env_timeout(
+        git_root,
+        &["symbolic-ref", "--quiet", "--short", &head_ref],
+        "git default remote branch",
+        &[],
+        remaining_timeout(deadline)?,
+    )?;
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    for branch in ["main", "trunk", "master"] {
+        let candidate = format!("{remote}/{branch}");
+        let output = run_git_output_with_env_timeout(
+            git_root,
+            &["rev-parse", "--verify", "--quiet", &candidate],
+            "git default remote branch fallback",
+            &[],
+            remaining_timeout(deadline)?,
+        )?;
+        if output.status.success() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
 }
 
 /// Resolve the remote's live HEAD symref without relying on cached
