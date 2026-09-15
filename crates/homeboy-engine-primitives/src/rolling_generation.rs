@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Work is pinned at admission; moving the admission owner never moves an
 /// existing job, run, or artifact to the newer endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(bound(deserialize = "E: Deserialize<'de>"))]
 pub struct RollingGenerations<E> {
     pub admission_owner: String,
     pub generations: BTreeMap<String, RollingGeneration<E>>,
@@ -16,6 +17,10 @@ pub struct RollingGenerations<E> {
     pub run_owners: BTreeMap<String, String>,
     #[serde(default)]
     pub artifact_owners: BTreeMap<String, String>,
+    /// Producing endpoints whose evidence is now controller-owned. These are
+    /// immutable provenance, never live execution/admission endpoints.
+    #[serde(default)]
+    pub retired_evidence: BTreeMap<String, E>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +68,7 @@ impl<E> RollingGenerations<E> {
             job_owners: BTreeMap::new(),
             run_owners: BTreeMap::new(),
             artifact_owners: BTreeMap::new(),
+            retired_evidence: BTreeMap::new(),
         }
     }
 
@@ -202,6 +208,17 @@ impl<E> RollingGenerations<E> {
         };
         entry.active_jobs = entry.active_jobs.saturating_sub(1);
         self.retire_drained()
+    }
+
+    /// External process owners retain the endpoint until stop is proven.
+    pub fn complete_job_preserving_drained(&mut self, job_id: &str) -> bool {
+        let Some(generation) = self.job_owners.remove(job_id) else {
+            return false;
+        };
+        if let Some(entry) = self.generations.get_mut(&generation) {
+            entry.active_jobs = entry.active_jobs.saturating_sub(1);
+        }
+        true
     }
 
     pub fn retire_result_owner(&mut self, retirement: RollingResultOwnerRetirement<'_>) -> bool {
