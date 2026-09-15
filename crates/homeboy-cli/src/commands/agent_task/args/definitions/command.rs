@@ -382,7 +382,8 @@ mod cook_continue_tests {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// Maximum matching durable runs to return.
+    /// Maximum matching durable runs to return (effective maximum: 100; output
+    /// reports both the requested and effective limits).
     #[arg(
         long = "limit",
         value_name = "N",
@@ -427,8 +428,9 @@ pub struct ListArgs {
 }
 #[derive(Args, Debug)]
 pub struct ActiveArgs {
-    /// Cap active discovery to a positive page size. Cannot be combined with
-    /// `--full` or fleet-wide `--reconcile`.
+    /// Cap active discovery to a positive page size (effective maximum: 100;
+    /// output reports both the requested and effective limits). Cannot be
+    /// combined with `--full` or fleet-wide `--reconcile`.
     #[arg(
         long = "limit",
         value_name = "N",

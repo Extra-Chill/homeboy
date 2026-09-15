@@ -2768,7 +2768,7 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
             "2".to_string(),
         ]);
         assert_eq!(first["limit"], 2);
-        assert_eq!(first["physical_count"], 2);
+        assert_eq!(first["physical_count"], 4);
         assert_eq!(
             first["runs"]
                 .as_array()
@@ -2856,29 +2856,19 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
             "--limit".to_string(),
             "2".to_string(),
         ]);
-        assert_eq!(first["physical_count"], 2);
-        assert_eq!(first["runs"][0]["run_id"], "page-z");
-        assert_eq!(first["record_health"]["healthy"], 1);
+        assert_eq!(first["physical_count"], 3);
+        assert_eq!(
+            first["runs"]
+                .as_array()
+                .expect("matching rows")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["page-z", "page-a"]
+        );
+        assert_eq!(first["record_health"]["healthy"], 2);
         assert_eq!(first["record_health"]["legacy"], 0);
-        let cursor = first["next_cursor"]
-            .as_str()
-            .expect("continuation after legacy row")
-            .to_string();
-
-        let second = run_discovery_page(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "list".to_string(),
-            "--branch".to_string(),
-            "fix/page-health".to_string(),
-            "--limit".to_string(),
-            "2".to_string(),
-            "--cursor".to_string(),
-            cursor,
-        ]);
-        assert_eq!(second["runs"][0]["run_id"], "page-a");
-        assert_eq!(second["record_health"]["healthy"], 1);
-        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(first["next_cursor"], Value::Null);
     });
 }
 
@@ -2927,10 +2917,15 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
 }
 
 #[test]
-fn list_sparse_scope_requires_the_matching_opaque_continuation() {
+fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
     with_isolated_home(|_| {
         persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);
+        persist_discovery_record("sparse-b", "fix/sparse", AgentTaskRunState::Running);
+        persist_discovery_record("sparse-c", "fix/sparse", AgentTaskRunState::Running);
         persist_discovery_record("sparse-z", "fix/sparse", AgentTaskRunState::Queued);
+        for run_id in ["unrelated-x", "unrelated-y", "unrelated-z"] {
+            persist_discovery_record(run_id, "fix/unrelated", AgentTaskRunState::Running);
+        }
 
         let lifecycle =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
@@ -2952,7 +2947,7 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--limit".to_string(),
             "10".to_string(),
         ]);
-        assert_eq!(active["count"], 2);
+        assert_eq!(active["count"], 4);
         assert!(active["runs"]
             .as_array()
             .expect("active branch-scoped runs")
@@ -2968,10 +2963,20 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--branch".to_string(),
             "fix/sparse".to_string(),
             "--limit".to_string(),
-            "1".to_string(),
+            "2".to_string(),
         ]);
-        assert_eq!(first["count"], 0);
-        assert_eq!(first["physical_count"], 1);
+        assert_eq!(first["count"], 2);
+        assert_eq!(first["physical_count"], 7);
+        assert_eq!(first["search_status"], "matching_limit_reached");
+        assert_eq!(
+            first["runs"]
+                .as_array()
+                .expect("first matching page")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["sparse-c", "sparse-b"]
+        );
         let cursor = first["next_cursor"]
             .as_str()
             .expect("sparse continuation")
@@ -2982,7 +2987,7 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             .iter()
             .find_map(|action| action["command"].as_str())
             .expect("next command");
-        assert!(next_action.contains("--state running --branch fix/sparse --limit 1 --cursor"));
+        assert!(next_action.contains("--state running --branch fix/sparse --limit 2 --cursor"));
 
         let second = run_discovery_page(vec![
             "homeboy".to_string(),
@@ -2993,12 +2998,14 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--branch".to_string(),
             "fix/sparse".to_string(),
             "--limit".to_string(),
-            "1".to_string(),
+            "2".to_string(),
             "--cursor".to_string(),
             cursor.clone(),
         ]);
         assert_eq!(second["count"], 1);
         assert_eq!(second["runs"][0]["run_id"], "sparse-a");
+        assert_eq!(second["search_status"], "complete");
+        assert_eq!(second["next_cursor"], Value::Null);
 
         let changed_scope = Cli::try_parse_from([
             "homeboy",
@@ -3031,6 +3038,70 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
         };
         let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
         assert_eq!(error.details["field"], "cursor");
+    });
+}
+
+#[test]
+fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
+    with_isolated_home(|_| {
+        for index in 0..101 {
+            persist_discovery_record(
+                &format!("unrelated-{index:03}"),
+                "fix/unrelated",
+                AgentTaskRunState::Running,
+            );
+        }
+        for run_id in ["match-a", "match-b", "match-c"] {
+            persist_discovery_record(run_id, "fix/window-match", AgentTaskRunState::Running);
+        }
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+        ]);
+        assert_eq!(first["requested_limit"], 250);
+        assert_eq!(first["limit"], 100);
+        assert_eq!(first["physical_count"], 100);
+        assert_eq!(first["count"], 0);
+        assert_eq!(first["search_status"], "search_window_exhausted");
+        assert!(first["truncated"].as_bool().expect("incomplete search"));
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("replayable incomplete-search continuation")
+            .to_string();
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+            "--cursor".to_string(),
+            cursor,
+        ]);
+        assert_eq!(second["search_status"], "complete");
+        assert_eq!(second["truncated"], false);
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(
+            second["runs"]
+                .as_array()
+                .expect("completed matching page")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["match-c", "match-b", "match-a"]
+        );
     });
 }
 
