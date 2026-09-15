@@ -352,6 +352,24 @@ pub(super) fn activate(state: &DaemonState) -> Result<()> {
     })
 }
 
+/// Rebuild one durable job-to-generation binding during startup recovery.
+///
+/// Unlike [`record_job`], a generation that is no longer registered is ordinary
+/// history here rather than an invariant violation. Startup replays leases
+/// recorded by earlier daemons, so restarting must never require that every
+/// generation which ever admitted a job still be present in the registry.
+pub(super) fn rebuild_job_owner(job_id: &str, lease_id: &str) -> Result<()> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(());
+        };
+        if registry.generations.generations.contains_key(lease_id) {
+            registry.generations.admit_job_for(lease_id, job_id);
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn mark_job_terminal(job_id: &str) -> Result<()> {
     mutate_registry(|registry| {
         let Some(registry) = registry.as_mut() else {
@@ -620,6 +638,40 @@ mod tests {
                     .expect("owner")
                     .lease_id,
                 "A"
+            );
+        });
+    }
+
+    #[test]
+    fn startup_rebuild_survives_jobs_owned_by_retired_generations() {
+        with_isolated_home(|_| {
+            // The registry holds one live generation, while durable jobs still
+            // name the long-gone daemons that admitted them.
+            let live = state("live", "127.0.0.1:1001");
+            seed(&live).expect("seed live generation");
+
+            rebuild_job_owner("historical-job", "retired-generation")
+                .expect("a retired generation must not fail startup recovery");
+
+            // The retired generation owns nothing to route, and the live
+            // generation is left free to admit work.
+            assert!(endpoint_for_job("historical-job")
+                .expect("route historical job")
+                .is_none());
+            assert_eq!(
+                admitting().expect("admitting").expect("live").lease_id,
+                "live"
+            );
+
+            // A job belonging to a generation that is still registered is
+            // rebuilt and routable.
+            rebuild_job_owner("live-job", "live").expect("rebuild live job");
+            assert_eq!(
+                endpoint_for_job("live-job")
+                    .expect("route live job")
+                    .expect("live owner")
+                    .lease_id,
+                "live"
             );
         });
     }
