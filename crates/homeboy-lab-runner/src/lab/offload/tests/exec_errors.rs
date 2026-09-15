@@ -636,7 +636,7 @@ fn timed_fallback_preserves_agent_task_target_for_the_verified_local_outcome() {
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
-                preserve_workspace_on_failure: false,
+                delete_workspace_on_failure: false,
                 capture_patch: false,
                 mutation_flag: None,
                 timeout: Some(std::time::Duration::from_secs(1)),

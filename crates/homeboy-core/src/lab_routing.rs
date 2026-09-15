@@ -157,7 +157,7 @@ pub struct LabRoutingRequest<'a> {
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
-    pub preserve_workspace_on_failure: bool,
+    pub delete_workspace_on_failure: bool,
     pub capture_patch: bool,
     pub mutation_flag: Option<&'a str>,
     pub timeout: Option<Duration>,
@@ -1075,7 +1075,7 @@ fn execute_lab_offload_with_timeout(
     let allow_local_fallback = request.allow_local_fallback;
     let allow_dirty_lab_workspace = request.allow_dirty_lab_workspace;
     let skip_deps_hydration = request.skip_deps_hydration;
-    let preserve_workspace_on_failure = request.preserve_workspace_on_failure;
+    let delete_workspace_on_failure = request.delete_workspace_on_failure;
     let capture_patch = request.capture_patch;
     let placement_outcome_target = request.placement_outcome_target.map(|target| match target {
         ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id } => run_id.to_string(),
@@ -1107,7 +1107,7 @@ fn execute_lab_offload_with_timeout(
             allow_local_fallback,
             allow_dirty_lab_workspace,
             skip_deps_hydration,
-            preserve_workspace_on_failure,
+            delete_workspace_on_failure,
             capture_patch,
             mutation_flag: mutation_flag.as_deref(),
             timeout: None,
@@ -1316,7 +1316,7 @@ mod tests {
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
-            preserve_workspace_on_failure: false,
+            delete_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
             timeout: None,
@@ -2006,7 +2006,7 @@ mod tests {
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
-                preserve_workspace_on_failure: false,
+                delete_workspace_on_failure: false,
                 capture_patch: false,
                 mutation_flag: None,
                 timeout: None,

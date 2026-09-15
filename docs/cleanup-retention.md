@@ -133,14 +133,14 @@ name. Making them distinguishable requires the writer to tag its output.
 
 ## Lab Failure Retention
 
-Lab offloads delete run-scoped workspaces on every known terminal outcome by
-default. `--preserve-workspace-on-failure` is the bounded debugging profile: it
-keeps failed or cancelled materialization state, registers it as
-`delete_after_ttl` in the workspace lifecycle metadata, and uses
-`lab.runner_workspace_ttl` (default `P7D`) for existing runner workspace
-pruning. The terminal report identifies the policy, outcome, lifecycle owner,
-retained location, and `homeboy runner workspace prune <runner> --apply
---min-age-hours 0` reclaim command.
+Lab offloads retain failed or cancelled run-scoped workspaces by default (#14680):
+a failed cook is the evidence for its own failure, so it survives through the
+bounded `lab.runner_workspace_ttl` (default `P7D`) runner workspace lifecycle
+instead of being deleted the moment the run ends. `--delete-workspace-on-failure`
+is the explicit opt-in that reaps every known terminal outcome immediately,
+including failures. The terminal report identifies the policy, outcome,
+lifecycle owner, retained location, and `homeboy runner workspace prune
+<runner> --apply --min-age-hours 0` reclaim command.
 
 Detached, in-flight, and otherwise uncertain daemon ownership always
 relinquishes the local cleanup handle. Those paths remain fail-closed and are

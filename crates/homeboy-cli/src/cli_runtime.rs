@@ -929,8 +929,7 @@ impl CliRuntime {
                     runner,
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
-                    preserve_workspace_on_failure: matches
-                        .get_flag("preserve_workspace_on_failure"),
+                    delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
                     detach_after_handoff: matches.get_flag("detach_after_handoff"),
                     runner_env: &runner_env,
                     runner_secret_env: &runner_secret_env,
