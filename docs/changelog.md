@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.374.3] - 2026-09-15
+
+### Changed
+- materialize one declared snapshot selection
+
+### Fixed
+- propagate partial inventory continuation
+- retire idle generations with preserved evidence
+
 ## [0.374.2] - 2026-09-15
 
 ### Changed
