@@ -2248,18 +2248,56 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
 #[cfg(unix)]
 #[test]
 fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
+    const CHILD_ENV: &str = "HOMEBOY_TEST_DAEMON_OPERATION_LOCK_EXEC_CHILD";
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let ready = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-exec-child.ready");
+        let release = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-exec-child.release");
+        // Reaching the test body proves exec closed the CLOEXEC lock descriptor.
+        std::fs::write(&ready, "ready").expect("signal exec child readiness");
+        while !release.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    }
+
     let _home = HomeGuard::new();
+    let ready = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-exec-child.ready");
+    let release = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-exec-child.release");
     let mut child = {
         let _lock = acquire_daemon_operation_lock().expect("acquire launcher lock");
-        Command::new("sh")
-            .args(["-c", "sleep 30"])
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg(crate::test_support::harness_test_name(
+                module_path!(),
+                "daemon_operation_lock_is_released_when_a_lifecycle_child_execs",
+            ))
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
             .spawn()
-            .expect("spawn detached lifecycle child")
+            .expect("spawn lifecycle exec child")
     };
 
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !ready.exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("lifecycle exec child did not become ready");
+    }
     acquire_daemon_operation_lock().expect("child exec must not retain lifecycle lock");
-    child.kill().expect("stop lifecycle child");
-    child.wait().expect("reap lifecycle child");
+    std::fs::write(&release, "release").expect("release lifecycle exec child");
+    assert!(child.wait().expect("reap lifecycle exec child").success());
 }
 
 #[test]
