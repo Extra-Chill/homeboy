@@ -327,15 +327,22 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
 
 #[cfg(unix)]
 #[test]
-fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
+fn cook_repository_selection_skips_unrelated_portable_git_enrichment() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
         let target = tempfile::tempdir().expect("target checkout");
-        register_component(
-            "target",
+        init_runtime_component_checkout(target.path());
+        add_remote(
             target.path(),
-            "https://github.com/example/target.git",
+            "origin",
+            "https://github.com/example/importer.git",
+        );
+        register_component_with_aliases(
+            "target",
+            &["target-alias"],
+            target.path(),
+            "https://github.com/example/importer.git",
         );
         let stale = tempfile::tempdir().expect("stale checkout");
         std::fs::write(stale.path().join("homeboy.json"), r#"{"id":"stale"}"#)
@@ -350,7 +357,7 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
         let git = bin.path().join("git");
         std::fs::write(
             &git,
-            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then touch \"$PWD/probed\"; exit 1; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
         )
         .expect("write fake git");
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
@@ -375,29 +382,34 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             ),
         );
 
-        let started = std::time::Instant::now();
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "targeted lookup".to_string(),
-            "--repo".to_string(),
-            "target".to_string(),
-            "--to-worktree".to_string(),
-            target.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
-        .expect("explicit repo must not inspect unrelated registrations");
+        for selector in [
+            "target",
+            "target-alias",
+            "https://github.com/example/importer.git",
+        ] {
+            let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "targeted lookup".to_string(),
+                "--repo".to_string(),
+                selector.to_string(),
+                "--to-worktree".to_string(),
+                target.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("repository selection must not inspect unrelated registrations");
 
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "unrelated portable checkout was probed"
-        );
-        assert_eq!(
-            args.repository_identity.expect("identity")["remote_identity"],
-            "git://github.com/example/target"
-        );
+            assert!(
+                !stale.path().join("probed").exists(),
+                "selector {selector} probed an unrelated portable checkout"
+            );
+            assert_eq!(
+                args.repository_identity.expect("identity")["remote_identity"],
+                "git://github.com/example/importer"
+            );
+        }
     });
 }
 
