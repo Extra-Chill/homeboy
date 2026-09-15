@@ -14,9 +14,10 @@ pub struct LabOffloadRequest<'a> {
     /// jobs. When true, Homeboy does not run `composer install`/`npm ci`/etc. in
     /// the materialized runner workspace before the command starts (#7366).
     pub skip_deps_hydration: bool,
-    /// Retain failures through the runner workspace TTL lifecycle instead of
-    /// deleting them at terminal completion.
-    pub preserve_workspace_on_failure: bool,
+    /// Delete a failed workspace immediately at terminal completion instead
+    /// of the default bounded retention through the runner workspace TTL
+    /// lifecycle.
+    pub delete_workspace_on_failure: bool,
     pub capture_patch: bool,
     /// Human-readable flag (e.g. `--write`, `--fix`) that requested the
     /// source-tree mutation. Used to render actionable diagnostics when the
@@ -90,7 +91,7 @@ impl<'a> LabOffloadRequest<'a> {
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
-            preserve_workspace_on_failure: false,
+            delete_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
             placement_outcome_target: None,
@@ -128,7 +129,7 @@ mod tests {
             allow_local_fallback,
             allow_dirty_lab_workspace,
             skip_deps_hydration,
-            preserve_workspace_on_failure,
+            delete_workspace_on_failure,
             capture_patch,
             mutation_flag,
             placement_outcome_target,
@@ -157,7 +158,7 @@ mod tests {
         assert!(!allow_local_fallback);
         assert!(!allow_dirty_lab_workspace);
         assert!(!skip_deps_hydration);
-        assert!(!preserve_workspace_on_failure);
+        assert!(!delete_workspace_on_failure);
         assert!(!capture_patch);
         assert!(mutation_flag.is_none());
         assert!(placement_outcome_target.is_none());
