@@ -644,10 +644,15 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
             match agent_task_lifecycle::status(&child.run_id) {
                 Ok(record) => record,
                 // The batch report retains the last durable child state and
-                // marks observation freshness separately below. A transient
-                // projection lock must not make status itself unavailable.
-                Err(error) if error.code == ErrorCode::ObservationStoreBusy => continue,
-                Err(error) => return Err(error),
+                // marks observation freshness separately below, so a read
+                // must never fail the whole status on one child's record.
+                // That record can be transiently unreadable (a projection
+                // lock) or not exist yet at all: children beyond the
+                // coordinator's concurrency limit have no durable run record
+                // until a worker claims them, even while the batch itself has
+                // already left `admitting` for `running` (#14677). Either way
+                // there is nothing to reconcile for this child yet.
+                Err(_) => continue,
             }
         };
         let Some(mut finalization) = record.metadata.get("cook_finalization").cloned() else {
@@ -12032,6 +12037,58 @@ fi
             assert!(value["batch"]["unavailable_child_runs"]
                 .as_array()
                 .is_none_or(Vec::is_empty));
+        });
+    }
+
+    /// #14677: a coordinator leaves `admitting` for `running` as soon as it
+    /// starts dispatching children, but a concurrency limit below the child
+    /// count means later children have no durable run record yet even though
+    /// the batch itself is no longer `admitting`. `fanout status` must still
+    /// read cleanly instead of failing on the first child without a record.
+    #[test]
+    fn public_status_reads_a_running_batch_with_a_child_still_unadmitted() {
+        with_isolated_home(|_| {
+            let batch_id = "running-with-throttled-child";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[
+                    batch::FanoutRunBatchChild {
+                        task_id: "child-a".to_string(),
+                        run_id: "cook-child-a".to_string(),
+                    },
+                    batch::FanoutRunBatchChild {
+                        task_id: "child-b".to_string(),
+                        run_id: "cook-child-b".to_string(),
+                    },
+                ],
+                json!({}),
+            )
+            .expect("persist fanout roster");
+            let claim_id = batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+            batch::start_fanout_run_batch(batch_id, &claim_id)
+                .expect("coordinator leaves admission for execution");
+            agent_task_lifecycle::submit_plan(
+                &AgentTaskPlan::new("running-with-throttled-child", Vec::new()),
+                Some("cook-child-a"),
+            )
+            .expect("materialize the one worker-claimed child");
+            // `cook-child-b` is still queued behind the concurrency limit and
+            // has no durable run record at all yet.
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Lab,
+            )
+            .expect("a running batch with an unadmitted child is still a readable status");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["admission"]["admitted"], 1);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
         });
     }
 
