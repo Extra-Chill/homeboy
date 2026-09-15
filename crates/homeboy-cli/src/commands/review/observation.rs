@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use homeboy::core::git::short_head_revision_at;
 use homeboy::core::observation::{
@@ -22,6 +23,84 @@ impl ReviewObservation {
     pub(super) fn run_id(&self) -> &str {
         self.0.run_id()
     }
+
+    pub(super) fn progress(&self, phase: &str, current: &str, status: &str) {
+        let Ok(Some(run)) = self.0.store().get_run(self.run_id()) else {
+            return;
+        };
+        let metadata = merge_metadata(
+            run.metadata_json,
+            serde_json::json!({
+                "observation_status": "running",
+                "progress": {
+                    "phase": phase,
+                    "current": current,
+                    "status": status,
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                },
+            }),
+        );
+        let _ = self
+            .0
+            .store()
+            .update_running_run_metadata(self.run_id(), metadata);
+        // The stream mirrors the persisted update so compact output remains
+        // observable without making stderr the source of truth.
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": "homeboy/review-lifecycle/v1",
+                "event": "progress",
+                "run_id": self.run_id(),
+                "phase": phase,
+                "current": current,
+                "status": status,
+            })
+        );
+    }
+
+    pub(super) fn transfer_owner_to(&self, owner_pid: u32) -> homeboy::core::Result<()> {
+        let deadline_at = chrono::Utc::now()
+            + chrono::Duration::from_std(super::DETACHED_OWNERSHIP_TRANSFER_DEADLINE)
+                .expect("ownership transfer deadline is representable");
+        if self
+            .0
+            .store()
+            .begin_running_run_handoff(self.run_id(), owner_pid, deadline_at)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        Err(homeboy::core::Error::validation_invalid_argument(
+            "run_id",
+            "running observation ended before detached ownership transfer",
+            Some(self.run_id().to_string()),
+            None,
+        ))
+    }
+
+    pub(super) fn handoff_accepted(&self, worker_pid: u32) -> homeboy::core::Result<bool> {
+        Ok(self.0.store().get_run(self.run_id())?.is_some_and(|run| {
+            run.status == RunStatus::Running.as_str()
+                && run
+                    .metadata_json
+                    .pointer("/homeboy_ownership_handoff/state")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("accepted")
+                && run
+                    .metadata_json
+                    .pointer("/homeboy_ownership_handoff/worker_pid")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(worker_pid as u64)
+        }))
+    }
+
+    pub(super) fn fail_handoff(&self, worker_pid: u32, reason: &str) {
+        let _ = self
+            .0
+            .store()
+            .fail_running_run_handoff(self.run_id(), worker_pid, reason);
+    }
 }
 
 #[derive(Serialize)]
@@ -36,9 +115,9 @@ struct EarlyReviewLifecycle<'a> {
 }
 
 pub(super) struct ReviewObservationStart<'a> {
-    pub component_id: &'a str,
-    pub component_label: &'a str,
-    pub source_path: &'a Path,
+    pub component_id: Option<&'a str>,
+    pub component_label: Option<&'a str>,
+    pub source_path: Option<&'a Path>,
     pub args: &'a ReviewArgs,
     pub scope: &'a str,
     pub changed_file_count: Option<usize>,
@@ -46,22 +125,80 @@ pub(super) struct ReviewObservationStart<'a> {
 
 pub(super) fn start(start: ReviewObservationStart<'_>) -> homeboy::core::Result<ReviewObservation> {
     let metadata = review_observation_initial_metadata(
-        start.component_label,
+        start.component_label.unwrap_or("pending-discovery"),
         start.args,
         start.scope,
         start.changed_file_count,
     );
-    ActiveObservation::start(
-        NewRunRecord::builder("review")
-            .component_id(start.component_id)
-            .command(review_observation_command(start.component_id, start.args))
-            .cwd_path(start.source_path)
-            .current_homeboy_version()
-            .git_sha(short_head_revision_at(start.source_path))
-            .metadata(metadata.clone())
-            .build(),
-    )
-    .map(ReviewObservation)
+    let record = NewRunRecord::builder("review")
+        .optional_cwd_path(start.source_path)
+        .command(review_observation_command(
+            start.component_id.unwrap_or("pending-discovery"),
+            start.args,
+        ))
+        .current_homeboy_version()
+        .git_sha(start.source_path.and_then(short_head_revision_at))
+        .metadata(metadata.clone())
+        .build();
+    let record = match start.component_id {
+        Some(component_id) => NewRunRecord {
+            component_id: Some(component_id.to_string()),
+            ..record
+        },
+        None => record,
+    };
+    ActiveObservation::start(record).map(ReviewObservation)
+}
+
+/// A child must not start writing lifecycle state until the launcher has made
+/// its PID durable. This closes the launcher's exit-to-first-progress window.
+pub(super) fn resume_after_ownership_transfer(
+    run_id: &str,
+    deadline: Duration,
+) -> homeboy::core::Result<ReviewObservation> {
+    let started = Instant::now();
+    loop {
+        let store = ObservationStore::open_initialized_for_lifecycle()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                "run record not found",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        if run.status != RunStatus::Running.as_str() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "run_id",
+                "detached observation ended before ownership transfer",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let worker_pid = std::process::id();
+        if homeboy::core::observation::run_owner_pid(&run) == Some(worker_pid)
+            && run
+                .metadata_json
+                .pointer("/homeboy_ownership_handoff/state")
+                .and_then(serde_json::Value::as_str)
+                == Some("accepted")
+        {
+            return ActiveObservation::resume(run_id).map(ReviewObservation);
+        }
+        if store
+            .accept_running_run_handoff(run_id, worker_pid)?
+            .is_some()
+        {
+            return ActiveObservation::resume(run_id).map(ReviewObservation);
+        }
+        if started.elapsed() >= deadline {
+            let reason =
+                format!("timed out waiting {deadline:?} for detached review ownership transfer");
+            let _ = store.fail_running_run_handoff(run_id, worker_pid, &reason);
+            return Err(homeboy::core::Error::internal_unexpected(reason));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Emit a JSONL lifecycle event after persistence. The final stdout envelope is unchanged.
@@ -136,9 +273,34 @@ fn finish_if_running(
     status: RunStatus,
     metadata: Option<serde_json::Value>,
 ) {
-    let _ = observation
-        .store()
-        .finish_running_run(observation.run_id(), status, metadata);
+    let Some(metadata) = metadata else {
+        let _ = observation
+            .store()
+            .finish_running_run(observation.run_id(), status, None);
+        return;
+    };
+    // A heartbeat can race the terminal path. CAS against the metadata we read
+    // so the terminal record retains the newest progress instead of restoring
+    // the launcher's initial snapshot over it.
+    for _ in 0..3 {
+        let Ok(Some(current)) = observation.store().get_run(observation.run_id()) else {
+            return;
+        };
+        if current.status != RunStatus::Running.as_str() {
+            return;
+        }
+        let merged = merge_metadata(current.metadata_json.clone(), metadata.clone());
+        match observation.store().finish_running_run_if_metadata(
+            observation.run_id(),
+            status,
+            merged,
+            &current.metadata_json,
+        ) {
+            Ok(Some(_)) => return,
+            Ok(None) => continue,
+            Err(_) => return,
+        }
+    }
 }
 
 fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
@@ -297,9 +459,9 @@ mod tests {
         homeboy::test_support::with_isolated_home(|_| {
             let args = review_args();
             let observation = start(ReviewObservationStart {
-                component_id: "homeboy",
-                component_label: "homeboy",
-                source_path: Path::new("/tmp/homeboy"),
+                component_id: Some("homeboy"),
+                component_label: Some("homeboy"),
+                source_path: Some(Path::new("/tmp/homeboy")),
                 args: &args,
                 scope: "changed-since",
                 changed_file_count: Some(3),
@@ -315,6 +477,15 @@ mod tests {
                 .expect("run");
             assert_eq!(run.kind, "review");
             assert_eq!(run.status, "running");
+
+            observation.progress("dependency_setup", "fixture-provider", "heartbeat");
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read")
+                .expect("run");
+            assert_eq!(run.metadata_json["progress"]["phase"], "dependency_setup");
+            assert_eq!(run.metadata_json["progress"]["current"], "fixture-provider");
 
             let lifecycle = serde_json::to_value(EarlyReviewLifecycle {
                 schema: "homeboy/review-lifecycle/v1",
@@ -355,6 +526,54 @@ mod tests {
                 review_runs.len(),
                 1,
                 "attaching must not create duplicate work"
+            );
+        });
+    }
+
+    #[test]
+    fn detached_owner_transfer_survives_reconcile_and_preserves_progress_to_terminal_result() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let args = review_args();
+            let observation = start(ReviewObservationStart {
+                component_id: Some("homeboy"),
+                component_label: Some("homeboy"),
+                source_path: Some(Path::new("/tmp/homeboy")),
+                args: &args,
+                scope: "changed-only",
+                changed_file_count: Some(1),
+            })
+            .expect("launcher admission");
+            let run_id = observation.run_id().to_string();
+
+            // Model an exited launcher before it atomically hands the durable
+            // row to its detached child (this test process).
+            observation
+                .transfer_owner_to(std::process::id())
+                .expect("child ownership transfer");
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .accept_running_run_handoff(&run_id, std::process::id())
+                .expect("child accepts handoff")
+                .expect("accepted handoff");
+            let owned = store.get_run(&run_id).expect("read").expect("admitted run");
+            assert_eq!(
+                homeboy::core::observation::run_owner_pid(&owned),
+                Some(std::process::id())
+            );
+            let watched = crate::commands::runs::poll_once_for_test(&store, &run_id)
+                .expect("watch/reconcile live child");
+            assert_eq!(watched.status, RunStatus::Running.as_str());
+
+            observation.progress("test_execution", "review.test", "heartbeat");
+            finish_if_running(&observation.0, RunStatus::Pass, None);
+            let terminal = store
+                .get_run(&run_id)
+                .expect("read terminal")
+                .expect("terminal run");
+            assert_eq!(terminal.status, RunStatus::Pass.as_str());
+            assert_eq!(
+                terminal.metadata_json["progress"]["phase"],
+                "test_execution"
             );
         });
     }

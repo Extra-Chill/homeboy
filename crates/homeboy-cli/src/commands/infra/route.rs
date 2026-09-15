@@ -103,6 +103,21 @@ pub(crate) fn route_after_parse_with_provenance(
         return Ok(None);
     }
 
+    // A compact local changed-only review is commonly launched from an
+    // interactive client. Hand its admitted observation to an independent
+    // worker so closing that client cannot terminate setup or test execution.
+    if cli.placement == homeboy::cli_surface::Placement::Local
+        && std::env::var_os("HOMEBOY_DETACHED_REVIEW_RUN_ID").is_none()
+    {
+        if let Commands::Review(review) = &cli.command {
+            if let Some(exit_code) =
+                crate::commands::review::detach_changed_only_summary(review, normalized_args)?
+            {
+                return Ok(Some(exit_code));
+            }
+        }
+    }
+
     // Promotion owns target resolution because gate-feedback artifacts can
     // authorize an exact dirty candidate. Generic Lab routing has no artifact
     // provenance and would reject that target before local promotion starts.

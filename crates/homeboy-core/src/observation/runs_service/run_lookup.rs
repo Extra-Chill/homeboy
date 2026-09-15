@@ -306,14 +306,11 @@ pub fn refresh_mirrored_daemon_evidence_best_effort(run_id: &str) {
     }
 }
 
-/// Refresh one selected mirrored run. A daemon 404 means the persisted mirror
-/// can no longer be observed, so preserve that terminal diagnostic locally
-/// instead of emitting a generic refresh warning.
-pub fn refresh_selected_mirrored_daemon_evidence_best_effort(
-    store: &ObservationStore,
-    run: &RunRecord,
-) {
-    if let Some(err) = refresh_selected_mirrored_daemon_evidence(store, run) {
+/// Refresh one selected mirrored run. A daemon 404 can come from an admission
+/// generation that no longer retains the job, so it remains an actionable
+/// refresh failure rather than terminal evidence for the local mirror.
+pub fn refresh_selected_mirrored_daemon_evidence_best_effort(run: &RunRecord) {
+    if let Some(err) = refresh_selected_mirrored_daemon_evidence(run) {
         let (runner_id, job_id) =
             runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
                 .expect("selected refresh errors only for mirrored runner jobs");
@@ -361,39 +358,11 @@ fn daemon_job_status(data: &Value, runner_id: &str, job_id: &str) -> Result<Stri
         })
 }
 
-pub fn refresh_selected_mirrored_daemon_evidence(
-    store: &ObservationStore,
-    run: &RunRecord,
-) -> Option<Error> {
-    let (runner_id, job_id) =
-        runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))?;
+pub fn refresh_selected_mirrored_daemon_evidence(run: &RunRecord) -> Option<Error> {
+    let _ = runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))?;
 
     match runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id)) {
         Ok(_) => None,
-        Err(err) if err.details.get("http_status").and_then(Value::as_u64) == Some(404) => {
-            let mut metadata = run.metadata_json.clone();
-            if !metadata.is_object() {
-                metadata = serde_json::json!({ "homeboy_original_metadata": metadata });
-            }
-            if let Some(object) = metadata.as_object_mut() {
-                object.insert(
-                    "runner_terminal_evidence".to_string(),
-                    serde_json::json!({
-                        "runner_id": runner_id,
-                        "job_id": job_id,
-                        "status": "evidence_unavailable",
-                        "stale_reason": "authoritative_generation_did_not_retain_job",
-                        "diagnostic": {
-                            "code": err.code.as_str(),
-                            "message": err.message,
-                            "details": err.details,
-                        },
-                    }),
-                );
-            }
-            let _ = store.finish_run(&run.id, RunStatus::Stale, Some(metadata));
-            None
-        }
         Err(err) => Some(err),
     }
 }

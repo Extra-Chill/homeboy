@@ -51,6 +51,8 @@ use super::CmdResult;
 pub(crate) use dispatch::{global_runner_error, run, run_markdown};
 pub use handlers::list_runs;
 pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
+#[cfg(test)]
+pub(crate) use watch::poll_once_for_test;
 
 /// Attach a runner artifact from another command surface without exposing the
 /// `runs artifact` clap types outside this module.

@@ -208,7 +208,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             presentation: _,
             field,
         } => {
-            let (output, exit_code) = handlers::show_run(&run_id)?;
+            let (output, exit_code) = handlers::show_run_in_store(&store, &run_id)?;
             if field.is_empty() {
                 Ok((output, exit_code))
             } else {
@@ -224,7 +224,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
             run_id,
             json: _,
             presentation: _,
-        } => dossier::runs_dossier(&run_id),
+        } => dossier::runs_dossier_in_store(&store, &run_id),
         RunsCommand::ResumePlan { run_id } => handlers::resume_plan(&store, &run_id),
         RunsCommand::Evidence {
             run_id,
