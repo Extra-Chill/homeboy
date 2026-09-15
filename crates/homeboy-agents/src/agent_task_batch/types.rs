@@ -44,6 +44,13 @@ pub struct AgentTaskBatchChildPlacement {
     pub runner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_source: Option<RunnerSelectionSource>,
+    /// Remote workspace path on `runner_id`, when dispatch has synced source
+    /// there. This is the same path recorded on the child's own durable run
+    /// (`metadata.remote_workspace`); surfacing it here means a wave's
+    /// per-child liveness and location no longer requires SSHing to the
+    /// runner to find it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     pub authority: String,
     pub decision_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

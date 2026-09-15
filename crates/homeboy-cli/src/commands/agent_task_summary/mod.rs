@@ -94,6 +94,7 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
             .unwrap_or("no reported cause");
         lines.push(format!("Blocked before admission in {stage}: {cause}"));
     }
+    lines.extend(fanout_child_placement_lines(payload));
     if payload
         .pointer("/batch/resumable")
         .and_then(Value::as_bool)
@@ -104,6 +105,37 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
         }
     }
     Some(lines.join("\n"))
+}
+
+/// Per-child runner id and remote workspace path for every child dispatched
+/// to a runner. An idle-looking local worktree is indistinguishable from "no
+/// progress" without this: the remote workspace is where the work actually
+/// runs, and this is the one place that names it without SSHing to the
+/// runner (#14683).
+fn fanout_child_placement_lines(payload: &Value) -> Vec<String> {
+    let Some(children) = payload
+        .pointer("/batch/batch/child_runs")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    children
+        .iter()
+        .filter_map(|child| {
+            let runner_id = child
+                .pointer("/placement/runner_id")
+                .and_then(Value::as_str)?;
+            let task_id = child.get("task_id").and_then(Value::as_str).unwrap_or("?");
+            let state = child.get("state").and_then(Value::as_str).unwrap_or("?");
+            let workspace = child
+                .pointer("/placement/workspace_path")
+                .and_then(Value::as_str)
+                .unwrap_or("pending");
+            Some(format!(
+                "  {task_id} ({state}): runner {runner_id}, workspace {workspace}"
+            ))
+        })
+        .collect()
 }
 
 /// Compact "2 succeeded, 1 failed" child tally from the batch totals.
@@ -2103,6 +2135,52 @@ mod tests {
         assert!(summary.contains(
             "Blocked before admission in worktree_preflight: fixture failure before first child"
         ));
+    }
+
+    /// #14683: a lab-dispatched child's runner id and remote workspace path
+    /// are durably known, but nothing surfaced them to an operator watching a
+    /// wave — an idle local worktree looked indistinguishable from no
+    /// progress. `fanout status` is the one command that answers "is this
+    /// wave alive" without SSHing to the runner.
+    #[test]
+    fn fanout_status_summary_names_the_runner_and_remote_workspace_per_child() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": {
+                "status": "running",
+                "batch": {
+                    "batch_id": "issue-wave",
+                    "state": "running",
+                    "task_count": 2,
+                    "child_runs": [
+                        {
+                            "task_id": "issue-220",
+                            "run_id": "issue-wave-issue-220",
+                            "state": "running",
+                            "placement": {
+                                "runner_id": "lab-runner-1",
+                                "workspace_path": "/srv/homeboy/_lab_workspaces/data-liberation-issue-220"
+                            }
+                        },
+                        {
+                            "task_id": "issue-221",
+                            "run_id": "issue-wave-issue-221",
+                            "state": "queued",
+                            "placement": { "runner_id": "lab-runner-1" }
+                        }
+                    ]
+                },
+                "totals": { "running": 1, "queued": 1 },
+            },
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::FanoutStatus, &payload).unwrap();
+
+        assert!(summary.contains(
+            "  issue-220 (running): runner lab-runner-1, workspace /srv/homeboy/_lab_workspaces/data-liberation-issue-220"
+        ));
+        assert!(summary.contains("  issue-221 (queued): runner lab-runner-1, workspace pending"));
     }
 
     #[test]
