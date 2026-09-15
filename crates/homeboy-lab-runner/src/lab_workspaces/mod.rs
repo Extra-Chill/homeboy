@@ -827,7 +827,17 @@ pub(super) fn agent_task_plan_extra_workspaces(
             &mut workspaces,
         )?;
     }
-    for candidate in provider_config_candidate_paths(&value) {
+    // Only executor configuration declares provider inputs. Plan metadata and
+    // source refs describe history (including other checkouts), not workspaces
+    // to transfer. The task workspace is handled explicitly above.
+    for candidate in value
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.pointer("/executor/config"))
+        .flat_map(provider_config_candidate_paths)
+    {
         add_candidate_extra_workspace(
             &candidate,
             "agent_task_plan_config",
