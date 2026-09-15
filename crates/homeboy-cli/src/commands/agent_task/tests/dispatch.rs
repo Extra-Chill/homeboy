@@ -2967,6 +2967,7 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
         ]);
         assert_eq!(first["count"], 2);
         assert_eq!(first["physical_count"], 7);
+        assert_eq!(first["search_status"], "matching_limit_reached");
         assert_eq!(
             first["runs"]
                 .as_array()
@@ -3003,6 +3004,7 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
         ]);
         assert_eq!(second["count"], 1);
         assert_eq!(second["runs"][0]["run_id"], "sparse-a");
+        assert_eq!(second["search_status"], "complete");
         assert_eq!(second["next_cursor"], Value::Null);
 
         let changed_scope = Cli::try_parse_from([
@@ -3036,6 +3038,70 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
         };
         let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
         assert_eq!(error.details["field"], "cursor");
+    });
+}
+
+#[test]
+fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
+    with_isolated_home(|_| {
+        for index in 0..101 {
+            persist_discovery_record(
+                &format!("unrelated-{index:03}"),
+                "fix/unrelated",
+                AgentTaskRunState::Running,
+            );
+        }
+        for run_id in ["match-a", "match-b", "match-c"] {
+            persist_discovery_record(run_id, "fix/window-match", AgentTaskRunState::Running);
+        }
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+        ]);
+        assert_eq!(first["requested_limit"], 250);
+        assert_eq!(first["limit"], 100);
+        assert_eq!(first["physical_count"], 100);
+        assert_eq!(first["count"], 0);
+        assert_eq!(first["search_status"], "search_window_exhausted");
+        assert!(first["truncated"].as_bool().expect("incomplete search"));
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("replayable incomplete-search continuation")
+            .to_string();
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+            "--cursor".to_string(),
+            cursor,
+        ]);
+        assert_eq!(second["search_status"], "complete");
+        assert_eq!(second["truncated"], false);
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(
+            second["runs"]
+                .as_array()
+                .expect("completed matching page")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["match-c", "match-b", "match-a"]
+        );
     });
 }
 

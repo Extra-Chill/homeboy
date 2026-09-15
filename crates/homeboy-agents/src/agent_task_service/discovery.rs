@@ -38,6 +38,9 @@ const AGENT_TASK_PAGE_CURSOR_SCHEMA: &str = "homeboy/agent-task-discovery-cursor
 /// columns. Inspect enough physical history to make sparse scopes useful, while
 /// keeping every request's storage work explicitly bounded.
 const FILTERED_DISCOVERY_PHYSICAL_LIMIT: usize = 100;
+/// Both the matching output and the physical sparse-search window are bounded
+/// at this ceiling. The response retains a larger requested limit separately.
+pub const MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT: usize = 100;
 
 /// Discovery options layered on top of an [`AgentTaskDiscoveryFilter`]. Today
 /// this carries the operator-facing `--limit` cap shared by the `list`/`active`
@@ -66,8 +69,9 @@ pub struct AgentTaskDiscoveryOptions {
 /// wire compatibility while new callers cannot accidentally use an offset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentTaskDiscoveryPageOptions {
-    /// Maximum matching rows to return. Sparse filters inspect a fixed bounded
-    /// physical window before returning an opaque continuation.
+    /// Requested maximum matching rows to return. The effective output limit
+    /// is capped at [`MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT`]; sparse filters
+    /// inspect one bounded physical window before returning a continuation.
     pub limit: usize,
     /// Opaque continuation returned by the previous page.
     pub cursor: Option<String>,
@@ -142,13 +146,29 @@ pub struct AgentTaskDiscoveryPage {
     /// A bounded page cannot truthfully compute a filtered global total.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// Original `--limit` request before the bounded effective ceiling applies.
+    pub requested_limit: usize,
     pub limit: usize,
     pub physical_count: usize,
+    /// Whether this page exhausted the scoped discovery history, reached the
+    /// matching output cap, or stopped at its bounded physical search window.
+    pub search_status: AgentTaskDiscoverySearchStatus,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
+}
+
+/// Completion state for one bounded filtered discovery page. In particular,
+/// an empty `search_window_exhausted` page means "not found in this window",
+/// not "no matching durable run exists"; follow `next_cursor` to continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskDiscoverySearchStatus {
+    Complete,
+    MatchingLimitReached,
+    SearchWindowExhausted,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -375,7 +395,8 @@ pub fn discover_runs_page(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryPageOptions,
 ) -> Result<AgentTaskDiscoveryPage> {
-    let limit = options.limit.clamp(1, 100);
+    let requested_limit = options.limit;
+    let limit = requested_limit.clamp(1, MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT);
     let scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
     let after = options
         .cursor
@@ -429,6 +450,13 @@ pub fn discover_runs_page(
             .then(|| encode_page_cursor(next.expect("truncated page has cursor"), scope))
     };
     let truncated = next_cursor.is_some();
+    let search_status = if records.len() == limit && (matching_truncated || physical_truncated) {
+        AgentTaskDiscoverySearchStatus::MatchingLimitReached
+    } else if physical_truncated {
+        AgentTaskDiscoverySearchStatus::SearchWindowExhausted
+    } else {
+        AgentTaskDiscoverySearchStatus::Complete
+    };
     let now = chrono::Utc::now();
     let runs = records
         .into_iter()
@@ -453,8 +481,10 @@ pub fn discover_runs_page(
         filter: filter_name(filter),
         count: runs.len(),
         total: None,
+        requested_limit,
         limit,
         physical_count,
+        search_status,
         truncated,
         next_cursor,
         record_health,
