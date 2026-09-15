@@ -446,7 +446,7 @@ fn connect_output_from_execution(
         failure_reason: if ssh_observation_lost(output) {
             ssh_failure_reason_with_observation(output)
         } else {
-            ssh_failure_reason(output.success, output.exit_code)
+            ssh_failure_reason_for_output(output)
         },
         phases: ssh_execution_phases(output),
         timed_out: output.timed_out,
@@ -618,6 +618,24 @@ fn ssh_result_classification_with_observation(
     "remote_command_failed".to_string()
 }
 
+/// Explain an authentication denial in terms of what the operator must do.
+///
+/// OpenSSH reports a missing second factor as the same exit 255 as a dead
+/// network, so without this the operator sees "SSH transport failed" for a host
+/// that is simply waiting for them to authenticate once.
+fn ssh_auth_failure_reason(stderr: &str) -> Option<String> {
+    match homeboy::core::server::ssh_auth_failure(stderr)? {
+        homeboy::core::server::SshAuthFailure::SecondFactorRequired => Some(
+            "The host accepted the credential and then required an additional interactive authentication factor, which a non-interactive command cannot answer. Authenticate once with `homeboy server connect <target>`, then rerun this command: it attaches to that session."
+                .to_string(),
+        ),
+        homeboy::core::server::SshAuthFailure::CredentialRejected => Some(
+            "The host rejected every credential offered. Check the configured identity and that the agent holds its key."
+                .to_string(),
+        ),
+    }
+}
+
 fn ssh_failure_reason(success: bool, exit_code: i32) -> Option<String> {
     if success {
         return None;
@@ -645,7 +663,16 @@ fn ssh_failure_reason_with_observation(
                 .to_string(),
         );
     }
-    ssh_failure_reason(output.success, output.exit_code)
+    ssh_failure_reason_for_output(output)
+}
+
+/// Prefer an authentication explanation over the generic transport message.
+fn ssh_failure_reason_for_output(output: &homeboy::core::server::CommandOutput) -> Option<String> {
+    if output.success {
+        return None;
+    }
+    ssh_auth_failure_reason(&output.stderr)
+        .or_else(|| ssh_failure_reason(output.success, output.exit_code))
 }
 
 /// Use an explicitly requested cwd when present; otherwise preserve the
@@ -1033,6 +1060,63 @@ mod tests {
             ssh_failure_reason(false, 42).as_deref(),
             Some("Remote command exited with status 42; stdout/stderr may be empty for no-output commands")
         );
+    }
+
+    #[test]
+    fn a_host_waiting_on_a_second_factor_says_how_to_authenticate() {
+        let denied = command_output(
+            "",
+            "user@host: Permission denied (keyboard-interactive).",
+            false,
+            255,
+            false,
+            CommandObservation::Complete,
+        );
+
+        let reason = ssh_failure_reason_for_output(&denied).expect("failure reason");
+        // The generic transport message sends an operator looking at the
+        // network for a host that is only waiting for them to authenticate.
+        assert!(
+            reason.contains("homeboy server connect"),
+            "expected the remedy, got: {reason}"
+        );
+        assert!(!reason.contains("SSH transport failed"), "{reason}");
+        // Retrying cannot satisfy a factor only a human can supply.
+        assert!(!homeboy::core::server::is_transient_ssh_error(&denied));
+    }
+
+    #[test]
+    fn a_rejected_credential_is_not_reported_as_a_missing_second_factor() {
+        let denied = command_output(
+            "",
+            "user@host: Permission denied (publickey,keyboard-interactive).",
+            false,
+            255,
+            false,
+            CommandObservation::Complete,
+        );
+
+        let reason = ssh_failure_reason_for_output(&denied).expect("failure reason");
+        assert!(reason.contains("rejected every credential"), "{reason}");
+        assert!(!homeboy::core::server::is_transient_ssh_error(&denied));
+    }
+
+    #[test]
+    fn an_unreachable_host_stays_transport_shaped_and_retryable() {
+        let unreachable = command_output(
+            "",
+            "ssh: connect to host example port 22: Connection refused",
+            false,
+            255,
+            false,
+            CommandObservation::Complete,
+        );
+
+        assert_eq!(
+            ssh_failure_reason_for_output(&unreachable).as_deref(),
+            Some("SSH transport failed with exit code 255")
+        );
+        assert!(homeboy::core::server::is_transient_ssh_error(&unreachable));
     }
 
     #[test]
