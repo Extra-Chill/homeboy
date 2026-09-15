@@ -386,6 +386,9 @@ pub(super) fn stop_with_force_for_lease(
         return reconcile_absent_lease_stop(expected_lease_id, path.display().to_string());
     };
     if state.lease_id != expected_lease_id {
+        if let Some(endpoint) = generation_store::endpoint_for_lease(expected_lease_id)? {
+            return retire_absent_registered_generation(expected_lease_id, &endpoint);
+        }
         return Err(Error::validation_invalid_argument(
             "lease_id",
             format!(
@@ -414,6 +417,70 @@ pub(super) fn stop_with_force_for_lease(
             .is_none_or(|state| state.lease_id != expected_lease_id);
     }
     Ok(result)
+}
+
+/// A registry can keep an older generation as its admission endpoint while the
+/// invoking process inherited a newer generation's state directory. For a dead
+/// exact lease, retire only the registered endpoint after reproving its lease,
+/// PID, and zero-job boundary; live generations still require their own scoped
+/// lifecycle command.
+fn retire_absent_registered_generation(
+    expected_lease_id: &str,
+    endpoint: &generation_store::LocalDaemonEndpoint,
+) -> Result<DaemonStopResult> {
+    let path = std::path::Path::new(&endpoint.state_dir).join("state.json");
+    let validation = validate_lease_file(&path)?;
+    let Some(state) = validation.state else {
+        return reconcile_absent_lease_stop(expected_lease_id, path.display().to_string());
+    };
+    if state.lease_id != expected_lease_id {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "registered daemon generation expected lease `{expected_lease_id}` but found `{}`; refusing replacement",
+                state.lease_id
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    if validation.running {
+        return Err(Error::validation_invalid_argument(
+            "lease_id",
+            format!(
+                "registered daemon generation lease `{expected_lease_id}` is still running; refusing to retire it from another generation"
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    let jobs_path = path.with_file_name("jobs.json");
+    let store = JobStore::open_without_reconciliation(&jobs_path)?;
+    let _ = store.reconcile_terminal_linked_daemon_jobs();
+    let active_jobs = store
+        .list()
+        .into_iter()
+        .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+        .count();
+    if active_jobs != 0 {
+        return Err(Error::validation_invalid_argument(
+            "daemon_stop",
+            format!(
+                "refusing daemon stop for registered lease `{expected_lease_id}` while {active_jobs} active durable job(s) exist"
+            ),
+            Some(expected_lease_id.to_string()),
+            None,
+        ));
+    }
+    let identity = DaemonLeaseIdentity::from_state(&state);
+    remove_lease_if_identity_matches(&path, &identity)?;
+    Ok(DaemonStopResult {
+        stopped: false,
+        already_absent: true,
+        pid: Some(state.pid),
+        state_path: path.display().to_string(),
+        termination_evidence: None,
+    })
 }
 
 /// A lease-bound stop can be replayed after a previous stop removed a dead
