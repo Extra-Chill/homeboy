@@ -138,6 +138,7 @@ where
                 run_id: run_id.clone(),
                 state: AgentTaskRunState::Queued,
                 placement: None,
+                predecessor_run_ids: Vec::new(),
             })
             .collect(),
         metadata: batch_metadata(plan),
@@ -262,6 +263,7 @@ pub fn persist_fanout_run_batch_in_store(
                     run_id: child.run_id.clone(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 })
                 .collect(),
             metadata,
@@ -514,6 +516,12 @@ pub fn record_fanout_child_run_replacement_in_store(
                     None,
                 )
             })?;
+        // The replaced run id is the only pointer to the failed first
+        // attempt's durable lifecycle record. Losing it here — the sole
+        // place a fanout child's run_id changes — orphans that record: it
+        // still exists on disk, but nothing an operator or `fanout status`
+        // consults ever names it again.
+        child.predecessor_run_ids.push(child.run_id.clone());
         child.run_id = replacement_run_id.to_string();
         child.state = AgentTaskRunState::Queued;
         child.placement = None;
@@ -2435,6 +2443,7 @@ mod tests {
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
             placement: None,
+            predecessor_run_ids: Vec::new(),
         });
         batch.task_count = batch.child_runs.len();
         batch_store
@@ -3078,6 +3087,38 @@ mod tests {
             "cook-issue-1419-transport-retry"
         );
         assert_eq!(batch.child_runs[0].state, AgentTaskRunState::Queued);
+        // The failed first attempt's run id must survive the overwrite: it is
+        // the only durable pointer a reader has to correlate the retry back
+        // to the attempt that produced no other observable record (#14681).
+        // The idempotent replay above must not duplicate it.
+        assert_eq!(
+            batch.child_runs[0].predecessor_run_ids,
+            vec!["cook-issue-1419".to_string()]
+        );
+
+        // A second transport failure on the retried attempt must extend the
+        // lineage rather than replace it, so every prior attempt for this
+        // child stays reachable from the roster.
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419-transport-retry",
+            "cook-issue-1419-transport-retry-transport-retry",
+        )
+        .expect("replace canonical child run a second time");
+
+        let batch = store.read_batch("retry-wave").expect("updated roster");
+        assert_eq!(
+            batch.child_runs[0].run_id,
+            "cook-issue-1419-transport-retry-transport-retry"
+        );
+        assert_eq!(
+            batch.child_runs[0].predecessor_run_ids,
+            vec![
+                "cook-issue-1419".to_string(),
+                "cook-issue-1419-transport-retry".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3355,12 +3396,14 @@ mod tests {
                     run_id: "a-run".to_string(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 },
                 AgentTaskBatchChildRun {
                     task_id: "b".to_string(),
                     run_id: "b-run".to_string(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 },
             ],
             metadata: json!({
