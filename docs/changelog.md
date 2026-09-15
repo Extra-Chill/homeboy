@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.374.4] - 2026-09-15
+
+### Changed
+- replace synthetic reads with canonical ledger history
+
+### Fixed
+- scope generation retirement fencing to unsafe ownership
+- survive startup when jobs outlive their generation
+- keep changed-only review within the client window
+- refresh automatic admission readiness
+- bound repository-name and alias component selection
+
 ## [0.374.3] - 2026-09-15
 
 ### Changed
