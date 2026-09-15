@@ -136,8 +136,11 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
         return None;
     }
     let status = payload.get("status")?.as_str()?;
-    if status != "blocked" {
+    if matches!(status, "failed" | "partial_failure") {
         return render_failed_fanout_child_summary(payload, status);
+    }
+    if status != "blocked" {
+        return render_fanout_cook_batch_progress_summary(payload, status);
     }
     let fanout_id = payload.get("fanout_id")?.as_str()?;
     let primary = payload.get("primary_failure")?.as_object()?;
@@ -188,6 +191,44 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Plan: plan_ref.sha256={sha256}"));
     }
     Some(lines.join("\n"))
+}
+
+/// `cook-batch` succeeds for `ready` (a plan or preview with nothing blocked)
+/// and for every terminal `run_result.status` a completed batch can carry
+/// (`completed`, `review_ready`, `running`, and friends). None of those are
+/// failures, so [`render_failed_fanout_child_summary`] never matches them and
+/// the envelope summary was landing empty on every successful cook-batch
+/// (#14682). `summary.issues`/`worktrees_total`/`worktrees_blocked` are
+/// unconditional fields on every cook-batch payload, dry-run or materialized,
+/// so this renders for any status this function is reached with.
+fn render_fanout_cook_batch_progress_summary(payload: &Value, status: &str) -> Option<String> {
+    let fanout_id = payload.get("fanout_id")?.as_str()?;
+    let summary = payload.get("summary")?;
+    let issues = summary.get("issues")?.as_u64()?;
+    let worktrees_total = summary.get("worktrees_total")?.as_u64()?;
+    let worktrees_blocked = summary
+        .get("worktrees_blocked")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mode = if payload
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "planned"
+    } else {
+        "materialized"
+    };
+    let mut line = format!(
+        "Fanout {fanout_id}: {status} ({mode}, {issues} issue(s), {worktrees_total} worktree(s), {worktrees_blocked} blocked)"
+    );
+    if let Some(next_action) = payload
+        .pointer("/next_actions/0/command")
+        .and_then(Value::as_str)
+    {
+        line.push_str(&format!("; next={next_action}"));
+    }
+    Some(line)
 }
 
 fn render_failed_fanout_child_summary(payload: &Value, status: &str) -> Option<String> {
@@ -2236,6 +2277,52 @@ mod tests {
 
         assert!(summary.starts_with("Fanout issue-wave: failed phase=committed_harvest_preflight classification=agent_task.committed_harvest_dirty_workspace children=3 provider_budget=unspent reason=refusing committed-change harvest from a workspace with pre-existing uncommitted changes; next=homeboy agent-task cook-continue cook-1"), "{summary}");
         assert!(summary.contains("Evidence: run_result.result.cooks (3 child references)"));
+    }
+
+    /// #14682: a successful `--preview` plan (`status: "ready"`) has no
+    /// `primary_failure`, so it must not fall through the failure-only
+    /// renderer and land as an empty envelope summary.
+    #[test]
+    fn ready_cook_batch_preview_summary_reports_the_plan() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "ready",
+            "dry_run": true,
+            "summary": {"issues": 2, "worktrees_total": 2, "worktrees_blocked": 0},
+            "next_actions": [
+                {"kind": "run", "command": "homeboy agent-task fanout run-plan --input @plan.json"}
+            ]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("ready preview summary");
+
+        assert_eq!(
+            summary,
+            "Fanout issue-wave: ready (planned, 2 issue(s), 2 worktree(s), 0 blocked); next=homeboy agent-task fanout run-plan --input @plan.json"
+        );
+    }
+
+    /// #14682: a completed `--run-plan` batch also has no `primary_failure`
+    /// and must render a populated summary, not an empty one.
+    #[test]
+    fn completed_cook_batch_run_summary_reports_the_outcome() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "completed",
+            "dry_run": false,
+            "summary": {"issues": 2, "worktrees_total": 2, "worktrees_blocked": 0, "causal_worktree_failures": 0},
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("completed run summary");
+
+        assert_eq!(
+            summary,
+            "Fanout issue-wave: completed (materialized, 2 issue(s), 2 worktree(s), 0 blocked)"
+        );
     }
 
     #[test]
