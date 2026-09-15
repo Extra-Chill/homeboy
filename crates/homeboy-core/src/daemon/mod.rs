@@ -1671,13 +1671,16 @@ where
 
 fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
     for job in job_store.list() {
+        // Only a live job needs its owner rebuilt. A terminal job has no work
+        // left to route, and generation retirement prunes its bookkeeping
+        // anyway, so recording it just to mark it terminal is pure churn.
+        if job.status.is_terminal() {
+            continue;
+        }
         let Some(lease_id) = job.daemon_lease_id.as_deref() else {
             continue;
         };
-        generation_store::record_job(&job.id.to_string(), lease_id)?;
-        if job.status.is_terminal() {
-            generation_store::mark_job_terminal(&job.id.to_string())?;
-        }
+        generation_store::rebuild_job_owner(&job.id.to_string(), lease_id)?;
     }
     Ok(())
 }
