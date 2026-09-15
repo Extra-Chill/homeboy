@@ -3163,6 +3163,11 @@ mod adopted_child_reaping_tests {
             intermediate,
             "reap intermediate"
         );
+        // Establish the post-exec descendant before root exit triggers cleanup.
+        wait_for_recorded_pid(
+            Path::new(&pid_file),
+            Instant::now() + Duration::from_secs(1),
+        );
     }
 
     #[test]

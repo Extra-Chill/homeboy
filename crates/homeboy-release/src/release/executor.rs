@@ -21,6 +21,7 @@ use super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult, ReleaseStep
 use super::utils::extract_latest_notes;
 
 pub(crate) mod artifacts;
+mod candidate;
 pub(crate) mod changelog;
 mod git_push;
 mod github_release;
@@ -33,6 +34,7 @@ mod release_pr;
 mod tagging;
 pub(crate) mod version_targets;
 
+pub use candidate::{publish_candidate, CandidatePublication};
 pub(crate) use git_push::{run_git_branch_push, run_git_push, run_git_tag_push};
 pub use github_release::release_notes_path;
 pub(crate) use github_release::release_notes_path as github_release_notes_path;

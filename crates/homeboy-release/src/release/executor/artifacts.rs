@@ -30,6 +30,50 @@ pub struct ArtifactSourceAuthorityManifest {
     release_notes: Option<ArtifactSourceAuthorityControlArtifact>,
 }
 
+/// A verified source-authority artifact available for immutable publication.
+#[derive(Debug, Clone)]
+pub struct SourceAuthorityArtifact {
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Read an externally assembled artifact directory through Homeboy's existing
+/// source-authority manifest validation. Candidate publication must not accept
+/// arbitrary local paths because the manifest is the source/byte binding.
+pub fn source_authority_artifacts(
+    artifact_dir: &std::path::Path,
+    component_id: &str,
+    tag: &str,
+    version: &str,
+    commit: &str,
+) -> Result<Vec<SourceAuthorityArtifact>> {
+    let manifest_path = artifact_dir.join(PACKAGE_RECOVERY_MANIFEST);
+    let context = PackageRecoveryContext {
+        component_id,
+        tag,
+        version,
+        commit,
+    };
+    let (artifacts, _) =
+        inventory_artifact_source_authority_manifest(artifact_dir, &manifest_path, &context)?;
+    artifacts
+        .into_iter()
+        .map(|artifact| {
+            Ok(SourceAuthorityArtifact {
+                path: artifact.durable_path.unwrap_or(artifact.path),
+                sha256: artifact.sha256.ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "from-artifacts",
+                        "source-authority artifact has no sha256",
+                        None,
+                        None,
+                    )
+                })?,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ArtifactSourceAuthorityArtifact {
     path: String,

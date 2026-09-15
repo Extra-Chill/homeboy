@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.374.1] - 2026-09-15
+
+### Changed
+- use generation-owned controller job fixtures
+
+### Fixed
+- retire registered dead lease
+
+## [0.374.0] - 2026-09-14
+
+### Added
+- publish immutable commit candidates
+
+### Changed
+- isolate release artifact lease directory
+
+### Fixed
+- bound candidate tag verification
+- verify candidate asset identities
+- verify immutable candidate publication
+- bound recovery admission waits
+- recover missing review forms
+- bind candidate assets to authority manifest
+- initialize repository integrity evidence at remaining call sites
+- allow ignored repository portability policy
+- scope paged discovery health
+
 ## [0.373.14] - 2026-09-14
 
 ### Fixed
