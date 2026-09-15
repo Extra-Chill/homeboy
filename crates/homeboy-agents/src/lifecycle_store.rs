@@ -917,7 +917,11 @@ impl AgentTaskLifecycleStore {
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
         let (records, _, _, truncated, next) = self.read_record_page_with_health(after, limit)?;
-        Ok((records, truncated, next))
+        Ok((
+            records.into_iter().map(|record| record.record).collect(),
+            truncated,
+            next,
+        ))
     }
 
     /// Read one immutable-keyset page while retaining health evidence for raw
@@ -928,7 +932,7 @@ impl AgentTaskLifecycleStore {
         after: Option<ObservationRunCursor>,
         limit: usize,
     ) -> Result<(
-        Vec<AgentTaskRunRecord>,
+        Vec<AgentTaskRecordPageRecord>,
         super::AgentTaskRecordHealthSummary,
         usize,
         bool,
@@ -1310,6 +1314,14 @@ impl AgentTaskLifecycleStore {
         })?;
         self.project_terminal_record_after_unlock(&committed.run_id)
     }
+}
+
+/// A decoded lifecycle record with the exact observation keyset that produced
+/// it. Filtered discovery must retain this boundary rather than reconstructing
+/// it from record fields, which are not the observation ordering contract.
+pub(crate) struct AgentTaskRecordPageRecord {
+    pub record: AgentTaskRunRecord,
+    pub cursor: ObservationRunCursor,
 }
 
 fn default_store() -> Result<AgentTaskLifecycleStore> {
@@ -2298,7 +2310,10 @@ fn records_with_health(
 /// unreadable row is omitted, while its diagnostic remains in the page health.
 fn page_records_with_health(
     observation_runs: Vec<RunRecord>,
-) -> (Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary) {
+) -> (
+    Vec<AgentTaskRecordPageRecord>,
+    super::AgentTaskRecordHealthSummary,
+) {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();
     let mut records = Vec::new();
     for run in observation_runs {
@@ -2309,7 +2324,10 @@ fn page_records_with_health(
                 } else {
                     health.healthy += 1;
                 }
-                records.push(record);
+                records.push(AgentTaskRecordPageRecord {
+                    record,
+                    cursor: ObservationRunCursor::from_run(&run),
+                });
             }
             Err(_) => {
                 if let Err(item) = super::health::diagnose_run(&run) {

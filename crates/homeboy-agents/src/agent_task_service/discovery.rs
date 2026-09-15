@@ -34,6 +34,10 @@ pub enum AgentTaskDiscoveryFilter {
 }
 
 const AGENT_TASK_PAGE_CURSOR_SCHEMA: &str = "homeboy/agent-task-discovery-cursor/v1";
+/// Filter identities are stored in durable plans rather than indexed observation
+/// columns. Inspect enough physical history to make sparse scopes useful, while
+/// keeping every request's storage work explicitly bounded.
+const FILTERED_DISCOVERY_PHYSICAL_LIMIT: usize = 100;
 
 /// Discovery options layered on top of an [`AgentTaskDiscoveryFilter`]. Today
 /// this carries the operator-facing `--limit` cap shared by the `list`/`active`
@@ -62,8 +66,8 @@ pub struct AgentTaskDiscoveryOptions {
 /// wire compatibility while new callers cannot accidentally use an offset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentTaskDiscoveryPageOptions {
-    /// Maximum physical rows to parse. Filtering is applied only to this page;
-    /// callers resume the opaque keyset cursor to continue sparse searches.
+    /// Maximum matching rows to return. Sparse filters inspect a fixed bounded
+    /// physical window before returning an opaque continuation.
     pub limit: usize,
     /// Opaque continuation returned by the previous page.
     pub cursor: Option<String>,
@@ -379,9 +383,8 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (mut records, _physical_record_health, physical_count, truncated, next) =
-        store.read_record_page_with_health(after, limit)?;
-    records.retain(|record| !is_fixture_runner_record(record));
+    let (records, _physical_record_health, physical_count, physical_truncated, next) =
+        store.read_record_page_with_health(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
     let submitted_after = options
         .submitted_after
         .as_deref()
@@ -398,23 +401,44 @@ pub fn discover_runs_page(
         branch: options.branch,
         ..Default::default()
     };
-    if filter == AgentTaskDiscoveryFilter::Active {
-        records.retain(|record| {
-            matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Queued
-                    | agent_task_lifecycle::AgentTaskRunState::Running
-            )
-        });
-    }
-    records.retain(|record| matches_discovery_options(record, &legacy, submitted_after.as_ref()));
+    let mut records = records
+        .into_iter()
+        .filter(|page_record| !is_fixture_runner_record(&page_record.record))
+        .filter(|page_record| {
+            filter != AgentTaskDiscoveryFilter::Active
+                || matches!(
+                    page_record.record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Queued
+                        | agent_task_lifecycle::AgentTaskRunState::Running
+                )
+        })
+        .filter(|page_record| {
+            matches_discovery_options(&page_record.record, &legacy, submitted_after.as_ref())
+        })
+        .collect::<Vec<_>>();
     if filter == AgentTaskDiscoveryFilter::Latest {
         records.truncate(1);
     }
+    let matching_truncated = records.len() > limit;
+    records.truncate(limit);
+    let next_cursor = if let Some(last) = records.last() {
+        (physical_truncated || matching_truncated)
+            .then(|| encode_page_cursor(last.cursor.clone(), scope))
+    } else {
+        physical_truncated
+            .then(|| encode_page_cursor(next.expect("truncated page has cursor"), scope))
+    };
+    let truncated = next_cursor.is_some();
     let now = chrono::Utc::now();
     let runs = records
         .into_iter()
-        .map(|record| discovery_run(record, filter == AgentTaskDiscoveryFilter::Active, now))
+        .map(|page_record| {
+            discovery_run(
+                page_record.record,
+                filter == AgentTaskDiscoveryFilter::Active,
+                now,
+            )
+        })
         .collect::<Vec<_>>();
     // The page cursor bounds storage reads, but selectors apply after that read.
     // Do not present malformed rows from the physical page as health of the
@@ -432,7 +456,7 @@ pub fn discover_runs_page(
         limit,
         physical_count,
         truncated,
-        next_cursor: next.map(|keyset| encode_page_cursor(keyset, scope)),
+        next_cursor,
         record_health,
         runs,
     })
