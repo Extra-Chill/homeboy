@@ -1405,6 +1405,13 @@ trait GenerationEndpointOperations {
     fn evidence(&self, _session: &RunnerSession, _path: &str) -> Option<serde_json::Value> {
         None
     }
+    /// The endpoint's own record for one job it owns, used to release ledger
+    /// ownership for work that already finished. Unlike [`Self::evidence`], this
+    /// is readable while the generation still reports active jobs, because a
+    /// stale owner is exactly why that count has not reached zero.
+    fn job_record(&self, _session: &RunnerSession, _job_id: &str) -> Option<serde_json::Value> {
+        None
+    }
     /// Terminal linked handoffs can survive a controller restart in a daemon's
     /// job store. Settle them before treating its active count as ownership.
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
@@ -1428,6 +1435,21 @@ struct FallbackGenerationEndpointOperations<'a, Primary, Fallback> {
 }
 
 impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        self.client
+            .get(format!(
+                "{}/jobs/{encoded}",
+                session.local_url.as_deref()?.trim_end_matches('/')
+            ))
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .ok()
+    }
+
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
         if self.active_jobs(session) != Some(0) {
             return None;
@@ -1661,6 +1683,11 @@ mod projection_tests {
 }
 
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        serde_json::from_str(&self.request("GET", session, &format!("/jobs/{encoded}"), None)?).ok()
+    }
+
     fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
         if self.active_jobs(session) != Some(0) {
             return None;
@@ -1726,6 +1753,12 @@ where
         self.primary
             .evidence(session, path)
             .or_else(|| self.fallback.evidence(session, path))
+    }
+
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        self.primary
+            .job_record(session, job_id)
+            .or_else(|| self.fallback.job_record(session, job_id))
     }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         self.primary.reconcile_terminal_jobs(session)
@@ -1867,6 +1900,25 @@ fn verify_retained_evidence(
     Ok(())
 }
 
+/// Read a daemon job record and report whether it is in a terminal state.
+///
+/// The status must be present and recognized. An unreachable endpoint, an
+/// unparsable record, or an unknown status is never treated as terminal, so a
+/// job whose fate is unknown keeps its generation.
+fn job_record_is_terminal(record: &serde_json::Value) -> bool {
+    record
+        .pointer("/data/body/job/status")
+        .or_else(|| record.pointer("/body/job/status"))
+        .or_else(|| record.pointer("/job/status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| {
+            serde_json::from_value::<homeboy_core::api_jobs::JobStatus>(serde_json::Value::String(
+                status.to_string(),
+            ))
+            .is_ok_and(homeboy_core::api_jobs::JobStatus::is_terminal)
+        })
+}
+
 /// Ownership consistency measured before any endpoint is stopped.
 #[derive(Debug, Default)]
 struct OwnershipAudit {
@@ -2000,6 +2052,23 @@ fn reconcile_with(
         })
         .map(
             |(generation, session, active_jobs, job_owner_ids, draining)| {
+                // A job whose submitting client disappeared keeps its ledger
+                // ownership until something observes the finished job. Ask the
+                // owning endpoint directly so a completed job cannot pin its
+                // generation forever, and settle only what it proves terminal.
+                let settled_job_ids = draining
+                    .then(|| {
+                        job_owner_ids
+                            .iter()
+                            .filter(|job_id| {
+                                operations
+                                    .job_record(&session, job_id)
+                                    .is_some_and(|record| job_record_is_terminal(&record))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let observed_active_jobs =
                     if draining && !operations.reconcile_terminal_jobs(&session) {
                         None
@@ -2016,6 +2085,7 @@ fn reconcile_with(
                     job_owner_ids,
                     observed_active_jobs,
                     proven_stopped,
+                    settled_job_ids,
                 )
             },
         )
@@ -2036,6 +2106,7 @@ fn reconcile_with(
             prior_job_owner_ids,
             observed_active_jobs,
             proven_stopped,
+            settled_job_ids,
         ) in &observations
         {
             if let Some(entry) = generations.generations.get(generation) {
@@ -2055,6 +2126,12 @@ fn reconcile_with(
                         .observed_active_jobs = None;
                     continue;
                 }
+            }
+            // Release ownership the endpoint proved finished, under the same
+            // lock that guards retirement. This only removes owners for jobs
+            // that were observed terminal on their own generation's endpoint.
+            for job_id in settled_job_ids {
+                generations.complete_job_preserving_drained(job_id);
             }
             let evidence_error = if observed_active_jobs == &Some(0) || *proven_stopped {
                 verify_retained_evidence(
@@ -2897,6 +2974,31 @@ mod tests {
                 ))
             );
         });
+    }
+
+    /// A job whose submitting client disappeared must not pin its generation
+    /// forever once its own endpoint reports the job finished.
+    #[test]
+    fn a_daemon_proven_terminal_job_releases_its_generation_ownership() {
+        for status in ["succeeded", "failed", "cancelled"] {
+            let record = serde_json::json!({"data": {"body": {"job": {"status": status}}}});
+            assert!(job_record_is_terminal(&record), "{status} is terminal");
+        }
+    }
+
+    /// Unknown fate is never settled: an unreachable endpoint, an unparsable
+    /// record, or live work all keep the generation's ownership intact.
+    #[test]
+    fn a_job_without_proven_terminality_keeps_its_generation_ownership() {
+        for record in [
+            serde_json::json!({"data": {"body": {"job": {"status": "running"}}}}),
+            serde_json::json!({"data": {"body": {"job": {"status": "queued"}}}}),
+            serde_json::json!({"data": {"body": {"job": {"status": "not-a-status"}}}}),
+            serde_json::json!({"data": {"body": {"job": {}}}}),
+            serde_json::json!({}),
+        ] {
+            assert!(!job_record_is_terminal(&record), "{record} is not terminal");
+        }
     }
 
     /// A result owner naming a generation this registry no longer knows is
