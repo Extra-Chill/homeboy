@@ -7,6 +7,9 @@
 //! same fence-held `remove` path as every other reaping route, so it is
 //! auditable like them, and every expired owner lease met along the way is
 //! released durably and reported as part of the reclaim output.
+//!
+//! Claim lifecycle precedence: live owner lease wins over any reaper, and a
+//! reaping audit line is never written for a plan that removed nothing.
 
 use std::path::Path;
 
