@@ -196,6 +196,10 @@ check "dest restored after failed validation" "server { listen 80; }" "$(cat "$D
 write_conf /bin/true 'http://127.0.0.1:1/ 200'
 check "probe failure exits 1" 1 "$(run site)"
 check "dest restored after failed probe" "server { listen 80; }" "$(cat "$DEST")"
+# An unreachable probe must report a single 000, not a concatenation of curl's
+# own %{http_code} output and a shell fallback.
+check "unreachable probe reports one status" 1 \
+    "$(grep -c 'expected 200, observed 000)' "$ROOT/out")"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
