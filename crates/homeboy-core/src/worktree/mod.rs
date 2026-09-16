@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod queue_ops;
+mod reaping;
+mod reclaim;
 mod store_ops;
 mod types;
 
@@ -18,27 +20,33 @@ static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
 
 pub use crate::workspace_claim::WorkspaceIdentity;
+pub use reaping::{
+    read_task_worktree_reaping_audit_in_root, reaping_audit_path,
+    TASK_WORKTREE_REAPING_AUDIT_SCHEMA,
+};
 pub use types::{
     authority_set_fingerprint, task_worktree_workspace_identity, AdoptedWorkspaceInventoryRecord,
     AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
-    MissingActiveWorktree, MissingActiveWorktreeReason, TaskWorktreeRecord, TaskWorktreeState,
-    TerminalWorkspaceAuthorityObservation, TerminalWorkspaceAuthorityProof, WorkspaceRefRecord,
-    WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeAdoptedInventoryPage,
-    WorktreeBranchCleanupReport, WorktreeCleanupCandidate, WorktreeCleanupCounts,
-    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCleanupPageOptions,
-    WorktreeCleanupSkipped, WorktreeCreateAction, WorktreeCreateEvidence, WorktreeCreateOptions,
-    WorktreeCreateOutput, WorktreeCreateReconciliation, WorktreeHandoffFreshness,
-    WorktreeHandoffFreshnessProof, WorktreeImportOptions, WorktreeImportOutput,
-    WorktreeInventoryApplyRefusal, WorktreeInventoryAuthorization, WorktreeInventoryCrossTab,
-    WorktreeInventoryLocalEvidence, WorktreeInventoryOptions, WorktreeInventoryOutput,
-    WorktreeInventoryRecord, WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOptions,
-    WorktreeListOutput, WorktreeLivenessAuthority, WorktreeOwnershipProbe,
-    WorktreeQueueCreateFailure, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
-    WorktreeQueueCreateRequest, WorktreeQueueCreateRow, WorktreeQueueCreateStatus,
-    WorktreeQueueLockHolder, WorktreeReconciliationAction, WorktreeReconciliationAuthority,
-    WorktreeReconciliationResult, WorktreeRemoveOptions, WorktreeRemoveOutput,
-    WorktreeSafetyReport, WorktreeStatusOutput, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
-    TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
+    MissingActiveWorktree, MissingActiveWorktreeReason, TaskWorktreeReapingAudit,
+    TaskWorktreeRecord, TaskWorktreeState, TerminalWorkspaceAuthorityObservation,
+    TerminalWorkspaceAuthorityProof, WorkspaceRefRecord, WorktreeAdoptOptions, WorktreeAdoptOutput,
+    WorktreeAdoptedInventoryPage, WorktreeBranchCleanupReport, WorktreeCleanupCandidate,
+    WorktreeCleanupCounts, WorktreeCleanupOptions, WorktreeCleanupOutput,
+    WorktreeCleanupPageOptions, WorktreeCleanupSkipped, WorktreeCreateAction,
+    WorktreeCreateEvidence, WorktreeCreateOptions, WorktreeCreateOutput,
+    WorktreeCreateReconciliation, WorktreeHandoffFreshness, WorktreeHandoffFreshnessProof,
+    WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryApplyRefusal,
+    WorktreeInventoryAuthorization, WorktreeInventoryCrossTab, WorktreeInventoryLocalEvidence,
+    WorktreeInventoryOptions, WorktreeInventoryOutput, WorktreeInventoryRecord,
+    WorktreeLeaseActivity, WorktreeListDiagnostic, WorktreeListOptions, WorktreeListOutput,
+    WorktreeLivenessAuthority, WorktreeOwnershipProbe, WorktreeQueueCreateFailure,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeQueueCreateRequest,
+    WorktreeQueueCreateRow, WorktreeQueueCreateStatus, WorktreeQueueLockHolder,
+    WorktreeReclaimCandidate, WorktreeReclaimCounts, WorktreeReclaimOptions, WorktreeReclaimOutput,
+    WorktreeReclaimRemoved, WorktreeReclaimSkipped, WorktreeReconciliationAction,
+    WorktreeReconciliationAuthority, WorktreeReconciliationResult, WorktreeRemoveOptions,
+    WorktreeRemoveOutput, WorktreeSafetyReport, WorktreeStaleLeaseRelease, WorktreeStatusOutput,
+    TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
@@ -708,6 +716,40 @@ pub fn cleanup_page(options: WorktreeCleanupPageOptions) -> Result<WorktreeClean
     cleanup_with_store_page(options, &store)
 }
 
+/// Reclaim disk space held by completed task-worktree loops.
+///
+/// The default is a non-mutating plan; only a `--apply` reclaim removes
+/// workspaces, and the claim store refuses every removal that a live owner
+/// lease still holds.
+pub fn reclaim(options: WorktreeReclaimOptions) -> Result<WorktreeReclaimOutput> {
+    reclaim_with_store(options, &metadata_dir()?)
+}
+
+/// Rate the reaping audit trail under the current test home.
+pub fn read_task_worktree_reaping_audit() -> Result<Vec<TaskWorktreeReapingAudit>> {
+    read_task_worktree_reaping_audit_in_root(&paths::homeboy_data()?)
+}
+
+pub fn publish_task_worktree_reaping_audit_in_root(
+    data_root: &Path,
+    record: &TaskWorktreeRecord,
+    at_ms: u64,
+    reason: Option<&str>,
+    reaper: Option<&str>,
+    force: bool,
+    branch_deleted: bool,
+) -> Result<TaskWorktreeReapingAudit> {
+    reaping::append_reaping_audit_in_root(
+        data_root,
+        record,
+        at_ms,
+        reason,
+        reaper,
+        force,
+        branch_deleted,
+    )
+}
+
 /// Register an active task-worktree record against the current test home.
 ///
 /// Other modules gate behavior on task-worktree liveness and need a registered
@@ -773,6 +815,7 @@ pub(crate) fn remove_record_for_test(id: &str) {
     fs::remove_file(record_path(&store, id)).expect("remove task worktree record");
 }
 
+use reclaim::*;
 use store_ops::*;
 
 pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueueCreateOutput> {

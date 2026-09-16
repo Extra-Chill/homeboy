@@ -1,3 +1,4 @@
+use super::reaping;
 use super::*;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -309,13 +310,28 @@ pub(super) fn cleanup_with_store_page(
             }
             Err(error) => branch_cleanup_unknown(&record, error.message),
         };
-        let live_owner_count = live_workspace_owner_count(&record, store)?;
+        let live_owners = live_workspace_owners(&record, store)?;
+        if !live_owners.is_empty() {
+            // Attribute the refusal to the exact holder session/run so an
+            // operator can see which live loop owns the checkout.
+            skipped.push(WorktreeCleanupSkipped {
+                record: record.clone(),
+                safety: Some(safety.clone()),
+                reasons: vec![format!(
+                    "refuses to remove workspace claimed by {} durable live owner lease(s); holder session/run(s): {}",
+                    live_owners.len(),
+                    owners_display(&live_owners)
+                )],
+            });
+            last_id = Some(record.id.clone());
+            continue;
+        }
         if deadline_exhausted(page.deadline) {
             next_cursor = last_id.clone().or_else(|| page.cursor.clone());
             continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
             break;
         }
-        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, live_owner_count);
+        let skip_reasons = cleanup_skip_reasons(&record, &safety, options.force, &live_owners);
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
                 record,
@@ -346,6 +362,8 @@ pub(super) fn cleanup_with_store_page(
                     force: options.force,
                     cleanup_branch: options.cleanup_branches,
                     allow_unmerged_branch: options.allow_unmerged_branches,
+                    reason: Some("cleanup --include task-worktrees".to_string()),
+                    reaper: options.reaper.clone(),
                 },
                 store,
                 page.deadline,
@@ -426,7 +444,7 @@ fn cleanup_skip_reasons(
     record: &TaskWorktreeRecord,
     safety: &WorktreeSafetyReport,
     force: bool,
-    live_owner_count: usize,
+    live_owners: &[String],
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if let Some(owner) = record
@@ -454,9 +472,11 @@ fn cleanup_skip_reasons(
     {
         reasons.push(LIVE_CWD_REASON.to_string());
     }
-    if live_owner_count > 0 {
+    if !live_owners.is_empty() {
         reasons.push(format!(
-            "refuses to remove workspace held by {live_owner_count} durable live owner(s)"
+            "refuses to remove workspace claimed by {} durable live owner lease(s); holder session/run(s): {}",
+            live_owners.len(),
+            owners_display(live_owners)
         ));
     }
     if !force {
@@ -1905,7 +1925,7 @@ pub(super) fn remove_with_store(
     remove_with_store_until(options, store_dir, None)
 }
 
-fn remove_with_store_until(
+pub(super) fn remove_with_store_until(
     options: WorktreeRemoveOptions,
     store_dir: &Path,
     deadline: Option<std::time::Instant>,
@@ -1962,13 +1982,17 @@ fn remove_with_store_unlocked_until(
             Some(safety.reasons.clone()),
         ));
     }
-    let live_owner_count = live_workspace_owner_count(&record, store_dir)?;
-    if live_owner_count > 0 {
+    let live_owners = live_workspace_owners(&record, store_dir)?;
+    if !live_owners.is_empty() {
         return Err(Error::validation_invalid_argument(
             "workspace_claim",
-            format!("Task worktree is held by {live_owner_count} durable live owner(s)"),
+            format!(
+                "refuses to remove workspace claimed by {} durable live owner lease(s); holder session/run(s): {}",
+                live_owners.len(),
+                owners_display(&live_owners)
+            ),
             Some(record.id.clone()),
-            None,
+            Some(live_owners.clone()),
         ));
     }
 
@@ -2032,6 +2056,23 @@ fn remove_with_store_unlocked_until(
             )
         })?;
         write_record_unlocked(store_dir, &record)?;
+        // Audit the reaping while the removal fact is fence-held and durable.
+        // A branch-delete failure after this point still has a complete,
+        // attributable answer for "who reclaimed this workspace".
+        let store_parent = store_dir.parent().map(Path::to_path_buf);
+        if let Some(data_root) = store_parent {
+            let branch_deleted =
+                options.cleanup_branch && branch_cleanup.status == BranchCleanupStatus::Deleted;
+            reaping::append_reaping_audit_in_root(
+                &data_root,
+                &record,
+                now_ms(),
+                options.reason.as_deref(),
+                options.reaper.as_deref(),
+                options.force,
+                branch_deleted,
+            )?;
+        }
         if options.cleanup_branch {
             branch_cleanup = apply_branch_cleanup_until(
                 &record,
@@ -2058,14 +2099,16 @@ fn remove_with_store_unlocked_until(
     }
 }
 
-fn live_workspace_owner_count(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<usize> {
+fn live_workspace_owners(record: &TaskWorktreeRecord, store_dir: &Path) -> Result<Vec<String>> {
     let claims = workspace_claim_store_for_worktrees(store_dir)?;
     Ok(claims
         .owner_status(&record.effective_workspace_identity()?, now_ms())?
-        .len())
+        .into_iter()
+        .map(|owner| owner.owner_id)
+        .collect())
 }
 
-fn workspace_claim_store_for_worktrees(
+pub(super) fn workspace_claim_store_for_worktrees(
     store_dir: &Path,
 ) -> Result<crate::workspace_claim::WorkspaceClaimStore> {
     let data_root = store_dir.parent().ok_or_else(|| {
@@ -2077,6 +2120,14 @@ fn workspace_claim_store_for_worktrees(
     Ok(crate::workspace_claim::WorkspaceClaimStore::new(
         data_root.join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
     ))
+}
+
+fn owners_display(owners: &[String]) -> String {
+    owners
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn branch_cleanup_report_until(
