@@ -316,7 +316,11 @@ for probe in ${PROBES+"${PROBES[@]}"}; do
 
     observed=
     for attempt in 1 2 3; do
-        observed=$(/usr/bin/curl "${probe_args[@]}" "$probe_url" 2>/dev/null || printf '000')
+        # curl already writes 000 to stdout via %{http_code} when it cannot
+        # connect, so a fallback on non-zero exit would concatenate and report
+        # "000000". Only substitute when curl produced no output at all.
+        observed=$(/usr/bin/curl "${probe_args[@]}" "$probe_url" 2>/dev/null) || true
+        [[ -n $observed ]] || observed=000
         [[ $observed == "$probe_expect" ]] && break
         /bin/sleep 2
     done
