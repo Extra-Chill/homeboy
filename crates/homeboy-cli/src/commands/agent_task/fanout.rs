@@ -330,7 +330,11 @@ impl DryRunPlanner {
             Some(_remaining) => self.deadline + elapsed,
             None => Instant::now() + Duration::from_secs(self.configured_timeout_seconds),
         };
-        result.map_err(|error| self.failure(error, unresolved_dependency))
+        let result = result.map_err(|error| self.failure(error, unresolved_dependency));
+        if result.is_ok() {
+            self.record_progress("completed", Some(unresolved_dependency));
+        }
+        result
     }
 
     fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
