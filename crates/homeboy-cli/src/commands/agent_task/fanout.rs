@@ -309,6 +309,34 @@ impl DryRunPlanner {
         }
     }
 
+    /// Run a phase that must not ride the fixed planning deadline.
+    ///
+    /// Registered-component repository resolution (#14658) can legitimately run
+    /// past the planner's preview budget, and where it fails, the resolution
+    /// error is the diagnosis — not "planner deadline exceeded". The wall clock
+    /// it consumed is returned to the shared budget so the remaining preview
+    /// phases start with a whole budget again.
+    fn run_without_phase_deadline<T>(
+        &mut self,
+        phase: &'static str,
+        unresolved_dependency: &'static str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.begin(phase);
+        let deadline_remaining = self.deadline.checked_duration_since(Instant::now());
+        let result = operation();
+        let elapsed = self.phase_started_at.elapsed();
+        self.deadline = match deadline_remaining {
+            Some(_remaining) => self.deadline + elapsed,
+            None => Instant::now() + Duration::from_secs(self.configured_timeout_seconds),
+        };
+        let result = result.map_err(|error| self.failure(error, unresolved_dependency));
+        if result.is_ok() {
+            self.record_progress("completed", Some(unresolved_dependency));
+        }
+        result
+    }
+
     fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
         let elapsed = self.phase_started_at.elapsed();
         if Instant::now() > self.deadline
@@ -3128,12 +3156,15 @@ fn cook_batch_dry_run_with_deadline(
     }
     planner.finish("declared gate inputs")?;
     let mut normalized_args = args.clone();
-    normalized_args =
-        planner.run_bounded("repository", "registered primary repository", move || {
+    normalized_args = planner.run_without_phase_deadline(
+        "repository",
+        "registered primary repository",
+        move || {
             normalize_static_cook_batch_repo_with_placement(&mut normalized_args, placement)?;
             resolve_cook_batch_default_branch(&mut normalized_args)?;
             Ok(normalized_args)
-        })?;
+        },
+    )?;
     args = normalized_args;
     // Profile/default resolution is part of the effective child identity. It is
     // local catalog/config projection only; readiness and provider execution
@@ -11018,6 +11049,62 @@ fi
 
         assert_eq!(error.details["planner_timeout_seconds"], 42);
         assert!(dry_run_replay_command(&args).contains("--dry-run-planner-timeout-seconds 42"));
+    }
+
+    #[test]
+    fn repository_resolution_outlives_the_planner_budget_and_extends_it() {
+        let mut planner = DryRunPlanner::new(&cook_batch_args(), Placement::Auto);
+        planner.deadline = Instant::now() - Duration::from_millis(1);
+        planner
+            .run_without_phase_deadline("repository", "registered primary repository", || {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(())
+            })
+            .expect("repository resolution does not ride the fixed planner deadline");
+        // The repository phase's elapsed time is returned to the shared budget,
+        // so a follow-on phase bounded by the same deadline still starts fresh.
+        assert!(planner.deadline > Instant::now());
+        planner
+            .run_bounded("provider_selection", "static provider selection", || Ok(()))
+            .expect("follow-on phases keep a fresh budget after repository resolution");
+    }
+
+    #[test]
+    fn repository_resolution_failure_surfaces_the_resolver_error_not_a_timeout() {
+        let mut planner = DryRunPlanner::new(&cook_batch_args(), Placement::Auto);
+        planner.deadline = Instant::now() - Duration::from_millis(1);
+        let error = planner
+            .run_without_phase_deadline(
+                "repository",
+                "registered primary repository",
+                move || -> homeboy_core::Result<()> {
+                    Err(Error::validation_invalid_argument(
+                        "repo",
+                        "component `website` is not registered",
+                        None,
+                        None,
+                    ))
+                },
+            )
+            .expect_err("registered-component resolver failed");
+
+        assert_ne!(error.details["reason"], "planner_deadline_exceeded");
+        assert_eq!(error.details["phase"], "repository");
+        assert_eq!(
+            error.details["unresolved_dependency"],
+            "registered primary repository"
+        );
+        assert_eq!(
+            error.details["phase_elapsed_ms"].as_u64(),
+            Some(0),
+            "elapsed ms value itself cannot be a timeout marker"
+        );
+
+        // The next phase still rides the shared budget the resolver refilled.
+        assert!(planner.deadline > Instant::now());
+        planner
+            .run_bounded("provider_selection", "static provider selection", || Ok(()))
+            .expect("shared budget was extended after resolver work");
     }
 
     #[test]

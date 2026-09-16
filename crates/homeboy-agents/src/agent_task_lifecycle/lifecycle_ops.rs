@@ -573,6 +573,16 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         true
     })?;
     if let Some(record) = claimed {
+        // The pending-with-no-PID parking phase cannot outlive an ownership
+        // claim: an owner is on record now, and recovery reads that, not the
+        // unclaimed placeholder phase (#14710, #14706).
+        record_cook_progress_in_store(
+            lifecycle_store,
+            &record.run_id,
+            "detached_handoff_claimed",
+            0,
+            Some("a live launcher owns the handoff and is materializing the first attempt"),
+        )?;
         return Ok(record);
     }
     let existing = lifecycle_store.read_record(&cook_id).ok();
