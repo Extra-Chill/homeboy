@@ -693,10 +693,11 @@ pub(crate) fn runner_admits_lab_dispatch(
             .is_some_and(|runner_id| lab_readiness_admits_runner(runner_id, lab_readiness))
 }
 
-/// Permit automatic controller execution only when Lab is disconnected and the
-/// local host has measured headroom. This is intentionally narrower than an
+/// Permit automatic controller execution when Lab is disconnected or stale and
+/// the local host has measured headroom. This is intentionally narrower than an
 /// explicit `--placement local`: missing load observations and every non-load
-/// pressure signal fail closed.
+/// pressure signal fail closed. Stale is included so Auto Cook admits locally
+/// once instead of parking a 20-retry Lab wait (#14715).
 pub(crate) fn admits_auto_local_capacity_fallback(
     command: HotCommand,
     resources: &DoctorOutput,
@@ -711,7 +712,11 @@ pub(crate) fn admits_auto_local_capacity_fallback(
     let Some(readiness) = lab_readiness else {
         return false;
     };
-    if readiness.state != crate::runner::runners::LabRunnerReadinessState::Disconnected {
+    if !matches!(
+        readiness.state,
+        crate::runner::runners::LabRunnerReadinessState::Disconnected
+            | crate::runner::runners::LabRunnerReadinessState::Stale
+    ) {
         return false;
     }
     let (Some(one), Some(five)) = (resources.load.one, resources.load.five) else {
@@ -1014,6 +1019,16 @@ mod tests {
             available_runner_ids: Vec::new(),
             reasons: vec!["runner is disconnected".to_string()],
             remediation_commands: vec!["homeboy runner reconnect homeboy-lab".to_string()],
+        }
+    }
+
+    fn stale_lab() -> LabRunnerReadiness {
+        LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::Stale,
+            selected_runner_id: Some("homeboy-lab".to_string()),
+            available_runner_ids: Vec::new(),
+            reasons: vec!["runner daemon is stale".to_string()],
+            remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
         }
     }
 
@@ -2227,6 +2242,12 @@ mod tests {
             Some(&disconnected),
             crate::cli_surface::Placement::Auto,
         ));
+        assert!(admits_auto_local_capacity_fallback(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &local,
+            Some(&stale_lab()),
+            crate::cli_surface::Placement::Auto,
+        ));
         let context = resource_policy_context_from_evaluation(
             lab_supported_hot("agent-task cook/run-plan/retry --run"),
             &local,
@@ -2253,6 +2274,12 @@ mod tests {
             lab_supported_hot("agent-task cook/run-plan/retry --run"),
             &local,
             Some(&disconnected_lab()),
+            crate::cli_surface::Placement::Auto,
+        ));
+        assert!(!admits_auto_local_capacity_fallback(
+            lab_supported_hot("agent-task cook/run-plan/retry --run"),
+            &local,
+            Some(&stale_lab()),
             crate::cli_surface::Placement::Auto,
         ));
     }

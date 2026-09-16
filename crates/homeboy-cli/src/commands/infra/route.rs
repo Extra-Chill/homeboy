@@ -3,6 +3,7 @@ use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
+use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
@@ -225,6 +226,14 @@ pub(crate) fn route_after_parse_with_provenance(
         .flatten();
     if cook_requires_unmaterialized_admission(cli, &preflight) && !is_unmaterialized_replay_worker()
     {
+        if let Some(error) =
+            auto_cook_unavailable_lab_replay_error(cli, &preflight, &normalized_args)
+        {
+            // Auto + stale/disconnected Lab must not persist a 20-retry
+            // `pending_resource_admission` park. Reject with the same local
+            // cook replay `runner status` already computed (#14715).
+            return Err(error);
+        }
         // Persist before provider execution. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
@@ -2107,6 +2116,72 @@ fn unmaterialized_admission_state(
         Some("capacity_blocked") => "queued",
         _ => "blocked_runner_unavailable",
     }
+}
+
+fn auto_cook_unavailable_lab_replay_error(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+    normalized_args: &[String],
+) -> Option<Error> {
+    if !matches!(cli.placement, homeboy::cli_surface::Placement::Auto) {
+        return None;
+    }
+    let state = preflight
+        .lab_readiness
+        .as_ref()
+        .map(|readiness| readiness.state.as_str())
+        .unwrap_or("absent");
+    if !matches!(state, "stale" | "disconnected") {
+        return None;
+    }
+    let local_args = cook_placement_replay_args(normalized_args, "local");
+    let lab_or_local_args = cook_placement_replay_args(normalized_args, "lab-or-local");
+    let local_command = homeboy::core::engine::shell::quote_args(&local_args);
+    let lab_or_local_command = homeboy::core::engine::shell::quote_args(&lab_or_local_args);
+    let reason = preflight
+        .lab_readiness
+        .as_ref()
+        .and_then(|readiness| readiness.reasons.first())
+        .cloned()
+        .unwrap_or_else(|| format!("Lab runner readiness is {state}"));
+    let mut error = Error::validation_invalid_argument(
+        "placement",
+        format!(
+            "Auto Cook cannot use Lab ({reason}); not parking a 20-retry admission. Replay locally with `--placement local`, or authorize fallback with `--placement lab-or-local`."
+        ),
+        Some("auto".to_string()),
+        Some(vec![
+            local_command.clone(),
+            lab_or_local_command,
+            "Use `--placement lab-or-local` to authorize controller execution when no Lab runner is ready.".to_string(),
+        ]),
+    )
+    .with_retryable(false);
+    error.details["next_action"] = serde_json::Value::String(local_command);
+    error.details["runner_readiness"] = serde_json::Value::String(state.to_string());
+    error.details["run_created"] = serde_json::Value::Bool(false);
+    Some(
+        error.with_action(ExecutableAction::new(
+            "replay-cook-on-local",
+            "replay Cook on this controller",
+            local_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "homeboy".to_string()),
+            local_args.iter().skip(1).cloned(),
+            ActionSafety::Mutating,
+        )),
+    )
+}
+
+fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
+    let mut replay = portable_deferred_args(args);
+    if replay.is_empty() {
+        replay.push("homeboy".to_string());
+    }
+    replay.insert(1, "--placement".to_string());
+    replay.insert(2, placement.to_string());
+    replay
 }
 
 /// Explain a Lab placement that cannot be served, without contradicting the
