@@ -7,6 +7,7 @@ Operations docs are runbooks for people operating Homeboy workflows, runners, an
 - [Release-gate proof path](release-gate-proof-path.md)
 - [Controller to runner reverse-runner setup](controller-runner-reverse-runner.md)
 - [Artifact loop for runner and matrix workflows](artifact-loop-runner-matrix.md)
+- [Applying reviewed edge config from an agent host](edge-config-apply.md)
 
 ## Related Workflows
 
