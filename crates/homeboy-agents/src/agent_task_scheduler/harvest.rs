@@ -118,6 +118,13 @@ pub(super) fn harvest_uncommitted_patch(
             "changed_files": changed_files,
         }),
     });
+    bind_candidate_artifact_fingerprint(
+        outcome
+            .artifacts
+            .last_mut()
+            .expect("uncommitted patch artifact was attached"),
+        running,
+    );
     Ok(())
 }
 
@@ -1162,7 +1169,7 @@ mod committed_harvest_tests {
             run_id: Some("metadata-exclude-test".to_string()),
             artifact_root: None,
             artifact_nonce: "test-artifact".to_string(),
-            task_base_sha: Some(base),
+            task_base_sha: Some(base.clone()),
             source_provenance: None,
             scratch: crate::controller_scratch::ControllerScratchAllocation {
                 path: temp.path().join("controller-scratch"),
@@ -1205,6 +1212,29 @@ mod committed_harvest_tests {
             !patch.contains("runner-workspace.json"),
             "Homeboy runner metadata drift must be excluded from the candidate patch: {patch}"
         );
+        for key in [
+            "run_id",
+            "task_id",
+            "producer_attempt",
+            "base_ref",
+            "provider_backend",
+            "repository_identity",
+            "workspace_identity",
+        ] {
+            assert!(
+                outcome.artifacts[0].metadata.get(key).is_some_and(|value| {
+                    value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
+                }),
+                "harvested uncommitted patch is missing {key}: {:#?}",
+                outcome.artifacts[0].metadata
+            );
+        }
+        assert_eq!(
+            outcome.artifacts[0].metadata["run_id"],
+            "metadata-exclude-test"
+        );
+        assert_eq!(outcome.artifacts[0].metadata["task_id"], "task-1");
+        assert_eq!(outcome.artifacts[0].metadata["base_ref"], base);
         git(&source, &["apply", "--check", &patch_path]);
         git(&source, &["apply", &patch_path]);
         assert_eq!(
