@@ -730,6 +730,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "serde_json",
+ "serde_yml",
  "tempfile",
  "uuid",
 ]

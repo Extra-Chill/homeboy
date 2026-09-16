@@ -2,9 +2,12 @@
 
 name: CI
 
+# No `branches` filter: stacked PRs (non-main base) must run CI too. `edited`
+# is required so retargeting a PR to a different base schedules the checks,
+# since base changes are not one of the default activity types.
 on:
   pull_request:
-    branches: [main]
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 concurrency:
