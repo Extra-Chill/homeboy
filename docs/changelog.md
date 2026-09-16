@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.374.5] - 2026-09-16
+
+### Changed
+- Explain an SSH second factor instead of reporting a dead transport
+
+### Fixed
+- derive pre-provider phase and classification from outcome diagnostics
+- surface runner id and remote workspace path per child
+- tolerate not-yet-admitted children when reading status
+- retain failed cook workspaces by default
+- preserve run id lineage across transport retries
+- key the prepared-source hydration cache on repository, not checkout path
+- settle endpoint-proven terminal jobs during reconcile
+- render cook-batch summary on successful outcomes
+- name the root cause in diagnose instead of an empty summary
+- branch task worktrees from the shared base
+
 ## [0.374.4] - 2026-09-15
 
 ### Changed
