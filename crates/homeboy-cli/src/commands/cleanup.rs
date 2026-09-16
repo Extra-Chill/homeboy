@@ -2029,6 +2029,7 @@ fn cleanup_inventory_with_deadline(
                         dry_run: !apply,
                         cleanup_branches: apply,
                         allow_unmerged_branches: false,
+                        reaper: None,
                     },
                     limit: args.limit.unwrap_or(500).max(1) as usize,
                     cursor: args.cursor.clone(),

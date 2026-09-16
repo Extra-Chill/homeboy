@@ -693,6 +693,11 @@ const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         operator_safety(None, &["--apply"]),
         "bounded cursor-paginated task-worktree and adopted-workspace inventory; --apply reconciles only leased terminal snapshots and reports typed refusals for incomplete local or offloaded authority",
     ),
+    paths_safety(
+        &["reclaim"],
+        operator_safety(None, &["--apply"]),
+        "default output is a non-mutating reclaim plan naming claimed workspaces, released stale owner leases, and reclaimable bytes; pass --apply to remove reclaimable completed-loop workspaces (every removal is reaping-audited)",
+    ),
 ];
 
 const TUNNEL_SERVICE_DECLARATION_PATHS: &[&str] =

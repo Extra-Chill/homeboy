@@ -84,7 +84,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         )));
     }
     if !pid_is_running(state.pid) {
-        remove_lease_if_identity_matches(&path, &identity)?;
+        retire_dead_lease_and_generation(&path, &identity, &state)?;
         return Ok(DaemonStopResult {
             stopped: false,
             already_absent: true,
@@ -96,7 +96,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
     if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
         // The zero-job gate and exact lease revalidation make it safe to retire
         // stale metadata, but the unowned PID must never receive a signal.
-        remove_lease_if_identity_matches(&path, &identity)?;
+        retire_dead_lease_and_generation(&path, &identity, &state)?;
         return Ok(DaemonStopResult {
             stopped: false,
             already_absent: true,
@@ -389,6 +389,14 @@ pub(super) fn stop_with_force_for_lease(
         if let Some(endpoint) = generation_store::endpoint_for_lease(expected_lease_id)? {
             return retire_absent_registered_generation(expected_lease_id, &endpoint);
         }
+        // #14706, single source of truth: the lease in this plan came from an
+        // authoritative status read, but no registry entry or live lease now
+        // carries it. When the persisted lease is also dead there is nothing
+        // left to signal, so the plan stays executable via idempotent absence;
+        // a live lease is a different owner and still refuses replacement.
+        if !validation.running {
+            return reconcile_absent_lease_stop(expected_lease_id, path.display().to_string());
+        }
         return Err(Error::validation_invalid_argument(
             "lease_id",
             format!(
@@ -473,7 +481,7 @@ fn retire_absent_registered_generation(
         ));
     }
     let identity = DaemonLeaseIdentity::from_state(&state);
-    remove_lease_if_identity_matches(&path, &identity)?;
+    retire_dead_lease_and_generation(&path, &identity, &state)?;
     Ok(DaemonStopResult {
         stopped: false,
         already_absent: true,
@@ -481,6 +489,23 @@ fn retire_absent_registered_generation(
         state_path: path.display().to_string(),
         termination_evidence: None,
     })
+}
+
+/// Remove one dead lease and clean the registry entry for its exact dead+idle
+/// generation, so a successor admission cannot be rejected with a missing
+/// generation owner (#14706). The registry cleanup is best-effort: a registry
+/// failure must not mask the lease retirement the gates already proved.
+fn retire_dead_lease_and_generation(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+) -> Result<()> {
+    remove_lease_if_identity_matches(path, identity)?;
+    let state_dir = path
+        .parent()
+        .map_or_else(String::new, |parent| parent.display().to_string());
+    let _ = generation_store::retire_exact_dead_generation(&state.lease_id, &state_dir);
+    Ok(())
 }
 
 /// A lease-bound stop can be replayed after a previous stop removed a dead
@@ -715,4 +740,75 @@ pub(super) fn active_jobs_block_daemon_stop_error(
     error.details["requested_homeboy_identity"] = serde_json::json!(requested_identity);
     error.details["lifecycle_mutation"] = serde_json::json!("stop");
     error
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        state_path, stop_for_lease, write_lease, DaemonRuntimeSnapshot, DaemonState,
+        DAEMON_LEASE_SCHEMA,
+    };
+    use crate::build_identity;
+    use crate::test_support::with_isolated_home;
+
+    fn dead_state(lease_id: &str, path: &std::path::Path) -> DaemonState {
+        let mut child = std::process::Command::new("true")
+            .stdin(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn transient child");
+        let dead_pid = child.id();
+        child.wait().expect("reap transient child");
+        DaemonState {
+            schema: DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id: lease_id.to_string(),
+            startup_token: "test-token".to_string(),
+            address: "127.0.0.1:0".to_string(),
+            pid: dead_pid,
+            state_path: path.display().to_string(),
+            started_at: "now".to_string(),
+            last_seen_at: "now".to_string(),
+            build_identity: build_identity::current(),
+            binary_sha256: None,
+            runtime_paths: DaemonRuntimeSnapshot {
+                loaded_at: "now".to_string(),
+                paths: Vec::new(),
+            },
+        }
+    }
+
+    /// #14706, single source of truth: any repair plan `daemon status` renders
+    /// must stay executable by `daemon stop`. A plan lease that no registry
+    /// carried anymore, with the persisted lease also dead, converges as
+    /// idempotent absence instead of refusing with "live lease is Y".
+    #[test]
+    fn a_plan_lease_with_no_registry_entry_converges_when_the_stored_lease_is_dead() {
+        with_isolated_home(|_| {
+            let path = state_path().expect("state path");
+            write_lease(&path, &dead_state("gone-live-lease", &path)).expect("write dead lease");
+
+            let result = stop_for_lease("plan-lease")
+                .expect("a plan lease over a dead stored lease stays executable");
+            assert!(result.already_absent);
+            assert!(!result.stopped);
+        });
+    }
+
+    /// A live persisted lease is a different owner: the plan still refuses to
+    /// signal it from another lease's recovery.
+    #[test]
+    fn a_plan_lease_refuses_replacement_when_the_stored_lease_is_live() {
+        with_isolated_home(|_| {
+            let path = state_path().expect("state path");
+            let mut live = dead_state("other-live", &path);
+            live.pid = std::process::id();
+            write_lease(&path, &live).expect("write live lease");
+
+            let error = stop_for_lease("plan-lease").expect_err("refuse replacement");
+            assert!(
+                error.message.contains("live lease"),
+                "the refusal names the live lease: {}",
+                error.message
+            );
+        });
+    }
 }

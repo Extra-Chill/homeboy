@@ -954,6 +954,59 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
 }
 
 #[test]
+fn unfingerprinted_timeout_next_action_is_worktree_git_status_not_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut options = compile_options("timeout-unfingerprinted");
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(workspace.path().display().to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(
+            &options.identity.initial_plan,
+            Some(&options.identity.initial_run_id),
+        )
+        .expect("submit");
+        let _ = agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+        );
+        agent_task_lifecycle::record_cook_controller_failure_in_store(
+            &test_lifecycle_store(),
+            &options.identity.initial_run_id,
+            &serde_json::json!({
+                "code": "validation.invalid_argument",
+                "message": "recoverable-candidate promotion requires a fingerprinted artifact bound to its producing run, task, base, and workspace",
+            }),
+        )
+        .expect("record fingerprint failure");
+
+        let context = super::super::cook_failure_context(
+            &options.identity.cook_id,
+            Some(&options.identity.initial_run_id),
+            "durable_failure",
+        )
+        .expect("failure context");
+
+        assert_eq!(
+            context.next_actions[0].command,
+            format!(
+                "git -C {} status",
+                quote_arg(workspace.path().to_str().expect("utf8"))
+            )
+        );
+        assert!(context
+            .next_actions
+            .iter()
+            .chain(&context.legal_actions)
+            .all(|action| {
+                !action.command.contains("retry") && !action.command.contains("cook-continue")
+            }));
+    });
+}
+
+#[test]
 fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
     let plan = compile_options("startup-without-output-report")
         .identity
@@ -9751,6 +9804,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                 ),
                 (
                     "workspace_base_capture".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
+                    "workspace_disk_pressure".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
                 ),

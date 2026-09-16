@@ -6433,6 +6433,18 @@ fn cook_failure_context_with_stores(
                     .map(super::cook_recovery_command_prefix_for_record),
             )
         })
+        .or_else(|| {
+            unfingerprinted_timeout_worktree_recovery(
+                &recipe,
+                record.as_ref(),
+                &chronological_latest_run_id,
+                diagnostic.as_ref(),
+                lifecycle_store,
+                record
+                    .as_ref()
+                    .map(super::cook_recovery_command_prefix_for_record),
+            )
+        })
         .unwrap_or_else(|| {
             cook_recovery_actions_with_prefix(
                 status,
@@ -6600,6 +6612,104 @@ fn dirty_candidate_adoption_recovery_actions(
         legal_actions: actions.clone(),
         next_actions: actions,
     })
+}
+
+/// Timeout left a real worktree candidate that could not be bound to its
+/// producing run. Retry and cook-continue --artifact-id are both ineligible
+/// until an operator inspects that checkout.
+fn unfingerprinted_timeout_worktree_recovery(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    run_id: &str,
+    diagnostic: Option<&Value>,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    prefix: Option<String>,
+) -> Option<CookRecoveryActions> {
+    let message = diagnostic.and_then(|diagnostic| {
+        diagnostic
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                diagnostic
+                    .pointer("/deepest_cause/message")
+                    .and_then(Value::as_str)
+            })
+    })?;
+    if !message.contains("fingerprinted artifact") {
+        return None;
+    }
+    let worktree = timeout_worktree_path(recipe, record, run_id, lifecycle_store)?;
+    let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
+    let command = |args: &[&str]| super::cook_recovery_command_with_prefix(&prefix, args);
+    let inspect = super::AgentTaskCookRecoveryAction {
+        action: "inspect_worktree".to_string(),
+        command: format!("git -C {} status", quote_arg(&worktree)),
+    };
+    Some(CookRecoveryActions {
+        reason: "Timeout left uncommitted worktree changes that could not be fingerprinted as the producing run's patch. Inspect the worktree; retry is not eligible.".to_string(),
+        legal_actions: vec![
+            super::AgentTaskCookRecoveryAction {
+                action: "status".to_string(),
+                command: command(&["status", run_id]),
+            },
+            super::AgentTaskCookRecoveryAction {
+                action: "diagnose".to_string(),
+                command: command(&["diagnose", run_id]),
+            },
+            inspect.clone(),
+        ],
+        next_actions: vec![inspect],
+    })
+}
+
+fn timeout_worktree_path(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    run_id: &str,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+) -> Option<String> {
+    let from_artifact = lifecycle_store
+        .map(|store| store.read_aggregate(run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id))
+        .ok()
+        .and_then(|aggregate| {
+            aggregate.outcomes.iter().find_map(|outcome| {
+                outcome.artifacts.iter().find_map(|artifact| {
+                    artifact
+                        .metadata
+                        .get("workspace_root")
+                        .and_then(Value::as_str)
+                        .filter(|root| !root.is_empty())
+                        .map(str::to_string)
+                })
+            })
+        });
+    from_artifact
+        .or_else(|| {
+            recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == run_id)
+                .and_then(|attempt| attempt.plan.tasks.first())
+                .and_then(|task| task.workspace.root.clone())
+                .filter(|root| !root.is_empty())
+        })
+        .or_else(|| {
+            record
+                .and_then(|record| record.metadata.get("source_checkout"))
+                .and_then(|checkout| checkout.get("path").or_else(|| checkout.get("root")))
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            super::reconstruct_options(recipe)
+                .ok()?
+                .workspace
+                .source_worktree_path
+                .map(|path| path.display().to_string())
+                .filter(|path| !path.is_empty())
+        })
 }
 
 /// Artifact IDs are durable controller metadata. Expose them only when the

@@ -2134,6 +2134,8 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
             force: true,
             cleanup_branch: false,
             allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
         })
         .expect("remove managed worktree");
 

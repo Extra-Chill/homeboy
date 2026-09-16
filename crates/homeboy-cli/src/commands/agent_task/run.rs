@@ -752,12 +752,6 @@ fn finalize_cook_preview_replay(
             "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
         );
     }
-    if args.prepared_base_sha.is_none() {
-        replay.requires.push(
-            "base admission is indeterminate; materialize an origin-backed workspace and rerun `homeboy agent-task cook --preview` before execution"
-                .to_string(),
-        );
-    }
     if preview_placement_policy_from_argv(&replay.argv)["requested"] != "local" {
         replay.requires.push(
             "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
@@ -1120,6 +1114,27 @@ mod preview_tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+    use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
+    use homeboy::agents::agent_tasks::{
+        AgentTaskExecutionContext, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
+    };
+
+    struct UnmaterializedPreviewExecutor;
+
+    impl AgentTaskExecutorAdapter for UnmaterializedPreviewExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                ..Default::default()
+            }
+        }
+    }
 
     fn cook(argv: &[&str]) -> AgentTaskCookArgs {
         let cli = Cli::try_parse_from(argv).expect("parse Cook preview");
@@ -2179,6 +2194,164 @@ mod preview_tests {
             .requires
             .iter()
             .any(|requirement| requirement.contains("runner placement admission")));
+        assert!(
+            !replay
+                .requires
+                .iter()
+                .any(|requirement| { requirement.contains("base admission is indeterminate") }),
+            "unmaterialized preview must not require a second preview: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("repository root");
+            let remote = tempfile::tempdir().expect("bare origin");
+            assert!(Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .current_dir(remote.path())
+                .status()
+                .expect("initialize bare origin")
+                .success());
+            let checkout = root.path().join("fixture");
+            std::fs::create_dir(&checkout).expect("repository checkout");
+            for args in [
+                ["init", "--quiet", "-b", "main"].as_slice(),
+                ["config", "user.email", "fixture@example.test"].as_slice(),
+                ["config", "user.name", "Fixture"].as_slice(),
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .expect("configure source")
+                    .success());
+            }
+            std::fs::write(checkout.join("README.md"), "fixture\n").expect("write fixture");
+            assert!(Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&checkout)
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "fixture"])
+                .current_dir(&checkout)
+                .status()
+                .expect("commit fixture")
+                .success());
+            let origin = remote.path().to_str().expect("origin path");
+            assert!(Command::new("git")
+                .args(["remote", "add", "origin", origin])
+                .current_dir(&checkout)
+                .status()
+                .expect("add origin")
+                .success());
+            assert!(Command::new("git")
+                .args(["push", "--quiet", "-u", "origin", "main"])
+                .current_dir(&checkout)
+                .status()
+                .expect("push origin main")
+                .success());
+            let origin_sha = String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&checkout)
+                    .output()
+                    .expect("resolve origin SHA")
+                    .stdout,
+            )
+            .expect("origin SHA is UTF-8")
+            .trim()
+            .to_string();
+            let repository = checkout.display().to_string();
+            let handle = "fixture@fix-issue-14714";
+            let args = cook(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                &repository,
+                "--task-url",
+                "https://github.com/example/fixture/issues/14714",
+                "--head",
+                "fix/issue-14714",
+                "--base",
+                "main",
+                "--to-worktree",
+                handle,
+                "--no-finalize",
+            ]);
+
+            let (preview, exit_code) = preview_cook(args.clone(), None).expect("preview");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
+            assert_eq!(
+                preview["resolved"]["base_preparation"]["provenance"],
+                "workspace_unmaterialized"
+            );
+            let requires = preview["replay_requires"]
+                .as_array()
+                .expect("preview replay requirements");
+            assert!(
+                !requires.iter().any(|requirement| {
+                    requirement
+                        .as_str()
+                        .is_some_and(|value| value.contains("base admission is indeterminate"))
+                }),
+                "unmaterialized preview must admit replay: {preview}"
+            );
+            assert!(
+                !Path::new(
+                    preview["resolved"]["workspace"]["path"]
+                        .as_str()
+                        .expect("planned path")
+                )
+                .exists(),
+                "preview must not materialize the planned worktree"
+            );
+
+            let provision =
+                provision_cook_destination(&args).expect("execution admits planned create");
+            assert_eq!(provision["action"], "lookup_pending");
+
+            let executor = Arc::new(UnmaterializedPreviewExecutor);
+            let (report, _) = run_cook_with_executor(args, executor).expect("cook replay");
+            assert_eq!(
+                report["failure_context"]["provider_executions_consumed"], 1,
+                "{report}"
+            );
+            let destination = PathBuf::from(
+                preview["resolved"]["workspace"]["path"]
+                    .as_str()
+                    .expect("planned path"),
+            );
+            assert!(
+                destination.is_dir(),
+                "cook must materialize the planned worktree: {}",
+                destination.display()
+            );
+            let destination_sha = String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&destination)
+                    .output()
+                    .expect("resolve destination SHA")
+                    .stdout,
+            )
+            .expect("destination SHA is UTF-8")
+            .trim()
+            .to_string();
+            assert_eq!(destination_sha, origin_sha);
+        });
     }
 
     #[test]
