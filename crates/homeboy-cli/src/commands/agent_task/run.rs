@@ -908,8 +908,10 @@ pub(crate) fn rewrite_cook_identity_replay_argv(
 }
 
 pub(super) fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
-    let requested_cook_id = args.dispatch.run_id.clone();
-    let owner_run_ref = args.attempt_run_id.clone().unwrap_or_else(|| {
+    args.requested_run_id = args.dispatch.run_id.clone();
+    args.requested_attempt_run_id = args.attempt_run_id.clone();
+    let requested_cook_id = args.requested_run_id.clone();
+    let owner_run_ref = args.requested_attempt_run_id.clone().unwrap_or_else(|| {
         requested_cook_id.as_deref().map_or_else(
             || format!("agent-task-{}", uuid::Uuid::new_v4()),
             |cook_id| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1),
@@ -919,20 +921,23 @@ pub(super) fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
     args.attempt_run_id = Some(owner_run_ref);
 }
 
+fn preview_replay_has_flag(argv: &[String], flag: &str) -> bool {
+    argv.iter()
+        .any(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
+}
+
 fn append_preview_lifecycle_replay_argv(argv: &mut Vec<String>, args: &AgentTaskCookArgs) {
     for (flag, value) in [
-        ("--run-id", args.dispatch.run_id.as_ref()),
-        ("--attempt-run-id", args.attempt_run_id.as_ref()),
+        ("--run-id", args.requested_run_id.as_ref()),
+        ("--attempt-run-id", args.requested_attempt_run_id.as_ref()),
     ] {
-        if !argv
-            .iter()
-            .any(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
-        {
-            argv.extend([
-                flag.to_string(),
-                value.expect("preview lifecycle is bound").clone(),
-            ]);
+        let Some(value) = value else {
+            continue;
+        };
+        if preview_replay_has_flag(argv, flag) {
+            continue;
         }
+        argv.extend([flag.to_string(), value.clone()]);
     }
 }
 
@@ -1242,6 +1247,92 @@ mod preview_tests {
             .iter()
             .any(|requirement| requirement.contains("runner placement admission is deferred")));
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
+    }
+
+    #[test]
+    fn preview_replay_omits_generated_lifecycle_ids() {
+        let mut args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+        ]);
+        bind_cook_preview_lifecycle(&mut args);
+        assert!(args.dispatch.run_id.is_some());
+        assert!(args.attempt_run_id.is_some());
+
+        let mut argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+        ];
+        append_preview_lifecycle_replay_argv(&mut argv, &args);
+        assert!(!preview_replay_has_flag(&argv, "--run-id"), "{argv:?}");
+        assert!(
+            !preview_replay_has_flag(&argv, "--attempt-run-id"),
+            "{argv:?}"
+        );
+
+        let replay = finalize_cook_preview_replay(argv, &args);
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--run-id"),
+            "{replay:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
+            "{replay:?}"
+        );
+    }
+
+    #[test]
+    fn preview_replay_echoes_explicit_run_id() {
+        let mut args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+            "--run-id",
+            "cook-42",
+        ]);
+        bind_cook_preview_lifecycle(&mut args);
+        assert_eq!(args.dispatch.run_id.as_deref(), Some("cook-42"));
+
+        let mut argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+        ];
+        append_preview_lifecycle_replay_argv(&mut argv, &args);
+        assert!(
+            argv.windows(2)
+                .any(|parts| parts == ["--run-id", "cook-42"]),
+            "{argv:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&argv, "--attempt-run-id"),
+            "{argv:?}"
+        );
+
+        let replay = finalize_cook_preview_replay(argv, &args);
+        assert!(
+            replay
+                .argv
+                .windows(2)
+                .any(|parts| parts == ["--run-id", "cook-42"]),
+            "{replay:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
+            "{replay:?}"
+        );
     }
 
     #[test]

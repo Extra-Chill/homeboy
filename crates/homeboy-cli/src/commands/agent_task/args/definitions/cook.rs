@@ -1237,6 +1237,12 @@ pub struct AgentTaskCookArgs {
     /// handoff and plan compilation without asking a later phase to reread stdin.
     #[arg(skip)]
     pub prompt_snapshot: Option<CookPromptSnapshot>,
+    /// Operator-supplied `--run-id` captured before preview lifecycle binding.
+    #[arg(skip)]
+    pub requested_run_id: Option<String>,
+    /// Operator-supplied `--attempt-run-id` captured before preview lifecycle binding.
+    #[arg(skip)]
+    pub requested_attempt_run_id: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
