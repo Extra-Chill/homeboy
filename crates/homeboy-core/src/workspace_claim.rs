@@ -524,6 +524,32 @@ impl WorkspaceClaimStore {
             })
         })
     }
+    /// Durably release every expired owner lease from one authority and report
+    /// exactly which owner ids were dropped, so reclamation can account for
+    /// stale registrations it released instead of leaving them to a probe.
+    /// Live owners and a live reconciliation claim are never touched.
+    pub fn prune_expired_owner_leases(
+        &self,
+        workspace: &WorkspaceIdentity,
+        now_ms: u64,
+    ) -> Result<Option<Vec<String>>> {
+        workspace.verify()?;
+        self.with_lock(workspace, || {
+            let mut state = self.read_or_empty(workspace)?;
+            let expired = state
+                .owners
+                .iter()
+                .filter(|owner| owner.expires_at_ms <= now_ms)
+                .map(|owner| owner.owner_id.clone())
+                .collect::<Vec<_>>();
+            if !state.prune(now_ms) {
+                return Ok(None);
+            }
+            self.commit(&mut state)?;
+            Ok((!expired.is_empty()).then_some(expired))
+        })
+    }
+
     /// Return exact live owner identities after pruning expiry under the
     /// workspace lock. This local-only probe never exposes authority tokens.
     pub fn owner_status(

@@ -4984,6 +4984,50 @@ fn reserve_cook_materialization_capacity(
     )
 }
 
+/// Surface the same filesystem pressure the materialization capacity reserve
+/// would later hit, in orchestration terms, before an unrelated build or write
+/// fails on the byte reserve. Advisory while above the reserve; exhausted
+/// filesystems refuse admission with a measured, attributed error.
+pub fn preflight_cook_materialization_capacity(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<homeboy_core::capacity::CapacityPreflight> {
+    Ok(homeboy_core::capacity::preflight_capacity(
+        &lifecycle_store.controller_scratch_root(),
+        "Cook controller scratch and workspace materialization",
+        homeboy_core::capacity::CapacityReserve::configured(),
+    ))
+}
+
+/// Record an advisory-only disk-pressure observation alongside the orchestration
+/// state, naming the reclaim routes an operator can run before the next
+/// capacity reserve refuses admission.
+fn record_cook_disk_pressure_advisory(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    preflight: &homeboy_core::capacity::CapacityPreflight,
+) -> Result<()> {
+    let advisory = serde_json::json!({
+        "schema": "homeboy/cook-disk-pressure-advisory/v1",
+        "subject": preflight.subject,
+        "status": preflight.status,
+        "available_bytes": preflight.available_bytes,
+        "available_inodes": preflight.available_inodes,
+        "reserve_bytes": preflight.reserve_bytes,
+        "reserve_inodes": preflight.reserve_inodes,
+        "warning": preflight.warning,
+        "reclaim_actions": [
+            "homeboy worktree reclaim --apply",
+            "homeboy cleanup --apply",
+        ],
+    });
+    agent_task_lifecycle::record_metadata_value_in_store(
+        lifecycle_store,
+        run_id,
+        "cook_workspace_disk_pressure_advisory",
+        advisory,
+    )
+}
+
 fn reconstruct_existing_cook_options(
     recipe: &super::cook_recipe::AgentTaskCookRecipe,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
@@ -5973,6 +6017,36 @@ fn run_cook_spine(
         }
     }
     validate_cook_candidate_group(&options.identity.initial_plan)?;
+    // Surface disk pressure in orchestration terms BEFORE the byte reserve:
+    // an advisory below the reserve is recorded on the run, and an exhausted
+    // filesystem refuses admission here with measured, attributed evidence
+    // rather than leaving an unrelated build to fail opaque on the reserve.
+    let disk_pressure = run_cook_startup_phase(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "workspace_disk_pressure",
+        || preflight_cook_materialization_capacity(lifecycle_store),
+    )?;
+    if !disk_pressure.is_exhausted() {
+        record_cook_disk_pressure_advisory(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+            &disk_pressure,
+        )?;
+    } else if let Some(error) = disk_pressure.error() {
+        let mut error = error;
+        error.details["cook_disk_pressure_preflight"] = serde_json::json!({
+            "subject": disk_pressure.subject,
+            "path": disk_pressure.path,
+            "reclaim_actions": [
+                "homeboy worktree reclaim --apply",
+                "homeboy cleanup --apply",
+            ],
+        });
+        return Err(error);
+    }
     // Reserve the source tree's projected copy before the scheduler creates its
     // controller scratch lease or detached workspace. This includes dependency
     // trees (for example node_modules and vendor), whose inode demand can be

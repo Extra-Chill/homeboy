@@ -12,15 +12,14 @@ use homeboy::core::worktree::{
     WorktreeAdoptOutput, WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions,
     WorktreeCreateOutput, WorktreeImportOptions, WorktreeImportOutput, WorktreeInventoryOptions,
     WorktreeInventoryOutput, WorktreeListOptions, WorktreeListOutput, WorktreeOwnershipProbe,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeStatusOutput,
+    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeReclaimOutput,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
-
-use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
 
 use super::utils::args::MutationArgs;
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
+use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
 
 #[derive(Args)]
 pub struct WorktreeArgs {
@@ -195,6 +194,14 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branches")]
         allow_unmerged_branches: bool,
     },
+    /// Reclaim disk space held by completed task-worktree loops
+    Reclaim {
+        // Default output is a non-mutating reclaim plan naming claimed
+        // workspaces, released stale leases, and reclaimable bytes;
+        // --apply executes the plan. Same precedence as `worktree cleanup`.
+        #[command(flatten)]
+        mutation: MutationArgs,
+    },
     /// Inspect or explicitly reconcile quarantined malformed task-worktree records
     Quarantine {
         #[command(subcommand)]
@@ -268,6 +275,7 @@ pub enum WorktreeOutput {
     Holder(WorktreeOwnershipProbe),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
+    Reclaim(WorktreeReclaimOutput),
     QuarantineList {
         quarantines: Vec<TaskWorktreeRegistryQuarantine>,
     },
@@ -283,6 +291,11 @@ pub struct WorktreeCleanupCommandOutput {
     pub deprecated_flag: Option<&'static str>,
     #[serde(rename = "_homeboy_actionable")]
     pub actionable: CommandActionableMetadata,
+}
+
+/// Session/run identity recorded as reaping provenance by CLI reapers.
+fn cli_reaper_identity() -> String {
+    format!("cli-pid:{}", std::process::id())
 }
 
 pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
@@ -606,6 +619,8 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             force,
             cleanup_branch,
             allow_unmerged_branch,
+            reason: Some("worktree remove".to_string()),
+            reaper: Some(cli_reaper_identity()),
         })?),
         WorktreeCommand::Cleanup {
             mutation,
@@ -621,6 +636,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 dry_run: !apply,
                 cleanup_branches,
                 allow_unmerged_branches,
+                reaper: Some(cli_reaper_identity()),
             })?;
             let artifact_cleanup = if cleanup_artifacts {
                 Some(artifact_cleanup::cleanup_artifacts(
@@ -650,6 +666,14 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 actionable,
             })
         }
+        WorktreeCommand::Reclaim { mutation } => WorktreeOutput::Reclaim(worktree::reclaim(
+            homeboy::core::worktree::WorktreeReclaimOptions {
+                dry_run: !mutation.is_apply(),
+                limit: 500,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+            },
+        )?),
         WorktreeCommand::Quarantine { command } => match command {
             WorktreeQuarantineCommand::List => WorktreeOutput::QuarantineList {
                 quarantines: worktree::list_task_worktree_registry_quarantines()?,
@@ -1035,6 +1059,41 @@ mod tests {
             with_branches.next_actions[0].command,
             "homeboy worktree cleanup --cleanup-branches --apply"
         );
+    }
+
+    #[test]
+    fn worktree_reclaim_defaults_to_a_non_mutating_plan() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "reclaim"]);
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Reclaim { mutation } = args.command else {
+            panic!("expected worktree reclaim command");
+        };
+        assert!(!mutation.apply);
+        assert!(!mutation.dry_run);
+    }
+
+    #[test]
+    fn worktree_reclaim_apply_is_explicit() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "reclaim", "--apply"]);
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Reclaim { mutation } = args.command else {
+            panic!("expected worktree reclaim command");
+        };
+        assert!(mutation.apply);
+    }
+
+    #[test]
+    fn worktree_reclaim_rejects_conflicting_apply_and_dry_run() {
+        let error =
+            match Cli::try_parse_from(["homeboy", "worktree", "reclaim", "--apply", "--dry-run"]) {
+                Ok(_) => panic!("conflicting reclaim modes must be rejected"),
+                Err(error) => error,
+            };
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

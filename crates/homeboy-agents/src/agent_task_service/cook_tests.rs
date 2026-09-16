@@ -9755,6 +9755,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     run_id.to_string()
                 ),
                 (
+                    "workspace_disk_pressure".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
                     "provider_ready".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
