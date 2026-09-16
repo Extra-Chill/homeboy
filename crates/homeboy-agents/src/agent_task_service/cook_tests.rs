@@ -5547,6 +5547,130 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
     });
 }
 
+/// A diverged destination is an operator workspace condition, not a transport
+/// failure: retrying can never converge it, so the pre-provider validation
+/// failure must be classified deterministic (`invalid_input`) and consume no
+/// transport retries (#14699).
+#[test]
+fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_retryable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let remote = tempfile::tempdir().expect("bare origin");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(remote.path(), &["init", "--bare"]);
+        let status = Command::new("git")
+            .args([
+                "clone",
+                remote.path().to_str().unwrap(),
+                workspace.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("clone workspace");
+        assert!(status.status.success());
+        git(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(workspace.path(), &["config", "user.name", "Test"]);
+        git(workspace.path(), &["checkout", "-b", "main"]);
+        std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
+        git(workspace.path(), &["add", "base.txt"]);
+        git(workspace.path(), &["commit", "-m", "base"]);
+        git(workspace.path(), &["push", "-u", "origin", "main"]);
+
+        let destination_root = tempfile::tempdir().expect("candidate worktree root");
+        let destination = destination_root.path().join("candidate");
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--branch",
+                "main",
+                remote.path().to_str().unwrap(),
+                destination.to_str().expect("candidate path"),
+            ])
+            .output()
+            .expect("clone candidate");
+        assert!(status.status.success());
+        git(&destination, &["config", "user.email", "test@example.com"]);
+        git(&destination, &["config", "user.name", "Test"]);
+        git(&destination, &["checkout", "-b", "candidate"]);
+
+        // Diverge: the base advances on origin while the destination commits
+        // candidate-only work without rebasing onto it.
+        std::fs::write(workspace.path().join("base-only.txt"), "base only\n").unwrap();
+        git(workspace.path(), &["add", "base-only.txt"]);
+        git(workspace.path(), &["commit", "-m", "advance base"]);
+        git(workspace.path(), &["push"]);
+        std::fs::write(destination.join("candidate-only.txt"), "candidate only\n").unwrap();
+        git(&destination, &["add", "candidate-only.txt"]);
+        git(&destination, &["commit", "-m", "candidate"]);
+
+        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", &[], false)
+            .expect_err("diverged destination is rejected before provider execution");
+        assert_eq!(diverged.code.as_str(), "validation.invalid_argument");
+        assert_eq!(
+            diverged.details["workspace_base_ancestry"]["direction"],
+            "diverged"
+        );
+        assert_ne!(
+            diverged.retryable,
+            Some(true),
+            "a diverged workspace must not be classified as transport-retryable: {diverged}"
+        );
+
+        let outcome = crate::agent_task_lifecycle::build_pre_execution_failure_outcome(
+            "cook-diverged-run",
+            &AgentTaskRequest {
+                schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "run".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: crate::agent_task::AgentTaskPolicy::default(),
+                limits: crate::agent_task::AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            },
+            "workspace_base_ancestry_preflight",
+            &diverged,
+        );
+        assert_eq!(
+            outcome.failure_classification,
+            Some(crate::agent_task::AgentTaskFailureClassification::InvalidInput)
+        );
+        assert_eq!(outcome.diagnostics[0].data["retryable"], false);
+    });
+}
+
 #[test]
 fn retryable_preview_base_resolution_is_deferred_not_admitted() {
     let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);

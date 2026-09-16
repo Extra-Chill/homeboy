@@ -655,6 +655,21 @@ pub(crate) fn pre_execution_failure_report(
     // instead of the wrapper alone.
     let error_message = error.to_string();
     let cause = failure.detail.as_deref().unwrap_or(&error_message);
+    // The stop reason is what an operator sees before reading deeper run
+    // metadata, so it carries the recovery next to the failing condition.
+    let cause = if error.hints.is_empty() {
+        cause.to_string()
+    } else {
+        format!(
+            "{cause}; recovery: {}",
+            error
+                .hints
+                .iter()
+                .map(|hint| hint.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    };
     let mut report = cook_report(CookReportInput {
         cook_id,
         status: "pre_execution_failure",
