@@ -4433,6 +4433,51 @@ mod tests {
     }
 
     #[test]
+    fn unmaterialized_runner_selection_fails_fast_on_an_unready_fleet_with_reason() {
+        crate::test_support::with_isolated_home(|_| {
+            // A configured SSH runner with no daemon observation. Automatic
+            // admission must not name it as an eligible runner; it reports the
+            // unready fleet state and a reason instead of stalling on a
+            // dispatch that would never be accepted (#14710).
+            homeboy::core::server::create(
+                r#"{"id":"lab-offline","host":"192.168.86.63","user":"user"}"#,
+                false,
+            )
+            .expect("create server");
+            homeboy::runner::runners::create(
+                r#"{"id":"lab-offline","kind":"ssh","server_id":"lab-offline"}"#,
+                false,
+            )
+            .expect("create runner");
+
+            let outcome = select_unmaterialized_cook_runner(&serde_json::json!({
+                "binding": {
+                    "placement": {},
+                    "provider_runtime_refs": { "required_capabilities": [] }
+                }
+            }));
+            match outcome {
+                Ok(selection) => {
+                    assert_ne!(selection["state"], "eligible");
+                    assert!(selection["runner_id"].is_null());
+                    assert!(selection["reason"].is_string());
+                }
+                Err(error) => {
+                    // A hard refresh failure is also a fast rejection: the
+                    // runners' own reasons ride with it and no runner id is
+                    // offered for dispatch.
+                    assert!(
+                        error.details["runner_failures"]
+                            .as_array()
+                            .is_some_and(|failures| !failures.is_empty()),
+                        "{error}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
     fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "hot-unmaterialized-resume";

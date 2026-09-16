@@ -878,6 +878,49 @@ fn replay_claim_renewal_rejects_an_expired_lease_without_materializing_it() {
 }
 
 #[test]
+fn a_claimed_handoff_parent_always_carries_the_owner_pid() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-claimed-parent-pid";
+    let record = claim_detached_cook_handoff_parent_in_store(&store, cook_id, "bootstrap-launcher")
+        .expect("record and claim the handoff parent atomically");
+
+    assert_eq!(record.metadata["detached_cook_handoff"]["state"], "pending");
+    assert_eq!(
+        record.metadata["detached_cook_handoff"]["launcher_id"],
+        "bootstrap-launcher"
+    );
+    assert_eq!(
+        record.metadata["detached_cook_handoff"]["launcher_pid"],
+        u64::from(std::process::id()),
+        "a pending handoff must never be published without an owning PID"
+    );
+    assert!(record.metadata["detached_cook_handoff"]["launcher_start_identity"].is_object());
+    let phase = record.metadata.get("cook_progress").cloned().or_else(|| {
+        store
+            .read_record(cook_id)
+            .ok()
+            .and_then(|record| record.metadata.get("cook_progress").cloned())
+    });
+    let phase = phase
+        .map(|value| value["phase"].clone())
+        .unwrap_or(Value::Null);
+    let stored = store.read_record(cook_id).expect("re-read parent");
+    let phase = stored
+        .metadata
+        .get("cook_progress")
+        .cloned()
+        .map(|value| value["phase"].clone())
+        .unwrap_or(Value::Null);
+    assert_ne!(
+        phase,
+        Value::String("detached_handoff_pending".to_string()),
+        "an ownership claim replaces the unclaimed parking phase"
+    );
+    assert_eq!(phase, Value::String("detached_handoff_claimed".to_string()));
+}
+
+#[test]
 fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

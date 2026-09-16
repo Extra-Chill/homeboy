@@ -103,10 +103,16 @@ pub(crate) fn run_command_output(
                         .clone()
                         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
                     cook_args.dispatch.run_id = Some(cook_id.clone());
+                    let launcher_id = uuid::Uuid::new_v4().to_string();
                     let bootstrap = (|| {
                         let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-                        homeboy::agents::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
-                            &store, &cook_id,
+                        // The dispatch process is the handoff launcher until the
+                        // Cook materializes its first attempt, so it must claim
+                        // the parent with its live PID. A bare record leaves a
+                        // `detached_handoff_pending` phase nobody owns and no
+                        // recovery can attribute (#14710, #14706).
+                        homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                            &store, &cook_id, &launcher_id,
                         )
                     })();
                     if let Err(error) = bootstrap {

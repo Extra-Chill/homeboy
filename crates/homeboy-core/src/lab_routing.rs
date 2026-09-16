@@ -16,6 +16,8 @@ use crate::observation::RunStatus;
 use crate::Result;
 
 pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
+/// Periodic "still dispatching" announcement during a bounded Lab dispatch.
+const LAB_DISPATCH_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 pub const LAB_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_DISPATCH_TIMEOUT_SECS";
 pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
@@ -1096,6 +1098,26 @@ fn execute_lab_offload_with_timeout(
     let reuse_compatible_snapshot = request.reuse_compatible_snapshot;
     let job_overrides = request.job_overrides;
     let worker_placement_outcome_target = placement_outcome_target.clone();
+    // A dispatched command must stay observable between "submitted" and
+    // "finished" (#14711). Speaking on stderr (never the command's captured
+    // streams) keeps these lines visible to a supervising agent without
+    // polluting the command's own JSON/patch output.
+    let heartbeat_deadline_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heartbeat_stop = std::sync::Arc::clone(&heartbeat_deadline_seen);
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !heartbeat_stop.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(LAB_DISPATCH_HEARTBEAT_INTERVAL);
+            if heartbeat_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            eprintln!(
+                "{{\"event\":\"lab_dispatch_heartbeat\",\"phase\":\"{}\",\"elapsed_seconds\":{}}}",
+                LAB_DISPATCH_PHASE,
+                started.elapsed().as_secs()
+            );
+        }
+    });
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = crate::lab_offload::execute_lab_offload(LabRoutingRequest {
@@ -1130,7 +1152,9 @@ fn execute_lab_offload_with_timeout(
         let _ = tx.send(result);
     });
 
-    rx.recv_timeout(timeout).map_err(|_| {
+    let outcome = rx.recv_timeout(timeout);
+    heartbeat_deadline_seen.store(true, std::sync::atomic::Ordering::SeqCst);
+    outcome.map_err(|_| {
         let mut error = crate::Error::internal_unexpected(format!(
             "Lab offload dispatch did not finish before timeout after {}s",
             timeout.as_secs()
