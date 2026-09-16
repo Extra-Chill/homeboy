@@ -750,6 +750,9 @@ fn failure_diagnostics_for_data(
     if let Some(diagnostics) = runner_reconciliation_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
+    if let Some(diagnostics) = runner_connect_failure_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
 
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
@@ -979,6 +982,67 @@ fn is_partial_upgrade_outcome(data: &Value) -> bool {
             data.pointer("/controller/status").and_then(Value::as_str),
             Some("updated" | "unchanged")
         )
+}
+
+/// Lift `failure_kind` + `failure_message` already present on a failed
+/// `runner connect` payload. Exit 20 used to serialize as "without reporting a
+/// failure cause" even when the connect report named `daemon_startup_failure`
+/// and the unreachable-daemon message (#14715).
+fn runner_connect_failure_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
+    let report = runner_connect_failure_report(data)?;
+    let failure_kind = report
+        .get("failure_kind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let failure_message = report
+        .get("failure_message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let message = format!("{failure_kind}: {failure_message}");
+    let mut details = Map::new();
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String("/connection".to_string()),
+    );
+    details.insert(
+        "failure_kind".to_string(),
+        Value::String(failure_kind.to_string()),
+    );
+    details.insert(
+        "failure_message".to_string(),
+        Value::String(failure_message.to_string()),
+    );
+    Some(CommandDiagnostics {
+        code: format!("runner.connect.{failure_kind}"),
+        message: message.clone(),
+        details: Value::Object(details),
+        hints: None,
+        retryable: None,
+        failure_digest: Some(CommandFailureDigest {
+            summary: message,
+            stdout_tail: None,
+            stderr_tail: None,
+            artifact_refs: Vec::new(),
+            next_actions: Vec::new(),
+            retryable: None,
+        }),
+    })
+}
+
+fn runner_connect_failure_report(data: &Value) -> Option<&Value> {
+    let connection = data.get("connection");
+    let is_connect = data.get("command").and_then(Value::as_str) == Some("runner.connect")
+        || connection
+            .and_then(|value| value.get("action"))
+            .and_then(Value::as_str)
+            == Some("connect");
+    if !is_connect {
+        return None;
+    }
+    Some(connection.unwrap_or(data))
 }
 
 fn command_failed_diagnostics(
@@ -2945,6 +3009,61 @@ mod tests {
             "agent-task cook exited 1 without reporting a failure cause"
         );
         assert!(value["diagnostics"].get("failure_digest").is_none());
+    }
+
+    /// #14715: exit 20 is not "no cause" when the connect report already named
+    /// `failure_kind` and `failure_message`.
+    #[test]
+    fn runner_connect_exit_20_summarizes_failure_kind_and_message() {
+        let payload = json!({
+            "command": "runner.connect",
+            "id": "homeboy-lab",
+            "connection": {
+                "action": "connect",
+                "runner_id": "homeboy-lab",
+                "connected": false,
+                "failure_kind": "daemon_startup_failure",
+                "failure_message": "remote daemon is unreachable; refusing to replace or persist a session",
+                "failure_evidence": {
+                    "recovery_command": "homeboy runner connect homeboy-lab",
+                    "tunnel_state": "not_established"
+                }
+            }
+        });
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(payload),
+            20,
+            &CommandIdentity::with_operation("runner", "connect"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(value["exit_code"], 20);
+        assert_eq!(
+            value["diagnostics"]["code"],
+            "runner.connect.daemon_startup_failure"
+        );
+        assert_eq!(
+            value["summary"],
+            "daemon_startup_failure: remote daemon is unreachable; refusing to replace or persist a session"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["failure_kind"],
+            "daemon_startup_failure"
+        );
+        assert_eq!(
+            value["diagnostics"]["details"]["failure_message"],
+            "remote daemon is unreachable; refusing to replace or persist a session"
+        );
+        assert!(
+            !value["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("without reporting a failure cause"),
+            "{}",
+            value["summary"]
+        );
     }
 
     /// #13702: `success: false` is never emitted without a named cause. A
