@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -2239,8 +2240,8 @@ where
                     .ok_or_else(|| {
                         Error::internal_unexpected("controller admission has no daemon lease owner")
                     })?;
-                heartbeat_lease()?;
-                generation_store::record_job(job_id, lease_id)?;
+                let serving = heartbeat_lease()?;
+                generation_store::record_job_for_admission(job_id, lease_id, &serving)?;
                 Ok(body)
             }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
@@ -7118,7 +7119,47 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
+/// How long a lifecycle command waits for a lock held by a live owner before
+/// it inspects the holder. Hermetic fixtures shrink this through
+/// [`DAEMON_OPERATION_LOCK_WAIT_MS_ENV`]; the default matches the bounded
+/// admission-fence wait so an in-flight stop/start never times out recovery.
+const DAEMON_OPERATION_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const DAEMON_OPERATION_LOCK_WAIT_MS_ENV: &str = "HOMEBOY_DAEMON_OPERATION_LOCK_WAIT_MS";
+
+fn daemon_operation_lock_wait() -> Duration {
+    std::env::var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DAEMON_OPERATION_LOCK_DEFAULT_WAIT)
+}
+
+fn open_daemon_operation_lock_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The daemon supervisor is detached from this launcher. It must not inherit
+    // the lifecycle lock and strand later recovery after the launcher exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    options.open(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+    })
+}
+
+pub(crate) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
+    acquire_daemon_operation_lock_with_wait(daemon_operation_lock_wait())
+}
+
+/// The ensure path carries its own explicit wait so its timeout stays
+/// meaningful even though destructive lifecycle acquisition reclaims
+/// unowned locks after the shared probe window.
+pub(super) fn acquire_daemon_operation_lock_with_wait(
+    wait: Duration,
+) -> Result<DaemonOperationLock> {
     let state = state_path()?;
     let Some(parent) = state.parent() else {
         return Err(Error::internal_io(
@@ -7130,26 +7171,132 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    // The daemon supervisor is detached from this launcher. It must not inherit
-    // the lifecycle lock and strand later recovery after the launcher exits.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
 
-        options.custom_flags(libc::O_CLOEXEC);
+    // A short retry absorbs a live owner that is mid-lifecycle. If the wait
+    // expires, classify the holder instead of confusing an operator with an
+    // unexplained lock report (#14706: an unowned lock must self-heal, and a
+    // live holder must be named with the exact path it is holding).
+    let deadline = Instant::now() + wait;
+    loop {
+        let file = open_daemon_operation_lock_file(&path)?;
+        if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+            return Ok(DaemonOperationLock { file });
+        }
+        if Instant::now() >= deadline {
+            // Drop this probe descriptor first: holder detection must not
+            // observe the caller itself, or the caller would look like a live
+            // holder and an in-process reclaim could never converge.
+            drop(file);
+            return claim_daemon_operation_lock_after_wait(&path);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    let file = options.open(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-    })?;
-    if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
-        return Err(Error::internal_unexpected(format!(
-            "daemon lifecycle operation already in progress; lock is held at {}",
-            path.display()
-        )));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OperationLockHolderState {
+    /// Live PIDs that currently hold the lock open.
+    Live(Vec<u32>),
+    /// The lock path is provably unowned: no running process holds it open.
+    Unowned,
+    /// Unverifiable, so reclaiming would be a guess; report that instead.
+    Undetermined,
+}
+
+/// Identify live processes holding the lifecycle lock open.
+///
+/// `flock` dies with the holder, so when an operator reports "lock held with
+/// no process", the holder is unobservable through the lock itself. This
+/// distinguishes a named live holder from a genuinely unowned lock file
+/// without ever guessing.
+fn operation_lock_holder_pids(path: &Path) -> OperationLockHolderState {
+    let output = Command::new("lsof")
+        .args(["-t", "--"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => return OperationLockHolderState::Undetermined,
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect();
+    if output.status.success() {
+        if pids.is_empty() {
+            OperationLockHolderState::Unowned
+        } else {
+            OperationLockHolderState::Live(pids)
+        }
+    } else {
+        // lsof reports no match with a failure status; it may also fail on
+        // sandboxed or restricted environments, which stays unverifiable.
+        OperationLockHolderState::Undetermined
     }
-    Ok(DaemonOperationLock { file })
+}
+
+fn claim_daemon_operation_lock_after_wait(path: &Path) -> Result<DaemonOperationLock> {
+    match operation_lock_holder_pids(path) {
+        OperationLockHolderState::Live(holders) => {
+            let live: Vec<u32> = holders
+                .iter()
+                .copied()
+                .filter(|pid| pid_is_running(*pid))
+                .collect();
+            if !live.is_empty() {
+                let mut error = Error::internal_unexpected(format!(
+                    "daemon lifecycle operation is held by live PID {} at {}; wait for the holder, then retry `homeboy daemon recover --yes`",
+                    live.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    path.display()
+                ));
+                error.details["operation_lock_path"] =
+                    serde_json::json!(path.display().to_string());
+                error.details["operation_lock_holder_pids"] = serde_json::json!(live);
+                error.details["lifecycle_mutation"] = serde_json::json!("reclaim");
+                return Err(error);
+            }
+            // Every listed holder exited between lsof and now. The final try
+            // below absorbs the common race before any reclaim is attempted.
+            reclaim_unowned_daemon_operation_lock(path)
+        }
+        OperationLockHolderState::Unowned => reclaim_unowned_daemon_operation_lock(path),
+        OperationLockHolderState::Undetermined => {
+            // The holder could not be observed. Try once more; if the lock is
+            // still held by something lsof cannot see, say so instead of
+            // reclaiming on a guess.
+            let file = open_daemon_operation_lock_file(path)?;
+            if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+                return Ok(DaemonOperationLock { file });
+            }
+            Err(Error::internal_unexpected(format!(
+                "daemon lifecycle operation is in progress; the lock holder at {} could not be verified; rerun `homeboy daemon status` and retry the lifecycle command on the machine that holds the file",
+                path.display()
+            )))
+        }
+    }
+}
+
+/// Reclaim a lifecycle lock proven unowned.
+///
+/// Every lock holder observed has exited, so the advisory ownership is gone.
+/// Reopening requires a fresh descriptor because removing the held inode is
+/// the only way to break a stranded lock; the removal happens only after the
+/// holder proof above, and the final flock still has to succeed on the new
+/// inode.
+fn reclaim_unowned_daemon_operation_lock(path: &Path) -> Result<DaemonOperationLock> {
+    let _ = fs::remove_file(path);
+    let file = open_daemon_operation_lock_file(path)?;
+    if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+        return Ok(DaemonOperationLock { file });
+    }
+    Err(Error::internal_unexpected(format!(
+        "daemon lifecycle lock was reclaimed at {} but raced a new holder; retry the lifecycle command",
+        path.display()
+    )))
 }
 
 pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
@@ -7534,12 +7681,12 @@ pub(super) fn acquire_daemon_operation_lock_for_ensure(
     const RETRY: Duration = Duration::from_millis(50);
     let deadline = Instant::now() + wait;
     loop {
-        match acquire_daemon_operation_lock() {
+        match acquire_daemon_operation_lock_with_wait(wait) {
             Ok(lock) => return Ok(lock),
             Err(err)
                 if err
                     .message
-                    .contains("daemon lifecycle operation already in progress")
+                    .contains("daemon lifecycle operation is held by live PID")
                     && Instant::now() < deadline =>
             {
                 std::thread::sleep(RETRY);
@@ -7547,7 +7694,7 @@ pub(super) fn acquire_daemon_operation_lock_for_ensure(
             Err(err)
                 if err
                     .message
-                    .contains("daemon lifecycle operation already in progress") =>
+                    .contains("daemon lifecycle operation is held by live PID") =>
             {
                 return Err(Error::internal_unexpected(format!(
                     "timed out after {}s waiting for daemon ensure-running lifecycle lock; another caller may still be starting the daemon",

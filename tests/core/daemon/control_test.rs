@@ -8,6 +8,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
+use super::super::DAEMON_OPERATION_LOCK_WAIT_MS_ENV;
 use super::{
     artifact_content_url, can_recover_startup_attempt, ensure_running_with_operations,
     fetch_artifact_to_path, observe_startup_lease,
@@ -814,6 +815,7 @@ fn legacy_child_recovery_refuses_operation_and_owner_locks_without_mutation() {
             .expect("store bytes");
 
         let operation = super::super::acquire_daemon_operation_lock().expect("operation lock");
+        std::env::set_var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV, "150");
         let operation_error = super::recover_missing_child_identity(
             "lease-dead",
             u32::MAX,
@@ -825,7 +827,8 @@ fn legacy_child_recovery_refuses_operation_and_owner_locks_without_mutation() {
         .expect_err("operation lock blocks recovery");
         assert!(operation_error
             .message
-            .contains("operation already in progress"));
+            .contains("daemon lifecycle operation is held by live PID"));
+        std::env::remove_var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV);
         assert_eq!(
             std::fs::read(crate::paths::daemon_jobs_file().expect("jobs path"))
                 .expect("store bytes"),
