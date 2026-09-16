@@ -1384,6 +1384,9 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_pid: None,
         observed_lease_id: None,
         observed_token: None,
+        observed_running: None,
+        observed_fresh: None,
+        observed_reachable: None,
     };
     assert!(can_recover_startup_attempt(true, expected, &absent, &[]));
 
@@ -1391,6 +1394,9 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_pid: Some(4242),
         observed_lease_id: Some("stale-lease".to_string()),
         observed_token: Some(expected.to_string()),
+        observed_running: None,
+        observed_fresh: None,
+        observed_reachable: None,
     };
     assert!(can_recover_startup_attempt(true, expected, &stale, &[]));
 
@@ -1398,6 +1404,9 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_pid: Some(4343),
         observed_lease_id: Some("other-lease".to_string()),
         observed_token: Some("other-token".to_string()),
+        observed_running: None,
+        observed_fresh: None,
+        observed_reachable: None,
     };
     assert!(!can_recover_startup_attempt(
         true,
@@ -1414,6 +1423,121 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
                 .to_string()
         ],
     ));
+}
+
+#[test]
+fn startup_timeout_error_reports_failed_admission_without_fabricating_a_token_mismatch() {
+    let died = super::StartupLeaseObservation {
+        observed_pid: Some(4343),
+        observed_lease_id: Some("lease-new".to_string()),
+        observed_token: Some("attempt-token".to_string()),
+        observed_running: Some(false),
+        observed_fresh: Some(true),
+        observed_reachable: Some(true),
+    };
+    let error = super::startup_timeout_error(4343, "attempt-token", died.clone(), Vec::new());
+    assert!(
+        !error.to_string().contains("token and PID did not match"),
+        "the common timeout cause must not be blamed on a token/PID mismatch"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("the daemon process was not running"),
+        "the report must name the failing admission condition: {error}"
+    );
+    assert_eq!(
+        error.details["admission"],
+        serde_json::json!({
+            "running": false,
+            "fresh": true,
+            "reachable": true,
+            "startup_token_mismatch": false,
+        })
+    );
+
+    let unreachable = super::StartupLeaseObservation {
+        observed_pid: Some(4343),
+        observed_lease_id: Some("lease-new".to_string()),
+        observed_token: Some("attempt-token".to_string()),
+        observed_running: Some(true),
+        observed_fresh: Some(true),
+        observed_reachable: Some(false),
+    };
+    let error = super::startup_timeout_error(4343, "attempt-token", unreachable, Vec::new());
+    assert!(
+        error
+            .to_string()
+            .contains("the daemon API was not reachable"),
+        "a live-but-unreachable daemon is reported for what it is: {error}"
+    );
+
+    let competing = super::StartupLeaseObservation {
+        observed_pid: Some(4343),
+        observed_lease_id: Some("other-lease".to_string()),
+        observed_token: Some("other-token".to_string()),
+        observed_running: Some(true),
+        observed_fresh: Some(true),
+        observed_reachable: Some(true),
+    };
+    let error = super::startup_timeout_error(4343, "attempt-token", competing, Vec::new());
+    assert!(
+        error.to_string().contains("different startup token"),
+        "an actually observed competing token is still named: {error}"
+    );
+}
+
+#[test]
+fn startup_timeout_error_carries_child_exit_status_and_output_from_launcher_evidence() {
+    with_isolated_home(|_| {
+        super::super::write_termination_evidence(&DaemonTerminationEvidence {
+            classification: DaemonTerminationClassification::UnexpectedExit,
+            observed_at: "2026-09-11T00:00:00Z".to_string(),
+            lease_id: Some("lease-new".to_string()),
+            pid: Some(4343),
+            binary_identity: None,
+            active_jobs: 0,
+            resource_evidence: "unavailable: fixture has no OS resource snapshot".to_string(),
+            os_evidence: "unavailable: fixture has no OS evidence".to_string(),
+            exit_code: Some(23),
+            signal: None,
+            supervisor_signal: None,
+            stdout: None,
+            stderr: Some("error: daemon bind failed".to_string()),
+            stop_requested: false,
+        })
+        .expect("persist launcher termination evidence");
+
+        let died = super::StartupLeaseObservation {
+            observed_pid: Some(4343),
+            observed_lease_id: Some("lease-new".to_string()),
+            observed_token: Some("attempt-token".to_string()),
+            observed_running: Some(false),
+            observed_fresh: Some(true),
+            observed_reachable: Some(true),
+        };
+        let error = super::startup_timeout_error(4343, "attempt-token", died, Vec::new());
+        assert_eq!(
+            error.details["child_exit"]["exit_code"],
+            serde_json::json!(23)
+        );
+        assert_eq!(
+            error.details["child_exit"]["stderr"],
+            serde_json::json!("error: daemon bind failed")
+        );
+
+        // Evidence about a different daemon never leaks into this report.
+        let unrelated = super::StartupLeaseObservation {
+            observed_pid: Some(5252),
+            observed_lease_id: None,
+            observed_token: None,
+            observed_running: Some(false),
+            observed_fresh: Some(true),
+            observed_reachable: Some(true),
+        };
+        let error = super::startup_timeout_error(4343, "attempt-token", unrelated, Vec::new());
+        assert_eq!(error.details["child_exit"], serde_json::Value::Null);
+    });
 }
 
 #[test]

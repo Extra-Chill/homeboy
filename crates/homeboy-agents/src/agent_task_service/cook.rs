@@ -8814,7 +8814,10 @@ fn preflight_cook_workspace_resolved_base_ancestry(
                 "candidate_only_commits": ahead,
                 "next_action": "converge_destination_before_provider",
             });
-            return Err(error.with_retryable(true));
+            // A behind destination under a recipe-pinned base is a deterministic
+            // workspace topology condition, not a transport failure: retrying
+            // cannot converge it and must not spend transport retries (#14699).
+            return Err(error);
         }
         return Ok(Some(serde_json::json!({
             "schema": "homeboy/cook-workspace-base-snapshot/v1",
@@ -8849,7 +8852,10 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         "candidate_only_commits": ahead,
         "next_action": "converge_destination_before_provider",
     });
-    Err(error.with_retryable(true))
+    // Divergence requires an operator merge/rebase; retrying without one can
+    // never change the outcome, so it is deterministic and consumes no
+    // transport retries (#14699).
+    Err(error)
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can
