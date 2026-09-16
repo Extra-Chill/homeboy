@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+#
+# homeboy-edge-apply — apply a reviewed, git-tracked config file to a host path.
+#
+# Install at /usr/local/sbin/homeboy-edge-apply (root:root, 0755) and grant an
+# unprivileged agent account:
+#
+#     agent ALL=(root) NOPASSWD: /usr/local/sbin/homeboy-edge-apply *
+#
+# The caller supplies a target NAME, never content and never a path. Everything
+# dangerous — which repository, which file, where it lands, how it is validated
+# and reloaded — comes from root-owned config in /etc/homeboy-edge.d/.
+#
+# THE TRUST ANCHOR IS THE REMOTE BRANCH, NOT THE DISK.
+#
+# This wrapper fetches the repository itself, into a root-owned mirror the
+# caller cannot write, and reads content out of the git object store with
+# `git cat-file`. It never reads a working tree. That distinction is the entire
+# security model: a wrapper that copies from a checkout the caller can write is
+# not a config tool, it is an obfuscated root shell, because the caller simply
+# writes whatever it wants into the checkout first. Arbitrary nginx config is
+# arbitrary root — `root /` plus `alias` serves /etc/shadow, `proxy_pass`
+# reaches any loopback service.
+#
+# By reading only from a commit that is an ancestor of the configured trust ref
+# (default refs/heads/main), the content is always something a human merged in a
+# pull request. The agent can apply reviewed config and structurally cannot
+# apply anything else.
+#
+# Exit codes:
+#   0  applied, or already current
+#   1  apply failed and the previous file was restored
+#   2  usage or configuration error (nothing was touched)
+#   3  refused: live file drifted from last applied state
+#   4  refused: requested commit is not merged into the trust ref
+#
+set -Eeuo pipefail
+
+readonly PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+IFS=$' \t\n'
+umask 077
+
+# sudo resets the environment, but defend in depth: a single inherited GIT_*
+# variable (GIT_CONFIG_GLOBAL, GIT_SSH_COMMAND, GIT_EXEC_PATH) is arbitrary
+# command execution as root the next time git runs.
+for _var in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$_var"; done
+unset BASH_ENV CDPATH ENV LD_PRELOAD LD_LIBRARY_PATH GITHUB_TOKEN GH_TOKEN \
+    HOMEBOY_CONFIG HOMEBOY_CONFIG_DIR PERL5LIB PYTHONPATH
+export GIT_CONFIG_NOSYSTEM=1
+export HOME=/nonexistent
+export GIT_TERMINAL_PROMPT=0
+
+readonly PROGRAM=homeboy-edge-apply
+readonly CONFIG_DIR=/etc/homeboy-edge.d
+readonly STATE_DIR=/var/lib/homeboy-edge
+
+log() {
+    /usr/bin/logger -t "$PROGRAM" -- "$*" 2>/dev/null || true
+    printf '%s: %s\n' "$PROGRAM" "$*" >&2
+}
+
+die() {
+    local code=$1
+    shift
+    log "ERROR: $*"
+    exit "$code"
+}
+
+usage() {
+    cat >&2 <<EOF
+usage: $PROGRAM <target> [<commit-sha>]
+       $PROGRAM <target> --adopt
+
+  <target>       name of a configured target in $CONFIG_DIR
+  <commit-sha>   full 40-character sha; must be merged into the trust ref.
+                 Defaults to the current tip of the trust ref.
+  --adopt        record the live file's current hash as the applied state
+                 without changing anything. Use once after a reviewed manual
+                 edit to clear a drift refusal.
+EOF
+    exit 2
+}
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+TARGET=$1
+readonly TARGET
+[[ $TARGET =~ ^[a-z][a-z0-9-]{0,63}$ ]] || die 2 "invalid target name"
+
+ADOPT=false
+REQUESTED_SHA=
+if [[ $# -eq 2 ]]; then
+    if [[ $2 == --adopt ]]; then
+        ADOPT=true
+    else
+        REQUESTED_SHA=$2
+        [[ $REQUESTED_SHA =~ ^[0-9a-f]{40}$ ]] || die 2 "commit must be a full 40-character sha"
+    fi
+fi
+readonly ADOPT REQUESTED_SHA
+
+# ---------------------------------------------------------------------------
+# Root-owned target configuration
+# ---------------------------------------------------------------------------
+
+readonly CONF="$CONFIG_DIR/$TARGET.conf"
+[[ -f $CONF ]] || die 2 "no such target: $TARGET"
+
+conf_owner=$(/usr/bin/stat -c '%u' "$CONF")
+conf_mode=$(/usr/bin/stat -c '%a' "$CONF")
+[[ $conf_owner == 0 ]] || die 2 "target config is not owned by root"
+[[ $((8#$conf_mode & 8#022)) -eq 0 ]] || die 2 "target config is group- or world-writable"
+
+REPO_URL=
+TRUST_REF=refs/heads/main
+SOURCE_PATH=
+DEST_PATH=
+DEST_MODE=0644
+VALIDATE_CMD=
+RELOAD_CMD=
+PROBES=()
+
+while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%$'\r'}
+    [[ -z ${line// /} || $line == \#* ]] && continue
+    key=${line%%=*}
+    value=${line#*=}
+    [[ $key != "$line" ]] || die 2 "malformed config line: $line"
+    case $key in
+        REPO_URL)     REPO_URL=$value ;;
+        TRUST_REF)    TRUST_REF=$value ;;
+        SOURCE_PATH)  SOURCE_PATH=$value ;;
+        DEST_PATH)    DEST_PATH=$value ;;
+        DEST_MODE)    DEST_MODE=$value ;;
+        VALIDATE_CMD) VALIDATE_CMD=$value ;;
+        RELOAD_CMD)   RELOAD_CMD=$value ;;
+        PROBE)        PROBES+=("$value") ;;
+        # Fail closed: an unrecognised key means this wrapper is older than the
+        # config that was written for it, and silently ignoring it could skip a
+        # validation step the operator believed was in force.
+        *)            die 2 "unknown config key: $key" ;;
+    esac
+done < "$CONF"
+
+[[ -n $REPO_URL ]]     || die 2 "REPO_URL is required"
+[[ -n $SOURCE_PATH ]]  || die 2 "SOURCE_PATH is required"
+[[ -n $DEST_PATH ]]    || die 2 "DEST_PATH is required"
+[[ -n $VALIDATE_CMD ]] || die 2 "VALIDATE_CMD is required"
+[[ -n $RELOAD_CMD ]]   || die 2 "RELOAD_CMD is required"
+
+# https only: git remote helpers (ext::, file://) are command execution.
+[[ $REPO_URL =~ ^https://[A-Za-z0-9._~/-]+$ ]] || die 2 "REPO_URL must be a plain https URL"
+[[ $TRUST_REF =~ ^refs/heads/[A-Za-z0-9._/-]+$ ]] || die 2 "TRUST_REF must be a refs/heads/ ref"
+[[ $SOURCE_PATH =~ ^[A-Za-z0-9._/-]+$ && $SOURCE_PATH != /* && $SOURCE_PATH != *..* ]] \
+    || die 2 "SOURCE_PATH must be a relative path inside the repository"
+[[ $DEST_PATH == /* && $DEST_PATH != *..* ]] || die 2 "DEST_PATH must be absolute"
+[[ $DEST_MODE =~ ^0[0-7]{3}$ ]] || die 2 "DEST_MODE must be octal, e.g. 0644"
+
+readonly REPO_URL TRUST_REF SOURCE_PATH DEST_PATH DEST_MODE VALIDATE_CMD RELOAD_CMD
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+readonly MIRROR="$STATE_DIR/mirrors/$TARGET.git"
+readonly STATE_FILE="$STATE_DIR/state/$TARGET.sha256"
+readonly SNAPSHOT_DIR="$STATE_DIR/snapshots"
+
+/usr/bin/install -d -m 0700 -o root -g root \
+    "$STATE_DIR" "$STATE_DIR/mirrors" "$STATE_DIR/state" "$SNAPSHOT_DIR"
+
+hash_of() { /usr/bin/sha256sum "$1" | /usr/bin/cut -d' ' -f1; }
+
+live_hash=
+[[ -f $DEST_PATH ]] && live_hash=$(hash_of "$DEST_PATH")
+
+if [[ $ADOPT == true ]]; then
+    [[ -n $live_hash ]] || die 2 "cannot adopt: $DEST_PATH does not exist"
+    printf '%s\n' "$live_hash" > "$STATE_FILE"
+    log "adopted live state for $TARGET: $live_hash"
+    exit 0
+fi
+
+# Drift refusal. If the live file no longer matches what this wrapper last
+# applied, someone edited it by hand and their change is load-bearing until
+# proven otherwise. Overwriting silently is how sites-available and
+# sites-enabled drift apart in the first place.
+if [[ -f $STATE_FILE && -n $live_hash ]]; then
+    recorded=$(< "$STATE_FILE")
+    if [[ $recorded != "$live_hash" ]]; then
+        log "recorded: $recorded"
+        log "live:     $live_hash"
+        die 3 "$DEST_PATH has drifted from the last applied state; reconcile it into $REPO_URL, then re-run, or run '$PROGRAM $TARGET --adopt' to accept the live file as-is"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Fetch — into a mirror the caller cannot write, from the configured remote
+# ---------------------------------------------------------------------------
+
+git_mirror() { /usr/bin/git --git-dir="$MIRROR" "$@"; }
+
+if [[ ! -d $MIRROR ]]; then
+    /usr/bin/git init --bare --quiet "$MIRROR"
+    git_mirror remote add origin "$REPO_URL"
+else
+    existing=$(git_mirror remote get-url origin 2>/dev/null || printf '')
+    [[ $existing == "$REPO_URL" ]] \
+        || die 2 "mirror remote ($existing) does not match configured REPO_URL; remove $MIRROR to re-clone"
+fi
+
+git_mirror fetch --quiet --prune --no-tags origin "+$TRUST_REF:refs/remotes/trust" \
+    || die 2 "fetch failed for $REPO_URL"
+
+ANCHOR=$(git_mirror rev-parse refs/remotes/trust) || die 2 "cannot resolve $TRUST_REF"
+readonly ANCHOR
+
+if [[ -n $REQUESTED_SHA ]]; then
+    # An unmerged commit's objects are simply not in this mirror, and a merged
+    # one is by definition an ancestor. Both checks, so the refusal is explicit
+    # rather than an incidental "object not found".
+    git_mirror cat-file -e "${REQUESTED_SHA}^{commit}" 2>/dev/null \
+        || die 4 "commit $REQUESTED_SHA is not present in $TRUST_REF"
+    git_mirror merge-base --is-ancestor "$REQUESTED_SHA" "$ANCHOR" \
+        || die 4 "commit $REQUESTED_SHA is not merged into $TRUST_REF; open a pull request and merge it first"
+    SELECTED=$REQUESTED_SHA
+else
+    SELECTED=$ANCHOR
+fi
+readonly SELECTED
+
+# The path must be a regular file in that commit. A symlink entry (mode 120000)
+# would otherwise be materialised as file content.
+entry=$(git_mirror ls-tree "$SELECTED" -- "$SOURCE_PATH")
+[[ -n $entry ]] || die 2 "$SOURCE_PATH does not exist at $SELECTED"
+entry_mode=${entry%% *}
+[[ $entry_mode == 100644 || $entry_mode == 100755 ]] \
+    || die 2 "$SOURCE_PATH is not a regular file at $SELECTED (mode $entry_mode)"
+
+WORK=$(/usr/bin/mktemp -d /var/tmp/homeboy-edge-apply.XXXXXXXX)
+readonly WORK
+cleanup() { /bin/rm -rf "$WORK"; }
+trap cleanup EXIT
+
+readonly CANDIDATE="$WORK/candidate"
+git_mirror cat-file blob "$SELECTED:$SOURCE_PATH" > "$CANDIDATE" \
+    || die 2 "cannot read $SOURCE_PATH at $SELECTED"
+
+candidate_hash=$(hash_of "$CANDIDATE")
+
+if [[ $candidate_hash == "$live_hash" ]]; then
+    printf '%s\n' "$live_hash" > "$STATE_FILE"
+    log "$TARGET already current at $SELECTED ($candidate_hash); no reload"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Apply, validate, reload, probe — with rollback at every step past the write
+# ---------------------------------------------------------------------------
+
+SNAPSHOT=
+if [[ -n $live_hash ]]; then
+    SNAPSHOT="$SNAPSHOT_DIR/${TARGET}.$(/usr/bin/date +%Y%m%dT%H%M%SZ).${live_hash:0:12}"
+    /usr/bin/install -m 0600 -o root -g root "$DEST_PATH" "$SNAPSHOT"
+    log "snapshot: $SNAPSHOT"
+fi
+readonly SNAPSHOT
+
+run_configured() {
+    local -a argv
+    read -ra argv <<< "$1"
+    "${argv[@]}"
+}
+
+rollback() {
+    if [[ -z $SNAPSHOT ]]; then
+        /bin/rm -f "$DEST_PATH"
+        log "rollback: removed $DEST_PATH (no previous version existed)"
+    else
+        /usr/bin/install -m "$DEST_MODE" -o root -g root "$SNAPSHOT" "$DEST_PATH"
+        log "rollback: restored $DEST_PATH from $SNAPSHOT"
+    fi
+    if run_configured "$VALIDATE_CMD" >/dev/null 2>&1; then
+        run_configured "$RELOAD_CMD" >/dev/null 2>&1 \
+            && log "rollback: reload succeeded" \
+            || log "rollback: RELOAD FAILED — service may be serving stale config, operator attention required"
+    else
+        log "rollback: VALIDATE FAILED on the restored file — operator attention required"
+    fi
+}
+
+log "applying $TARGET: $SOURCE_PATH@${SELECTED:0:12} -> $DEST_PATH (${live_hash:-absent} -> $candidate_hash)"
+/usr/bin/install -m "$DEST_MODE" -o root -g root "$CANDIDATE" "$DEST_PATH"
+
+if ! run_configured "$VALIDATE_CMD"; then
+    rollback
+    die 1 "validation failed; $DEST_PATH was restored and nothing was reloaded"
+fi
+
+if ! run_configured "$RELOAD_CMD"; then
+    rollback
+    die 1 "reload failed; $DEST_PATH was restored"
+fi
+
+probe_failure=
+for probe in ${PROBES+"${PROBES[@]}"}; do
+    read -r probe_url probe_expect probe_resolve <<< "$probe"
+    [[ -n ${probe_expect:-} ]] || die 2 "PROBE needs a URL and an expected status: $probe"
+
+    probe_args=(-sS -o /dev/null -w '%{http_code}' --max-time 15)
+    [[ -n ${probe_resolve:-} ]] && probe_args+=(--resolve "$probe_resolve")
+
+    observed=
+    for attempt in 1 2 3; do
+        observed=$(/usr/bin/curl "${probe_args[@]}" "$probe_url" 2>/dev/null || printf '000')
+        [[ $observed == "$probe_expect" ]] && break
+        /bin/sleep 2
+    done
+
+    if [[ $observed != "$probe_expect" ]]; then
+        probe_failure="$probe_url expected $probe_expect, observed $observed"
+        break
+    fi
+    log "probe ok: $probe_url -> $observed"
+done
+
+if [[ -n $probe_failure ]]; then
+    rollback
+    die 1 "post-reload probe failed ($probe_failure); $DEST_PATH was restored"
+fi
+
+printf '%s\n' "$candidate_hash" > "$STATE_FILE"
+log "applied $TARGET at $SELECTED: $DEST_PATH is now $candidate_hash"
