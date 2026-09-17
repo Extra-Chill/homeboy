@@ -37,6 +37,13 @@ pub struct ResourcePolicyContext {
     pub runner_selection: ResourcePolicyRunnerSelection,
     /// Structured host snapshot used to derive the severity.
     pub host: ResourcePolicyHostSnapshot,
+    /// Outcome of a bounded reconnect attempted before `--placement auto`
+    /// degraded to local, when the Lab runner was observed disconnected.
+    /// Absent when no such attempt applied (already ready, absent, or a
+    /// non-auto placement). See
+    /// `homeboy_lab_runner::auto_placement_reconnect` (#14730).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_placement_reconnect: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

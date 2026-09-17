@@ -156,6 +156,7 @@ pub fn runner_admission_snapshot_for_status(
     ))
 }
 
+pub mod auto_placement_reconnect;
 mod git_dependency_materialization;
 mod homeboy_refresh;
 mod job_preparation;

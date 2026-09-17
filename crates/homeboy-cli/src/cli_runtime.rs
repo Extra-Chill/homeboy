@@ -3002,6 +3002,45 @@ fn preflight_hot_command_with_input(
             } else {
                 None
             };
+            // For `--placement auto` specifically, a disconnected runner gets
+            // one bounded reconnect attempt before this command commits to
+            // local execution. Explicit `--runner`/`--placement lab` pin their
+            // own runner and already surface their own connection failure
+            // through their own contract, so this stays scoped to the case
+            // that previously degraded silently (#14730).
+            let mut auto_placement_reconnect_diagnostic: Option<serde_json::Value> = None;
+            if hot_command.lab_offload_supported
+                && cli.runner.is_none()
+                && matches!(cli.placement, crate::cli_surface::Placement::Auto)
+                && lab_readiness.as_ref().is_some_and(|readiness| {
+                    readiness.state == crate::runner::runners::LabRunnerReadinessState::Disconnected
+                })
+            {
+                let observed = lab_readiness.take().expect("checked Some above");
+                let (resolved, attempt) =
+                    crate::runner::auto_placement_reconnect::attempt_auto_placement_reconnect(
+                        &observed,
+                    );
+                if attempt.attempted {
+                    eprintln!(
+                        "{}",
+                        if attempt.succeeded {
+                            format!(
+                                "Lab runner `{}` was disconnected; reconnected before dispatch.",
+                                attempt.runner_id.as_deref().unwrap_or("?")
+                            )
+                        } else {
+                            format!(
+                                "Lab runner `{}` was disconnected; a bounded reconnect was attempted and failed ({}). Falling back to local.",
+                                attempt.runner_id.as_deref().unwrap_or("?"),
+                                attempt.reason.as_deref().unwrap_or("unknown reason")
+                            )
+                        }
+                    );
+                }
+                auto_placement_reconnect_diagnostic = Some(attempt.to_json());
+                lab_readiness = Some(resolved);
+            }
             // Timestamp the projection after it has completed; it describes the
             // exact inventory consumed by the terminal placement decision.
             let lab_inventory_observed_at_ms = unix_timestamp_ms();
@@ -3139,6 +3178,7 @@ fn preflight_hot_command_with_input(
                 resource_policy_context.runner_selection.reason = "explicit_lab_runner".to_string();
                 resource_policy_context.runner_selection.runner_id = cli.runner.clone();
             }
+            resource_policy_context.auto_placement_reconnect = auto_placement_reconnect_diagnostic;
             let selected_runner_id = resource_policy_context.runner_selection.runner_id.clone();
             resource_policy::capture_context(resource_policy_context.clone());
             let result =

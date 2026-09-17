@@ -9855,6 +9855,9 @@ mod tests {
                     rig_lease_severity: "ok".to_string(),
                     rig_lease_concurrency_limit: None,
                 },
+                // This fixture models local dispatch under load, where no lab
+                // reconnect is attempted; #14730 records its outcome here.
+                auto_placement_reconnect: None,
             }
         }
 

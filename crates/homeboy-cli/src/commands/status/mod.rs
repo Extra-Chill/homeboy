@@ -37,8 +37,9 @@ use dashboard_table::log_dashboard_table;
 use git_cache::{fetch_project_remote_versions, log_unreleased_merges, StatusGitCache};
 
 pub use types::{
-    CompactContextStatus, CompactStatusOutput, GlobalActivityStatus, GlobalDaemonStatus,
-    GlobalInventoryStatus, GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
+    CompactContextStatus, CompactStatusOutput, DispatchReadinessStatus,
+    DispatchRunnerReadinessStatus, GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus,
+    GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
     ProjectComponentDashboardStatus, ProjectDashboardOutput, ProjectDashboardSummary,
     ProjectStatusRow, StatusArgs, StatusOutput, StatusPartial, StatusPartialComponent,
     StatusResult, StatusTiming, UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus,
@@ -153,6 +154,9 @@ fn run_unisolated(
         let cwd = std::env::current_dir()
             .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
         timer.finish("build_compact_snapshot");
+        timer.begin("refresh_dispatch_readiness");
+        let dispatch = compact_dispatch_readiness();
+        timer.finish("refresh_dispatch_readiness");
         return Ok((
             StatusResult::Compact(CompactStatusOutput {
                 command: "status",
@@ -161,9 +165,10 @@ fn run_unisolated(
                 controller,
                 context: CompactContextStatus {
                     status: "not_checked",
-                    detail: "CWD, Git, registry, runner, and control-plane inventory were not inspected.",
+                    detail: "CWD, Git, registry, and control-plane inventory were not inspected.",
                     command: "homeboy status --full",
                 },
+                dispatch,
                 action: "Run `homeboy status --full` for context/inventory enrichment, `homeboy status --all` to inspect every configured component, or `homeboy status --global` for local control-plane health.",
             }),
             0,
@@ -507,6 +512,65 @@ fn requires_component_enrichment(args: &StatusArgs) -> bool {
 
 const GLOBAL_RUNNER_LIMIT: usize = 64;
 const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
+
+/// Live dispatch-readiness answer for the default `status` command.
+///
+/// Bounded by the same probe machinery `--placement auto` itself consults
+/// (`refresh_lab_runner_readiness_for_admission`), so this answer matches what
+/// a dispatch would actually observe (#14736): a disconnected runner is
+/// visible here without a second `runner status` call, and the answer is a
+/// fresh bounded probe rather than an unrefreshed cache. With no Lab runner
+/// configured this returns immediately (`state: "absent"`, no probes) —
+/// dispatch readiness is unconditionally reported, not conditionally cheap.
+fn compact_dispatch_readiness() -> DispatchReadinessStatus {
+    dispatch_readiness_from_refresh(runner::refresh_lab_runner_readiness_for_admission())
+}
+
+/// Pure mapping from a readiness refresh outcome to the compact dispatch
+/// answer. Split from [`compact_dispatch_readiness`] so the placement/state
+/// logic is testable without a live runner probe.
+fn dispatch_readiness_from_refresh(
+    refreshed: homeboy::core::Result<runner::LabRunnerReadiness>,
+) -> DispatchReadinessStatus {
+    match refreshed {
+        Ok(readiness) => {
+            let state = readiness.state.as_str();
+            let effective_placement =
+                if state == "connected_ready" && readiness.selected_runner_id.is_some() {
+                    "lab"
+                } else {
+                    "local"
+                };
+            DispatchReadinessStatus {
+                effective_placement,
+                runner: DispatchRunnerReadinessStatus {
+                    state,
+                    selected_runner_id: readiness.selected_runner_id,
+                    available_runner_ids: readiness.available_runner_ids,
+                    blockers: readiness.reasons,
+                    remediation_commands: readiness.remediation_commands,
+                },
+                drill_down: "homeboy runner status --full",
+            }
+        }
+        // A failed or timed-out refresh must not manufacture "lab is ready" —
+        // local is always the answer that stays correct.
+        Err(error) => DispatchReadinessStatus {
+            effective_placement: "local",
+            runner: DispatchRunnerReadinessStatus {
+                state: "unavailable",
+                selected_runner_id: None,
+                available_runner_ids: Vec::new(),
+                blockers: vec![format!(
+                    "bounded runner readiness refresh failed: {}",
+                    error.message
+                )],
+                remediation_commands: vec!["homeboy runner status --full".to_string()],
+            },
+            drill_down: "homeboy runner status --full",
+        },
+    }
+}
 
 /// Read the controller's own local stores without resolving the caller's CWD,
 /// fetching component remotes, or probing runner daemons. Counts are capped at
@@ -1597,6 +1661,109 @@ mod tests {
     fn controller_staleness_logging_is_advisory_only() {
         log_controller_staleness(&stale_controller());
         log_controller_staleness(&empty_status_output().controller);
+    }
+
+    fn readiness(
+        state: runner::LabRunnerReadinessState,
+        selected_runner_id: Option<&str>,
+        available_runner_ids: &[&str],
+        reasons: &[&str],
+        remediation_commands: &[&str],
+    ) -> runner::LabRunnerReadiness {
+        runner::LabRunnerReadiness {
+            state,
+            selected_runner_id: selected_runner_id.map(str::to_string),
+            available_runner_ids: available_runner_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            remediation_commands: remediation_commands
+                .iter()
+                .map(|command| command.to_string())
+                .collect(),
+        }
+    }
+
+    /// A connected, policy-selected runner is the one case where default
+    /// `status` reports the preferred placement as `lab` (#14736).
+    #[test]
+    fn dispatch_readiness_reports_lab_only_when_a_runner_is_connected_and_selected() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::ConnectedReady,
+            Some("homeboy-lab"),
+            &["homeboy-lab"],
+            &[],
+            &[],
+        )));
+
+        assert_eq!(output.effective_placement, "lab");
+        assert_eq!(output.runner.state, "connected_ready");
+        assert_eq!(
+            output.runner.selected_runner_id.as_deref(),
+            Some("homeboy-lab")
+        );
+        assert_eq!(output.runner.available_runner_ids, vec!["homeboy-lab"]);
+    }
+
+    /// A disconnected runner must be visible from the default `status`
+    /// answer, without requiring a second `runner status` call, and it must
+    /// never be reported as the effective placement (#14736).
+    #[test]
+    fn dispatch_readiness_names_a_disconnected_runner_and_falls_back_to_local() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::Disconnected,
+            None,
+            &[],
+            &["daemon_transport_unreachable"],
+            &["homeboy runner connect homeboy-lab"],
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "disconnected");
+        assert!(output.runner.selected_runner_id.is_none());
+        assert!(output
+            .runner
+            .blockers
+            .iter()
+            .any(|reason| reason == "daemon_transport_unreachable"));
+        assert!(output
+            .runner
+            .remediation_commands
+            .iter()
+            .any(|command| command == "homeboy runner connect homeboy-lab"));
+    }
+
+    /// No Lab runner configured at all is `absent`, and dispatch still falls
+    /// back to `local` rather than erroring.
+    #[test]
+    fn dispatch_readiness_with_no_runners_configured_is_absent_and_local() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::Absent,
+            None,
+            &[],
+            &[],
+            &["homeboy runner connect <runner-id>"],
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "absent");
+    }
+
+    /// A failed or timed-out bounded refresh must never manufacture "lab is
+    /// ready" — the safe answer is always `local`, with the failure surfaced
+    /// as a blocker rather than silently dropped.
+    #[test]
+    fn dispatch_readiness_falls_back_to_local_when_the_refresh_itself_fails() {
+        let output = dispatch_readiness_from_refresh(Err(homeboy::core::Error::new(
+            homeboy::core::ErrorCode::RemoteCommandTimeout,
+            "bounded admission refresh timed out",
+            serde_json::json!({}),
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "unavailable");
+        assert!(!output.runner.blockers.is_empty());
     }
 
     #[test]

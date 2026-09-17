@@ -2022,6 +2022,33 @@ fn find_homeboy_source_checkout(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Resolve the Homeboy source checkout that produced the *running* binary,
+/// using only the executable's own path — never the caller's working
+/// directory.
+///
+/// A caller-cwd probe (`git merge-base` invoked with no `-C`) answers a
+/// question the operator's shell position has no bearing on: which checkout
+/// built this controller. A source build's executable always lives inside its
+/// checkout (`<checkout>/target/{debug,release}/homeboy`), so walking the
+/// executable path's own ancestors for the checkout marker resolves this
+/// deterministically regardless of the invoking directory (#14736). Installs
+/// with no local checkout (Homebrew, a bare binary download) correctly resolve
+/// to `None` — there is no ancestry to compare against.
+pub fn controller_source_checkout() -> Option<PathBuf> {
+    let exe_path = std::env::current_exe().ok()?;
+    controller_source_checkout_from(&exe_path)
+}
+
+/// [`controller_source_checkout`] against an explicit executable path, so the
+/// exe-path-based resolution is testable without depending on the test
+/// binary's own on-disk location.
+fn controller_source_checkout_from(exe_path: &Path) -> Option<PathBuf> {
+    let exe_path = exe_path
+        .canonicalize()
+        .unwrap_or_else(|_| exe_path.to_path_buf());
+    find_homeboy_source_checkout(&exe_path)
+}
+
 fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
     let exe_path = active_binary_path()?;
     active_binary_info_at(&exe_path)
