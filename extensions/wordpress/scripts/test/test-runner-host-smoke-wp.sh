@@ -398,8 +398,21 @@ passed=0
 failed=0
 failed_smokes=()
 last_failure_exit=0
+skipped=0
 for smoke_file in "${smoke_files[@]}"; do
     rel_path="${smoke_file#"${PLUGIN_PATH}/"}"
+
+    # Some smokes are isolated unit tests that replace WordPress primitives
+    # (options, hooks, abilities) with in-memory doubles. Real WordPress
+    # supersedes those doubles, so the smoke cannot assert anything meaningful
+    # here. Such a smoke declares itself out of this backend and still runs in
+    # the bare-PHP host-smoke backend.
+    if grep -q 'homeboy:host-smoke-backend[[:space:]]*=[[:space:]]*standalone' "$smoke_file" 2>/dev/null; then
+        echo "HOST_SMOKE_SKIP:${rel_path}:reason=standalone-only"
+        skipped=$((skipped + 1))
+        continue
+    fi
+
     echo "HOST_SMOKE_BEGIN:${rel_path}"
     if run_one_smoke "$smoke_file"; then
         echo "HOST_SMOKE_OK:${rel_path}"
@@ -416,7 +429,7 @@ for smoke_file in "${smoke_files[@]}"; do
 done
 
 echo ""
-echo "HOST_SMOKE_SUMMARY:passed=${passed} failed=${failed}"
+echo "HOST_SMOKE_SUMMARY:passed=${passed} failed=${failed} skipped=${skipped}"
 if [ "$failed" -ne 0 ]; then
     echo ""
     echo "Real-WordPress smoke tests failed (${failed} of $((passed + failed))):"
