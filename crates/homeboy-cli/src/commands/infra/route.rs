@@ -2537,6 +2537,7 @@ fn run_split_placement_cook_with_runtime(
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
+                crate::commands::agent_task::run::announce_resolved_execution_placement();
             }
         } else {
             progress_reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);

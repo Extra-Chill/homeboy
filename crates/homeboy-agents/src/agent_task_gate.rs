@@ -863,6 +863,12 @@ pub enum AgentTaskGateStatus {
     /// The candidate command failed, but the identical failure was reproduced
     /// against the controller-recorded immutable baseline.
     AcceptedInheritedFailure,
+    /// The gate command declared a portable Lab route and could not execute
+    /// under the resolved placement (e.g. no ready Lab runner), so it deferred
+    /// rather than running. This is neither a pass nor a candidate-attributable
+    /// failure: no evidence was produced either way, so the candidate stays
+    /// unverified rather than rejected (#14731).
+    Deferred,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -954,6 +960,11 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
             AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
             AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
             AgentTaskGateStatus::Skipped => HomeboyGateStatus::Skipped,
+            // `Blocked` already names "could not execute under the resolved
+            // environment" for a lab-capability preflight; a deferred workload
+            // is the same shape of evidence gap, so it reuses the variant
+            // rather than adding a new one to the shared contract (#14731).
+            AgentTaskGateStatus::Deferred => HomeboyGateStatus::Blocked,
             AgentTaskGateStatus::AcceptedInheritedFailure => {
                 HomeboyGateStatus::AcceptedInheritedFailure
             }
@@ -1207,6 +1218,25 @@ impl AgentTaskGateReport {
             )),
         }
     }
+
+    /// Detect the exact durable marker a portable-Lab-route command emits when
+    /// it could not run against the resolved placement (`homeboy
+    /// deferred-workload defer`, schema `homeboy/deferred-workload-result/v1`).
+    ///
+    /// This intentionally checks stdout content rather than exit code: the
+    /// deferred-workload contract exits `0` on defer (it is not itself an
+    /// error), which the exit-code-only classification this replaces
+    /// misread as a passing gate. A gate whose declared command produces this
+    /// exact shape never executed, so it can neither pass nor fail — it is a
+    /// distinct `Deferred` outcome (#14731).
+    fn gate_stdout_reports_deferred_workload(stdout: &str) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+            return false;
+        };
+        value.get("schema").and_then(serde_json::Value::as_str)
+            == Some("homeboy/deferred-workload-result/v1")
+            && value.get("status").and_then(serde_json::Value::as_str) == Some("deferred")
+    }
     #[expect(
         clippy::too_many_arguments,
         reason = "constructor mirrors persisted gate result fields"
@@ -1223,6 +1253,7 @@ impl AgentTaskGateReport {
         environment: AgentTaskGateEnvironment,
     ) -> Self {
         let id = id.into();
+        let stdout = stdout.into();
         let invocation = match command.as_slice() {
             [shell, flag, source] if shell == "sh" && flag == "-lc" => {
                 Some(AgentTaskGateInvocation::LegacyShell {
@@ -1231,7 +1262,9 @@ impl AgentTaskGateReport {
             }
             _ => None,
         };
-        let status = if exit_code == 0 {
+        let status = if Self::gate_stdout_reports_deferred_workload(&stdout) {
+            AgentTaskGateStatus::Deferred
+        } else if exit_code == 0 {
             AgentTaskGateStatus::Succeeded
         } else {
             AgentTaskGateStatus::Failed
@@ -1253,7 +1286,9 @@ impl AgentTaskGateReport {
                 AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure => {
                     PlanStepStatus::Failed
                 }
-                AgentTaskGateStatus::Skipped => PlanStepStatus::Skipped,
+                AgentTaskGateStatus::Skipped | AgentTaskGateStatus::Deferred => {
+                    PlanStepStatus::Skipped
+                }
             },
         )
         .inputs(PlanValues::new().json("command", &command))
@@ -1273,7 +1308,7 @@ impl AgentTaskGateReport {
             exit_code,
             termination: AgentTaskGateTermination::Completed,
             test_execution_outcome: None,
-            stdout: stdout.into(),
+            stdout,
             stderr: stderr.into(),
             capture: AgentTaskGateCapture::default(),
             cwd: None,
@@ -4107,6 +4142,69 @@ mod tests {
     }
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// #14731: `homeboy review test` and equivalent portable-Lab-route
+    /// commands exit `0` and print the deferred-workload marker when they
+    /// could not execute under the resolved placement. Reading exit code
+    /// alone misread this as a passing gate; this pins the marker-based
+    /// classification as `Deferred`, distinct from both `Succeeded` and
+    /// `Failed`.
+    #[test]
+    fn a_deferred_workload_marker_on_stdout_classifies_as_deferred_regardless_of_exit_code() {
+        for exit_code in [0, 1] {
+            let report = AgentTaskGateReport::new(
+                "gate-1",
+                vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    "homeboy review test homeboy".to_string(),
+                ],
+                exit_code,
+                r#"{"schema":"homeboy/deferred-workload-result/v1","status":"deferred","deferred_workload_id":"deferred-fixture","command":"review test"}"#,
+                String::new(),
+                None,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                AgentTaskGateEnvironment::default(),
+            );
+            assert_eq!(
+                report.status,
+                AgentTaskGateStatus::Deferred,
+                "exit_code={exit_code}"
+            );
+        }
+    }
+
+    /// A gate whose stdout is not the deferred-workload marker keeps the
+    /// ordinary exit-code classification.
+    #[test]
+    fn ordinary_stdout_is_not_misclassified_as_deferred() {
+        let succeeded = AgentTaskGateReport::new(
+            "gate-1",
+            vec!["sh".to_string(), "-lc".to_string(), "true".to_string()],
+            0,
+            "ok",
+            String::new(),
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+        assert_eq!(succeeded.status, AgentTaskGateStatus::Succeeded);
+
+        let failed = AgentTaskGateReport::new(
+            "gate-1",
+            vec!["sh".to_string(), "-lc".to_string(), "false".to_string()],
+            1,
+            "",
+            "boom",
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+        assert_eq!(failed.status, AgentTaskGateStatus::Failed);
+    }
 
     /// Serializes tests that mutate process-global environment state.
     ///

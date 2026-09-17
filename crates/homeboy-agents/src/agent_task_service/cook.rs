@@ -8005,6 +8005,30 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            // #14731: a gate that could not execute under the resolved
+            // placement is control-plane evidence, not a candidate verdict.
+            // The candidate patch is already durably promoted; this is
+            // deliberately not `policy_failure` and does not run
+            // differential-baseline comparison (no failure exists to
+            // compare). Retry re-verifies from the existing candidate rather
+            // than spending another provider execution.
+            AgentTaskCookLoopStatus::GatesDeferred => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "gates_deferred",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "at least one deterministic gate could not execute under the resolved \
+     placement and deferred; the candidate patch is promoted and unverified, not rejected. \
+     Retry once the required environment (e.g. a ready Lab runner) is available"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
                     return Ok(cook_report(CookReportInput {

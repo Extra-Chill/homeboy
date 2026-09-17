@@ -97,6 +97,11 @@ pub enum CookStatus {
     NoOpGateFailed,
     /// A deterministic gate failed.
     GateFailed,
+    /// A deterministic gate could not execute under the resolved placement
+    /// and deferred; no gate failed. The candidate patch is promoted and
+    /// durable but unverified, distinct from a rejected (`GateFailed`)
+    /// candidate.
+    GatesDeferred,
     /// Waiting on an independent acceptance verdict.
     AwaitingAcceptance,
     /// Stopped, but the candidate can still be recovered.
@@ -154,6 +159,7 @@ impl CookStatus {
             "no_changes" => Self::NoChanges,
             "no_op_gate_failed" => Self::NoOpGateFailed,
             "gate_failed" => Self::GateFailed,
+            "gates_deferred" => Self::GatesDeferred,
             "awaiting_acceptance" => Self::AwaitingAcceptance,
             "candidate_recoverable" => Self::CandidateRecoverable,
             "blocked_by_dependency" => Self::BlockedByDependency,
@@ -189,6 +195,7 @@ impl CookStatus {
             Self::NoChanges => "no_changes",
             Self::NoOpGateFailed => "no_op_gate_failed",
             Self::GateFailed => "gate_failed",
+            Self::GatesDeferred => "gates_deferred",
             Self::AwaitingAcceptance => "awaiting_acceptance",
             Self::CandidateRecoverable => "candidate_recoverable",
             Self::BlockedByDependency => "blocked_by_dependency",
@@ -324,6 +331,7 @@ mod tests {
             "no_candidate",
             "no_changes",
             "gate_failed",
+            "gates_deferred",
             "awaiting_acceptance",
             "cancelled",
             "timed_out",
@@ -395,6 +403,7 @@ mod tests {
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
+            CookStatus::GatesDeferred,
             CookStatus::AwaitingAcceptance,
             CookStatus::CandidateRecoverable,
             CookStatus::BlockedByDependency,
@@ -442,7 +451,13 @@ mod tests {
                 "{status} must exit 0 on status alone"
             );
         }
-        for status in ["failed", "gate_failed", "no_changes", "durable_failure"] {
+        for status in [
+            "failed",
+            "gate_failed",
+            "gates_deferred",
+            "no_changes",
+            "durable_failure",
+        ] {
             assert!(
                 !CookStatus::from_status(status).is_success_exit(),
                 "{status} must not exit 0 on status alone"

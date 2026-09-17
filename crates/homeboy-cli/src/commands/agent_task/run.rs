@@ -32,7 +32,10 @@ use super::args::{
     ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
-use super::gate_contract::{validate_gate_contracts, GateContractValidation};
+use super::gate_contract::{
+    reject_gates_unexecutable_under_resolved_placement, validate_gate_contracts,
+    GateContractValidation,
+};
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Provider evidence is streamed into an immutable, digest-addressed projection.
@@ -88,6 +91,63 @@ pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -
 /// interrupted Lab Cook ended up with no reported task identity at all (#10419).
 pub(crate) fn announce_durable_cook_identity(cook_id: Option<&str>, run_id: &str) {
     for line in durable_cook_identity_lines(cook_id, run_id) {
+        eprintln!("{line}");
+    }
+}
+
+/// Render the resolved execution placement this process already computed
+/// before dispatch, the same way preview does (#14729).
+///
+/// `None` when no preflight decision was captured for this process (e.g. a
+/// unit test that never ran the CLI's normal preflight path).
+fn resolved_execution_placement_line() -> Option<String> {
+    let directive = homeboy::core::parsed_command_preflight::captured_result()?.placement;
+    Some(format_resolved_execution_placement_line(&directive))
+}
+
+/// Pure formatter kept separate from its process-global-reading caller so it
+/// can be tested deterministically against a directly constructed directive,
+/// rather than through the shared `parsed_command_preflight` capture slot
+/// (which is process-wide and not safe to mutate from parallel tests).
+fn format_resolved_execution_placement_line(
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
+) -> String {
+    let requested = cli_placement_str(directive.requested);
+    let selected = match directive.selected {
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+    };
+    if selected == requested {
+        format!("cook: placement: {selected}")
+    } else {
+        let reason = directive
+            .fallback
+            .reason
+            .as_deref()
+            .map(|reason| format!(" — {reason}"))
+            .unwrap_or_default();
+        format!("cook: placement: {selected}  (requested: {requested}{reason})")
+    }
+}
+
+fn cli_placement_str(placement: homeboy_lab_runner_contract::Placement) -> &'static str {
+    match placement {
+        homeboy_lab_runner_contract::Placement::Auto => "auto",
+        homeboy_lab_runner_contract::Placement::Local => "local",
+        homeboy_lab_runner_contract::Placement::Lab => "lab",
+        homeboy_lab_runner_contract::Placement::LabOrLocal => "lab-or-local",
+    }
+}
+
+/// Report the resolved execution placement once identity is known.
+///
+/// Non-preview dispatch previously never reported this at all: an operator
+/// backgrounding a Cook (the common case, since durable identity is reported
+/// before materialization can even start) never saw preview's output and had
+/// no other line telling them a requested Lab placement had silently degraded
+/// to local execution (#14729).
+pub(crate) fn announce_resolved_execution_placement() {
+    if let Some(line) = resolved_execution_placement_line() {
         eprintln!("{line}");
     }
 }
@@ -394,6 +454,13 @@ pub(crate) fn preview_cook(
             .cloned(),
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
+    )?;
+    reject_gates_unexecutable_under_resolved_placement(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
     )?;
     record_preview_phase(&mut progress, "provider_preflight");
     preflight_cook_provider_credentials(&args)?;
@@ -1058,6 +1125,7 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
 
 fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     let mut policy = preview_placement_policy_from_argv(replay_args);
+    apply_resolved_placement(&mut policy);
     // Resource and Lab inventory are live execution inputs. Reading either here
     // made a read-only preview wait on the same unavailable control plane it was
     // intended to diagnose. Execution revalidates this admission after preview.
@@ -1073,6 +1141,33 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
         "replay_prerequisite": "connected runner readiness is revalidated before execution",
     });
     policy
+}
+
+/// Merge the already-resolved placement decision into preview's placement
+/// projection.
+///
+/// This process already ran the same Lab-readiness resolution that a real
+/// dispatch would use — `parsed_command_preflight::capture_result` completes
+/// once, before any command (preview included) executes — so surfacing it
+/// here costs no additional live I/O. Preview otherwise reported only the
+/// *requested* placement, which silently diverged from what actually ran
+/// whenever `auto`/`lab-or-local` degraded to local execution (#14729).
+fn apply_resolved_placement(policy: &mut Value) {
+    let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
+        return;
+    };
+    let directive = result.placement;
+    let selected = match directive.selected {
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+    };
+    policy["selected"] = serde_json::json!(selected);
+    if let Some(runner) = directive.runner.as_ref() {
+        policy["selected_runner"] = serde_json::json!(runner.runner_id);
+    }
+    if let Some(reason) = directive.fallback.reason.as_deref() {
+        policy["fallback_reason"] = serde_json::json!(reason);
+    }
 }
 
 fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
@@ -1964,6 +2059,317 @@ mod preview_tests {
                 "execution_placement_admission"
             );
         });
+    }
+
+    /// #14729: with no ready Lab runner, `--placement auto` preview must
+    /// report the *resolved* placement (local) rather than the request, and
+    /// must name why — not just that a substitution happened somewhere.
+    #[test]
+    fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("prompt source");
+            std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
+            let repository = tempfile::tempdir().expect("repository");
+            let primary = repository.path().join("primary");
+            let workspace = repository.path().join("task-worktree");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+                .status()
+                .expect("initialize primary")
+                .success());
+            for (key, value) in [
+                ("user.email", "fixture@example.test"),
+                ("user.name", "Fixture"),
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        primary.to_str().expect("UTF-8 primary"),
+                        "config",
+                        key,
+                        value
+                    ])
+                    .status()
+                    .expect("configure fixture repository")
+                    .success());
+            }
+            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+            assert!(std::process::Command::new("git")
+                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .expect("commit fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "task",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                ])
+                .status()
+                .expect("create linked workspace")
+                .success());
+
+            let cli = Cli::try_parse_from([
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
+                "--prompt".to_string(),
+                format!("@{}", source.path().display()),
+                "--to-worktree".to_string(),
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
+                "--no-finalize".to_string(),
+                "--verify".to_string(),
+                "true".to_string(),
+            ])
+            .expect("parse preview");
+
+            // No lab runner is registered at all: the readiness snapshot a real
+            // dispatch would compute is `absent`, with no available runners.
+            crate::cli_runtime::capture_preflight_result_for_test(
+                &cli,
+                Some(
+                    crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                        state: "absent".to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: Vec::new(),
+                        remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
+                        repair_admitted_runner_ids: Vec::new(),
+                    },
+                ),
+            );
+
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook command");
+            };
+
+            let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["placement"]["requested"], "auto");
+            assert_eq!(preview["resolved"]["placement"]["selected"], "local");
+            assert_eq!(
+                preview["resolved"]["placement"]["fallback_reason"],
+                "no Lab runner is configured"
+            );
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                summary
+                    .contains("Placement: local  (requested: auto — no Lab runner is configured)"),
+                "summary did not name the resolved placement and reason: {summary}"
+            );
+        });
+    }
+
+    /// #14731: preview must resolve `homeboy review test` — the exact gate
+    /// documented in Cook's own `--help` quick start — against the resolved
+    /// placement and refuse admission before a provider is dispatched, since
+    /// that gate is a portable Lab route that defers without a ready runner.
+    #[test]
+    fn preview_rejects_admission_for_a_lab_routed_gate_with_no_ready_lab_runner() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("prompt source");
+            std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
+            let repository = tempfile::tempdir().expect("repository");
+            let primary = repository.path().join("primary");
+            let workspace = repository.path().join("task-worktree");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+                .status()
+                .expect("initialize primary")
+                .success());
+            for (key, value) in [
+                ("user.email", "fixture@example.test"),
+                ("user.name", "Fixture"),
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        primary.to_str().expect("UTF-8 primary"),
+                        "config",
+                        key,
+                        value
+                    ])
+                    .status()
+                    .expect("configure fixture repository")
+                    .success());
+            }
+            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+            assert!(std::process::Command::new("git")
+                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .expect("commit fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "task",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                ])
+                .status()
+                .expect("create linked workspace")
+                .success());
+
+            let cli = Cli::try_parse_from([
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
+                "--prompt".to_string(),
+                format!("@{}", source.path().display()),
+                "--to-worktree".to_string(),
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
+                "--no-finalize".to_string(),
+                "--verify".to_string(),
+                "homeboy review test fixture-repository".to_string(),
+            ])
+            .expect("parse preview");
+
+            // No lab runner is registered at all: the readiness snapshot a
+            // real dispatch would compute is `absent`, with no available
+            // runners — the exact condition that made `homeboy review test`
+            // defer at execution time in the reported session.
+            crate::cli_runtime::capture_preflight_result_for_test(
+                &cli,
+                Some(
+                    crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                        state: "absent".to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: Vec::new(),
+                        remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
+                        repair_admitted_runner_ids: Vec::new(),
+                    },
+                ),
+            );
+
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook command");
+            };
+
+            let error =
+                preview_cook(*args, None).expect_err("an unexecutable gate must block preview");
+            assert!(
+                error
+                    .message
+                    .contains("homeboy review test fixture-repository"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains("cannot execute under the resolved local placement"),
+                "{}",
+                error.message
+            );
+        });
+    }
+
+    /// #14729: backgrounded/detached dispatches never see preview output, so
+    /// the non-preview path must report the same resolved-vs-requested
+    /// substitution independently. Exercised against a directly constructed
+    /// directive (not the shared process-global capture slot) so this stays
+    /// deterministic under parallel test execution.
+    #[test]
+    fn resolved_execution_placement_line_names_a_local_fallback() {
+        let directive = crate::core::parsed_command_preflight::PlacementDirective {
+            requested: homeboy_lab_runner_contract::Placement::Auto,
+            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            runner: None,
+            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: true,
+                reason: Some("the configured Lab runner is disconnected".to_string()),
+            },
+            override_authorization:
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: false,
+                    authority: None,
+                },
+        };
+
+        assert_eq!(
+            format_resolved_execution_placement_line(&directive),
+            "cook: placement: local  (requested: auto — the configured Lab runner is disconnected)"
+        );
+    }
+
+    #[test]
+    fn resolved_execution_placement_line_is_silent_when_nothing_diverged() {
+        let directive = crate::core::parsed_command_preflight::PlacementDirective {
+            requested: homeboy_lab_runner_contract::Placement::Local,
+            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            runner: None,
+            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            override_authorization:
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: true,
+                    authority: Some("operator --placement local".to_string()),
+                },
+        };
+
+        assert_eq!(
+            format_resolved_execution_placement_line(&directive),
+            "cook: placement: local"
+        );
     }
 
     #[test]
@@ -5489,6 +5895,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             .cloned(),
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
+    )?;
+    reject_gates_unexecutable_under_resolved_placement(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
     )?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the

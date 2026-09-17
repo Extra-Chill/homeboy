@@ -88,6 +88,12 @@ pub enum AgentTaskCookLoopStatus {
     IntentionalNoChange,
     NoChanges,
     NoOpGateFailed,
+    /// At least one declared deterministic gate deferred rather than
+    /// executing (no failure occurred). The candidate patch is promoted and
+    /// durable but unverified; retry is a verification retry, not a provider
+    /// remediation attempt, so it never spends provider execution budget
+    /// (#14731).
+    GatesDeferred,
     RetryRequested,
     RetriesExhausted,
 }
@@ -315,6 +321,12 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::RetryRequested
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
         AgentTaskCookLoopStatus::NoOpGateFailed
+    } else if options.promotion_report.status == AgentTaskPromotionStatus::GateDeferred {
+        // No gate failed, so `follow_up_request`/`failed_gates` are both
+        // empty and this would otherwise fall through to `GreenCompleted` —
+        // reporting unexecuted verification as a verified green candidate
+        // (#14731).
+        AgentTaskCookLoopStatus::GatesDeferred
     } else if intentional_no_change.is_some() {
         AgentTaskCookLoopStatus::IntentionalNoChange
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
@@ -2206,6 +2218,44 @@ mod tests {
         assert!(report.follow_up_request.is_none());
     }
 
+    /// #14731: a deferred gate is control-plane evidence, not a candidate
+    /// verdict. It must produce a distinct `GatesDeferred` outcome — never
+    /// `RetriesExhausted`/`RetryRequested` (both of which a caller maps
+    /// toward `policy_failure` for an exhausted or malformed retry), and
+    /// never a request to spend provider execution budget "fixing" a gate
+    /// that never actually ran.
+    #[test]
+    fn a_deferred_gate_reports_gates_deferred_and_never_requests_provider_remediation() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateDeferred,
+                vec![deferred_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-deferred-1".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.status, AgentTaskCookLoopStatus::GatesDeferred);
+        assert!(
+            report.follow_up_request.is_none(),
+            "a deferred gate must never spend a provider execution retrying remediation"
+        );
+        assert!(
+            report.failed_gates.is_empty(),
+            "a deferred gate is not a failure and must not appear in failed_gates"
+        );
+        assert_eq!(
+            report.promotion_status,
+            AgentTaskPromotionStatus::GateDeferred
+        );
+    }
+
     fn source_request() -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
@@ -2341,6 +2391,27 @@ mod tests {
             ],
             0,
             "ok",
+            String::new(),
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        )
+    }
+
+    /// A gate whose declared command emitted the exact durable marker a
+    /// portable-Lab-route command produces when it defers rather than
+    /// executing (exit code `0`, `homeboy/deferred-workload-result/v1`).
+    fn deferred_gate() -> AgentTaskGateReport {
+        AgentTaskGateReport::new(
+            "gate-1",
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "homeboy review test homeboy".to_string(),
+            ],
+            0,
+            r#"{"schema":"homeboy/deferred-workload-result/v1","status":"deferred","deferred_workload_id":"deferred-fixture"}"#,
             String::new(),
             None,
             AgentTaskGateVisibility::Visible,
