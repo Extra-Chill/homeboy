@@ -56,6 +56,18 @@ pub fn runtime_promotion_dir_in_root(data_root: &Path) -> PathBuf {
     data_root.join("runtime-promotion")
 }
 
+/// Directory holding leases for active local Cook provider dispatches, below
+/// an already-resolved data root.
+///
+/// Each concurrently dispatching `homeboy agent-task cook` process on this
+/// machine holds one lease file here for the duration of its local provider
+/// execution, so unrelated processes can see how many others are already
+/// running and apply the local-dispatch concurrency ceiling without a daemon
+/// or shared server (#14732).
+pub fn local_cook_dispatch_leases_dir_in_root(data_root: &Path) -> PathBuf {
+    data_root.join("local-cook-dispatch-leases")
+}
+
 /// Machine-global coordination directory for Homeboy runtime binary promotion.
 pub fn runtime_promotion_dir() -> Result<PathBuf> {
     Ok(runtime_promotion_dir_in_root(&homeboy_data()?))

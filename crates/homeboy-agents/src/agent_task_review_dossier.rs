@@ -192,20 +192,6 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
                     "minItems": 1
                 },
                 "compatibility": { "type": "string" },
-                "verification": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "required": ["command", "total", "passed", "failed", "ignored"],
-                        "properties": {
-                            "command": { "type": "string" },
-                            "total": { "type": "integer", "minimum": 0 },
-                            "passed": { "type": "integer", "minimum": 0 },
-                            "failed": { "type": "integer", "minimum": 0 },
-                            "ignored": { "type": "integer", "minimum": 0 }
-                        }
-                    }
-                },
                 "used_for": { "type": "string" }
             }
         }),
@@ -231,8 +217,14 @@ pub struct AiFilledReviewForm {
     /// Compatibility / impact assessment.
     #[serde(deserialize_with = "prose_field")]
     pub compatibility: String,
-    /// Optional numeric test claims supplied by the agent. Homeboy derives the
-    /// reviewer-visible verification evidence from durable candidate gates.
+    /// Optional numeric test claims. No longer requested by the dispatched
+    /// prompt or declared output schema (#14733): the deterministic gate
+    /// commands are controller-owned, so asking the agent to also run and
+    /// report them was redundant, non-deterministic, and unreliable evidence.
+    /// The field remains only so an older or noncompliant provider response
+    /// that still includes it parses instead of hard-failing; it is never
+    /// consulted — `verify_against_promotion` derives every reviewer-visible
+    /// verification entry solely from durable candidate gate evidence.
     #[serde(default)]
     pub verification: Vec<AiReviewVerificationClaim>,
     /// Self-reflective, concise description of the *process* the AI took —
@@ -332,10 +324,10 @@ impl AiFilledReviewForm {
     pub fn requirement_feedback() -> &'static str {
         "Return a `review_form` object in your task outputs with: `summary` (what is changing and why), \
 `what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
- assessment), optional `verification` entries with an exact command, elapsed_ms, and total/passed/failed/ignored counts, and \
-`used_for` (a concise, self-reflective description of the process you took — distinct from the summary of what \
-changed). Homeboy derives reviewer-visible verification from its durable candidate gate evidence. A successful \
-`used_for` is a genuine process reflection."
+ assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct from the \
+summary of what changed). Do not run or report verification commands: Homeboy runs the declared deterministic \
+gates itself and derives reviewer-visible verification exclusively from that durable candidate gate evidence. A \
+successful `used_for` is a genuine process reflection."
     }
 
     /// Validate that the agent filled every required slot with real content.

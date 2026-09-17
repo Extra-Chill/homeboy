@@ -953,6 +953,121 @@ fn provider_timeout_report_surfaces_budget_and_exact_recovery() {
     );
 }
 
+/// Regression for #14732: the terminal failure previously advertised a
+/// `cook-continue --timeout-ms` resume command in `next_actions` even while
+/// `recovery_legal` was false because deferred cleanup had not gone terminal.
+/// An operator following the printed guidance hit a durable retry that the
+/// run's own admission had already refused. Only a command that is admitted
+/// right now may appear in `next_actions`.
+#[test]
+fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let options = compile_options("timeout-pending-cleanup");
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist timeout recipe");
+    let mut plan = options.identity.initial_plan.clone();
+    plan.options.timeout_ms = Some(1_200_000);
+    plan.tasks[0].limits.timeout_ms = Some(1_200_000);
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&plan, "timeout-pending-run", |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("persist timeout run");
+    lifecycle_store
+        .record_cook_attempt("timeout-pending-cleanup", 1, "timeout-pending-run")
+        .expect("index timeout run");
+
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Timeout;
+    aggregate.outcomes[0].failure_classification =
+        Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
+    aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+        class: "agent_task.provider_timeout".to_string(),
+        message: "provider exceeded timeout_ms=1200000".to_string(),
+        data: serde_json::json!({ "timeout_ms": 1_200_000 }),
+    }];
+
+    let mut report = cook_report(CookReportInput {
+        cook_id: "timeout-pending-cleanup".to_string(),
+        status: "provider_failure",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: None,
+        exit_code: 1,
+        invocation_latest_run_id: Some("timeout-pending-run"),
+    });
+    report.value.failure_context = Some(AgentTaskCookFailureContext {
+        cook_id: "timeout-pending-cleanup".to_string(),
+        latest_run_id: "timeout-pending-run".to_string(),
+        selected_run_id: None,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        promotion_provenance: None,
+        durable_recipe_ref: "homeboy://agent-task/cooks/timeout-pending-cleanup/recipe".to_string(),
+        lifecycle_state: "Failed".to_string(),
+        phase: "provider".to_string(),
+        reason_code: "failed".to_string(),
+        diagnostic: None,
+        continuation_admission: None,
+        blocking_claim: None,
+        provider_budget_consumed: true,
+        provider_executions_consumed: 1,
+        recovery_legal: false,
+        recovery_reason: "generic".to_string(),
+        legal_actions: Vec::new(),
+        next_actions: Vec::new(),
+    });
+
+    // `provider_execution_active: true` is the same "deferred cleanup has not
+    // gone terminal yet" signal the real timeout path observes when a
+    // provider process is still winding down.
+    make_provider_timeout_actionable(
+        Some(&lifecycle_store),
+        &mut report,
+        &aggregate,
+        &plan,
+        "timeout-pending-run",
+        Some(AgentTaskExecutionBudget::new(1, 1, 0)),
+        true,
+    );
+
+    let context = report.value.failure_context.expect("failure context");
+    assert!(
+        !context.recovery_legal,
+        "recovery must not be legal while cleanup is pending"
+    );
+    assert!(
+        context.recovery_reason.contains("deferred cleanup"),
+        "{}",
+        context.recovery_reason
+    );
+    assert!(
+        context.legal_actions.is_empty(),
+        "no legal actions while cleanup is pending: {:?}",
+        context.legal_actions
+    );
+    assert!(
+        context.next_actions.iter().all(|action| {
+            action.action.as_str() != "resume" && !action.command.contains("cook-continue")
+        }),
+        "next_actions must not offer a resume command while cleanup is pending: {:?}",
+        context.next_actions
+    );
+    assert!(
+        context
+            .next_actions
+            .iter()
+            .any(|action| action.command.contains("diagnose")),
+        "the diagnose action remains offered: {:?}",
+        context.next_actions
+    );
+}
+
 #[test]
 fn unfingerprinted_timeout_next_action_is_worktree_git_status_not_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -6842,6 +6957,20 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
+    // #14733: the dispatched prompt no longer asks the agent to run or report
+    // its own verification; Homeboy runs the declared gates and derives
+    // `review_form.verification` from that evidence alone.
+    assert!(request
+        .instructions
+        .contains("Do not run or report verification commands"));
+    assert!(!request
+        .instructions
+        .contains("structured `verification` entries"));
+    assert_eq!(
+        declaration.structural_schema["properties"].get("verification"),
+        None,
+        "the declared output schema must not request a `verification` property"
+    );
     assert_eq!(
         request.metadata["publication"],
         serde_json::json!({
@@ -6887,8 +7016,13 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
     assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
     assert!(instructions.contains("1 private deterministic gate(s)"));
     assert!(!instructions.contains("private-gate --token secret"));
-    assert!(instructions.contains("focused check only when it directly reduces uncertainty"));
-    assert!(instructions.contains("authoritative final gate evidence separately"));
+    // #14733: the agent is told not to run or report its own verification —
+    // never nudged toward "a focused check" or asked to report its result.
+    assert!(instructions.contains("not for running or improvising your own verification"));
+    assert!(instructions.contains("Do not run or report a verification command yourself"));
+    assert!(instructions.contains("authoritative gate evidence separately after harvest"));
+    assert!(!instructions.contains("focused check"));
+    assert!(!instructions.contains("Report any focused command"));
 
     project_controller_owned_gate_contract(&mut options);
     assert_eq!(
@@ -6897,6 +7031,58 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
             .matches("Declared deterministic gates are controller-owned.")
             .count(),
         1
+    );
+}
+
+/// #14733 end-to-end: the complete dispatched prompt — both the gate contract
+/// and the review-form dossier projections applied together, exactly as
+/// `materialize_initial_cook_attempt_with_stores` applies them before a
+/// provider is dispatched — asks the agent for the source change and the
+/// qualitative dossier fields only. It never asks the agent to run, choose, or
+/// report the result of any verification command, and the declared output
+/// schema has no `verification` slot for the agent to fill.
+#[test]
+fn dispatched_prompt_never_asks_the_agent_to_run_or_report_verification() {
+    let mut options = batch_cook_options(
+        "dispatched-prompt-no-agent-verification",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.finalization.no_finalize = false;
+    options.gates.verify = vec!["homeboy review test sample-plugin".to_string()];
+
+    project_controller_owned_gate_contract(&mut options);
+    project_initial_finalizing_review_form_contract(&mut options);
+
+    let request = &options.identity.initial_plan.tasks[0];
+    let instructions = &request.instructions;
+    for forbidden in [
+        "focused check",
+        "Report any focused command",
+        "optional structured `verification`",
+        "run a command",
+        "run your own test",
+    ] {
+        assert!(
+            !instructions.contains(forbidden),
+            "dispatched prompt must not ask the agent to run/report verification, found {forbidden:?} in {instructions}"
+        );
+    }
+    assert!(instructions.contains("Do not run or report a verification command yourself"));
+    assert!(instructions.contains("Do not run or report verification commands"));
+
+    let declaration = request
+        .output_declarations
+        .iter()
+        .find(|declaration| declaration.name == "review_form")
+        .expect("review form declaration");
+    assert_eq!(
+        declaration.structural_schema["properties"].get("verification"),
+        None,
+        "the declared review_form schema must not request agent-run verification"
+    );
+    assert_eq!(
+        declaration.structural_schema["required"],
+        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
     );
 }
 

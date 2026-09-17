@@ -123,6 +123,7 @@ pub mod lab_offload;
 pub mod lab_routing;
 pub mod lab_workspace_provenance;
 pub use homeboy_lifecycle_contract::lifecycle;
+pub mod local_dispatch_admission;
 pub mod markdown;
 pub use homeboy_lab_contract::materialization_currency;
 pub mod matrix_artifact_summary;
