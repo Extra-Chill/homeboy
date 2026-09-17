@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.375.0] - 2026-09-17
+
+### Added
+- add homeboy-edge-apply privileged config wrapper
+- claim-aware workspace reclamation with reaping audit
+
+### Fixed
+- report one status for an unreachable edge-apply probe
+- omit preview-generated run ids from Replay
+- fingerprint timeout uncommitted worktree patches
+- surface connect failure causes and stop Auto Cook parking on stale Lab
+- admit preview replay for unmaterialized worktrees
+- dispatch reliability — resolver surfacing, owned handoff claims, dispatch heartbeats
+- make recover --yes self-sufficient for dead lease recovery
+- report the real failure cause for daemon startup timeouts and pre-provider validation
+
 ## [0.374.6] - 2026-09-16
 
 ### Changed
