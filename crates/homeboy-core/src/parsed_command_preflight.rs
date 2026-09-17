@@ -376,6 +376,19 @@ pub fn resolve_parsed_command_preflight(
     } else {
         FallbackDirective::None
     };
+    // Operator-facing evidence for *why* an operator's Lab-desiring placement
+    // resolved to local execution. This was structurally present but never
+    // populated, so a silent auto -> local degrade left no trace in preview or
+    // dispatch output for the operator to discover later (#14729).
+    let fallback_reason = (selected == EffectiveExecutionPlacement::Local
+        && !matches!(input.placement, PlacementIntent::Local))
+    .then(|| {
+        policy
+            .lab_readiness
+            .as_ref()
+            .and_then(lab_readiness_fallback_reason)
+    })
+    .flatten();
     let placement = PlacementDirective {
         requested: match input.placement {
             PlacementIntent::Auto => Placement::Auto,
@@ -393,7 +406,7 @@ pub fn resolve_parsed_command_preflight(
                         input.placement,
                         PlacementIntent::Auto | PlacementIntent::LabOrLocal
                     )),
-            reason: None,
+            reason: fallback_reason,
         },
         override_authorization: ExecutionPlacementOverrideAuthorization {
             authorized: matches!(input.placement, PlacementIntent::Local),
@@ -414,6 +427,33 @@ pub fn resolve_parsed_command_preflight(
         generic_route_runner_id,
         selected_runner_id: policy.selected_runner_id,
     })
+}
+
+/// Render the reason a Lab-desiring placement request degraded to local
+/// execution. `readiness.reasons` already carries a specific per-runner
+/// explanation (e.g. `capacity_reached`) when at least one runner is
+/// registered; a snapshot with no registered runner at all (`absent`) or
+/// otherwise blocked state carries no per-runner reasons, so this falls back
+/// to a human-readable rendering of the readiness state itself rather than
+/// leaving the operator with no explanation at all.
+fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<String> {
+    if !readiness.reasons.is_empty() {
+        return Some(readiness.reasons.join("; "));
+    }
+    let described = match readiness.state.as_str() {
+        "connected_ready" => return None,
+        "absent" => "no Lab runner is configured",
+        "disconnected" => "the configured Lab runner is disconnected",
+        "stale" => "the configured Lab runner's admission is stale",
+        "connected_ineligible" => "the connected Lab runner is not eligible for this workload",
+        "capacity_blocked" => "the configured Lab runner is at capacity",
+        other => {
+            return Some(format!(
+                "no eligible Lab runner is currently ready ({other})"
+            ))
+        }
+    };
+    Some(described.to_string())
 }
 
 /// Fully resolved placement policy. Parsed-command preflight owns every policy

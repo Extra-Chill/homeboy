@@ -3294,6 +3294,40 @@ pub(crate) fn placement_directive(
     .placement
 }
 
+/// Capture the exact preflight result a real dispatch would compute for
+/// `cli` when Lab readiness resolves to `lab_readiness`, then persist it into
+/// the process-wide captured slot preview and dispatch both read. Exercises
+/// the production `resolve_parsed_command_preflight` (including
+/// `generic_route_policy_snapshot`) rather than hand-building a placement
+/// directive, so tests prove the same wiring a real invocation uses (#14729).
+#[cfg(test)]
+pub(crate) fn capture_preflight_result_for_test(
+    cli: &Cli,
+    lab_readiness: Option<crate::core::parsed_command_preflight::LabReadinessSnapshot>,
+) {
+    crate::core::parsed_command_preflight::reset_captured_result_for_test();
+    let normalized_args = vec!["homeboy".to_string()];
+    let input = resource_policy::parsed_command_preflight_input(cli, &normalized_args);
+    let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        normalized_args,
+        input,
+        crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
+            resource_admission_evidence:
+                crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness,
+            selected_runner_id: None,
+            generic_route: generic_route_policy_snapshot(cli, None),
+            deferred_pressure_refusal: false,
+            runner_admitted: false,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect("test preflight fixture resolves without a selected runner");
+    crate::core::parsed_command_preflight::capture_result(result);
+}
+
 #[cfg(test)]
 fn preflight_hot_command_with(
     cli: &Cli,
