@@ -4410,10 +4410,26 @@ fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<Collecte
 }
 
 fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagnostic> {
+    // A provider that exited 0 makes every raw, unparsed process-stream
+    // excerpt (progress heartbeats, not a diagnostics payload) causally
+    // meaningless: it is a slice of the progress-event stream, not an
+    // explanation. When the provider succeeded, a later phase is the root
+    // cause; root-cause attribution must never select the heartbeat noise
+    // instead (#14735). Structured provider errors and nested diagnostics
+    // extracted *from* a stream still carry real signal and are unaffected.
+    let provider_succeeded = collected
+        .iter()
+        .any(|item| is_successful_process_exit(&format!("{} {}", item.class, item.message)));
+    let is_unparsed_stream_noise = |item: &CollectedDiagnostic| {
+        item.source == "hydrated_process_stream" && item.class == "provider.process_stream"
+    };
     // Dedupe by (class, message) keeping the first occurrence, then order the
     // most actionable root-cause diagnostics first.
     let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
     for item in collected {
+        if provider_succeeded && is_unparsed_stream_noise(&item) {
+            continue;
+        }
         let trimmed = item.message.trim();
         if trimmed.is_empty() {
             continue;
@@ -5152,16 +5168,11 @@ fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<Collected
                     )
                 })
             });
-        let gate_name = gate
-            .and_then(|gate| gate.get("name").or_else(|| gate.get("command")))
-            .and_then(Value::as_str)
-            .unwrap_or("deterministic gate");
+        let gate_name = gate_display_name(gate);
         return Some(CollectedDiagnostic {
             task_id: "promotion".to_string(),
             class: "agent_task.promotion_gate_failed".to_string(),
-            message: gate
-                .and_then(|gate| gate.get("message").and_then(Value::as_str))
-                .map(str::to_string)
+            message: gate_failure_message(gate)
                 .unwrap_or_else(|| format!("Deterministic promotion gate failed: {gate_name}")),
             source: "current_lifecycle".to_string(),
             data: promotion.clone(),
@@ -5188,6 +5199,52 @@ fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<Collected
             .to_string(),
         source: "current_lifecycle".to_string(),
         data: finalization.clone(),
+    })
+}
+
+/// Name a failed deterministic gate from whatever shape its report carries.
+/// The real, production `AgentTaskGateReport` has no `name`/`message` field
+/// at all: its identity is `id` and its command is `command: Vec<String>`, so
+/// naming it only fell back to the generic `"deterministic gate"` placeholder
+/// for every real gate failure (#14735). Legacy/test fixtures that carry a
+/// bare `name`/string `command` are still honored.
+fn gate_display_name(gate: Option<&Value>) -> String {
+    gate.and_then(|gate| {
+        gate.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| gate.get("name").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| {
+                gate.pointer("/failure_evidence/command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                gate.get("command").and_then(|command| match command {
+                    Value::String(command) => Some(command.clone()),
+                    Value::Array(parts) => {
+                        let joined = parts
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (!joined.is_empty()).then_some(joined)
+                    }
+                    _ => None,
+                })
+            })
+    })
+    .unwrap_or_else(|| "deterministic gate".to_string())
+}
+
+/// The human-readable reason a gate failed, preferring the producer's own
+/// summary (`failure_evidence.summary`) over the legacy bare `message` field.
+fn gate_failure_message(gate: Option<&Value>) -> Option<String> {
+    gate.and_then(|gate| {
+        gate.pointer("/failure_evidence/summary")
+            .and_then(Value::as_str)
+            .or_else(|| gate.get("message").and_then(Value::as_str))
+            .map(str::to_string)
     })
 }
 
