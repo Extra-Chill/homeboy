@@ -317,6 +317,7 @@ pub(crate) fn resource_policy_context_from_evaluation(
             rig_lease_severity: severity_str(resources.rig_leases.recommendation).to_string(),
             rig_lease_concurrency_limit: resources.rig_leases.concurrency_limit,
         },
+        auto_placement_reconnect: None,
     }
 }
 

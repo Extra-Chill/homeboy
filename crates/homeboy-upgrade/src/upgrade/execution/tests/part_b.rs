@@ -486,6 +486,36 @@ fn source_workspace_resolves_from_nested_checkout_path() {
     assert_eq!(resolved, dir.path());
 }
 
+/// The controller checkout resolution must depend only on the running
+/// executable's own path, never on the caller's working directory (#14736).
+/// The test process's actual cwd (somewhere under the workspace, not this
+/// fabricated checkout) is left untouched, so a passing assertion already
+/// proves cwd independence: the answer can only have come from `exe_path`.
+#[test]
+fn controller_source_checkout_resolves_from_exe_path_not_cwd() {
+    let dir = checkout_with_package_name("homeboy");
+    let exe_path = dir.path().join("target/release/homeboy");
+    std::fs::create_dir_all(exe_path.parent().expect("parent")).expect("target dir");
+    std::fs::write(&exe_path, "fake binary").expect("write fake exe");
+
+    let resolved =
+        controller_source_checkout_from(&exe_path).expect("checkout resolves from exe path");
+
+    assert_eq!(resolved, dir.path().canonicalize().expect("canonicalize"));
+}
+
+/// A binary with no ancestor checkout marker (a Homebrew or bare-download
+/// install) resolves to `None` rather than falling back to an unrelated cwd.
+#[test]
+fn controller_source_checkout_is_none_without_a_checkout_marker() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let exe_path = dir.path().join("bin/homeboy");
+    std::fs::create_dir_all(exe_path.parent().expect("parent")).expect("bin dir");
+    std::fs::write(&exe_path, "fake binary").expect("write fake exe");
+
+    assert!(controller_source_checkout_from(&exe_path).is_none());
+}
+
 #[test]
 fn source_upgrade_preparation_preserves_detached_checkout_identity() {
     let remote = tempfile::tempdir().expect("remote tempdir");
