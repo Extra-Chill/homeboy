@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.3] - 2026-09-17
+
+### Fixed
+- let isolated smokes opt out of the real-WordPress backend
+
 ## [3.48.2] - 2026-09-13
 
 ### Fixed
