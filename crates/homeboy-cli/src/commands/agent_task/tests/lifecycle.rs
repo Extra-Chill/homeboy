@@ -2353,6 +2353,74 @@ fn diagnose_reads_no_change_gate_results_as_the_current_denial() {
 }
 
 #[test]
+fn diagnose_names_the_gate_not_the_successful_provider_stream_noise() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let stream_path = evidence_dir.path().join("executor.stdout");
+        std::fs::write(
+            &stream_path,
+            "{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:00Z\"}\n{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:01Z\"}",
+        )
+        .expect("write heartbeat stream");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "provider",
+                    "message": "OpenCode CLI exited with status 0."
+                }],
+                "stdout_uri": format!("file://{}", stream_path.display()),
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-gate-over-successful-stream";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorInputEvidenceExecutor {
+                evidence_uris: vec![format!("file://{}", evidence_path.display())],
+            }),
+        )
+        .expect("run completed with a succeeded provider outcome");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "patch_artifact": { "sha256": "candidate" },
+                "deterministic_gates": [{
+                    "name": "cargo test -p homeboy-cli",
+                    "status": "failed",
+                    "message": "gate proof failed"
+                }]
+            }),
+        )
+        .expect("persist gate failure after a successful provider");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        // The provider exited 0 and only heartbeat noise came from its
+        // process stream; the deterministic gate that actually failed after
+        // the provider succeeded must be named, never a slice of the
+        // progress-event stream (#14735).
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.promotion_gate_failed"
+        );
+        assert_eq!(diagnosis["root_cause"]["message"], "gate proof failed");
+        assert_ne!(diagnosis["root_cause"]["class"], "provider.process_stream");
+    });
+}
+
+#[test]
 fn diagnose_prioritizes_current_finalization_failure_over_controller_history() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-finalization-failure";
