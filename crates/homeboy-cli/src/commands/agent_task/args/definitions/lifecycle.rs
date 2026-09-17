@@ -829,8 +829,10 @@ pub struct FinalizePrArgs {
     /// Worktree path containing the manual finalization candidate.
     #[arg(long, value_name = "PATH", required_unless_present = "recover")]
     pub path: Option<String>,
-    /// Registered component identity for disambiguating a shared-repository worktree.
-    #[arg(long, value_name = "COMPONENT_ID", conflicts_with = "recover")]
+    /// Registered component identity for disambiguating a shared-repository worktree. With
+    /// `--recover`, Homeboy prefers the component identity Cook durably recorded at admission;
+    /// this is a fallback for pre-existing durable records with no recorded identity.
+    #[arg(long, value_name = "COMPONENT_ID")]
     pub component: Option<String>,
     /// Base branch for the manual finalization candidate.
     #[arg(long, default_value = "main", value_name = "BRANCH")]

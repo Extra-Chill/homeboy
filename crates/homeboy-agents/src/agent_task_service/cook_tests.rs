@@ -18611,6 +18611,272 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
     });
 }
 
+/// Register two distinct components sharing one Git remote and a third,
+/// unrelated checkout with the identical remote. `resolve_effective(None, ...)`
+/// cannot disambiguate the checkout on its own — exactly the shared-repository
+/// ambiguity #14265 introduced a `--component` selector for, and #14725 fixes
+/// on Cook's own finalization and recovery routes.
+fn register_shared_repository_components(home: &std::path::Path) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("fixture root");
+    let primary_a = dir.path().join("primary-a");
+    let primary_b = dir.path().join("primary-b");
+    let checkout = dir.path().join("checkout");
+    for path in [&primary_a, &primary_b, &checkout] {
+        std::fs::create_dir_all(path).expect("checkout dir");
+        homeboy_core::test_support::run_git_fixture_command(path, &["init", "-q"]);
+        homeboy_core::test_support::run_git_fixture_command(
+            path,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/org/shared-repo.git",
+            ],
+        );
+    }
+    let registrations = home.join(".config/homeboy/components");
+    std::fs::create_dir_all(&registrations).expect("component registrations");
+    for (id, path) in [("fixture-a", &primary_a), ("fixture-b", &primary_b)] {
+        std::fs::write(
+            registrations.join(format!("{id}.json")),
+            serde_json::json!({
+                "local_path": path,
+                "remote_url": "https://github.com/example/shared-repo.git",
+            })
+            .to_string(),
+        )
+        .expect("register component");
+    }
+    (dir, checkout)
+}
+
+/// #14725: a Cook worktree whose repository carries multiple component
+/// registrations cannot finalize, because `cook_finalization_options` hardcoded
+/// `None` into `resolve_review_profile` instead of reusing the component
+/// identity Cook durably recorded at admission (`cook_repository_identity`).
+#[test]
+fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_identity_for_shared_repository_worktree(
+) {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let (_fixture_root, checkout) = register_shared_repository_components(home.path());
+
+        // Baseline: without a recorded component identity, the shared
+        // repository worktree remains genuinely ambiguous.
+        let ambiguous_cook_id = "cook-14725-ambiguous";
+        let ambiguous_run_id = "cook-14725-ambiguous-run";
+        let mut ambiguous_options = batch_cook_options(
+            ambiguous_cook_id,
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        ambiguous_options.identity.initial_run_id = ambiguous_run_id.to_string();
+        ambiguous_options.identity.initial_plan.tasks[0]
+            .executor
+            .model = Some("fixture-model".to_string());
+        persist_initial_recipe(&ambiguous_options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(
+            &ambiguous_options.identity.initial_plan,
+            Some(ambiguous_run_id),
+        )
+        .expect("submit run");
+        seed_review_form_aggregate(ambiguous_run_id, &ambiguous_options.identity.initial_plan);
+        let ambiguous_promotion = promotion_with_existing_path(ambiguous_run_id, &checkout);
+        let error = cook_finalization_options(
+            &ambiguous_options,
+            ambiguous_run_id,
+            &ambiguous_promotion,
+            Vec::new(),
+        )
+        .expect_err("an unrecorded shared-repository checkout must fail closed");
+        assert!(error
+            .message
+            .contains("matches multiple registered component configurations"));
+        assert!(error.message.contains("fixture-a, fixture-b"));
+
+        // Fixed: Cook durably records the component it admitted the run
+        // against, and finalization reuses that recorded identity instead of
+        // re-deriving it ambiguously from the bare worktree path.
+        let cook_id = "cook-14725-recorded";
+        let run_id = "cook-14725-recorded-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "fixture-a",
+            "component_registered": true,
+            "provenance": "--cwd:git-remote:origin",
+        });
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+        let promotion = promotion_with_existing_path(run_id, &checkout);
+        // Building the finalization options is exactly where `resolve_review_profile`
+        // is called (`cook_finalization_options_with_stores_and_review_form`); a
+        // real end-to-end publish is unrelated git-identity/drift machinery this
+        // test does not need to exercise.
+        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("recorded component identity resolves the shared-repository worktree");
+        assert_eq!(finalization.path, checkout.to_str().unwrap());
+    });
+}
+
+/// #14725: the recovered-candidate branch after a Cook gate failure
+/// (`manual_finalization: true`) must reuse the component identity Cook
+/// recorded at admission with no new required `--recover` argument.
+#[test]
+fn cook_promotion_recovery_reuses_recorded_component_identity_after_gate_failure() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let (_fixture_root, checkout) = register_shared_repository_components(home.path());
+
+        let cook_id = "cook-14725-recovery";
+        let run_id = "cook-14725-recovery-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "fixture-a",
+            "component_registered": true,
+            "provenance": "--cwd:git-remote:origin",
+        });
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &options.identity.initial_plan,
+            "test",
+            &homeboy_core::Error::invalid_argument("test", "failed Cook attempt"),
+        )
+        .expect("fail attempt");
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+
+        let promotion = promotion_with_existing_path(run_id, &checkout);
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("recorded component identity resolves the shared-repository worktree");
+        finalization.manual_finalization = true;
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        persist_manual_finalization_intent(run_id, &preflight)
+            .expect("persist recoverable serialized intent");
+
+        // No `--component` is supplied: recovery must reuse the identity Cook
+        // durably recorded at admission rather than re-deriving it ambiguously
+        // from the shared-repository worktree path. `preflight` exercises the
+        // full recovery hydration path (including `resolve_review_profile`)
+        // without the unrelated real git publication/drift machinery.
+        let mut backend = CaptureBackend {
+            candidate_state: Some(candidate),
+            ..Default::default()
+        };
+        let recovered = recover_cook_pr_with_backend(run_id, Vec::new(), true, &mut backend)
+            .expect("recovery reuses the recorded component identity with no operator argument");
+        assert_eq!(recovered["status"], "validated");
+        assert!(!backend.created && !backend.committed && !backend.pushed);
+    });
+}
+
+/// #14725: when the durable record predates the recorded-identity fix (or is a
+/// standalone manual finalization with no Cook lineage), `--component` may be
+/// supplied alongside `--recover` instead of the combination being rejected.
+#[test]
+fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_is_available() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let (_fixture_root, checkout) = register_shared_repository_components(home.path());
+
+        let cook_id = "cook-14725-standalone";
+        let run_id = "manual-14725-standalone";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        // The recipe records the component identity only long enough to build
+        // the preflight dossier below; it is removed before recovery so the
+        // recovery route has no recorded identity to reuse, matching a
+        // pre-existing durable record that predates this fix.
+        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "fixture-a",
+            "component_registered": true,
+            "provenance": "--cwd:git-remote:origin",
+        });
+        persist_initial_recipe(&options).expect("persist fixture recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit standalone manual record");
+        agent_task_lifecycle::record_metadata_value_in_store(
+            &test_lifecycle_store(),
+            run_id,
+            "manual_finalization_identity",
+            serde_json::json!(true),
+        )
+        .expect("mark manual identity");
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+
+        let promotion = promotion_with_existing_path(run_id, &checkout);
+        let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
+            .expect("recorded component identity resolves the shared-repository worktree");
+        finalization.manual_finalization = true;
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("manual preflight");
+        persist_manual_finalization_intent(run_id, &preflight).expect("persist validated intent");
+        std::fs::remove_file(
+            homeboy_core::paths::homeboy_data()
+                .expect("homeboy data")
+                .join(format!("agent-task-cooks/{cook_id}/recipe.json")),
+        )
+        .expect("remove fixture recipe before continuation");
+
+        // With no recipe, recovery has no recorded component identity to
+        // reuse. Omitting `--component` must reproduce the deterministic
+        // ambiguity error rather than silently falling back to ambiguous
+        // resolution.
+        let ambiguous =
+            recover_cook_pr_with_backend(run_id, Vec::new(), false, &mut CaptureBackend::default())
+                .expect_err("no recorded identity and no --component must fail closed");
+        assert!(ambiguous
+            .message
+            .contains("matches multiple registered component configurations"));
+
+        // `--component` supplied alongside `--recover` disambiguates a
+        // pre-existing durable record with no recorded identity. `preflight`
+        // exercises the full recovery hydration path (including
+        // `resolve_review_profile`) without the unrelated real git
+        // publication/drift machinery.
+        let mut publish_backend = CaptureBackend {
+            candidate_state: Some(candidate),
+            ..Default::default()
+        };
+        let recovered = recover_cook_pr_with_backend_and_review_form(
+            run_id,
+            None,
+            Some("fixture-a"),
+            Vec::new(),
+            true,
+            &mut publish_backend,
+        )
+        .expect("operator-supplied --component resolves the shared-repository worktree");
+        assert_eq!(recovered["status"], "validated");
+        assert!(!publish_backend.created);
+    });
+}
+
 #[test]
 fn verified_existing_candidate_no_change_recovery_finalizes_once() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -19941,6 +20207,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         let preflight = recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(supplied_test_review_form()),
+            None,
             Vec::new(),
             true,
             &mut preflight_backend,
@@ -19982,6 +20249,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         let error = recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(supplied_test_review_form()),
+            None,
             Vec::new(),
             true,
             &mut CaptureBackend::default(),
@@ -19998,6 +20266,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(invalid_provenance),
+            None,
             Vec::new(),
             false,
             &mut CaptureBackend::default(),
@@ -20017,6 +20286,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(supplied_test_review_form()),
+            None,
             Vec::new(),
             false,
             &mut failed_persistence_backend,
@@ -20032,6 +20302,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         recover_cook_pr_with_backend_and_review_form(
             cook_id,
             Some(supplied_test_review_form()),
+            None,
             Vec::new(),
             false,
             &mut failed_publication_backend,
@@ -20050,6 +20321,7 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         };
         let published = recover_cook_pr_with_backend_and_review_form(
             cook_id,
+            None,
             None,
             Vec::new(),
             false,

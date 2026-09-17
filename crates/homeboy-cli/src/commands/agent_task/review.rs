@@ -920,6 +920,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         let value = agent_task_service::recover_cook_pr_with_review_form(
             run_or_cook_id,
             review_form,
+            args.component.as_deref(),
             overrides,
             args.preflight,
         )?;
