@@ -1136,6 +1136,60 @@ fn replacement_launcher_reclaims_a_dead_pre_supervisor_owner() {
     );
 }
 
+/// #14768: the real local admission sequence is launcher claim, then
+/// supervision, then the same owner claims again (output-file bootstrap in
+/// the detached child). Refusing that re-entry with
+/// `admission_state=supervising` / `launcher_live=true` blocked every local
+/// Cook. Identity match must admit the owner without resetting supervision,
+/// and the handoff must still be materializable.
+#[test]
+fn owning_launcher_can_reclaim_after_publishing_supervision() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "cook-owner-reclaim-after-supervision";
+    let launcher_id = "owning-launcher";
+    claim_detached_cook_handoff_parent_in_store(&store, cook_id, launcher_id)
+        .expect("launcher claims the handoff");
+    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
+        starttime_ticks: 42,
+    };
+    record_claimed_detached_cook_handoff_supervision_in_store(
+        &store,
+        cook_id,
+        launcher_id,
+        4242,
+        identity,
+        "supervisor-owned",
+    )
+    .expect("launcher publishes supervision");
+
+    let admitted = claim_detached_cook_handoff_parent_in_store(&store, cook_id, launcher_id)
+        .expect("owning launcher re-enters the handoff it already holds");
+
+    assert_eq!(
+        admitted.metadata["detached_cook_handoff"]["admission_state"],
+        "supervising"
+    );
+    assert_eq!(
+        admitted.metadata["detached_cook_handoff"]["launcher_id"],
+        launcher_id
+    );
+    assert_eq!(
+        admitted.metadata["detached_cook_handoff"]["supervisor_job_id"],
+        "supervisor-owned"
+    );
+    reserve_detached_cook_handoff_materialization_in_store(
+        &store,
+        cook_id,
+        "cook-owner-reclaim-after-supervision-attempt-1",
+    )
+    .expect("a cook admitted through owner re-entry can still materialize");
+    assert!(
+        claim_detached_cook_handoff_parent_in_store(&store, cook_id, "stranger-launcher").is_err(),
+        "a live owner's supervised handoff stays fenced against a second launcher"
+    );
+}
+
 #[test]
 fn scoped_resume_rearms_backoff_but_preserves_terminal_and_materializing_owners() {
     with_isolated_home(|_| {
