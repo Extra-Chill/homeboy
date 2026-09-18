@@ -130,6 +130,8 @@ pub struct ScheduleView {
     /// daemon reclaims it. Keep `due` truthful while making that condition
     /// explicit and recoverable.
     stale_running: bool,
+    /// In-flight longer than this schedule's own cadence.
+    cadence_stale: bool,
     /// Repeated failures are operator-visible rather than a counter that only
     /// lives on disk. A schedule whose last run failed is unhealthy.
     unhealthy: bool,
@@ -178,10 +180,9 @@ pub struct TickReport {
 }
 
 fn view(schedule: Schedule) -> ScheduleView {
-    let state = schedule::load_state(&schedule.id);
     let now = chrono::Utc::now();
-    let stale_running = state.is_stale_running(now);
-    let unhealthy = state.is_unhealthy();
+    let state = schedule::load_state(&schedule.id);
+    let health = schedule::assess(&schedule, &state, now);
     let next_run_at = state
         .next_run_at(&schedule)
         .map(|next| next.to_rfc3339())
@@ -203,9 +204,11 @@ fn view(schedule: Schedule) -> ScheduleView {
         state,
         next_run_at,
         due,
-        stale_running,
-        unhealthy,
-        recovery_command: stale_running
+        stale_running: health.stale_running,
+        cadence_stale: health.cadence_stale,
+        unhealthy: health.unhealthy,
+        recovery_command: health
+            .stale_running
             .then(|| daemon.recovery_command.clone())
             .flatten(),
         daemon,
@@ -627,6 +630,67 @@ mod tests {
             assert_eq!(value["daemon"]["running"], false);
             assert_eq!(value["daemon"]["reachable"], false);
             assert!(value["daemon"].get("process_candidates").is_none());
+        });
+    }
+
+    fn sample(id: &str) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            command: Some(vec!["cleanup".to_string()]),
+            exec: None,
+            steps: Vec::new(),
+            every: Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on: NotifyPolicy::default(),
+            on_overlap: OverlapPolicy::Skip,
+            notification_transport: None,
+            notification_route: None,
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn schedule_show_reports_cadence_stale_running_and_consecutive_failures() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let now = chrono::Utc::now();
+            schedule::save_state(
+                "wedged",
+                &ScheduleState {
+                    last_run_at: Some((now - chrono::Duration::days(7)).to_rfc3339()),
+                    last_status: Some("failed".to_string()),
+                    running: true,
+                    started_at: Some((now - chrono::Duration::hours(2)).to_rfc3339()),
+                    consecutive_failures: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("save wedged state");
+            schedule::save_state(
+                "failing",
+                &ScheduleState {
+                    last_run_at: Some(now.to_rfc3339()),
+                    last_status: Some("partial_failure".to_string()),
+                    consecutive_failures: 106,
+                    ..Default::default()
+                },
+            )
+            .expect("save failing state");
+
+            let wedged = serde_json::to_value(view(sample("wedged"))).expect("serialize");
+            assert_eq!(wedged["state"]["last_status"], "failed");
+            assert_eq!(wedged["state"]["consecutive_failures"], 1);
+            assert_eq!(wedged["stale_running"], false);
+            assert_eq!(wedged["cadence_stale"], true);
+            assert_eq!(wedged["unhealthy"], true);
+
+            let failing = serde_json::to_value(view(sample("failing"))).expect("serialize");
+            assert_eq!(failing["state"]["last_status"], "partial_failure");
+            assert_eq!(failing["state"]["consecutive_failures"], 106);
+            assert_eq!(failing["stale_running"], false);
+            assert_eq!(failing["cadence_stale"], false);
+            assert_eq!(failing["unhealthy"], true);
         });
     }
 
