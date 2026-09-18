@@ -135,7 +135,10 @@ mod tests {
             ..Default::default()
         };
         let health = assess(&schedule("wedged", 3_600), &state, now);
-        assert!(!health.stale_running, "two hours is under the 6h reclaim window");
+        assert!(
+            !health.stale_running,
+            "two hours is under the 6h reclaim window"
+        );
         assert!(health.cadence_stale);
         assert!(health.unhealthy);
         assert_eq!(health.command, "homeboy schedule show wedged");

@@ -329,11 +329,8 @@ mod tests {
         let pointer = get_json_pointer(&config, "/retention").expect("json pointer");
         assert_eq!(dotted, pointer);
         assert_eq!(
-            get_json_pointer(
-                &config,
-                "retention.reconstructable_artifact_reserve_bytes"
-            )
-            .expect("nested dotted path"),
+            get_json_pointer(&config, "retention.reconstructable_artifact_reserve_bytes")
+                .expect("nested dotted path"),
             Some(&json!(20))
         );
     }

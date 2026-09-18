@@ -547,7 +547,9 @@ mod tests {
             let (subtree, _) = show(false, Some("retention")).expect("dotted retention subtree");
             let value = subtree.value.expect("retention subtree");
             assert!(
-                value.get("reconstructable_artifact_reserve_bytes").is_some(),
+                value
+                    .get("reconstructable_artifact_reserve_bytes")
+                    .is_some(),
                 "retention subtree must include the reserve: {value}"
             );
             assert_eq!(subtree.pointer.as_deref(), Some("/retention"));

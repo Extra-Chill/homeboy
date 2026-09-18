@@ -2356,7 +2356,10 @@ mod tests {
                 .map(|report| report.id.as_str())
                 .collect();
             assert!(ids.contains(&"wedged"), "wedged schedule missing: {ids:?}");
-            assert!(ids.contains(&"failing"), "failing schedule missing: {ids:?}");
+            assert!(
+                ids.contains(&"failing"),
+                "failing schedule missing: {ids:?}"
+            );
             let wedged = output
                 .schedules
                 .unhealthy
