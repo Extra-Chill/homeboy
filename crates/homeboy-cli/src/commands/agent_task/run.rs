@@ -44,6 +44,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
+const PREVIEW_ADMISSION_UNCHECKED: &str = "static inputs only; admission not checked";
 
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
@@ -558,8 +559,25 @@ fn cook_preview_result(
     }
     if let Some(failure) = failure {
         result["failure"] = failure;
+    } else if let Some(failure) = cook_preview_blocked_admission_failure(&result["resolved"]) {
+        result["failure"] = failure;
     }
     result
+}
+
+fn cook_preview_blocked_admission_failure(resolved: &Value) -> Option<Value> {
+    let admission = resolved.get("placement")?.get("admission")?;
+    if admission.get("state").and_then(Value::as_str) != Some("blocked") {
+        return None;
+    }
+    let blocker = admission
+        .get("remaining_blocker")
+        .and_then(Value::as_str)?;
+    let mut failure = serde_json::json!({ "message": blocker });
+    if let Some(next_action) = admission.get("next_action").cloned() {
+        failure["next_action"] = next_action;
+    }
+    Some(failure)
 }
 
 fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> Value {
@@ -1126,21 +1144,103 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
 fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     let mut policy = preview_placement_policy_from_argv(replay_args);
     apply_resolved_placement(&mut policy);
-    // Resource and Lab inventory are live execution inputs. Reading either here
-    // made a read-only preview wait on the same unavailable control plane it was
-    // intended to diagnose. Execution revalidates this admission after preview.
     if policy["requested"] == "local" {
         return policy;
     }
-    policy["admission"] = serde_json::json!({
+    policy["admission"] = preview_placement_admission(&policy);
+    policy
+}
+
+fn preview_placement_admission(policy: &Value) -> Value {
+    let Some(runner_id) = policy.get("selected_runner").and_then(Value::as_str) else {
+        return indeterminate_preview_admission();
+    };
+    let snapshot = homeboy::runner::runners::persisted_status(runner_id)
+        .and_then(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .ok();
+    if let Some(snapshot) = snapshot.as_ref() {
+        let unresolved = snapshot.summary.unresolved_retained_projection_count > 0
+            || !snapshot.summary.unresolved_generation_ids.is_empty();
+        if unresolved {
+            let outcome = crate::commands::runner::reconciliation_outcome(
+                runner_id,
+                Vec::new(),
+                &snapshot.status,
+                &snapshot.summary,
+            );
+            return blocked_preview_admission(
+                outcome
+                    .remaining_blocker
+                    .unwrap_or_else(|| "unresolved_generation_projection".to_string()),
+                outcome.next_action,
+            );
+        }
+    }
+    if captured_selected_runner_is_connected_ready(runner_id) {
+        return admissible_preview_admission();
+    }
+    if let Some(snapshot) = snapshot {
+        let outcome = crate::commands::runner::reconciliation_outcome(
+            runner_id,
+            Vec::new(),
+            &snapshot.status,
+            &snapshot.summary,
+        );
+        if let Some(blocker) = outcome.remaining_blocker {
+            return blocked_preview_admission(blocker, outcome.next_action);
+        }
+        return admissible_preview_admission();
+    }
+    indeterminate_preview_admission()
+}
+
+fn captured_selected_runner_is_connected_ready(runner_id: &str) -> bool {
+    homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+        result.lab_readiness.as_ref().is_some_and(|readiness| {
+            readiness.state == "connected_ready"
+                && readiness.selected_runner_id.as_deref() == Some(runner_id)
+                && readiness
+                    .available_runner_ids
+                    .iter()
+                    .any(|available| available == runner_id)
+        })
+    })
+}
+
+fn indeterminate_preview_admission() -> Value {
+    serde_json::json!({
         "schema": "homeboy/cook-preview-placement-admission/v1",
         "state": "indeterminate",
         "revalidate_before_execution": true,
         "blockers": [],
         "deferred_to": "execution_placement_admission",
-        "replay_prerequisite": "connected runner readiness is revalidated before execution",
+        "reason": PREVIEW_ADMISSION_UNCHECKED,
+        "replay_prerequisite": PREVIEW_ADMISSION_UNCHECKED,
+    })
+}
+
+fn admissible_preview_admission() -> Value {
+    serde_json::json!({
+        "schema": "homeboy/cook-preview-placement-admission/v1",
+        "state": "admissible",
+        "revalidate_before_execution": true,
+        "blockers": [],
+    })
+}
+
+fn blocked_preview_admission(blocker: String, next_action: Option<String>) -> Value {
+    let mut admission = serde_json::json!({
+        "schema": "homeboy/cook-preview-placement-admission/v1",
+        "state": "blocked",
+        "revalidate_before_execution": true,
+        "blockers": [blocker],
+        "remaining_blocker": blocker,
+        "replay_prerequisite": blocker,
     });
-    policy
+    if let Some(next_action) = next_action {
+        admission["next_action"] = serde_json::json!(next_action);
+    }
+    admission
 }
 
 /// Merge the already-resolved placement decision into preview's placement
@@ -2552,6 +2652,7 @@ mod preview_tests {
 
     #[test]
     fn preview_defers_lab_placement_admission_with_a_structured_phase() {
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
         let policy = preview_placement_policy_with_admission(&[
             "homeboy".to_string(),
             "--placement".to_string(),
@@ -2565,6 +2666,166 @@ mod preview_tests {
             policy["admission"]["deferred_to"],
             "execution_placement_admission"
         );
+        assert_eq!(
+            policy["admission"]["reason"],
+            "static inputs only; admission not checked"
+        );
+    }
+
+    fn persist_unresolved_generation_runner(runner_id: &str) {
+        homeboy::runner::runners::create(
+            &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
+            false,
+        )
+        .expect("create runner");
+        let dir = homeboy::core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join(runner_id);
+        std::fs::create_dir_all(&dir).expect("runner session dir");
+        let endpoint = |lease: &str| {
+            serde_json::json!({
+                "runner_id": runner_id,
+                "server_id": null,
+                "tunnel_pid": null,
+                "remote_daemon_pid": null,
+                "homeboy_version": "1.0.0",
+                "connected_at": "2026-09-17T00:00:00Z",
+                "remote_daemon_lease_id": lease,
+            })
+        };
+        std::fs::write(
+            dir.join("generations.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "runner_id": runner_id,
+                "admission_owner": "lease-new",
+                "generations": {
+                    "lease-old": {
+                        "endpoint": endpoint("lease-old"),
+                        "active_jobs": 1,
+                        "drain_state": "draining"
+                    },
+                    "lease-new": {
+                        "endpoint": endpoint("lease-new"),
+                        "active_jobs": 0,
+                        "drain_state": "admitting"
+                    }
+                }
+            }))
+            .expect("serialize generations"),
+        )
+        .expect("write generations");
+    }
+
+    fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root")
+            .display()
+            .to_string();
+        let cli = Cli::try_parse_from([
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--preview".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--prompt".to_string(),
+            "Inspect the task workspace.".to_string(),
+            "--to-worktree".to_string(),
+            workspace,
+            "--no-finalize".to_string(),
+            "--verify".to_string(),
+            "true".to_string(),
+        ])
+        .expect("parse preview");
+        if let Some(runner_id) = runner_id {
+            crate::cli_runtime::capture_admitted_runner_preflight_for_test(&cli, runner_id);
+        }
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+            panic!("Cook command");
+        };
+        preview_cook(*args, None).expect("compile preview")
+    }
+
+    #[test]
+    fn preview_reports_unresolved_generation_blocker_instead_of_an_unqualified_ready_plan() {
+        crate::test_support::with_isolated_home(|_| {
+            persist_unresolved_generation_runner("homeboy-lab");
+            let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["placement"]["selected_runner"], "homeboy-lab");
+            assert_eq!(preview["resolved"]["placement"]["admission"]["state"], "blocked");
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["remaining_blocker"],
+                "unresolved_generation_projection"
+            );
+            assert_eq!(preview["failure"]["message"], "unresolved_generation_projection");
+            let next_action = preview["resolved"]["placement"]["admission"]["next_action"]
+                .as_str()
+                .expect("recovery action");
+            assert!(
+                next_action.contains("homeboy-lab"),
+                "recovery action must target the resolved runner: {next_action}"
+            );
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                summary.contains("Blocked: unresolved_generation_projection"),
+                "preview must not present an unqualified ready plan: {summary}"
+            );
+            assert!(
+                summary.contains("Next:") && summary.contains("homeboy-lab"),
+                "preview must surface the runner-status recovery action: {summary}"
+            );
+            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        });
+    }
+
+    #[test]
+    fn preview_that_passes_admission_uses_the_same_connected_ready_evidence_execution_requires() {
+        crate::test_support::with_isolated_home(|_| {
+            let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["placement"]["selected_runner"], "homeboy-lab");
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "admissible"
+            );
+            assert!(preview.get("failure").is_none(), "{preview}");
+
+            let captured = homeboy::core::parsed_command_preflight::captured_result()
+                .expect("admitted runner preflight remains captured");
+            assert_eq!(captured.selected_runner_id.as_deref(), Some("homeboy-lab"));
+            let readiness = captured.lab_readiness.as_ref().expect("lab readiness");
+            assert_eq!(readiness.state, "connected_ready");
+            assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
+            assert!(readiness.available_runner_ids.iter().any(|id| id == "homeboy-lab"));
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                !summary.contains("Blocked:"),
+                "admissible preview must not report a blocker: {summary}"
+            );
+            assert!(
+                !summary.contains("static inputs only; admission not checked"),
+                "admissible preview must not claim admission was skipped: {summary}"
+            );
+            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        });
     }
 
     #[test]

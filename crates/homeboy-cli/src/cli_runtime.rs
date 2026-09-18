@@ -3368,6 +3368,43 @@ pub(crate) fn capture_preflight_result_for_test(
     crate::core::parsed_command_preflight::capture_result(result);
 }
 
+/// Capture an admitted Lab runner as the resolved placement, the same way a
+/// real dispatch records `connected_ready` evidence before Cook preview runs.
+#[cfg(test)]
+pub(crate) fn capture_admitted_runner_preflight_for_test(cli: &Cli, runner_id: &str) {
+    crate::core::parsed_command_preflight::reset_captured_result_for_test();
+    let normalized_args = vec!["homeboy".to_string()];
+    let input = resource_policy::parsed_command_preflight_input(cli, &normalized_args);
+    let selected_runner_id = Some(runner_id.to_string());
+    let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        normalized_args,
+        input,
+        crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
+            resource_admission_evidence:
+                crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: Some(
+                crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                    state: "connected_ready".to_string(),
+                    selected_runner_id: selected_runner_id.clone(),
+                    available_runner_ids: vec![runner_id.to_string()],
+                    reasons: Vec::new(),
+                    remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
+                },
+            ),
+            selected_runner_id: selected_runner_id.clone(),
+            generic_route: generic_route_policy_snapshot(cli, selected_runner_id),
+            deferred_pressure_refusal: false,
+            runner_admitted: true,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect("test preflight fixture supplies admitted connected readiness evidence");
+    crate::core::parsed_command_preflight::capture_result(result);
+}
+
 #[cfg(test)]
 fn preflight_hot_command_with(
     cli: &Cli,
