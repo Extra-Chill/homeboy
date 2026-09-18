@@ -421,7 +421,7 @@ pub(super) fn reconcile_output(
     ))
 }
 
-pub(super) fn reconciliation_outcome(
+pub(crate) fn reconciliation_outcome(
     runner_id: &str,
     retired_generation_ids: Vec<String>,
     report: &homeboy::runner::runners::RunnerStatusReport,

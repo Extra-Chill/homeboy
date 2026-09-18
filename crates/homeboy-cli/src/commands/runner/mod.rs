@@ -28,7 +28,7 @@ mod tests;
 
 pub use cli::RunnerArgs;
 pub(crate) use dispatch::{run, run_command_output};
-pub(crate) use status::declared_tool_diagnostics;
+pub(crate) use status::{declared_tool_diagnostics, reconciliation_outcome};
 pub use types::RunnerToolDiagnostics;
 
 pub(crate) fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
