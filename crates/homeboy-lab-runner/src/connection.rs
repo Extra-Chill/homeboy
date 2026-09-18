@@ -3025,6 +3025,13 @@ pub(crate) fn tunnel_process_is_owned_with_observation(
     )
 }
 
+fn typed_probe_timed_out(error: &Error, started: Instant, timeout: Duration) -> bool {
+    error.details["request_timeout"]
+        .as_bool()
+        .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"))
+        || started.elapsed() >= timeout
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,
@@ -3079,9 +3086,7 @@ fn runner_jobs_with_client(
         Ok((active_jobs, stale_jobs))
     })();
     if let Err(error) = &result {
-        let timed_out = error.details["request_timeout"]
-            .as_bool()
-            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
+        let timed_out = typed_probe_timed_out(error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_typed_jobs".to_string(),
             runner_id: Some(runner_id.to_string()),
@@ -3162,9 +3167,7 @@ fn runner_running_runs_with_client(
 ) -> Result<Vec<RunSummary>> {
     let started = Instant::now();
     let data = daemon_get(client, local_url, "/runs?status=running&limit=1000").map_err(|error| {
-        let timed_out = error.details["request_timeout"]
-            .as_bool()
-            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
+        let timed_out = typed_probe_timed_out(&error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_running_runs".to_string(),
             runner_id: Some(runner_id.to_string()),
