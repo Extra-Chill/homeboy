@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.376.0] - 2026-09-18
+
+### Added
+- probe and bounded reconnect for auto placement; report dispatch readiness
+- report resolved placement, and treat a deferred gate as deferred
+- local dispatch admission ceiling; stop asking the agent to verify
+
+### Changed
+- stop using wp-codebox as the example agent backend
+
+### Fixed
+- report a failed cook accurately
+
 ## [0.375.0] - 2026-09-17
 
 ### Added
