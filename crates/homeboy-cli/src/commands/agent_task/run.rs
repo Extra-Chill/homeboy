@@ -570,9 +570,7 @@ fn cook_preview_blocked_admission_failure(resolved: &Value) -> Option<Value> {
     if admission.get("state").and_then(Value::as_str) != Some("blocked") {
         return None;
     }
-    let blocker = admission
-        .get("remaining_blocker")
-        .and_then(Value::as_str)?;
+    let blocker = admission.get("remaining_blocker").and_then(Value::as_str)?;
     let mut failure = serde_json::json!({ "message": blocker });
     if let Some(next_action) = admission.get("next_action").cloned() {
         failure["next_action"] = next_action;
@@ -2758,13 +2756,22 @@ mod preview_tests {
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
             assert_eq!(exit_code, 0);
-            assert_eq!(preview["resolved"]["placement"]["selected_runner"], "homeboy-lab");
-            assert_eq!(preview["resolved"]["placement"]["admission"]["state"], "blocked");
+            assert_eq!(
+                preview["resolved"]["placement"]["selected_runner"],
+                "homeboy-lab"
+            );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "blocked"
+            );
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["remaining_blocker"],
                 "unresolved_generation_projection"
             );
-            assert_eq!(preview["failure"]["message"], "unresolved_generation_projection");
+            assert_eq!(
+                preview["failure"]["message"],
+                "unresolved_generation_projection"
+            );
             let next_action = preview["resolved"]["placement"]["admission"]["next_action"]
                 .as_str()
                 .expect("recovery action");
@@ -2796,7 +2803,10 @@ mod preview_tests {
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
             assert_eq!(exit_code, 0);
-            assert_eq!(preview["resolved"]["placement"]["selected_runner"], "homeboy-lab");
+            assert_eq!(
+                preview["resolved"]["placement"]["selected_runner"],
+                "homeboy-lab"
+            );
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["state"],
                 "admissible"
@@ -2809,7 +2819,10 @@ mod preview_tests {
             let readiness = captured.lab_readiness.as_ref().expect("lab readiness");
             assert_eq!(readiness.state, "connected_ready");
             assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
-            assert!(readiness.available_runner_ids.iter().any(|id| id == "homeboy-lab"));
+            assert!(readiness
+                .available_runner_ids
+                .iter()
+                .any(|id| id == "homeboy-lab"));
 
             let summary = crate::commands::agent_task_summary::render_agent_task_summary(
                 crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
