@@ -216,6 +216,45 @@ fn compact_doctor_retains_safe_typed_runner_convergence_action() {
 }
 
 #[test]
+fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_match() {
+    let (mut report, _) = run("local").expect("local doctor report");
+    report.status = RunnerDoctorStatus::Error;
+    report.failure = None;
+    report.checks = vec![types::RunnerCheck {
+        id: "homeboy.version_skew".to_string(),
+        status: RunnerDoctorStatus::Error,
+        message: "controller is ahead".to_string(),
+        remediation: Some("refresh runner".to_string()),
+        remediation_action: Some(RunnerRepairAction::RefreshHomeboy {
+            git_ref: Some("abc1234".to_string()),
+            allow_downgrade: false,
+        }),
+        details: BTreeMap::new(),
+    }];
+
+    let projection = output_projection(report, true);
+    assert_eq!(
+        projection["failure"]["next_actions"][0]["command"],
+        "homeboy runner refresh-homeboy local --ref abc1234 --reconnect"
+    );
+
+    let data = serde_json::to_value(crate::commands::runner::types::RunnerCommandOutput::Doctor(
+        Box::new(projection),
+    ))
+    .expect("doctor output serializes");
+    let envelope = compact_command_run(Ok(data), 1)
+        .with_identity(
+            &crate::commands::utils::response::CommandIdentity::with_operation("runner", "doctor"),
+        )
+        .stdout_envelope();
+    let envelope = serde_json::to_value(envelope).expect("envelope serializes");
+    assert_eq!(
+        envelope["next_actions"][0]["command"],
+        "homeboy runner refresh-homeboy local --ref abc1234 --reconnect"
+    );
+}
+
+#[test]
 fn compact_doctor_retains_failed_repair_cause_and_remediation() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.repairs.push(types::RunnerRepair {

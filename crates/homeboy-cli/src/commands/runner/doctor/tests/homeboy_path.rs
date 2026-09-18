@@ -253,7 +253,7 @@ fn version_skew_action_and_prose_carry_the_same_ref() {
                 .unwrap_or(CommitAncestry::NotAncestor)
         },
     )
-    .expect("version skew warning");
+    .expect("version skew error");
 
     let Some(RunnerRepairAction::RefreshHomeboy {
         git_ref,
@@ -300,10 +300,10 @@ fn homeboy_version_skew_check_warns_for_different_build_identities() {
         "lab",
         |_, _| CommitAncestry::Unavailable,
     )
-    .expect("version skew warning");
+    .expect("version skew error");
 
     assert_eq!(check.id, "homeboy.version_skew");
-    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
     assert!(check.message.contains("0.290.0+00d2756ef115"));
     assert!(check.message.contains("0.290.0+differentbuild"));
     assert_eq!(
@@ -342,8 +342,9 @@ fn homeboy_version_skew_recommends_refresh_only_when_controller_is_ahead() {
                 .unwrap_or(CommitAncestry::NotAncestor)
         },
     )
-    .expect("version skew warning");
+    .expect("version skew error");
 
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
     assert_eq!(
         check.details.get("direction").map(String::as_str),
         Some("controller_ahead")
@@ -359,6 +360,18 @@ fn homeboy_version_skew_recommends_refresh_only_when_controller_is_ahead() {
             ..
         })
     ));
+    let next = check
+        .remediation_action
+        .as_ref()
+        .and_then(|action| action.to_next_action("lab"))
+        .expect("version skew renders a refresh next action");
+    assert!(
+        next.command
+            .starts_with("homeboy runner refresh-homeboy lab --ref "),
+        "{}",
+        next.command
+    );
+    assert!(next.command.ends_with(" --reconnect"), "{}", next.command);
 }
 
 #[test]
@@ -375,8 +388,9 @@ fn homeboy_version_skew_keeps_a_runner_ahead_of_the_controller() {
                 .unwrap_or(CommitAncestry::NotAncestor)
         },
     )
-    .expect("version skew warning");
+    .expect("version skew error");
 
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
     assert_eq!(
         check.details.get("direction").map(String::as_str),
         Some("runner_ahead")
@@ -398,8 +412,9 @@ fn homeboy_version_skew_withholds_refresh_for_diverged_commits() {
         "lab",
         |_, _| CommitAncestry::NotAncestor,
     )
-    .expect("version skew warning");
+    .expect("version skew error");
 
+    assert_eq!(check.status, RunnerDoctorStatus::Error);
     assert_eq!(
         check.details.get("direction").map(String::as_str),
         Some("diverged_or_unverified")

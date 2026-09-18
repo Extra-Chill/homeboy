@@ -299,40 +299,47 @@ fn ensure_failure(report: &mut RunnerDoctorOutput) {
     for (key, value) in check.details.iter().take(6) {
         details.insert(redacted_text(key), redacted_text(value));
     }
-    let next_actions = match check
-        .remediation
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| is_homeboy_command(command))
-    {
-        Some(command) => {
-            let kind = remediation_action_kind(command);
-            vec![crate::commands::utils::response::CommandNextAction::new(
-                format!(
-                    "{} {}",
-                    if matches!(
-                        kind,
-                        crate::commands::utils::response::CommandNextActionKind::Repair
-                    ) {
-                        "repair"
-                    } else {
-                        "inspect"
-                    },
-                    redacted_text(&check.id)
-                ),
-                redacted_text(command),
-            )
-            .with_kind(kind)]
-        }
-        _ => vec![crate::commands::utils::response::CommandNextAction::new(
-            format!("inspect {}", redacted_text(&check.id)),
-            redacted_text(&format!(
-                "homeboy runner doctor {} --full",
-                report.runner_id
-            )),
-        )
-        .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
-    };
+    let next_actions = check
+        .remediation_action
+        .as_ref()
+        .and_then(|action| action.to_next_action(&report.runner_id))
+        .map(|action| vec![action])
+        .unwrap_or_else(|| {
+            match check
+                .remediation
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| is_homeboy_command(command))
+            {
+                Some(command) => {
+                    let kind = remediation_action_kind(command);
+                    vec![crate::commands::utils::response::CommandNextAction::new(
+                        format!(
+                            "{} {}",
+                            if matches!(
+                                kind,
+                                crate::commands::utils::response::CommandNextActionKind::Repair
+                            ) {
+                                "repair"
+                            } else {
+                                "inspect"
+                            },
+                            redacted_text(&check.id)
+                        ),
+                        redacted_text(command),
+                    )
+                    .with_kind(kind)]
+                }
+                _ => vec![crate::commands::utils::response::CommandNextAction::new(
+                    format!("inspect {}", redacted_text(&check.id)),
+                    redacted_text(&format!(
+                        "homeboy runner doctor {} --full",
+                        report.runner_id
+                    )),
+                )
+                .with_kind(crate::commands::utils::response::CommandNextActionKind::Show)],
+            }
+        });
     report.failure = Some(types::RunnerDoctorFailure {
         code: redacted_text(&code),
         message: redacted_text(&check.message),
