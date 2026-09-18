@@ -448,85 +448,86 @@ pub(super) fn reconciliation_outcome(
     }
 
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
-    let (remaining_blocker, next_action, retry_predicate) =
-        if terminal_daemon_ownership_blocker(report) {
-            (
-                "daemon_ownership_evidence_unavailable".to_string(),
-                None,
-                format!(
-                    "ownership evidence required before daemon recovery: {}",
-                    report
-                        .daemon_freshness
-                        .as_ref()
-                        .and_then(|freshness| freshness.ownership_evidence.as_deref())
-                        .unwrap_or("no ownership evidence was recorded")
-                ),
-            )
-        } else if unresolved_projection {
-            (
+    let (remaining_blocker, next_action, retry_predicate) = if terminal_daemon_ownership_blocker(
+        report,
+    ) {
+        (
+            "daemon_ownership_evidence_unavailable".to_string(),
+            None,
+            format!(
+                "ownership evidence required before daemon recovery: {}",
+                report
+                    .daemon_freshness
+                    .as_ref()
+                    .and_then(|freshness| freshness.ownership_evidence.as_deref())
+                    .unwrap_or("no ownership evidence was recorded")
+            ),
+        )
+    } else if unresolved_projection {
+        (
                 "unresolved_generation_projection".to_string(),
                 Some(runner_reconnect_command(runner_id)),
                 "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs"
                     .to_string(),
             )
-        } else if !admission.connected {
-            (
-                "runner_disconnected".to_string(),
-                Some(
-                    reconciliation_remediation(&reconcile_command, admission, report)
-                        .unwrap_or_else(|| {
-                            format!("homeboy runner connect {}", shell_arg(runner_id))
-                        }),
+    } else if !admission.connected {
+        (
+            "runner_disconnected".to_string(),
+            Some(
+                reconciliation_remediation(&reconcile_command, admission, report)
+                    .unwrap_or_else(|| format!("homeboy runner connect {}", shell_arg(runner_id))),
+            ),
+            "the runner reconnects and publishes a current daemon session".to_string(),
+        )
+    } else if !admission.daemon_fresh {
+        (
+            daemon_freshness_blocker(report),
+            Some(
+                reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
+                    || {
+                        format!(
+                            "homeboy runner doctor {} --scope lab-offload",
+                            shell_arg(runner_id)
+                        )
+                    },
                 ),
-                "the runner reconnects and publishes a current daemon session".to_string(),
-            )
-        } else if !admission.daemon_fresh {
-            (
-                daemon_freshness_blocker(report),
-                Some(
-                    reconciliation_remediation(&reconcile_command, admission, report)
-                        .unwrap_or_else(|| {
-                            format!(
-                                "homeboy runner doctor {} --scope lab-offload",
-                                shell_arg(runner_id)
-                            )
-                        }),
+            ),
+            "daemon_fresh=true after the selected daemon repair completes".to_string(),
+        )
+    } else if !admission.daemon_compatible {
+        (
+            "daemon_compatibility".to_string(),
+            Some(
+                reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
+                    || {
+                        format!(
+                            "homeboy runner doctor {} --scope lab-offload",
+                            shell_arg(runner_id)
+                        )
+                    },
                 ),
-                "daemon_fresh=true after the selected daemon repair completes".to_string(),
-            )
-        } else if !admission.daemon_compatible {
-            (
-                "daemon_compatibility".to_string(),
-                Some(
-                    reconciliation_remediation(&reconcile_command, admission, report)
-                        .unwrap_or_else(|| {
-                            format!(
-                                "homeboy runner doctor {} --scope lab-offload",
-                                shell_arg(runner_id)
-                            )
-                        }),
-                ),
-                "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
-            )
-        } else if admission.blocking_generation.is_some() {
-            (
-                "retained_generation_ownership".to_string(),
-                Some(format!(
-                    "homeboy runner job list {} --active",
-                    shell_arg(runner_id)
-                )),
-                "the retained generation has no authoritative active job owners".to_string(),
-            )
-        } else {
-            (
-                "admission_unavailable".to_string(),
-                Some(format!(
-                    "homeboy runner status {} --full",
-                    shell_arg(runner_id)
-                )),
-                "an authoritative active-job view is available".to_string(),
-            )
-        };
+            ),
+            "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
+        )
+    } else if admission.blocking_generation.is_some() {
+        (
+            "retained_generation_ownership".to_string(),
+            Some(format!(
+                "homeboy runner job list {} --active",
+                shell_arg(runner_id)
+            )),
+            "the retained generation has no authoritative active job owners".to_string(),
+        )
+    } else {
+        (
+            "admission_unavailable".to_string(),
+            Some(format!(
+                "homeboy runner status {} --full",
+                shell_arg(runner_id)
+            )),
+            "an authoritative active-job view is available".to_string(),
+        )
+    };
 
     RunnerReconciliationOutcome {
         changed_state: reconciliation_changed_state(retired_generation_count),
