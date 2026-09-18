@@ -514,12 +514,12 @@ mod tests {
             &self,
             _command: homeboy::core::schedule::ScheduledCommand<'_>,
         ) -> homeboy::core::Result<homeboy::core::schedule::ScheduleCommandResult> {
-            Ok(
-                homeboy::core::schedule::ScheduleCommandResult::Envelope(serde_json::json!({
+            Ok(homeboy::core::schedule::ScheduleCommandResult::Envelope(
+                serde_json::json!({
                     "status": "failed",
                     "exit_code": 1,
-                })),
-            )
+                }),
+            ))
         }
     }
 
