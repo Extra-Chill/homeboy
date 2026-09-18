@@ -465,11 +465,8 @@ pub(super) fn reconciliation_outcome(
         } else if unresolved_projection {
             (
                 "unresolved_generation_projection".to_string(),
-                Some(format!(
-                    "homeboy runner status {} --full",
-                    shell_arg(runner_id)
-                )),
-                "a fresh authoritative generation projection resolves every retained count"
+                Some(runner_reconnect_command(runner_id)),
+                "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs"
                     .to_string(),
             )
         } else if !admission.connected {
@@ -581,6 +578,11 @@ fn reconciliation_changed_state(retired_generation_count: usize) -> String {
     } else {
         format!("retired_generations:{retired_generation_count}")
     }
+}
+
+fn runner_reconnect_command(runner_id: &str) -> String {
+    let runner = shell_arg(runner_id);
+    format!("homeboy runner disconnect {runner} && homeboy runner connect {runner}")
 }
 
 fn reconciliation_remediation(
