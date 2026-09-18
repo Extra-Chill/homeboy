@@ -1417,6 +1417,14 @@ impl CliRuntime {
         // placement routing can consume controller transport markers.
         let preflight = crate::core::parsed_command_preflight::captured_result()
             .expect("completed parsed-command preflight was captured");
+        if matches!(
+            preflight.fallback,
+            crate::core::parsed_command_preflight::FallbackDirective::LocalAllowed
+        ) {
+            if let Some(reason) = preflight.placement.fallback.reason.as_deref() {
+                eprintln!("{reason}");
+            }
+        }
         crate::commands::utils::execution_provenance::capture(&preflight);
 
         let route_result = crate::core::notification_route::with_current_resolution(
