@@ -1821,6 +1821,7 @@ mod status_serialization_tests {
         assert_eq!(summary.unresolved_retained_projection_count, 3);
         assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
         assert!(summary.accepting_jobs);
+        assert!(report.admission_availability(None).accepts_jobs);
         assert!(!summary.safe_to_rotate);
         assert_eq!(
             summary.next_action.as_deref(),

@@ -2938,6 +2938,20 @@ mod tests {
                 "runner.reconcile.daemon_ownership_evidence_unavailable",
                 None,
             ),
+            (
+                "unresolved generation projection",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                        "retry_predicate": "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs",
+                    },
+                }),
+                "runner.reconcile.unresolved_generation_projection",
+                Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"),
+            ),
         ] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(payload.clone()),
@@ -2968,6 +2982,89 @@ mod tests {
             match action {
                 Some(action) => assert_eq!(value["next_actions"][0]["command"], action, "{label}"),
                 None => assert!(value["next_actions"].is_null(), "{label}"),
+            }
+            if let Some(actions) = value["next_actions"].as_array() {
+                for next in actions {
+                    let command = next["command"].as_str().unwrap_or_default();
+                    assert_ne!(
+                        command, "homeboy runner reconcile homeboy-lab",
+                        "{label} recommended the failed reconcile command"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runner_command_failure_next_actions_are_never_the_failed_command() {
+        let cases = [
+            (
+                "reconcile",
+                "homeboy runner reconcile homeboy-lab",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                    },
+                }),
+            ),
+            (
+                "refresh-homeboy",
+                "homeboy runner refresh-homeboy homeboy-lab",
+                json!({
+                    "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+                    "command": "runner.refresh_homeboy",
+                    "exit_code": 1,
+                    "error": {
+                        "code": "runner.policy_denied",
+                        "message": "runner rotation is blocked",
+                        "details": {
+                            "_homeboy_actions": [{
+                                "id": "inspect-runner-status",
+                                "label": "inspect runner admission",
+                                "program": "homeboy",
+                                "args": ["runner", "status", "homeboy-lab"],
+                                "safety": "read_only"
+                            }]
+                        }
+                    },
+                }),
+            ),
+            (
+                "doctor",
+                "homeboy runner doctor homeboy-lab",
+                json!({
+                    "command": "runner.doctor",
+                    "status": "error",
+                    "failure": {
+                        "code": "runner.doctor.daemon",
+                        "message": "daemon probe failed",
+                        "next_actions": [{
+                            "label": "reconnect the runner",
+                            "command": "homeboy runner connect homeboy-lab",
+                        }],
+                    },
+                }),
+            ),
+        ];
+        for (operation, failed_command, payload) in cases {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload),
+                1,
+                &CommandIdentity::with_operation("runner", operation),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+            if let Some(actions) = value["next_actions"].as_array() {
+                for action in actions {
+                    assert_ne!(
+                        action["command"].as_str().unwrap_or_default(),
+                        failed_command,
+                        "{operation}"
+                    );
+                }
             }
         }
     }

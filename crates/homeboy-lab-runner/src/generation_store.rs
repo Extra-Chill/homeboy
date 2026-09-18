@@ -2038,6 +2038,11 @@ fn reconcile_with(
             retained_evidence_generation_count: generations.retired_evidence.len(),
         });
     }
+    let live_idle = generations
+        .generations
+        .get(&generations.admission_owner)
+        .and_then(|entry| operations.active_jobs(&entry.endpoint))
+        == Some(0);
     let observations = generations
         .generations
         .iter()
@@ -2069,12 +2074,16 @@ fn reconcile_with(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let observed_active_jobs =
-                    if draining && !operations.reconcile_terminal_jobs(&session) {
-                        None
-                    } else {
-                        operations.active_jobs(&session)
-                    };
+                let terminal_settled = !draining || operations.reconcile_terminal_jobs(&session);
+                let raw_observed = operations.active_jobs(&session);
+                let unclaimed = draining && raw_observed.is_none() && live_idle;
+                let observed_active_jobs = if unclaimed {
+                    Some(0)
+                } else if terminal_settled {
+                    raw_observed
+                } else {
+                    None
+                };
                 let proven_stopped = draining
                     && observed_active_jobs.is_none()
                     && operations.proven_stopped(&session);
@@ -2085,6 +2094,7 @@ fn reconcile_with(
                     job_owner_ids,
                     observed_active_jobs,
                     proven_stopped,
+                    unclaimed,
                     settled_job_ids,
                 )
             },
@@ -2106,6 +2116,7 @@ fn reconcile_with(
             prior_job_owner_ids,
             observed_active_jobs,
             proven_stopped,
+            unclaimed,
             settled_job_ids,
         ) in &observations
         {
@@ -2157,10 +2168,15 @@ fn reconcile_with(
                         !owner_matches_generation(owner, generation, &entry.endpoint)
                     });
                     if evidence_error.is_none() {
-                        authoritative_zero.push(generation.clone());
+                        if *unclaimed {
+                            already_stopped.push(generation.clone());
+                        } else {
+                            authoritative_zero.push(generation.clone());
+                        }
                     }
                 }
                 if *proven_stopped
+                    && !*unclaimed
                     && entry.drain_state == crate::RollingDrainState::Draining
                     && entry.active_jobs == 0
                     && prior_job_owner_ids.is_empty()
@@ -3933,6 +3949,108 @@ mod tests {
                 job_session("runner-a", "job-stale", Some(&fresh)).expect("route persisted job"),
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn unclaimed_draining_projection_retires_when_live_daemon_is_idle() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate live generation");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-fresh".to_string(), 0);
+            let result = reconcile_with("runner-a", Some(&fresh), &operations)
+                .expect("resolve unclaimed draining projection");
+
+            assert_eq!(result.retired_generation_ids, ["lease-stale"]);
+            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].generation, "lease-fresh");
+            assert_eq!(projection[0].active_job_count, 0);
+            assert_eq!(projection[0].observed_active_job_count, Some(0));
+            assert!(status_job_owners("runner-a", Some(&fresh))
+                .expect("owners")
+                .iter()
+                .all(|owner| owner.job_ids.is_empty()));
+            let report = RunnerStatusReport {
+                runner_id: "runner-a".to_string(),
+                connected: true,
+                state: RunnerSessionState::Connected,
+                session: Some(fresh.clone()),
+                stale_daemon: None,
+                configured_job_binary_build_identity: None,
+                daemon_freshness: None,
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                stale_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::Available,
+                active_job_source: None,
+                active_job_error: None,
+                active_job_recovery_evidence: None,
+                session_path: "test".to_string(),
+            };
+            let owners = status_job_owners("runner-a", Some(&fresh)).expect("owners");
+            let summary = report.admission_summary_with_generations(&projection, &owners, 0);
+            assert!(summary.accepting_jobs);
+            assert!(summary.unresolved_generation_ids.is_empty());
+            assert_eq!(summary.unresolved_retained_projection_count, 0);
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn reachable_terminal_settlement_failure_is_not_overridden_by_an_idle_live_daemon() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate live generation");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-fresh".to_string(), 0);
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-stale".to_string(), 0);
+            operations
+                .terminal_reconcile_failures
+                .borrow_mut()
+                .insert("lease-stale".to_string());
+            reconcile_with("runner-a", Some(&fresh), &operations)
+                .expect("reachable settlement failure stays fail-closed");
+
+            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            assert!(projection.iter().any(|entry| {
+                entry.generation == "lease-stale"
+                    && entry.active_job_count == 1
+                    && entry.observed_active_job_count.is_none()
+            }));
             assert!(operations.stopped_leases.borrow().is_empty());
         });
     }
