@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.376.2] - 2026-09-18
+
+### Fixed
+- inspect config paths and schedule health without disk spelunking
+- recover version-skewed lab daemons without interrupting proven work
+- check resolved runner admission in cook preview
+
 ## [0.376.1] - 2026-09-18
 
 ### Fixed
