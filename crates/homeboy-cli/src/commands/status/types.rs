@@ -1,6 +1,7 @@
 //! Data types for the `status` command: CLI args, serialized output shapes,
 //! dashboard rows/summaries, and the phase timer.
 
+use homeboy::core::schedule::ScheduleHealth;
 use homeboy_upgrade::controller_staleness::ControllerStaleness;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -257,7 +258,17 @@ pub struct CompactStatusOutput {
     /// this is a live, bounded refresh, never a cached negative served
     /// without a reprobe.
     pub dispatch: DispatchReadinessStatus,
+    /// Local schedule run health. Wedged or repeatedly-failing schedules are
+    /// named here so default `status` does not require knowing to look for them.
+    pub schedules: CompactScheduleStatus,
     pub action: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompactScheduleStatus {
+    pub declared: usize,
+    pub unhealthy: Vec<ScheduleHealth>,
+    pub drill_down: &'static str,
 }
 
 #[derive(Debug, Serialize)]

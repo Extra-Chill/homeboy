@@ -14,6 +14,7 @@ use homeboy::core::context;
 use homeboy::core::daemon;
 use homeboy::core::observation::{ObservationStore, RunListFilter};
 use homeboy::core::project;
+use homeboy::core::schedule;
 use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
@@ -37,7 +38,7 @@ use dashboard_table::log_dashboard_table;
 use git_cache::{fetch_project_remote_versions, log_unreleased_merges, StatusGitCache};
 
 pub use types::{
-    CompactContextStatus, CompactStatusOutput, DispatchReadinessStatus,
+    CompactContextStatus, CompactScheduleStatus, CompactStatusOutput, DispatchReadinessStatus,
     DispatchRunnerReadinessStatus, GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus,
     GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
     ProjectComponentDashboardStatus, ProjectDashboardOutput, ProjectDashboardSummary,
@@ -153,6 +154,7 @@ fn run_unisolated(
         timer.begin("build_compact_snapshot");
         let cwd = std::env::current_dir()
             .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+        let schedules = compact_schedule_health();
         timer.finish("build_compact_snapshot");
         timer.begin("refresh_dispatch_readiness");
         let dispatch = compact_dispatch_readiness();
@@ -169,6 +171,7 @@ fn run_unisolated(
                     command: "homeboy status --full",
                 },
                 dispatch,
+                schedules,
                 action: "Run `homeboy status --full` for context/inventory enrichment, `homeboy status --all` to inspect every configured component, or `homeboy status --global` for local control-plane health.",
             }),
             0,
@@ -524,6 +527,29 @@ const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
 /// dispatch readiness is unconditionally reported, not conditionally cheap.
 fn compact_dispatch_readiness() -> DispatchReadinessStatus {
     dispatch_readiness_from_refresh(runner::refresh_lab_runner_readiness_for_admission())
+}
+
+/// Local schedule health for the default `status` command.
+///
+/// Schedule declarations and runtime records are small JSON files. Reading
+/// them here is how a wedged or repeatedly-failing schedule becomes visible
+/// without the operator knowing to run `schedule list` or open state files.
+fn compact_schedule_health() -> CompactScheduleStatus {
+    match schedule::list_health(chrono::Utc::now()) {
+        Ok(reports) => CompactScheduleStatus {
+            declared: reports.len(),
+            unhealthy: reports
+                .into_iter()
+                .filter(|report| report.unhealthy)
+                .collect(),
+            drill_down: "homeboy schedule list",
+        },
+        Err(_) => CompactScheduleStatus {
+            declared: 0,
+            unhealthy: Vec::new(),
+            drill_down: "homeboy schedule list",
+        },
+    }
 }
 
 /// Pure mapping from a readiness refresh outcome to the compact dispatch
@@ -2262,6 +2288,93 @@ mod tests {
                 }
                 _ => panic!("expected unregistered context output"),
             }
+        });
+    }
+
+    fn declared_schedule(id: &str) -> schedule::Schedule {
+        schedule::Schedule {
+            id: id.to_string(),
+            command: Some(vec!["cleanup".to_string()]),
+            exec: None,
+            steps: Vec::new(),
+            every: schedule::Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on: schedule::NotifyPolicy::default(),
+            on_overlap: schedule::OverlapPolicy::Skip,
+            notification_transport: None,
+            notification_route: None,
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// A wedged `running` marker and a repeatedly-failing sibling must appear
+    /// on default `status` without the operator naming either schedule (#14755).
+    #[test]
+    fn default_status_surfaces_unhealthy_schedules_without_naming_them() {
+        crate::test_support::with_isolated_home(|_| {
+            let now = chrono::Utc::now();
+            let wedged = declared_schedule("wedged");
+            let failing = declared_schedule("failing");
+            schedule::save(&wedged).expect("save wedged");
+            schedule::save(&failing).expect("save failing");
+            schedule::save_state(
+                &wedged.id,
+                &schedule::ScheduleState {
+                    last_run_at: Some((now - chrono::Duration::days(7)).to_rfc3339()),
+                    last_status: Some("failed".to_string()),
+                    running: true,
+                    started_at: Some((now - chrono::Duration::hours(2)).to_rfc3339()),
+                    consecutive_failures: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("save wedged state");
+            schedule::save_state(
+                &failing.id,
+                &schedule::ScheduleState {
+                    last_run_at: Some(now.to_rfc3339()),
+                    last_status: Some("partial_failure".to_string()),
+                    consecutive_failures: 106,
+                    ..Default::default()
+                },
+            )
+            .expect("save failing state");
+
+            let (result, code) = run(default_status_args()).expect("compact status succeeds");
+            assert_eq!(code, 0);
+            let StatusResult::Compact(output) = result else {
+                panic!("expected compact status output");
+            };
+            assert_eq!(output.schedules.declared, 2);
+            assert_eq!(output.schedules.drill_down, "homeboy schedule list");
+            let ids: Vec<&str> = output
+                .schedules
+                .unhealthy
+                .iter()
+                .map(|report| report.id.as_str())
+                .collect();
+            assert!(ids.contains(&"wedged"), "wedged schedule missing: {ids:?}");
+            assert!(ids.contains(&"failing"), "failing schedule missing: {ids:?}");
+            let wedged = output
+                .schedules
+                .unhealthy
+                .iter()
+                .find(|report| report.id == "wedged")
+                .expect("wedged");
+            assert!(wedged.cadence_stale);
+            assert!(wedged.running);
+            assert_eq!(wedged.command, "homeboy schedule show wedged");
+            let failing = output
+                .schedules
+                .unhealthy
+                .iter()
+                .find(|report| report.id == "failing")
+                .expect("failing");
+            assert_eq!(failing.consecutive_failures, 106);
+            assert_eq!(failing.last_status.as_deref(), Some("partial_failure"));
+            assert_eq!(failing.command, "homeboy schedule show failing");
         });
     }
 

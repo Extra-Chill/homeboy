@@ -20,12 +20,12 @@ enum ConfigCommand {
         /// Show only built-in defaults (ignore homeboy.json)
         #[arg(long)]
         builtin: bool,
-        /// JSON pointer path to read (e.g., /notifications/default_transport)
+        /// JSON pointer or dotted path (e.g. /retention or retention.limit)
         pointer: Option<String>,
     },
     /// Set a configuration value at a JSON pointer path
     Set {
-        /// JSON pointer path (e.g., /defaults/deploy/scp_flags)
+        /// JSON pointer or dotted path (e.g. /retention/limit or retention.limit)
         pointer: String,
         /// Value to set (JSON)
         value: String,
@@ -35,7 +35,7 @@ enum ConfigCommand {
     },
     /// Remove a configuration value at a JSON pointer path
     Remove {
-        /// JSON pointer path (e.g., /defaults/deploy/scp_flags)
+        /// JSON pointer or dotted path (e.g. /retention/limit or retention.limit)
         pointer: String,
     },
     /// Reset configuration to built-in defaults (deletes homeboy.json)
@@ -182,14 +182,7 @@ fn defaults_value(defaults: &Defaults) -> homeboy::core::Result<Value> {
 }
 
 fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
-    if !pointer.starts_with('/') {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "pointer",
-            "JSON pointer must start with '/'",
-            None,
-            None,
-        ));
-    }
+    let pointer = homeboy::core::config::config_pointer(pointer)?;
 
     let (config, file_value) = if builtin {
         (
@@ -201,12 +194,12 @@ fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
             None,
         )
     } else {
-        let (config, file_value) = defaults::load_config_and_file_value_for_read(pointer)?;
+        let (config, file_value) = defaults::load_config_and_file_value_for_read(&pointer)?;
         (redacted_config_value(&config)?, file_value)
     };
-    let value = homeboy::core::config::get_json_pointer(&config, pointer)?
+    let value = homeboy::core::config::get_json_pointer(&config, &pointer)?
         .cloned()
-        .ok_or_else(|| missing_pointer_error(&config, pointer))?;
+        .ok_or_else(|| missing_pointer_error(&config, &pointer))?;
     let source = if !builtin && file_value.is_some() {
         "file"
     } else {
@@ -221,7 +214,7 @@ fn show_pointer(builtin: bool, pointer: &str) -> CmdResult<ConfigOutput> {
             defaults: None,
             path,
             exists: None,
-            pointer: Some(pointer.to_string()),
+            pointer: Some(pointer),
             value: Some(value),
             source: Some(source.to_string()),
             deleted: None,
@@ -279,17 +272,9 @@ fn escape_pointer_token(token: &str) -> String {
 }
 
 fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> {
-    // Validate pointer format
-    if !pointer.starts_with('/') {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "pointer",
-            "JSON pointer must start with '/'",
-            None,
-            None,
-        ));
-    }
+    let pointer = homeboy::core::config::config_pointer(pointer)?;
 
-    let value = parse_config_set_value(pointer, value_str, string)?;
+    let value = parse_config_set_value(&pointer, value_str, string)?;
 
     // Load current config (or create default)
     let mut config = defaults::load_config();
@@ -300,7 +285,7 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
     })?;
 
     // Navigate to the pointer location and set the value
-    homeboy::core::config::set_json_pointer(&mut config_json, pointer, value.clone())?;
+    homeboy::core::config::set_json_pointer(&mut config_json, &pointer, value.clone())?;
 
     // Convert back to HomeboyConfig
     config = serde_json::from_value(config_json).map_err(|e| {
@@ -321,7 +306,7 @@ fn set(pointer: &str, value_str: &str, string: bool) -> CmdResult<ConfigOutput> 
             defaults: None,
             path: None,
             exists: None,
-            pointer: Some(pointer.to_string()),
+            pointer: Some(pointer),
             value: Some(value),
             source: None,
             deleted: None,
@@ -377,15 +362,7 @@ fn looks_like_unquoted_string(value_str: &str) -> bool {
 }
 
 fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
-    // Validate pointer format
-    if !pointer.starts_with('/') {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "pointer",
-            "JSON pointer must start with '/'",
-            None,
-            None,
-        ));
-    }
+    let pointer = homeboy::core::config::config_pointer(pointer)?;
 
     // Load current config
     let mut config = defaults::load_config();
@@ -396,7 +373,7 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
     })?;
 
     // Remove the value at the pointer
-    homeboy::core::config::remove_json_pointer(&mut config_json, pointer)?;
+    homeboy::core::config::remove_json_pointer(&mut config_json, &pointer)?;
 
     // Convert back to HomeboyConfig
     config = serde_json::from_value(config_json).map_err(|e| {
@@ -417,7 +394,7 @@ fn remove(pointer: &str) -> CmdResult<ConfigOutput> {
             defaults: None,
             path: None,
             exists: None,
-            pointer: Some(pointer.to_string()),
+            pointer: Some(pointer),
             value: None,
             source: None,
             deleted: None,
@@ -559,6 +536,40 @@ mod tests {
         };
 
         assert!(is_read(&args));
+    }
+
+    /// Reading one configured value must not require a JSON parser or a
+    /// JSON-pointer spelling. `config get retention` is the operator question
+    /// from #14755.
+    #[test]
+    fn config_get_returns_one_value_by_dotted_path() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let (subtree, _) = show(false, Some("retention")).expect("dotted retention subtree");
+            let value = subtree.value.expect("retention subtree");
+            assert!(
+                value.get("reconstructable_artifact_reserve_bytes").is_some(),
+                "retention subtree must include the reserve: {value}"
+            );
+            assert_eq!(subtree.pointer.as_deref(), Some("/retention"));
+
+            let (leaf, _) = show(
+                false,
+                Some("retention.reconstructable_artifact_reserve_bytes"),
+            )
+            .expect("dotted reserve path");
+            assert_eq!(
+                leaf.value,
+                Some(serde_json::json!(20 * 1024 * 1024 * 1024u64))
+            );
+            assert_eq!(
+                leaf.pointer.as_deref(),
+                Some("/retention/reconstructable_artifact_reserve_bytes")
+            );
+
+            let (pointer, _) = show(false, Some("/retention"))
+                .expect("json pointer still selects the same subtree");
+            assert_eq!(pointer.value, subtree.value);
+        });
     }
 
     #[test]

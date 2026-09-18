@@ -15,14 +15,18 @@ Display the current configuration (merged built-in defaults + file overrides).
 ```bash
 homeboy config show              # Show merged config
 homeboy config show --builtin    # Show only built-in defaults
+homeboy config get retention
+homeboy config get retention.reconstructable_artifact_reserve_bytes
 homeboy config show /notifications/default_transport
 homeboy config show --builtin /defaults/deploy/scp_flags
 ```
 
-Passing a JSON pointer returns only that effective value, its canonical pointer,
-and its owning source. File-backed values include the `homeboy.json` path;
-values supplied by defaults report `"builtin"`. Pointer reads apply the same
-secret redaction as a full config read.
+`config get` is the read alias for `config show`. Passing a dotted path or JSON
+pointer returns only that effective value, its canonical pointer, and its owning
+source — reading one configured value does not require a JSON parser. File-backed
+values include the `homeboy.json` path; values supplied by defaults report
+`"builtin"`. Pointer reads apply the same secret redaction as a full config read.
+Keys that themselves contain dots (hostnames) still use a JSON pointer.
 
 An unscoped `config show` elides the large multi-line
 `defaults.install_methods.{source,binary}.upgrade_command` scripts so
