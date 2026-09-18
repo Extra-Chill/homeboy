@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.376.1] - 2026-09-18
+
+### Fixed
+- resolve unclaimed generation projections on reconcile
+- fall back when auto's preferred runner is inadmissible
+- reclaim stale markers on tick and surface consecutive failures
+
 ## [0.376.0] - 2026-09-18
 
 ### Added
