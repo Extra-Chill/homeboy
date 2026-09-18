@@ -150,12 +150,12 @@ mod tests {
         let declaration = parse_agent_task_executor_declaration(
             "wordpress",
             "wordpress-runtime",
-            &json!({"id": "wordpress.default", "backend": "wp-codebox"}),
+            &json!({"id": "wordpress.default", "backend": "opencode"}),
         )
         .expect("complete declaration parses");
 
         assert_eq!(declaration.id, "wordpress.default");
-        assert_eq!(declaration.backend, "wp-codebox");
+        assert_eq!(declaration.backend, "opencode");
         assert_eq!(declaration.schema, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA);
     }
 
@@ -181,7 +181,7 @@ mod tests {
         let error = parse_agent_task_executor_declaration(
             "wordpress",
             "wordpress-runtime",
-            &json!({"backend": "wp-codebox"}),
+            &json!({"backend": "opencode"}),
         )
         .expect_err("a declaration without an id must be rejected");
 
