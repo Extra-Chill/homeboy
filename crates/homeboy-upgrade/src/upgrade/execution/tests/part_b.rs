@@ -147,6 +147,115 @@ fn binary_swap_failure_identifies_the_target_and_observed_destination() {
         .any(|hint| hint.message.contains("type -a homeboy")));
 }
 
+#[cfg(unix)]
+#[test]
+fn post_install_verification_accepts_a_path_resolved_controller_without_managed_prefix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Cargo-installed controllers live on PATH, not under a Homeboy-managed
+    // prefix. Verification must follow the operator's shell (#14769).
+    let directory = tempfile::tempdir().expect("tempdir");
+    let managed = directory.path().join("managed").join("homeboy");
+    let path_dir = directory.path().join("bin");
+    std::fs::create_dir_all(&path_dir).expect("path dir");
+    let path_binary = path_dir.join("homeboy");
+    std::fs::write(&path_binary, "#!/bin/sh\nprintf 'homeboy 0.376.1\\n'\n")
+        .expect("write PATH controller");
+    std::fs::set_permissions(&path_binary, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH controller executable");
+
+    let (verified, info) =
+        verify_post_install_controller_version("0.376.1", &[managed, path_binary.clone()])
+            .expect("PATH-only controller verifies after a successful install");
+
+    assert_eq!(verified, path_binary);
+    assert_eq!(info.version.as_deref(), Some("0.376.1"));
+}
+
+#[test]
+fn post_install_verification_names_probed_paths_when_unverifiable() {
+    let managed = PathBuf::from("/tmp/homeboy-managed-missing/homeboy");
+    let path_binary = PathBuf::from("/tmp/homeboy-path-missing/homeboy");
+    let current_exe = PathBuf::from("/tmp/homeboy-current-exe-missing/homeboy");
+    let probed = [managed.clone(), path_binary.clone(), current_exe.clone()];
+
+    let error = verify_post_install_controller_version_with("0.376.1", &probed, |_| Ok(None))
+        .expect_err("missing binaries cannot verify");
+
+    assert!(
+        error
+            .message
+            .contains("could not locate a controller binary to verify"),
+        "operator-visible summary must distinguish locate failure: {}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("observed"),
+        "locate failure must not collapse into a version-mismatch diagnostic: {}",
+        error.message
+    );
+    let details = error.details.to_string();
+    assert!(
+        details.contains(&managed.display().to_string()),
+        "details must name the managed prefix: {details}"
+    );
+    assert!(
+        details.contains(&path_binary.display().to_string()),
+        "details must name the PATH candidate: {details}"
+    );
+    assert!(
+        details.contains(&current_exe.display().to_string()),
+        "details must name current_exe: {details}"
+    );
+    assert_eq!(
+        error.details["context"].as_str(),
+        Some("verify active binary version")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn post_install_verification_rejects_a_wrong_installed_version() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path_dir = directory.path().join("bin");
+    std::fs::create_dir_all(&path_dir).expect("path dir");
+    let path_binary = path_dir.join("homeboy");
+    std::fs::write(&path_binary, "#!/bin/sh\nprintf 'homeboy 0.376.0\\n'\n")
+        .expect("write stale PATH controller");
+    std::fs::set_permissions(&path_binary, std::fs::Permissions::from_mode(0o755))
+        .expect("make PATH controller executable");
+
+    let error = verify_post_install_controller_version("0.376.1", &[path_binary.clone()])
+        .expect_err("stale installed version must not verify");
+
+    assert!(
+        error
+            .message
+            .contains("did not activate the selected release 0.376.1"),
+        "operator-visible summary must name the version mismatch: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains(&path_binary.display().to_string()),
+        "mismatch diagnostic must name the probed binary: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("observed 0.376.0"),
+        "mismatch diagnostic must name the observed version: {}",
+        error.message
+    );
+    assert!(
+        !error
+            .message
+            .contains("could not locate a controller binary to verify"),
+        "a readable wrong version is not a locate failure: {}",
+        error.message
+    );
+}
+
 #[test]
 fn source_swap_failure_errors_when_active_binary_unchanged() {
     // Issue #5772: the source upgrade command exited 0 but the read-back
