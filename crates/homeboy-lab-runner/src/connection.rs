@@ -2231,19 +2231,19 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     let active_job_count = selected_active_job_count;
     let (generation_inventory, generation_owners) =
         super::generation_store::status_admission_projection(runner_id, session.as_ref())?;
-    let authoritative_generation_count = generation_inventory
+    let authoritative_live_count = generation_inventory
         .iter()
         .find(|generation| generation.admission_owner)
         .filter(|generation| generation.active_job_count_authoritative)
-        .map(|generation| generation.active_job_count);
+        .map(|generation| generation.live_job_count());
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(_)) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
+        (None, Some(_)) if authoritative_live_count.is_some_and(|count| count != active_job_count) => {
             Some(RunnerActiveJobError {
                 code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
                     "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger retains {}",
-                    authoritative_generation_count.expect("guarded by is_some_and")
+                    authoritative_live_count.expect("guarded by is_some_and")
                 ),
             })
         }

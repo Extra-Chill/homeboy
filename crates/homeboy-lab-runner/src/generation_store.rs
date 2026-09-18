@@ -655,10 +655,10 @@ pub(crate) fn with_admission_fence<T>(
             generations
                 .generations
                 .iter()
-                .find(|(_, entry)| entry.active_jobs > 0)
+                .find(|(_, entry)| entry.observed_active_jobs.unwrap_or(entry.active_jobs) > 0)
                 .map(|(generation, entry)| AdmissionFence {
                     generation: generation.clone(),
-                    active_job_count: entry.active_jobs,
+                    active_job_count: entry.observed_active_jobs.unwrap_or(entry.active_jobs),
                 })
         });
         Ok((reservation, fence))
@@ -2161,12 +2161,14 @@ fn reconcile_with(
                 if let Some(active_jobs) = observed_active_jobs {
                     entry.active_jobs = *active_jobs;
                 }
-                if entry.drain_state == crate::RollingDrainState::Draining
-                    && observed_active_jobs == &Some(0)
-                {
+                if observed_active_jobs == &Some(0) {
                     generations.job_owners.retain(|_, owner| {
                         !owner_matches_generation(owner, generation, &entry.endpoint)
                     });
+                }
+                if entry.drain_state == crate::RollingDrainState::Draining
+                    && observed_active_jobs == &Some(0)
+                {
                     if evidence_error.is_none() {
                         if *unclaimed {
                             already_stopped.push(generation.clone());
@@ -3209,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciled_zero_for_admission_owner_releases_fence_but_retains_job_identities() {
+    fn reconciled_zero_for_admission_owner_retires_unclaimed_jobs() {
         test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
             record_job("runner-a", &current, "job-a").expect("record first job");
@@ -3226,16 +3228,42 @@ mod tests {
             let projection = status_projection("runner-a", Some(&current)).expect("projection");
             assert_eq!(projection[0].active_job_count, 0);
             assert_eq!(projection[0].observed_active_job_count, Some(0));
-            assert_eq!(
-                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
-                ["job-a", "job-b"],
-                "zero live work settles the active count without discarding durable ownership"
+            assert!(
+                status_job_owners("runner-a", Some(&current)).expect("owners")[0]
+                    .job_ids
+                    .is_empty(),
+                "durable jobs with no live daemon owner are residue"
             );
             with_admission_fence("runner-a", Some(&current), "connect", |fence| {
                 assert!(fence.is_none(), "authoritative zero must permit reconnect");
                 Ok(())
             })
             .expect("released fence");
+        });
+    }
+
+    #[test]
+    fn live_daemon_owner_keeps_its_durable_job() {
+        test_support::with_isolated_home(|_| {
+            let current = session("lease-current", "daemon-current", Some(202));
+            record_job("runner-a", &current, "job-live").expect("record live job");
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-current".to_string(), 1);
+
+            reconcile_with("runner-a", Some(&current), &operations).expect("reconcile live owner");
+
+            assert_eq!(
+                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
+                ["job-live"]
+            );
+            with_admission_fence("runner-a", Some(&current), "connect", |fence| {
+                assert!(fence.is_some(), "a live job remains a placement fence");
+                Ok(())
+            })
+            .expect("live fence");
         });
     }
 
