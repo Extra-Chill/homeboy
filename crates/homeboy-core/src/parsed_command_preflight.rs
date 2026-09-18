@@ -330,7 +330,9 @@ pub fn resolve_parsed_command_preflight(
         let lab_line = policy
             .selected_runner_id
             .as_deref()
-            .map(|runner_id| lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref()))
+            .map(|runner_id| {
+                lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref())
+            })
             .expect("auto route fallback requires a preferred runner");
         let local_line = local_route_inadmissible_reason(&resource_admission)
             .expect("rejected local admission supplies a route reason");
@@ -378,13 +380,12 @@ pub fn resolve_parsed_command_preflight(
     } else {
         ExecutionPlacementRequirement::Either
     };
-    let selected = if matches!(input.placement, PlacementIntent::Local)
-        || selected_runner_id.is_none()
-    {
-        EffectiveExecutionPlacement::Local
-    } else {
-        EffectiveExecutionPlacement::Lab
-    };
+    let selected =
+        if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
+            EffectiveExecutionPlacement::Local
+        } else {
+            EffectiveExecutionPlacement::Lab
+        };
     let runner = selected_runner_id
         .as_ref()
         .map(|runner_id| ExecutionPlacementRunnerSelection {
@@ -922,9 +923,9 @@ mod tests {
             .expect_err("auto fails only after every route is rejected");
         assert_eq!(error.details["field"], "placement");
         assert!(
-            error.message.contains(
-                "Lab runner homeboy-lab inadmissible (unresolved generation projection)"
-            ),
+            error
+                .message
+                .contains("Lab runner homeboy-lab inadmissible (unresolved generation projection)"),
             "{}",
             error.message
         );
