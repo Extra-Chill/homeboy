@@ -826,6 +826,18 @@ mod tests {
                     envelope["data"]["connection"]["local_recovery_command"],
                     "homeboy runner disconnect homeboy-lab --local-recovery"
                 );
+                assert_eq!(
+                    envelope["diagnostics"]["code"],
+                    "runner.disconnect.partial_failure"
+                );
+                assert_eq!(envelope["summary"], "SSH timeout");
+                assert!(
+                    !envelope["summary"]
+                        .as_str()
+                        .expect("summary")
+                        .contains("without reporting a failure cause"),
+                    "{name}"
+                );
             } else if name == "repeated local recovery" {
                 assert_eq!(
                     envelope["data"]["connection"]["local_recovery_command"],
