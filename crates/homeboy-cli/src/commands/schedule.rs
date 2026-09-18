@@ -130,6 +130,9 @@ pub struct ScheduleView {
     /// daemon reclaims it. Keep `due` truthful while making that condition
     /// explicit and recoverable.
     stale_running: bool,
+    /// Repeated failures are operator-visible rather than a counter that only
+    /// lives on disk. A schedule whose last run failed is unhealthy.
+    unhealthy: bool,
     daemon: ScheduleDaemonHealth,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_command: Option<String>,
@@ -177,23 +180,13 @@ pub struct TickReport {
 fn view(schedule: Schedule) -> ScheduleView {
     let state = schedule::load_state(&schedule.id);
     let now = chrono::Utc::now();
-    let stale_running = state.running
-        && state
-            .started_at
-            .as_deref()
-            .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
-            .map(|started| {
-                (now - started.with_timezone(&chrono::Utc)).num_seconds()
-                    > homeboy::core::schedule::ticker::STALE_RUN_RECLAIM_SECS
-            })
-            // An unaged running marker is equally unrecoverable without a
-            // daemon restart, so surface the same deterministic action.
-            .unwrap_or(true);
+    let stale_running = state.is_stale_running(now);
+    let unhealthy = state.is_unhealthy();
     let next_run_at = state
         .next_run_at(&schedule)
         .map(|next| next.to_rfc3339())
         .or_else(|| Some("due now".to_string()));
-    let due = state.is_due(&schedule, chrono::Utc::now());
+    let due = state.is_due(&schedule, now);
     let daemon = daemon_health();
     ScheduleView {
         schedule: ScheduleSummary {
@@ -211,6 +204,7 @@ fn view(schedule: Schedule) -> ScheduleView {
         next_run_at,
         due,
         stale_running,
+        unhealthy,
         recovery_command: stale_running
             .then(|| daemon.recovery_command.clone())
             .flatten(),
@@ -436,7 +430,11 @@ pub fn run(args: ScheduleArgs) -> CmdResult<ScheduleOutput> {
         ScheduleCommand::Enable { id } => set_enabled(&id, true),
         ScheduleCommand::Disable { id } => set_enabled(&id, false),
         ScheduleCommand::Tick(tick) => {
-            let due = schedule::due_schedules(chrono::Utc::now())?;
+            let now = chrono::Utc::now();
+            if !tick.dry_run {
+                let _ = schedule::reclaim_stale_runs(now);
+            }
+            let due = schedule::due_schedules(now)?;
             let ids: Vec<String> = due.iter().map(|s| s.id.clone()).collect();
             if tick.dry_run {
                 return Ok((
@@ -507,6 +505,77 @@ mod tests {
     fn rejects_unbalanced_quotes_and_empty_commands() {
         assert!(split_command(r#"deploy "unclosed"#).is_err());
         assert!(split_command("   ").is_err());
+    }
+
+    struct FailingRunner;
+
+    impl homeboy::core::schedule::ScheduleCommandRunner for FailingRunner {
+        fn run(
+            &self,
+            _command: homeboy::core::schedule::ScheduledCommand<'_>,
+        ) -> homeboy::core::Result<homeboy::core::schedule::ScheduleCommandResult> {
+            Ok(
+                homeboy::core::schedule::ScheduleCommandResult::Envelope(serde_json::json!({
+                    "status": "failed",
+                    "exit_code": 1,
+                })),
+            )
+        }
+    }
+
+    fn install_transport(id: &str, command: Vec<&str>) {
+        let mut manifest: homeboy_extension_contract::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Test transport",
+                "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": id,
+                    "command": command,
+                }]
+            }))
+            .unwrap();
+        manifest.id = "schedule-show-test-transport".to_string();
+        homeboy::core::extension::catalog::save_manifest(&manifest).unwrap();
+    }
+
+    fn declared(id: &str, notify_on: NotifyPolicy) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            command: Some(vec!["triage".to_string()]),
+            exec: None,
+            steps: Vec::new(),
+            every: Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on,
+            on_overlap: OverlapPolicy::Skip,
+            notification_transport: Some("test.run-completion".to_string()),
+            notification_route: Some("route-42".to_string()),
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn consecutive_failures_notify_and_are_visible_in_schedule_show() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            install_transport("test.run-completion", vec!["true"]);
+            let schedule = declared("failing-retention", NotifyPolicy::Failure);
+            schedule::save(&schedule).expect("save");
+
+            let first = schedule::run_schedule(&schedule, &FailingRunner);
+            let second = schedule::run_schedule(&schedule, &FailingRunner);
+            assert!(first.notified, "notify_on: failure must emit");
+            assert!(second.notified, "repeated failures must keep emitting");
+
+            let output = view(schedule);
+            assert_eq!(output.state.consecutive_failures, 2);
+            assert!(output.unhealthy);
+            let value = serde_json::to_value(output).expect("schedule view serializes");
+            assert_eq!(value["state"]["consecutive_failures"], 2);
+            assert_eq!(value["unhealthy"], true);
+        });
     }
 
     #[test]

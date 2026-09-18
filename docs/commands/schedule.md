@@ -142,4 +142,4 @@ homeboy schedule tick
 
 A schedule is marked in flight while it runs so an overlapping tick declines it. If the process is killed between that marker and the recorded result, the marker would otherwise block the schedule forever under `--on-overlap skip`.
 
-The daemon clears markers older than six hours when it starts, in the same way it reconciles expired job reservations. A marker with no recorded start time cannot be aged and is cleared as well.
+The daemon clears markers older than six hours on every tick, so a live daemon cannot leave a schedule wedged under skip-on-overlap. A marker with no recorded start time cannot be aged and is cleared as well.
