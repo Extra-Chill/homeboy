@@ -545,7 +545,7 @@ mod tests {
     fn config_get_returns_one_value_by_dotted_path() {
         homeboy::core::test_support::with_isolated_home(|_| {
             let (subtree, _) = show(false, Some("retention")).expect("dotted retention subtree");
-            let value = subtree.value.expect("retention subtree");
+            let value = subtree.value.clone().expect("retention subtree");
             assert!(
                 value
                     .get("reconstructable_artifact_reserve_bytes")
