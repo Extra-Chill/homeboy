@@ -1582,6 +1582,104 @@ fn cleanup_marks_missing_worktree_record_removed() {
 }
 
 #[test]
+fn tombstoned_missing_worktree_is_retired_and_live_path_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let live_path = sibling_worktree_path(source.path(), "live");
+    fs::create_dir_all(&live_path).unwrap();
+    let store = dir.path().join("store");
+
+    let mut live = fixture_record(source.path(), &live_path);
+    live.id = "fixture@live".to_string();
+    write_record(&store, &live).unwrap();
+
+    let mut tombstone = fixture_record(source.path(), &dir.path().join("gone"));
+    tombstone.id = "fixture@gone".to_string();
+    tombstone.state = TaskWorktreeState::Removed;
+    write_record(&store, &tombstone).unwrap();
+
+    let retired = retire_residue_with_store(&store).unwrap();
+    assert_eq!(retired, ["fixture@gone"]);
+    assert_eq!(
+        read_record(&store, "fixture@live").unwrap().id,
+        "fixture@live"
+    );
+    assert!(read_record(&store, "fixture@gone").is_err());
+
+    let listed = list_with_store(&store).unwrap();
+    assert_eq!(
+        listed
+            .worktrees
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture@live"]
+    );
+}
+
+#[test]
+fn listing_and_cleanup_inventory_count_live_records_not_residue() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let live_path = sibling_worktree_path(source.path(), "live-inventory");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "live-inventory",
+            &live_path.to_string_lossy(),
+        ],
+    );
+    let store = dir.path().join("store");
+    let mut live = succeeded_record(source.path(), &live_path);
+    live.id = "fixture@live-inventory".to_string();
+    write_record(&store, &live).unwrap();
+    let mut tombstone = fixture_record(source.path(), &dir.path().join("gone-inventory"));
+    tombstone.id = "fixture@gone-inventory".to_string();
+    tombstone.state = TaskWorktreeState::Removed;
+    write_record(&store, &tombstone).unwrap();
+
+    let listed = list_with_store(&store).unwrap();
+    assert_eq!(listed.worktrees.len(), 1);
+    assert_eq!(listed.worktrees[0].id, "fixture@live-inventory");
+
+    let cleanup = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(cleanup.counts.candidates, 1);
+    assert_eq!(cleanup.counts.skipped, 0);
+    assert_eq!(cleanup.candidates[0].record.id, "fixture@live-inventory");
+
+    let inventory = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            apply: false,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &FixedLivenessAuthority(WorktreeLivenessAuthority::Live {
+            provenance: "preview".to_string(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(inventory.total, 1);
+    assert_eq!(inventory.records.len(), 1);
+    assert_eq!(inventory.records[0].record.id, "fixture@live-inventory");
+    assert_eq!(inventory.cross_tab.removed_path_missing, 0);
+}
+
+#[test]
 fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
     let data_root = tempfile::tempdir().unwrap();
     let source = git_repo();

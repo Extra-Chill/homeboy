@@ -74,6 +74,14 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+/// Retire residue records from the native task-worktree registry.
+///
+/// A tombstone whose path is gone and that no live process claims is residue.
+/// Retirement does not consult free-space reserve gates.
+pub fn retire_residue() -> Result<Vec<String>> {
+    retire_residue_with_store(&metadata_dir()?)
+}
+
 /// Read a bounded, stable keyset page for the operator-facing worktree list.
 pub fn list_page(options: WorktreeListOptions) -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(|| list_page_with_store(&metadata_dir()?, options))

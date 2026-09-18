@@ -1791,6 +1791,7 @@ fn automatic_retention() -> CmdResult<Value> {
     let deadline = SystemTime::now().checked_add(Duration::from_secs(
         retention.automatic_retention_max_run_seconds,
     ));
+    let _residue = homeboy::core::worktree::retire_residue()?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
     let roots = homeboy::core::component::registered()
         .unwrap_or_default()

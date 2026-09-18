@@ -2120,6 +2120,7 @@ fn broker_typed_job_timeout_records_runner_attributed_partial_status() {
 fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("request");
         let mut request = [0; 1024];
@@ -2128,7 +2129,7 @@ fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
             .expect("headers");
         stream.flush().expect("flush headers");
-        std::thread::sleep(Duration::from_millis(1100));
+        let _ = release_rx.recv();
     });
     let mut session = reverse_controller_session();
     session.broker_url = Some(format!("http://{address}"));
@@ -2142,6 +2143,7 @@ fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
         runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_secs(1)).is_err()
     );
 
+    drop(release_tx);
     server.join().expect("server");
     let degradations = crate::readonly_probe::take_degradations();
     assert_eq!(degradations.len(), 1);

@@ -250,24 +250,35 @@ pub(super) fn cleanup_with_store_page(
     store: &Path,
 ) -> Result<WorktreeCleanupOutput> {
     let options = page.cleanup.clone();
+    if !options.dry_run {
+        retire_residue_with_store(store)?;
+    }
     let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
-    let mut records = list_with_store(store)?
-        .worktrees
-        .into_iter()
-        .filter(|record| {
-            page.cursor
-                .as_ref()
-                .is_none_or(|cursor| record.id > *cursor)
-        });
+    let mut records = scan_registry(store)?.0.into_iter().filter(|record| {
+        page.cursor
+            .as_ref()
+            .is_none_or(|cursor| record.id > *cursor)
+    });
     let mut next_cursor = None;
     let mut continuation = None;
     // Only advance the cursor after a record has been fully inspected. If the
     // deadline interrupts an inspection, resuming after that record would drop
     // it from every subsequent page.
     let mut last_id = None;
-    for record in records.by_ref().take(page.limit.max(1)) {
+    let mut inspected = 0usize;
+    for record in records.by_ref() {
+        if task_worktree_liveness(&record, false).residue() {
+            last_id = Some(record.id.clone());
+            continue;
+        }
+        if inspected == page.limit.max(1) {
+            next_cursor = last_id.clone();
+            continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
+            break;
+        }
+        inspected += 1;
         if page
             .deadline
             .is_some_and(|deadline| std::time::Instant::now() >= deadline)
@@ -1185,19 +1196,49 @@ fn create_evidence(
     })
 }
 
-pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
+pub(super) fn task_worktree_liveness(
+    record: &TaskWorktreeRecord,
+    live_claim: bool,
+) -> crate::reaping::RecordLiveness {
+    crate::reaping::RecordLiveness::new(
+        Path::new(&record.worktree_path).exists(),
+        live_claim || record.state == TaskWorktreeState::Active,
+    )
+}
+
+fn delete_record_unlocked(store_dir: &Path, id: &str) -> Result<()> {
+    let path = record_path(store_dir, id);
+    fs::remove_file(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+pub(super) fn retire_residue_with_store(store_dir: &Path) -> Result<Vec<String>> {
+    with_task_worktree_registry_write_lock(|| retire_residue_unlocked(store_dir))
+}
+
+pub(super) fn retire_residue_unlocked(store_dir: &Path) -> Result<Vec<String>> {
+    if !store_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut retired = Vec::new();
+    for record in scan_registry(store_dir)?.0 {
+        let live_claim = !live_workspace_owners(&record, store_dir)?.is_empty();
+        if !task_worktree_liveness(&record, live_claim).residue() {
+            continue;
+        }
+        delete_record_unlocked(store_dir, &record.id)?;
+        retired.push(record.id);
+    }
+    Ok(retired)
+}
+
+fn scan_registry(
+    store_dir: &Path,
+) -> Result<(Vec<TaskWorktreeRecord>, Vec<WorktreeListDiagnostic>)> {
     let mut worktrees = Vec::new();
     let mut diagnostics = Vec::new();
     if !store_dir.exists() {
-        return Ok(WorktreeListOutput {
-            worktrees,
-            cursor: None,
-            next_cursor: None,
-            next_command: None,
-            limit: usize::MAX,
-            truncated: false,
-            diagnostics,
-        });
+        return Ok((worktrees, diagnostics));
     }
     let mut entries: Vec<_> = fs::read_dir(store_dir)
         .map_err(|err| Error::internal_io(err.to_string(), Some(store_dir.display().to_string())))?
@@ -1220,8 +1261,15 @@ pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
         }
     }
     worktrees.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok((worktrees, diagnostics))
+}
+
+pub(super) fn list_with_store(store_dir: &Path) -> Result<WorktreeListOutput> {
+    let (worktrees, diagnostics) = scan_registry(store_dir)?;
     Ok(WorktreeListOutput {
-        worktrees,
+        worktrees: crate::reaping::live_only(worktrees, |record| {
+            task_worktree_liveness(record, false)
+        }),
         cursor: None,
         next_cursor: None,
         next_command: None,
@@ -1264,42 +1312,46 @@ pub(super) fn list_page_with_store(
                 <= boundary.as_str()
         })
     });
-    let entries = entries
-        .into_iter()
-        .skip(start)
-        .take(limit + 1)
-        .collect::<Vec<_>>();
-    let truncated = entries.len() > limit;
-    let entries = entries.into_iter().take(limit).collect::<Vec<_>>();
+    let mut worktrees = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut last_manifest = None;
+    let mut truncated = false;
+    for entry in entries.into_iter().skip(start) {
+        let manifest_name = entry
+            .file_name()
+            .to_string_lossy()
+            .trim_end_matches(".json")
+            .to_string();
+        match read_record_path(&entry.path()) {
+            Ok(record) if task_worktree_liveness(&record, false).residue() => continue,
+            Ok(record) => {
+                if worktrees.len() + diagnostics.len() == limit {
+                    truncated = true;
+                    break;
+                }
+                worktrees.push(record);
+            }
+            Err(error) => {
+                if worktrees.len() + diagnostics.len() == limit {
+                    truncated = true;
+                    break;
+                }
+                diagnostics.push(WorktreeListDiagnostic::from_error(
+                    error,
+                    Some(manifest_name.clone()),
+                    Some(entry.path().display().to_string()),
+                ));
+            }
+        }
+        last_manifest = Some(manifest_name);
+    }
     let next_cursor = truncated
-        .then(|| {
-            entries
-                .last()
-                .expect("a truncated page has a boundary entry")
-                .file_name()
-                .to_string_lossy()
-                .trim_end_matches(".json")
-                .to_string()
-        })
+        .then_some(last_manifest)
+        .flatten()
         .map(encode_worktree_list_cursor);
     let next_command = next_cursor
         .as_ref()
         .map(|cursor| format!("homeboy worktree list --limit {limit} --cursor {cursor}"));
-    let mut worktrees = Vec::new();
-    let mut diagnostics = Vec::new();
-    for entry in entries {
-        match read_record_path(&entry.path()) {
-            Ok(record) => worktrees.push(record),
-            Err(error) => diagnostics.push(WorktreeListDiagnostic::from_error(
-                error,
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| name.trim_end_matches(".json").to_string()),
-                Some(entry.path().display().to_string()),
-            )),
-        }
-    }
     Ok(WorktreeListOutput {
         worktrees,
         cursor: options.cursor,
@@ -1329,8 +1381,9 @@ pub(super) fn inventory_with_store_and_authority(
             .apply_deadline
             .unwrap_or_else(|| std::time::Instant::now() + APPLY_TIMEOUT)
     });
-    // Count and sort manifest names without deserializing the registry. A page
-    // must bound parsing too, not merely trim an already materialized result.
+    if apply {
+        retire_residue_with_store(store_dir)?;
+    }
     let mut manifest_paths = if store_dir.exists() {
         fs::read_dir(store_dir)
             .map_err(|error| {
@@ -1343,7 +1396,15 @@ pub(super) fn inventory_with_store_and_authority(
         Vec::new()
     };
     manifest_paths.sort();
-    let total = manifest_paths.len();
+    let mut live_paths = Vec::new();
+    for path in manifest_paths {
+        match read_record_path(&path) {
+            Ok(record) if task_worktree_liveness(&record, false).residue() => {}
+            _ => live_paths.push(path),
+        }
+    }
+    let total = live_paths.len();
+    let manifest_paths = live_paths;
     let start = options.cursor.as_ref().map_or(0, |cursor| {
         let cursor = paths::sanitize_path_segment(cursor);
         manifest_paths.partition_point(|path| {
