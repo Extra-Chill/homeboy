@@ -2670,6 +2670,77 @@ mod preview_tests {
         );
     }
 
+    struct ResetCapturedPreflight;
+
+    impl Drop for ResetCapturedPreflight {
+        fn drop(&mut self) {
+            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        }
+    }
+
+    fn preview_fixture_worktree() -> (tempfile::TempDir, String) {
+        let repository = tempfile::tempdir().expect("repository");
+        let primary = repository.path().join("primary");
+        let workspace = repository.path().join("task-worktree");
+        assert!(Command::new("git")
+            .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+            .status()
+            .expect("initialize primary")
+            .success());
+        for (key, value) in [
+            ("user.email", "fixture@example.test"),
+            ("user.name", "Fixture"),
+        ] {
+            assert!(Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "config",
+                    key,
+                    value
+                ])
+                .status()
+                .expect("configure fixture repository")
+                .success());
+        }
+        std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+        assert!(Command::new("git")
+            .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+            .status()
+            .expect("stage fixture")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture"
+            ])
+            .status()
+            .expect("commit fixture")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                workspace.to_str().expect("UTF-8 workspace"),
+            ])
+            .status()
+            .expect("create linked workspace")
+            .success());
+        (
+            repository,
+            workspace.to_str().expect("UTF-8 workspace").to_string(),
+        )
+    }
+
     fn persist_unresolved_generation_runner(runner_id: &str) {
         homeboy::runner::runners::create(
             &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
@@ -2715,12 +2786,7 @@ mod preview_tests {
     }
 
     fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
-        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root")
-            .display()
-            .to_string();
+        let (_repository, workspace) = preview_fixture_worktree();
         let cli = Cli::try_parse_from([
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -2728,6 +2794,8 @@ mod preview_tests {
             "--preview".to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
+            "--repo".to_string(),
+            "fixture-repository".to_string(),
             "--prompt".to_string(),
             "Inspect the task workspace.".to_string(),
             "--to-worktree".to_string(),
@@ -2752,6 +2820,7 @@ mod preview_tests {
     #[test]
     fn preview_reports_unresolved_generation_blocker_instead_of_an_unqualified_ready_plan() {
         crate::test_support::with_isolated_home(|_| {
+            let _reset = ResetCapturedPreflight;
             persist_unresolved_generation_runner("homeboy-lab");
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
@@ -2793,13 +2862,13 @@ mod preview_tests {
                 summary.contains("Next:") && summary.contains("homeboy-lab"),
                 "preview must surface the runner-status recovery action: {summary}"
             );
-            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
         });
     }
 
     #[test]
     fn preview_that_passes_admission_uses_the_same_connected_ready_evidence_execution_requires() {
         crate::test_support::with_isolated_home(|_| {
+            let _reset = ResetCapturedPreflight;
             let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
 
             assert_eq!(exit_code, 0);
@@ -2837,7 +2906,6 @@ mod preview_tests {
                 !summary.contains("static inputs only; admission not checked"),
                 "admissible preview must not claim admission was skipped: {summary}"
             );
-            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
         });
     }
 
