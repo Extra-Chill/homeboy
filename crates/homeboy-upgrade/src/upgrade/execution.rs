@@ -384,30 +384,24 @@ pub(crate) fn execute_upgrade(
             .expect("release upgrades have an isolated stage");
         let selected_version =
             selected_binary_version.expect("release upgrades select a release version");
-        let staged_identity = active_binary_info_at(staged)?.ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "release installer did not produce a verifiable staged candidate at {}",
-                staged.display()
-            ))
-        })?;
-        if staged_identity.version.as_deref() != Some(selected_version) {
-            replacement_checkpoint(
-                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-            )?;
-            return Err(binary_swap_failure(
-                selected_version,
-                Some(staged),
-                Some(&staged_identity),
-            ));
-        }
+        let destination = binary_destination
+            .as_deref()
+            .expect("release upgrades capture a destination");
+        let probed = post_install_controller_candidates(staged, Some(destination));
+        let (candidate, _) = match verify_post_install_controller_version(selected_version, &probed)
+        {
+            Ok(verified) => verified,
+            Err(error) => {
+                replacement_checkpoint(
+                    &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+                )?;
+                return Err(error);
+            }
+        };
         run_verified_target_admission(
-            staged,
+            &candidate,
             selected_version,
-            &candidate_legacy_identity(
-                binary_destination
-                    .as_deref()
-                    .expect("release upgrades capture a destination"),
-            )?,
+            &candidate_legacy_identity(destination)?,
             &selected_release
                 .expect("release upgrades select a release")
                 .tag,
@@ -415,16 +409,13 @@ pub(crate) fn execute_upgrade(
         promotion_lease
             .expect("release replacement requires promotion ownership")
             .assert_generation()?;
-        if let Err(error) = install_source_built_binary(
-            staged,
-            binary_destination
-                .as_deref()
-                .expect("release upgrades capture a destination"),
-        ) {
-            replacement_checkpoint(
-                &checkpoint.with_state(replacement_observed_state(checkpoint)?),
-            )?;
-            return Err(error);
+        if !paths_identify_same_binary(&candidate, destination) {
+            if let Err(error) = install_source_built_binary(&candidate, destination) {
+                replacement_checkpoint(
+                    &checkpoint.with_state(replacement_observed_state(checkpoint)?),
+                )?;
+                return Err(error);
+            }
         }
         if !replacement_was_applied(checkpoint)? {
             replacement_checkpoint(
@@ -432,8 +423,11 @@ pub(crate) fn execute_upgrade(
             )?;
             return Err(binary_swap_failure(
                 selected_version,
-                binary_destination.as_deref(),
-                active_binary_info_at(&checkpoint.target)?.as_ref(),
+                Some(destination),
+                active_binary_info_at(&checkpoint.target)
+                    .ok()
+                    .flatten()
+                    .as_ref(),
             ));
         }
         replacement_checkpoint(&checkpoint.with_state("applied"))?;
@@ -2073,43 +2067,33 @@ fn command_output_with_timeout(
     timeout: Duration,
 ) -> Result<std::process::Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let program = PathBuf::from(command.get_program());
 
-    let mut child = command.spawn().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some("verify active binary version".to_string()),
-        )
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| verify_active_binary_io_error(&program, e))?;
     let start = Instant::now();
 
     loop {
         if child
             .try_wait()
-            .map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some("verify active binary version".to_string()),
-                )
-            })?
+            .map_err(|e| verify_active_binary_io_error(&program, e))?
             .is_some()
         {
-            return child.wait_with_output().map_err(|e| {
-                Error::internal_io(
-                    e.to_string(),
-                    Some("verify active binary version".to_string()),
-                )
-            });
+            return child
+                .wait_with_output()
+                .map_err(|e| verify_active_binary_io_error(&program, e));
         }
 
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(Error::internal_io(
+            return Err(verify_active_binary_io_error(
+                &program,
                 format!(
                     "active binary did not answer --version within {}s",
                     timeout.as_secs()
                 ),
-                Some("verify active binary version".to_string()),
             ));
         }
 
@@ -2117,8 +2101,114 @@ fn command_output_with_timeout(
     }
 }
 
-pub(crate) fn active_binary_path() -> Result<PathBuf> {
+fn verify_active_binary_io_error(program: &Path, error: impl std::fmt::Display) -> Error {
+    Error::internal_io(
+        format!("{}: {error}", program.display()),
+        Some("verify active binary version".to_string()),
+    )
+}
+
+/// Candidates for post-install verification, in preference order:
+/// managed/staged prefix, PATH-resolved `homeboy`, captured destination,
+/// then `current_exe()`. A cargo-installed controller has no managed prefix;
+/// PATH / `current_exe` is what the operator's shell runs (#14769).
+fn post_install_controller_candidates(
+    managed_prefix: &Path,
+    destination: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut probed = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !probed.iter().any(|existing| existing == &path) {
+            probed.push(path);
+        }
+    };
+    push(managed_prefix.to_path_buf());
     if let Some(path) = resolve_binary_on_path() {
+        push(path);
+    }
+    if let Some(path) = destination {
+        push(path.to_path_buf());
+    }
+    if let Ok(path) = std::env::current_exe() {
+        push(path);
+    }
+    probed
+}
+
+fn verify_post_install_controller_version(
+    expected_version: &str,
+    probed: &[PathBuf],
+) -> Result<(PathBuf, ActiveBinaryInfo)> {
+    verify_post_install_controller_version_with(expected_version, probed, active_binary_info_at)
+}
+
+fn verify_post_install_controller_version_with<R>(
+    expected_version: &str,
+    probed: &[PathBuf],
+    mut read_info: R,
+) -> Result<(PathBuf, ActiveBinaryInfo)>
+where
+    R: FnMut(&Path) -> Result<Option<ActiveBinaryInfo>>,
+{
+    let Some(path) = probed.iter().find(|path| path.is_file()) else {
+        return Err(missing_controller_binary_error(probed));
+    };
+    let info =
+        read_info(path)?.ok_or_else(|| unverifiable_controller_binary_error(path, probed))?;
+    if info.version.as_deref() != Some(expected_version) {
+        return Err(binary_swap_failure(
+            expected_version,
+            Some(path.as_path()),
+            Some(&info),
+        ));
+    }
+    Ok((path.clone(), info))
+}
+
+fn probed_path_details(probed: &[PathBuf]) -> serde_json::Value {
+    serde_json::json!({
+        "context": "verify active binary version",
+        "probed_paths": probed.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+    })
+}
+
+fn missing_controller_binary_error(probed: &[PathBuf]) -> Error {
+    let listed = display_probed_paths(probed);
+    let mut error = Error::internal_unexpected(format!(
+        "could not locate a controller binary to verify (probed {listed})"
+    ))
+    .with_hint(
+        "The installer may have replaced a PATH-visible binary that is not under a managed install prefix.",
+    )
+    .with_hint("Inspect PATH with: type -a homeboy");
+    error.details = probed_path_details(probed);
+    error
+}
+
+fn unverifiable_controller_binary_error(path: &Path, probed: &[PathBuf]) -> Error {
+    let mut error = Error::internal_unexpected(format!(
+        "controller at {} did not report a verifiable version (probed {})",
+        path.display(),
+        display_probed_paths(probed)
+    ));
+    error.details = probed_path_details(probed);
+    error
+}
+
+fn display_probed_paths(probed: &[PathBuf]) -> String {
+    if probed.is_empty() {
+        "<none>".to_string()
+    } else {
+        probed
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+pub(crate) fn active_binary_path() -> Result<PathBuf> {
+    if let Some(path) = resolve_binary_on_path().filter(|path| path.is_file()) {
         return Ok(path);
     }
 
