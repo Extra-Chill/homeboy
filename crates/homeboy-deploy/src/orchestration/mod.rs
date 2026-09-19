@@ -17,7 +17,9 @@ use super::orchestration_tag_checkout::{
     restore_branches,
 };
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
-use super::planning::{load_project_components_with_projection, plan_components};
+use super::planning::{
+    load_project_components_with_projection, local_deploy_version, plan_components,
+};
 use super::types::{
     ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary,
     DeploymentProvenanceEvidence, VersionSource, VersionSources,
@@ -32,9 +34,10 @@ mod smoke_check;
 
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode, CheckModeInput};
 use preflight::{
-    check_uncommitted_changes, check_unreleased_commits, guard_head_matches_invocation_checkout,
-    guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
-    sync_components, verify_expected_version, warn_non_default_branch,
+    check_uncommitted_changes, check_unreleased_commits, guard_checkout_required_selectors,
+    guard_head_matches_invocation_checkout, guard_local_build_downgrades,
+    guard_local_build_source_freshness, local_build_components, sync_components,
+    verify_expected_version, warn_non_default_branch,
 };
 #[cfg(test)]
 use prepared_payloads::prepare_component_deployments;
@@ -153,6 +156,13 @@ pub(super) fn prepare_components(
         }));
     }
 
+    // A selector that names a specific source ref has nothing to select from
+    // on a component with no local checkout (#14782). Fail with a clear,
+    // targeted message before any other guard gets a chance to degrade into a
+    // vaguer "not a git repository" error on a path that was never expected
+    // to exist.
+    guard_checkout_required_selectors(&components, config)?;
+
     // This must precede artifact resolution and every source operation below.
     // Strict project policy failures are therefore unable to trigger a build,
     // checkout/pull, dependency install, or remote deployment mutation.
@@ -232,10 +242,12 @@ pub(super) fn prepare_components(
 
     version::validate_component_versions(&components)?;
 
-    // Gather versions
+    // Gather versions. A component resolved without a local checkout falls
+    // back to the version implied by its GitHub repository's latest release
+    // tag (#14782) — the only "local" version authority it has.
     let mut local_versions: HashMap<String, String> = components
         .iter()
-        .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
+        .filter_map(|c| local_deploy_version(c).map(|v| (c.id.clone(), v)))
         .collect();
     let local_build_components = local_build_components(&components, config);
     let remote_versions = if config.outdated
@@ -403,7 +415,7 @@ pub(super) fn prepare_components(
 
     local_versions = components
         .iter()
-        .filter_map(|c| version::get_component_version(c).map(|v| (c.id.clone(), v)))
+        .filter_map(|c| local_deploy_version(c).map(|v| (c.id.clone(), v)))
         .collect();
 
     guard_local_build_downgrades(

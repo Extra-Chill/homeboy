@@ -198,6 +198,24 @@ pub(super) fn plan_component_deploys(
     }
 }
 
+/// The version to compare for `--outdated`, and for reporting "local
+/// version" generally: the component's actual configured version when a
+/// checkout is available, or — for a component resolved without one — the
+/// version implied by its GitHub repository's latest release tag (#14782).
+///
+/// A release-materialized component has no source tree to read
+/// `version_targets` from at all, so its "local" version is defined by the
+/// same release-tag authority `--outdated` is asking about in the first
+/// place. A component with a checkout always uses the ordinary path; this is
+/// a fallback consulted only when that path finds nothing.
+pub(super) fn local_deploy_version(component: &Component) -> Option<String> {
+    version::get_component_version(component).or_else(|| {
+        homeboy_version::checkout_less_release_version(component)
+            .ok()
+            .flatten()
+    })
+}
+
 fn plan_outdated_steps(
     all_components: &[Component],
     remote_versions: &HashMap<String, String>,
@@ -205,7 +223,7 @@ fn plan_outdated_steps(
     all_components
         .iter()
         .map(|component| {
-            let local_version = version::get_component_version(component);
+            let local_version = local_deploy_version(component);
             let remote_version = remote_versions.get(&component.id).cloned();
             let version_status =
                 compare_deployed_versions(local_version.as_deref(), remote_version.as_deref());
@@ -1316,6 +1334,81 @@ mod tests {
             current.skip_reason.as_deref(),
             Some("Component is up to date")
         );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_binary(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("write fake binary");
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake binary");
+    }
+
+    /// A checkout-less component's "local" version for `--outdated` planning
+    /// comes from its GitHub repository's latest release tag rather than
+    /// `version_targets` — there is no checkout to read those from (#14782).
+    #[cfg(unix)]
+    #[test]
+    fn plan_outdated_steps_uses_the_latest_release_tag_for_a_checkout_less_component() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let bin_dir = TempDir::new().expect("bin dir");
+        write_fake_binary(
+            &bin_dir.path().join("gh"),
+            "#!/bin/sh\necho fake-test-token\nexit 0\n",
+        );
+        write_fake_binary(
+            &bin_dir.path().join("curl"),
+            "#!/bin/sh\ncat > /dev/null 2>&1\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  \
+             *releases/latest*) printf '%s' '{\"tag_name\":\"v1.5.0\"}'; printf '\\n200' ;;\n  \
+             *) printf '\\n404' ;;\nesac\n",
+        );
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = bin_dir.path().as_os_str().to_os_string();
+        new_path.push(":");
+        new_path.push(existing);
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", new_path);
+
+        let checkout_less_component = |id: &str| Component {
+            id: id.to_string(),
+            local_path: format!("/tmp/homeboy-14782-outdated-{id}"),
+            remote_url: Some(format!(
+                "https://github.com/Extra-Chill-Test/outdated-fixture-{id}"
+            )),
+            ..Component::default()
+        };
+
+        for (id, remote_version, expected_status, expect_ready) in [
+            ("behind", "1.6.0", ComponentStatus::BehindRemote, false),
+            ("equal", "1.5.0", ComponentStatus::UpToDate, false),
+            ("ahead", "1.4.0", ComponentStatus::NeedsUpdate, true),
+        ] {
+            let component = checkout_less_component(id);
+            let remote_versions = HashMap::from([(id.to_string(), remote_version.to_string())]);
+
+            let steps = plan_outdated_steps(std::slice::from_ref(&component), &remote_versions);
+            let step = steps.first().expect("one step");
+
+            assert_eq!(
+                step.status,
+                if expect_ready {
+                    PlanStepStatus::Ready
+                } else {
+                    PlanStepStatus::Skipped
+                },
+                "id={id} remote={remote_version}"
+            );
+            assert_eq!(
+                step.outputs.get("local_version").and_then(|v| v.as_str()),
+                Some("1.5.0"),
+                "id={id}: local version must come from the latest release tag"
+            );
+            assert_eq!(
+                step.outputs.get("component_status"),
+                Some(&serde_json::to_value(expected_status).expect("status serializes")),
+                "id={id}"
+            );
+        }
     }
 
     #[test]
