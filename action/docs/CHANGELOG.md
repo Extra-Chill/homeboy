@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.16.0] - 2026-09-19
+
+### Added
+- reusable consumer-facing release.yml workflow
+
 ## [2.15.25] - 2026-09-10
 
 ### Fixed
