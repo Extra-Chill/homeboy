@@ -1340,6 +1340,24 @@ mod preview_tests {
         *cook
     }
 
+    fn linked_preview_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let (repository, primary) =
+            crate::test_support::shared_committed_git_repo_fixture("primary");
+        let workspace = repository.path().join("task-worktree");
+        crate::test_support::run_git_command(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                workspace.to_str().expect("UTF-8 workspace"),
+            ],
+        );
+        (repository, workspace)
+    }
+
     #[test]
     fn preview_replay_rewrites_repository_and_component_identity_without_losing_flags() {
         let mut args = cook(&[
@@ -2088,12 +2106,7 @@ mod preview_tests {
     #[test]
     fn compiled_plan_preview_emits_placement_admission_schema() {
         crate::test_support::with_isolated_home(|_| {
-            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()
-                .expect("workspace root")
-                .display()
-                .to_string();
+            let (_repository, workspace) = linked_preview_workspace();
             let cli = Cli::try_parse_from([
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -2101,10 +2114,12 @@ mod preview_tests {
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
                 "--prompt".to_string(),
                 "-".to_string(),
                 "--to-worktree".to_string(),
-                workspace,
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
                 "--no-finalize".to_string(),
                 "--verify".to_string(),
                 "true".to_string(),
@@ -2133,6 +2148,7 @@ mod preview_tests {
                     { "event": "cook_preview_progress", "phase": "prompt_input" },
                     { "event": "cook_preview_progress", "phase": "input_validation" },
                     { "event": "cook_preview_progress", "phase": "destination_resolution" },
+                    { "event": "cook_preview_progress", "phase": "base_preparation" },
                     { "event": "cook_preview_progress", "phase": "placement_projection" },
                     { "event": "cook_preview_progress", "phase": "gate_contract_validation" },
                     { "event": "cook_preview_progress", "phase": "provider_preflight" },
@@ -2571,6 +2587,8 @@ mod preview_tests {
                 "--preview",
                 "--backend",
                 "fixture",
+                "--repo",
+                "fixture-repository",
                 "--prompt",
                 &format!("@{}", source.path().display()),
                 "--to-worktree",
@@ -3221,6 +3239,8 @@ mod preview_tests {
                     "--preview",
                     "--backend",
                     "fixture",
+                    "--repo",
+                    "fixture-repository",
                     "--prompt",
                     "implement the issue",
                     "--to-worktree",
