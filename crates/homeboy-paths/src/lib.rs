@@ -192,8 +192,63 @@ fn resolved_config_artifact_root() -> Option<String> {
     resolver.and_then(|f| f())
 }
 
-/// Base product config directory (universal ~/.config/homeboy/ on all platforms)
+/// Explicit config-root override env var name.
+///
+/// Set verbatim as the full config directory (it replaces the resolved
+/// `<config-root>/<dirname>` path entirely, not just the parent that would
+/// otherwise contain it). This is the top-priority override on every
+/// platform -- see [`homeboy`] for the complete precedence chain.
+pub const HOMEBOY_CONFIG_ROOT_ENV: &str = "HOMEBOY_CONFIG_ROOT";
+
+/// `HOMEBOY_CONFIG_ROOT`, if set to a non-empty value.
+///
+/// Shared by [`homeboy`] on every platform so Windows keeps parity with the
+/// explicit override instead of only honoring `APPDATA`.
+fn explicit_config_root_override() -> Option<PathBuf> {
+    let value = env::var(HOMEBOY_CONFIG_ROOT_ENV).ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(expand_tilde_path(value))
+}
+
+/// `XDG_CONFIG_HOME`, if set to a non-empty *absolute* value.
+///
+/// The XDG Base Directory spec requires relative values to be ignored by
+/// conforming implementations, so a relative value here falls through to the
+/// next precedence tier rather than being resolved against an implicit base.
+fn xdg_config_home() -> Option<PathBuf> {
+    let value = env::var("XDG_CONFIG_HOME").ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&value);
+    path.is_absolute().then_some(path)
+}
+
+/// Base product config directory.
+///
+/// Precedence, first match wins:
+///
+/// 1. `HOMEBOY_CONFIG_ROOT` -- used verbatim as the *complete* config
+///    directory (it replaces `~/.config/homeboy` entirely, not just `~`).
+///    Gives CI and multi-config operators an explicit, unambiguous lever
+///    that does not require swapping `HOME`.
+/// 2. The process-local home-root override ([`set_home_root_override`]) --
+///    `<override>/.config/<dirname>`. Outranks `XDG_CONFIG_HOME` so hermetic
+///    test harnesses that repoint `HOME` keep working unchanged.
+/// 3. `XDG_CONFIG_HOME`, when set to a non-empty absolute path --
+///    `<XDG_CONFIG_HOME>/<dirname>`. The Linux convention; per the XDG Base
+///    Directory spec, a relative value is invalid and ignored.
+/// 4. `$HOME/.config/<dirname>` -- the historical default.
+///
+/// On Windows, `HOMEBOY_CONFIG_ROOT` is still honored first for parity, then
+/// `APPDATA/<dirname>`.
 pub fn homeboy() -> Result<PathBuf> {
+    if let Some(root) = explicit_config_root_override() {
+        return Ok(root);
+    }
+
     #[cfg(windows)]
     {
         let appdata = env::var("APPDATA").map_err(|_| {
@@ -206,6 +261,24 @@ pub fn homeboy() -> Result<PathBuf> {
 
     #[cfg(not(windows))]
     {
+        let override_home = {
+            let guard = home_root_override()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.clone()
+        };
+        if let Some(home) = override_home {
+            return Ok(home
+                .join(".config")
+                .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname));
+        }
+
+        if let Some(xdg_config_home) = xdg_config_home() {
+            return Ok(
+                xdg_config_home.join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname)
+            );
+        }
+
         Ok(resolved_home_root()?
             .join(".config")
             .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname))
@@ -1461,6 +1534,215 @@ mod home_root_override_tests {
         assert_eq!(
             failures, 0,
             "readers must never fail to resolve a home root while it is repointed"
+        );
+    }
+}
+
+/// Tests for the config-root precedence chain: `HOMEBOY_CONFIG_ROOT` >
+/// process-local home override > `XDG_CONFIG_HOME` (absolute only) >
+/// `$HOME/.config/<dirname>`.
+///
+/// These mutate real process environment variables (`HOMEBOY_CONFIG_ROOT`,
+/// `XDG_CONFIG_HOME`, `HOME`), which are process-global and raced by any test
+/// run concurrently in this binary. Every test takes [`env_lock`] for its
+/// whole body and restores every variable it touches on the way out, mirroring
+/// the save/restore discipline `home_root_override_tests` uses for the
+/// override mutex.
+#[cfg(test)]
+mod config_root_tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Snapshot of the three env vars this module mutates, restored on drop
+    /// regardless of test outcome (including panics) so one failing assertion
+    /// cannot leak state into every later test in the binary.
+    struct EnvGuard<'a> {
+        _lock: MutexGuard<'a, ()>,
+        prior_config_root: Option<String>,
+        prior_xdg_config_home: Option<String>,
+        prior_home: Option<String>,
+    }
+
+    impl<'a> EnvGuard<'a> {
+        fn new(lock: MutexGuard<'a, ()>) -> Self {
+            set_home_root_override(None);
+            Self {
+                _lock: lock,
+                prior_config_root: env::var(HOMEBOY_CONFIG_ROOT_ENV).ok(),
+                prior_xdg_config_home: env::var("XDG_CONFIG_HOME").ok(),
+                prior_home: env::var("HOME").ok(),
+            }
+        }
+
+        fn set(&self, name: &str, value: &str) {
+            // SAFETY: serialized by `_lock`, which every test in this module
+            // holds for its entire body; no other test observes a torn value.
+            unsafe { env::set_var(name, value) };
+        }
+
+        fn remove(&self, name: &str) {
+            // SAFETY: see `set` above.
+            unsafe { env::remove_var(name) };
+        }
+    }
+
+    impl Drop for EnvGuard<'_> {
+        fn drop(&mut self) {
+            set_home_root_override(None);
+            for (name, prior) in [
+                (HOMEBOY_CONFIG_ROOT_ENV, &self.prior_config_root),
+                ("XDG_CONFIG_HOME", &self.prior_xdg_config_home),
+                ("HOME", &self.prior_home),
+            ] {
+                // SAFETY: see `EnvGuard::set`.
+                match prior {
+                    Some(value) => unsafe { env::set_var(name, value) },
+                    None => unsafe { env::remove_var(name) },
+                }
+            }
+        }
+    }
+
+    fn guard() -> EnvGuard<'static> {
+        let lock = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        EnvGuard::new(lock)
+    }
+
+    /// Tier 1: `HOMEBOY_CONFIG_ROOT` is used verbatim as the complete config
+    /// directory, outranking every other tier -- including an active
+    /// process-local home override and a set `XDG_CONFIG_HOME`.
+    #[test]
+    fn explicit_override_outranks_every_other_tier() {
+        let env = guard();
+        env.set(HOMEBOY_CONFIG_ROOT_ENV, "/tmp/hb-explicit-root");
+        env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
+        set_home_root_override(Some(PathBuf::from("/tmp/hb-home-override")));
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-explicit-root"),
+            "HOMEBOY_CONFIG_ROOT must be used verbatim, not joined with the dirname"
+        );
+    }
+
+    /// An empty `HOMEBOY_CONFIG_ROOT` must not shadow the lower tiers -- an
+    /// operator clearing the var with `HOMEBOY_CONFIG_ROOT=` should fall
+    /// through exactly like an unset var.
+    #[test]
+    fn empty_explicit_override_is_ignored() {
+        let env = guard();
+        env.set(HOMEBOY_CONFIG_ROOT_ENV, "");
+        set_home_root_override(Some(PathBuf::from("/tmp/hb-home-override")));
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-override/.config/homeboy"),
+            "empty HOMEBOY_CONFIG_ROOT must fall through to the next tier, got {}",
+            resolved.display()
+        );
+    }
+
+    /// Tier 2: the process-local home override outranks `XDG_CONFIG_HOME`, so
+    /// the existing hermetic test harness (which sets both to a fake home)
+    /// keeps resolving through the override it actually asserts on.
+    #[test]
+    fn home_override_outranks_xdg_config_home() {
+        let env = guard();
+        env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
+        set_home_root_override(Some(PathBuf::from("/tmp/hb-home-override")));
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-override/.config/homeboy"),
+            "home override must win over XDG_CONFIG_HOME, got {}",
+            resolved.display()
+        );
+    }
+
+    /// Tier 3: an absolute `XDG_CONFIG_HOME` is honored when no higher tier
+    /// applies. This is the behavior the issue asks for -- it was previously
+    /// read by test fixtures but never consulted by `homeboy()`.
+    #[test]
+    fn xdg_config_home_is_honored_when_absolute() {
+        let env = guard();
+        env.set("HOME", "/tmp/hb-home-fallback");
+        env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-xdg-root/homeboy"),
+            "absolute XDG_CONFIG_HOME must be honored, got {}",
+            resolved.display()
+        );
+    }
+
+    /// Per the XDG Base Directory spec, relative values are invalid and must
+    /// be ignored by conforming implementations -- a relative
+    /// `XDG_CONFIG_HOME` must not be resolved against an implicit base, it
+    /// must fall through to `$HOME/.config`.
+    #[test]
+    fn relative_xdg_config_home_is_ignored() {
+        let env = guard();
+        env.set("HOME", "/tmp/hb-home-fallback");
+        env.set("XDG_CONFIG_HOME", "relative/xdg/root");
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
+            "relative XDG_CONFIG_HOME must be ignored per the XDG spec, got {}",
+            resolved.display()
+        );
+    }
+
+    /// An empty `XDG_CONFIG_HOME` must not shadow `$HOME/.config` either.
+    #[test]
+    fn empty_xdg_config_home_is_ignored() {
+        let env = guard();
+        env.set("HOME", "/tmp/hb-home-fallback");
+        env.set("XDG_CONFIG_HOME", "");
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
+            "empty XDG_CONFIG_HOME must fall through to $HOME/.config, got {}",
+            resolved.display()
+        );
+    }
+
+    /// Tier 4: the historical default, unchanged when nothing else applies.
+    #[test]
+    fn home_config_default_is_unchanged_when_no_override_applies() {
+        let env = guard();
+        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
+        env.remove("XDG_CONFIG_HOME");
+        env.set("HOME", "/tmp/hb-home-fallback");
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
+            "got {}",
+            resolved.display()
         );
     }
 }
