@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.17.0] - 2026-09-19
+
+### Added
+- publish where the installed toolchain lives
+
 ## [2.16.1] - 2026-09-19
 
 ### Fixed
