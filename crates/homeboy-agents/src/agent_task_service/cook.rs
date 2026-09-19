@@ -1151,7 +1151,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Do not run or report verification commands: Homeboy runs the declared deterministic gates itself after harvest and records the authoritative verification evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
         let form_timeout_ms = review_form_timeout_ms(request);
@@ -1191,7 +1191,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
     }
 
     let mut instructions = vec![
-        "Declared deterministic gates are controller-owned. Homeboy runs them after it harvests your candidate, so use this attempt for the source change and a focused check only when it directly reduces uncertainty.".to_string(),
+        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate: use this attempt entirely for the source change, not for running or improvising your own verification.".to_string(),
     ];
     if !public_gates.is_empty() {
         instructions.push(format!(
@@ -1205,7 +1205,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
         ));
     }
     instructions.push(
-        "Report any focused command you run and its result in the reviewer-facing verification evidence; Homeboy records the authoritative final gate evidence separately."
+        "Do not run or report a verification command yourself; Homeboy records the authoritative gate evidence separately after harvest."
             .to_string(),
     );
     let contract = instructions.join("\n");
@@ -4587,14 +4587,18 @@ fn make_provider_timeout_actionable(
                 ),
             });
         }
+        // A resume command is only offered when it is actually admitted right
+        // now. While deferred cleanup is pending, `recovery_legal` is false and
+        // the durable retry route itself refuses the same command (#14732) —
+        // advertising it in `next_actions` printed a command the operator could
+        // not yet run. The `status`/`diagnose` action above remains the correct
+        // next step until cleanup goes terminal.
         if let Some(command) = command {
-            let action = AgentTaskCookRecoveryAction {
-                action: "resume".to_string(),
-                command,
-            };
-            if deferred_cleanup_pending {
-                context.next_actions.push(action);
-            } else {
+            if !deferred_cleanup_pending {
+                let action = AgentTaskCookRecoveryAction {
+                    action: "resume".to_string(),
+                    command,
+                };
                 context.legal_actions.push(action.clone());
                 context.next_actions.push(action);
             }
@@ -4835,14 +4839,15 @@ fn make_review_form_timeout_actionable(
                 ),
             });
         }
+        // See the identical reasoning in `make_provider_timeout_actionable`:
+        // a resume command is only offered when it is admitted right now, not
+        // merely once deferred cleanup finishes (#14732).
         if let Some(command) = command {
-            let action = AgentTaskCookRecoveryAction {
-                action: "resume".to_string(),
-                command,
-            };
-            if deferred_cleanup_pending {
-                context.next_actions.push(action);
-            } else {
+            if !deferred_cleanup_pending {
+                let action = AgentTaskCookRecoveryAction {
+                    action: "resume".to_string(),
+                    command,
+                };
                 context.legal_actions.push(action.clone());
                 context.next_actions.push(action);
             }
@@ -7994,6 +7999,30 @@ fn run_cook_spine(
                     stop_reason: Some(
                         "provider produced no patch and the pinned candidate failed \
      deterministic verification"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
+            // #14731: a gate that could not execute under the resolved
+            // placement is control-plane evidence, not a candidate verdict.
+            // The candidate patch is already durably promoted; this is
+            // deliberately not `policy_failure` and does not run
+            // differential-baseline comparison (no failure exists to
+            // compare). Retry re-verifies from the existing candidate rather
+            // than spending another provider execution.
+            AgentTaskCookLoopStatus::GatesDeferred => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "gates_deferred",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "at least one deterministic gate could not execute under the resolved \
+     placement and deferred; the candidate patch is promoted and unverified, not rejected. \
+     Retry once the required environment (e.g. a ready Lab runner) is available"
                             .to_string(),
                     ),
                     exit_code: 1,

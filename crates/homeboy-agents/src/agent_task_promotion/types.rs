@@ -104,7 +104,9 @@ impl AgentTaskPromotionReport {
                                     == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
                         })
                 }
-                AgentTaskGateStatus::Failed | AgentTaskGateStatus::Skipped => false,
+                AgentTaskGateStatus::Failed
+                | AgentTaskGateStatus::Skipped
+                | AgentTaskGateStatus::Deferred => false,
             })
     }
 
@@ -215,7 +217,8 @@ fn durable_gate_passed(gate: &AgentTaskGateReport) -> bool {
         AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
         AgentTaskGateStatus::Failed
         | AgentTaskGateStatus::Skipped
-        | AgentTaskGateStatus::AcceptedInheritedFailure => false,
+        | AgentTaskGateStatus::AcceptedInheritedFailure
+        | AgentTaskGateStatus::Deferred => false,
     }
 }
 
@@ -234,6 +237,13 @@ pub enum AgentTaskPromotionStatus {
     VerificationPending,
     Applied,
     GateFailed,
+    /// At least one declared deterministic gate deferred rather than
+    /// executing (its portable Lab route had no ready runner) and none of the
+    /// remaining gates failed. This is control-plane evidence, not a verdict
+    /// on the candidate: the patch is promoted and durable, but unverified.
+    /// Distinct from `GateFailed` so a run whose gates could not execute is
+    /// never classified as rejected (#14731).
+    GateDeferred,
     /// A provider produced no patch, but the pinned candidate workspace passed
     /// every declared deterministic verification gate.
     VerifiedNoChanges,
@@ -245,17 +255,28 @@ pub enum AgentTaskPromotionStatus {
 
 impl AgentTaskPromotionStatus {
     /// Whether a patch was actually promoted into the target worktree for this
-    /// status (true for both clean applies and gate-failed applies).
+    /// status (true for clean applies, gate-failed applies, and gate-deferred
+    /// applies — the patch reached the destination in all three).
     pub fn patch_promoted(self) -> bool {
         matches!(
             self,
-            Self::VerificationPending | Self::Applied | Self::GateFailed
+            Self::VerificationPending | Self::Applied | Self::GateFailed | Self::GateDeferred
         )
     }
 
     /// Whether deterministic gates failed after the patch was promoted.
+    /// `GateDeferred` is deliberately excluded: a gate that could not execute
+    /// did not fail, and callers that gate retry/differential-baseline
+    /// behavior on "did a gate fail" must not run that behavior for evidence
+    /// that was never produced (#14731).
     pub fn gate_failed(self) -> bool {
         matches!(self, Self::GateFailed)
+    }
+
+    /// Whether at least one declared gate deferred instead of executing, with
+    /// no gate failure alongside it.
+    pub fn gate_deferred(self) -> bool {
+        matches!(self, Self::GateDeferred)
     }
 
     /// Stable handoff boundary identifier for this promotion status.
@@ -264,6 +285,7 @@ impl AgentTaskPromotionStatus {
             Self::VerificationPending => "patch_promoted_verification_pending",
             Self::Applied => "patch_promoted_no_pr",
             Self::GateFailed => "patch_promoted_gates_failed",
+            Self::GateDeferred => "patch_promoted_gates_deferred",
             Self::VerifiedNoChanges => "no_patch_verified",
             Self::NoChangesGateFailed => "no_patch_gates_failed",
             Self::DryRun => "patch_not_promoted_dry_run",

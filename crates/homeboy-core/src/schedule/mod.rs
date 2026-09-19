@@ -19,6 +19,7 @@
 
 mod entity;
 pub mod execution;
+pub mod health;
 pub mod state;
 pub mod ticker;
 pub mod types;
@@ -27,6 +28,7 @@ pub use execution::{
     raw_digest, result_digest, run_schedule, sequence_digest, ScheduleCommandResult,
     ScheduleCommandRunner, ScheduleRunOutcome, ScheduleStepOutcome, SubprocessRunner,
 };
+pub use health::{assess, list_health, ScheduleHealth};
 pub use state::{
     load_state, load_state_in_root, remove_state, remove_state_in_root, save_state,
     save_state_in_root, ScheduleState,

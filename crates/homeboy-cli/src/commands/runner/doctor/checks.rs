@@ -227,7 +227,7 @@ pub(super) fn homeboy_version_skew_check_with(
             if ancestry(controller, runner) == CommitAncestry::Ancestor =>
         {
             details.insert("direction".to_string(), "runner_ahead".to_string());
-            Some(warning_with_details(
+            Some(error(
                 "homeboy.version_skew",
                 message,
                 Some(format!(
@@ -245,7 +245,7 @@ pub(super) fn homeboy_version_skew_check_with(
                 .git_commit
                 .unwrap_or_else(|| format!("v{local_version}"));
             Some(
-                warning_with_details(
+                error(
                     "homeboy.version_skew",
                     message,
                     Some(format!(
@@ -264,7 +264,7 @@ pub(super) fn homeboy_version_skew_check_with(
                 "direction".to_string(),
                 "diverged_or_unverified".to_string(),
             );
-            Some(warning_with_details(
+            Some(error(
                 "homeboy.version_skew",
                 message,
                 Some(format!(

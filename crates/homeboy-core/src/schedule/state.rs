@@ -47,6 +47,11 @@ pub struct ScheduleState {
 }
 
 impl ScheduleState {
+    /// Whether repeated failures have left this schedule unhealthy.
+    pub fn is_unhealthy(&self) -> bool {
+        self.consecutive_failures > 0
+    }
+
     /// Whether an in-flight marker is old enough to be reclaimed safely.
     pub fn is_stale_running(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
         self.running

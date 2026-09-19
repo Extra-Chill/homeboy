@@ -1360,16 +1360,38 @@ fn portfolio_observation(
     let path = promotion
         .and_then(|value| value.pointer("/provenance/worktree_path"))
         .and_then(Value::as_str)
+        .map(str::to_string)
         .or_else(|| {
-            recipe
+            // `to_worktree` on the recipe is a workspace *handle*
+            // (`component@branch`), not a filesystem path. Treating it as a
+            // path here always failed `git status`, reporting a worktree
+            // that was still durably registered and present on disk as
+            // `missing` whenever the promotion checkpoint had not been
+            // written yet or could not be read (#14734, #14735). Resolve the
+            // handle through the worktree registry so the real path backs
+            // the observation instead.
+            let handle = recipe
                 .as_ref()
                 .and_then(|recipe| recipe.finalization.get("to_worktree"))
-                .and_then(Value::as_str)
+                .and_then(Value::as_str)?;
+            // `resolve_worktree_ownership_if_present` also gates on reuse
+            // safety (it rejects a dirty worktree), which is the wrong
+            // question for a read-only observation: an uncommitted candidate
+            // is exactly the state this projection needs to surface, not
+            // reject. Read the raw registered record instead.
+            homeboy_core::worktree::resolve_workspace_ref_if_present(handle)
+                .ok()
+                .flatten()
+                .filter(|record| {
+                    *record.state() != homeboy_core::worktree::TaskWorktreeState::Removed
+                })
+                .map(|record| record.path().to_string())
         });
     let declared_base = promotion
         .and_then(|value| value.pointer("/verified_base/base"))
         .and_then(Value::as_str);
     let (worktree, head_sha, current_base_sha) = path
+        .as_deref()
         .map(|path| git_candidate_state(path, declared_base))
         .unwrap_or((
             supervisor::AgentTaskFanoutWorktreeState::Missing,
@@ -1389,8 +1411,18 @@ fn portfolio_observation(
         .and_then(|value| value.get("status"))
         .and_then(Value::as_str)
     {
-        Some("applied") => supervisor::AgentTaskFanoutEvidenceState::Current,
-        Some("failed") => supervisor::AgentTaskFanoutEvidenceState::Failed,
+        // `applied`/`verified_no_changes` are the real terminal promotion
+        // status strings for a passing gate phase; `gate_failed`/
+        // `no_changes_gate_failed` are the real strings for a failing one.
+        // The literal `"failed"` this matched against before never occurs,
+        // so a gate-failed candidate was silently reported as `missing`
+        // evidence instead of `failed` (#14735).
+        Some("applied" | "verified_no_changes") => {
+            supervisor::AgentTaskFanoutEvidenceState::Current
+        }
+        Some("gate_failed" | "no_changes_gate_failed") => {
+            supervisor::AgentTaskFanoutEvidenceState::Failed
+        }
         _ => supervisor::AgentTaskFanoutEvidenceState::Missing,
     };
     let finalization = record
@@ -1409,7 +1441,7 @@ fn portfolio_observation(
         .and_then(|receipt| receipt.get("after_sha"))
         .and_then(Value::as_str)
         .is_some_and(|after_sha| head_sha.as_deref() == Some(after_sha));
-    let (tracker, pr, remote_head_sha, findings) = match path {
+    let (tracker, pr, remote_head_sha, findings) = match path.as_deref() {
         Some(path) => github_observation(path, record.as_ref(), finalization, declared_tracker)?,
         None => (
             tracker_state_without_observation(record.as_ref(), recipe.as_ref(), declared_tracker),
@@ -7261,6 +7293,94 @@ mod tests {
                 homeboy::core::worktree::CleanupPolicy::PreserveOnFailure
             );
             assert_eq!(record.terminal_disposition.as_deref(), Some("failed"));
+        });
+    }
+
+    #[test]
+    fn portfolio_observation_never_reports_a_registered_worktree_as_missing() {
+        with_isolated_home(|home| {
+            let source = home.path().join("Developer/fixture");
+            std::fs::create_dir_all(&source).expect("source checkout");
+            for args in [
+                vec!["init", "--quiet", "-b", "main"],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Homeboy Test"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git runs")
+                    .success());
+            }
+            std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("component manifest");
+            assert!(Command::new("git")
+                .args(["add", "."])
+                .current_dir(&source)
+                .status()
+                .expect("git add")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(&source)
+                .status()
+                .expect("git commit")
+                .success());
+            init_git_primary(&source);
+            write_component_registration(home.path(), "fixture", &source);
+
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.cooks[0].to_worktree = "fixture@portfolio-recover".to_string();
+            let mut options = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("compile child invocation")
+                .options;
+            materialize_test_child(&mut options);
+            let run_id = options.identity.initial_run_id.clone();
+            let cook_id = options.identity.cook_id.clone();
+
+            agent_task_service::persist_initial_recipe(&options).expect("persist recipe");
+            // A lifecycle record whose promotion checkpoint was never written
+            // models a provider interruption or an unread projection: exactly
+            // the case where `latest_promotion.provenance.worktree_path` is
+            // unavailable and the recipe's declared handle is the only lead.
+            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+                .expect("persist lifecycle record without a promotion checkpoint");
+
+            let created =
+                homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                    component_id: "fixture".to_string(),
+                    branch: "portfolio-recover".to_string(),
+                    from: Some("main".to_string()),
+                    task_url: None,
+                    run_id: Some(run_id.clone()),
+                    cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
+                    require_handoff_freshness: false,
+                })
+                .expect("materialize destination worktree");
+            std::fs::write(
+                std::path::Path::new(&created.record.worktree_path).join("harvested.txt"),
+                "candidate change",
+            )
+            .expect("harvest an uncommitted candidate change");
+
+            let observation = portfolio_observation(&cook_id, &run_id, false, None)
+                .expect("observe a child whose promotion checkpoint was never written");
+
+            // The worktree is durably registered and holds a real,
+            // uncommitted candidate change; it must never be reported
+            // `missing` just because `latest_promotion` was never written
+            // (#14734, #14735).
+            assert_ne!(
+                observation.worktree,
+                supervisor::AgentTaskFanoutWorktreeState::Missing
+            );
+            assert_eq!(
+                observation.worktree,
+                supervisor::AgentTaskFanoutWorktreeState::Dirty
+            );
         });
     }
 

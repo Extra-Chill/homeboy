@@ -86,6 +86,71 @@ pub(crate) fn validate_gate_contracts(
     })
 }
 
+/// #14731: resolve each declared gate against the placement this process
+/// already resolved for this Cook, and fail admission when a gate cannot
+/// execute there — before a provider is dispatched whose work would be
+/// discarded when the gate defers at execution time.
+///
+/// This reuses the same preflight decision preview and dispatch both already
+/// read (`parsed_command_preflight::captured_result`), so it costs no
+/// additional live I/O and cannot disagree with what execution actually does.
+///
+/// Recognizes exactly the `homeboy review test` declared-test prefix — the
+/// same prefix `TestExecutionPlan::declared_homeboy_review_test` requires,
+/// and Cook's own documented default gate (`homeboy --help` quick start). It
+/// is a `portable_lab_route` command: with no ready Lab runner it defers
+/// rather than executing, which is exactly the substitution this rejects
+/// before it can consume a provider execution.
+pub(crate) fn reject_gates_unexecutable_under_resolved_placement(
+    gates: impl IntoIterator<Item = String>,
+) -> Result<()> {
+    let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
+        return Ok(());
+    };
+    let selected_local = result.placement.selected
+        == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local;
+    let lab_ready = result
+        .lab_readiness
+        .as_ref()
+        .is_some_and(|readiness| readiness.state == "connected_ready");
+    reject_gates_unexecutable_under_placement(gates, selected_local, lab_ready)
+}
+
+/// Pure admission check, separated from its process-global-reading caller so
+/// it can be exercised deterministically without touching the shared
+/// `parsed_command_preflight` capture slot (process-wide, not safe to mutate
+/// from parallel tests).
+fn reject_gates_unexecutable_under_placement(
+    gates: impl IntoIterator<Item = String>,
+    selected_local: bool,
+    lab_ready: bool,
+) -> Result<()> {
+    if !selected_local || lab_ready {
+        return Ok(());
+    }
+    let Some(gate) = gates
+        .into_iter()
+        .find(|command| gate_requires_portable_lab_route(command))
+    else {
+        return Ok(());
+    };
+    Err(Error::validation_invalid_argument(
+        "verify",
+        format!(
+            "declared gate `{gate}` requires a Lab route and cannot execute under the resolved local placement; dispatching a provider now would discard its work when this gate defers at execution time"
+        ),
+        None,
+        Some(vec![
+            "Connect a ready Lab runner before dispatching (see `homeboy runner status`), or replace the gate with one that can execute locally.".to_string(),
+        ]),
+    ))
+}
+
+fn gate_requires_portable_lab_route(command: &str) -> bool {
+    exact_simple_homeboy_invocation(command)
+        .is_some_and(|argv| argv.len() >= 3 && argv[1] == "review" && argv[2] == "test")
+}
+
 fn entry(command: String, kind: &'static str, status: &'static str) -> GateContractValidationEntry {
     GateContractValidationEntry {
         command,
@@ -309,5 +374,54 @@ mod tests {
         .unwrap();
         assert_eq!(result.gates[0].kind, "external");
         assert_eq!(result.gates[0].status, "unvalidated");
+    }
+
+    /// #14731: admission must resolve `homeboy review test` — Cook's own
+    /// documented default gate — against the selected placement and refuse it
+    /// *before* a provider is dispatched, rather than discovering at
+    /// execution time that the gate deferred and the provider's work was
+    /// wasted.
+    #[test]
+    fn rejects_a_lab_routed_gate_when_local_is_selected_and_no_lab_runner_is_ready() {
+        let error = reject_gates_unexecutable_under_placement(
+            ["homeboy review test homeboy".to_string()],
+            true,
+            false,
+        )
+        .expect_err("a portable-lab-route gate cannot execute locally with no ready runner");
+        assert!(error.message.contains("homeboy review test homeboy"));
+        assert!(error
+            .message
+            .contains("cannot execute under the resolved local placement"));
+    }
+
+    #[test]
+    fn admits_the_gate_when_a_lab_runner_is_ready() {
+        reject_gates_unexecutable_under_placement(
+            ["homeboy review test homeboy".to_string()],
+            true,
+            true,
+        )
+        .expect("a ready Lab runner admits the same gate");
+    }
+
+    #[test]
+    fn admits_the_gate_when_placement_selected_lab() {
+        reject_gates_unexecutable_under_placement(
+            ["homeboy review test homeboy".to_string()],
+            false,
+            false,
+        )
+        .expect("a Lab-selected placement admits the gate regardless of this local-only check");
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_gates_as_lab_routed() {
+        reject_gates_unexecutable_under_placement(
+            ["homeboy review lint --path .".to_string()],
+            true,
+            false,
+        )
+        .expect("only the recognized `homeboy review test` prefix is rejected here");
     }
 }

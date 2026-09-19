@@ -270,18 +270,25 @@ pub fn resolve_parsed_command_preflight(
         }
         _ => false,
     };
-    if policy.selected_runner_id.is_some()
-        && !readiness_repair_admitted
-        && (!policy.runner_admitted
-            || !policy.lab_readiness.as_ref().is_some_and(|readiness| {
+    let selected_runner_admitted = readiness_repair_admitted
+        || (policy.runner_admitted
+            && policy.lab_readiness.as_ref().is_some_and(|readiness| {
                 readiness.state == "connected_ready"
                     && readiness.selected_runner_id == policy.selected_runner_id
                     && readiness
                         .available_runner_ids
                         .iter()
                         .any(|runner| Some(runner) == policy.selected_runner_id.as_ref())
-            }))
-    {
+            }));
+    let preferred_runner_inadmissible =
+        policy.selected_runner_id.is_some() && !selected_runner_admitted;
+    // `--placement auto` is a policy over the set of available routes, not a
+    // commitment to the preferred runner. An already-observed Lab rejection
+    // falls through to local instead of failing closed on the first route.
+    let auto_route_fallback = preferred_runner_inadmissible
+        && matches!(input.placement, PlacementIntent::Auto)
+        && matches!(input.runner, RunnerIntent::Default);
+    if preferred_runner_inadmissible && !auto_route_fallback {
         return Err(crate::Error::validation_invalid_argument(
             "selected_runner_id",
             "selected runner requires admitted connected readiness evidence",
@@ -314,6 +321,33 @@ pub fn resolve_parsed_command_preflight(
         &input.resource_admission,
         policy.resource_admission_evidence,
     );
+    let local_route_admissible = policy.auto_local_capacity_fallback
+        || !matches!(
+            resource_admission,
+            ResourceAdmissionDecision::Rejected { .. }
+        );
+    if auto_route_fallback && !local_route_admissible {
+        let lab_line = policy
+            .selected_runner_id
+            .as_deref()
+            .map(|runner_id| {
+                lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref())
+            })
+            .expect("auto route fallback requires a preferred runner");
+        let local_line = local_route_inadmissible_reason(&resource_admission)
+            .expect("rejected local admission supplies a route reason");
+        return Err(crate::Error::validation_invalid_argument(
+            "placement",
+            format!("no admissible route: {lab_line}; {local_line}"),
+            None,
+            Some(vec![lab_line, local_line]),
+        ));
+    }
+    let selected_runner_id = if auto_route_fallback {
+        None
+    } else {
+        policy.selected_runner_id.clone()
+    };
     let deferred_workload = match input.deferred_workload {
         DeferredWorkloadPolicy::Forbidden => {
             if policy.deferred_pressure_refusal || policy.runner_incompatible {
@@ -346,35 +380,57 @@ pub fn resolve_parsed_command_preflight(
     } else {
         ExecutionPlacementRequirement::Either
     };
-    let selected = if matches!(input.placement, PlacementIntent::Local)
-        || policy.selected_runner_id.is_none()
-    {
-        EffectiveExecutionPlacement::Local
-    } else {
-        EffectiveExecutionPlacement::Lab
-    };
-    let runner =
-        policy
-            .selected_runner_id
-            .as_ref()
-            .map(|runner_id| ExecutionPlacementRunnerSelection {
-                runner_id: runner_id.clone(),
-                source: if matches!(
-                    input.runner,
-                    RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
-                ) {
-                    homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
-                } else {
-                    homeboy_lab_runner_contract::RunnerSelectionSource::Policy
-                },
-            });
+    let selected =
+        if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
+            EffectiveExecutionPlacement::Local
+        } else {
+            EffectiveExecutionPlacement::Lab
+        };
+    let runner = selected_runner_id
+        .as_ref()
+        .map(|runner_id| ExecutionPlacementRunnerSelection {
+            runner_id: runner_id.clone(),
+            source: if matches!(
+                input.runner,
+                RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
+            ) {
+                homeboy_lab_runner_contract::RunnerSelectionSource::Explicit
+            } else {
+                homeboy_lab_runner_contract::RunnerSelectionSource::Policy
+            },
+        });
     let fallback = if policy.auto_local_capacity_fallback {
         FallbackDirective::LocalCapacity
-    } else if matches!(input.placement, PlacementIntent::Lab) && policy.selected_runner_id.is_none()
-    {
+    } else if auto_route_fallback {
+        FallbackDirective::LocalAllowed
+    } else if matches!(input.placement, PlacementIntent::Lab) && selected_runner_id.is_none() {
         FallbackDirective::RequiredLabUnavailable
     } else {
         FallbackDirective::None
+    };
+    // Operator-facing evidence for *why* an operator's Lab-desiring placement
+    // resolved to local execution. This was structurally present but never
+    // populated, so a silent auto -> local degrade left no trace in preview or
+    // dispatch output for the operator to discover later (#14729). Auto route
+    // substitution names the skipped runner so the operator is not sent to
+    // discover `--placement local` from a different command (#14754).
+    let fallback_reason = if auto_route_fallback {
+        policy.selected_runner_id.as_deref().map(|runner_id| {
+            format!(
+                "{}; routing to local.",
+                lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref())
+            )
+        })
+    } else {
+        (selected == EffectiveExecutionPlacement::Local
+            && !matches!(input.placement, PlacementIntent::Local))
+        .then(|| {
+            policy
+                .lab_readiness
+                .as_ref()
+                .and_then(lab_readiness_fallback_reason)
+        })
+        .flatten()
     };
     let placement = PlacementDirective {
         requested: match input.placement {
@@ -393,7 +449,7 @@ pub fn resolve_parsed_command_preflight(
                         input.placement,
                         PlacementIntent::Auto | PlacementIntent::LabOrLocal
                     )),
-            reason: None,
+            reason: fallback_reason,
         },
         override_authorization: ExecutionPlacementOverrideAuthorization {
             authorized: matches!(input.placement, PlacementIntent::Local),
@@ -401,7 +457,11 @@ pub fn resolve_parsed_command_preflight(
                 .then(|| "operator --placement local".to_string()),
         },
     };
-    let generic_route_runner_id = resolve_generic_route_runner(&input, &policy.generic_route);
+    let generic_route_runner_id = if selected_runner_id.is_none() {
+        None
+    } else {
+        resolve_generic_route_runner(&input, &policy.generic_route)
+    };
     Ok(ParsedCommandPreflightResult {
         normalized_args,
         input,
@@ -412,8 +472,54 @@ pub fn resolve_parsed_command_preflight(
         fallback,
         placement,
         generic_route_runner_id,
-        selected_runner_id: policy.selected_runner_id,
+        selected_runner_id,
     })
+}
+
+/// Render the reason a Lab-desiring placement request degraded to local
+/// execution. `readiness.reasons` already carries a specific per-runner
+/// explanation (e.g. `capacity_reached`) when at least one runner is
+/// registered; a snapshot with no registered runner at all (`absent`) or
+/// otherwise blocked state carries no per-runner reasons, so this falls back
+/// to a human-readable rendering of the readiness state itself rather than
+/// leaving the operator with no explanation at all.
+fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<String> {
+    if !readiness.reasons.is_empty() {
+        return Some(readiness.reasons.join("; "));
+    }
+    let described = match readiness.state.as_str() {
+        "connected_ready" => return None,
+        "absent" => "no Lab runner is configured",
+        "disconnected" => "the configured Lab runner is disconnected",
+        "stale" => "the configured Lab runner's admission is stale",
+        "connected_ineligible" => "the connected Lab runner is not eligible for this workload",
+        "capacity_blocked" => "the configured Lab runner is at capacity",
+        other => {
+            return Some(format!(
+                "no eligible Lab runner is currently ready ({other})"
+            ))
+        }
+    };
+    Some(described.to_string())
+}
+
+fn lab_route_inadmissible_reason(
+    runner_id: &str,
+    readiness: Option<&LabReadinessSnapshot>,
+) -> String {
+    let detail = readiness
+        .and_then(lab_readiness_fallback_reason)
+        .unwrap_or_else(|| "no admitted connected readiness evidence".to_string());
+    format!("Lab runner {runner_id} inadmissible ({detail})")
+}
+
+fn local_route_inadmissible_reason(admission: &ResourceAdmissionDecision) -> Option<String> {
+    match admission {
+        ResourceAdmissionDecision::Rejected { label, .. } => Some(format!(
+            "local inadmissible (resource admission rejected for {label})"
+        )),
+        _ => None,
+    }
 }
 
 /// Fully resolved placement policy. Parsed-command preflight owns every policy
@@ -634,7 +740,7 @@ mod tests {
             resource_admission: ResourceAdmissionRequirement::Exempt,
             controller_execution: ControllerExecution::Ordinary,
             deferred_workload: DeferredWorkloadPolicy::Forbidden,
-            placement: PlacementIntent::Auto,
+            placement: PlacementIntent::Lab,
             runner: RunnerIntent::Default,
             runner_normalization: RunnerNormalization::None,
             lab_route: LabRouteIntent::Unsupported,
@@ -766,6 +872,85 @@ mod tests {
     }
 
     #[test]
+    fn auto_routes_to_local_when_the_preferred_lab_runner_is_inadmissible() {
+        let input = auto_route_input();
+        let policy = auto_route_policy(
+            Some("homeboy-lab"),
+            "connected_ineligible",
+            Vec::new(),
+            vec!["unresolved generation projection".into()],
+            false,
+            ResourceAdmissionEvidence::Unavailable,
+        );
+
+        let result = resolve_parsed_command_preflight(vec!["fixture".into()], input, policy)
+            .expect("auto falls through to the ready local route");
+        assert_eq!(
+            result.placement.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        );
+        assert!(result.placement.runner.is_none());
+        assert!(result.selected_runner_id.is_none());
+        assert!(result.generic_route_runner_id.is_none());
+        assert_eq!(result.fallback, FallbackDirective::LocalAllowed);
+        assert_eq!(
+            result.placement.fallback.reason.as_deref(),
+            Some(
+                "Lab runner homeboy-lab inadmissible (unresolved generation projection); routing to local."
+            )
+        );
+    }
+
+    #[test]
+    fn auto_enumerates_every_inadmissible_route_when_none_remain() {
+        let mut input = auto_route_input();
+        input.resource_admission = ResourceAdmissionRequirement::Required {
+            label: "fixture run".into(),
+            engages_at: ResourceHeat::Warm,
+        };
+        let policy = auto_route_policy(
+            Some("homeboy-lab"),
+            "connected_ineligible",
+            Vec::new(),
+            vec!["unresolved generation projection".into()],
+            false,
+            ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::Hot,
+            },
+        );
+
+        let error = resolve_parsed_command_preflight(vec!["fixture".into()], input, policy)
+            .expect_err("auto fails only after every route is rejected");
+        assert_eq!(error.details["field"], "placement");
+        assert!(
+            error
+                .message
+                .contains("Lab runner homeboy-lab inadmissible (unresolved generation projection)"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .contains("local inadmissible (resource admission rejected for fixture run)"),
+            "{}",
+            error.message
+        );
+        let tried = error.details["tried"]
+            .as_array()
+            .expect("per-route reasons are enumerated together");
+        assert_eq!(tried.len(), 2);
+        assert!(tried.iter().any(|route| {
+            route.as_str()
+                == Some("Lab runner homeboy-lab inadmissible (unresolved generation projection)")
+        }));
+        assert!(tried.iter().any(|route| {
+            route.as_str()
+                == Some("local inadmissible (resource admission rejected for fixture run)")
+        }));
+    }
+
+    #[test]
     fn resolver_rejects_an_explicit_runner_without_ready_inventory_evidence() {
         let input = explicit_runner_input();
         let policy = explicit_runner_policy("stale", Vec::new(), false);
@@ -790,6 +975,56 @@ mod tests {
         };
 
         assert!(resolve_parsed_command_preflight(vec!["fixture".into()], input, policy).is_ok());
+    }
+
+    fn auto_route_input() -> ParsedCommandPreflightInput {
+        ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "fixture".into(),
+                operation: vec!["run".into()],
+            },
+            resource_admission: ResourceAdmissionRequirement::Exempt,
+            controller_execution: ControllerExecution::Ordinary,
+            deferred_workload: DeferredWorkloadPolicy::Eligible,
+            placement: PlacementIntent::Auto,
+            runner: RunnerIntent::Default,
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: true },
+            provenance: ProvenanceRequirement::None,
+        }
+    }
+
+    fn auto_route_policy(
+        selected_runner_id: Option<&str>,
+        state: &str,
+        available_runner_ids: Vec<String>,
+        reasons: Vec<String>,
+        runner_admitted: bool,
+        resource_admission_evidence: ResourceAdmissionEvidence,
+    ) -> ParsedCommandPolicySnapshot {
+        let selected_runner_id = selected_runner_id.map(str::to_string);
+        ParsedCommandPolicySnapshot {
+            resource_admission_evidence,
+            resource_policy: None,
+            lab_readiness: Some(LabReadinessSnapshot {
+                state: state.into(),
+                selected_runner_id: selected_runner_id.clone(),
+                available_runner_ids,
+                reasons,
+                remediation_commands: Vec::new(),
+                repair_admitted_runner_ids: Vec::new(),
+            }),
+            selected_runner_id: selected_runner_id.clone(),
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: true,
+                selected_runner_id,
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        }
     }
 
     fn explicit_runner_input() -> ParsedCommandPreflightInput {

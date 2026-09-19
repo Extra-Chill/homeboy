@@ -753,6 +753,9 @@ fn failure_diagnostics_for_data(
     if let Some(diagnostics) = runner_connect_failure_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
+    if let Some(diagnostics) = runner_disconnect_failure_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
 
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
@@ -1040,6 +1043,68 @@ fn runner_connect_failure_report(data: &Value) -> Option<&Value> {
             .and_then(Value::as_str)
             == Some("connect");
     if !is_connect {
+        return None;
+    }
+    Some(connection.unwrap_or(data))
+}
+
+fn runner_disconnect_failure_diagnostics(
+    exit_code: i32,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    let report = runner_disconnect_failure_report(data)?;
+    let remote_error = report
+        .get("remote_error")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("runner disconnect did not prove a remote stop");
+    let local_recovery_command = report
+        .get("local_recovery_command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut details = Map::new();
+    details.insert("exit_code".to_string(), Value::from(exit_code));
+    details.insert(
+        "source_pointer".to_string(),
+        Value::String("/connection".to_string()),
+    );
+    details.insert(
+        "remote_error".to_string(),
+        Value::String(remote_error.to_string()),
+    );
+    let next_actions = local_recovery_command
+        .map(|command| {
+            vec![CommandNextAction::new("recover locally", command)
+                .with_kind(CommandNextActionKind::Repair)]
+        })
+        .unwrap_or_default();
+    Some(CommandDiagnostics {
+        code: "runner.disconnect.partial_failure".to_string(),
+        message: remote_error.to_string(),
+        details: Value::Object(details),
+        hints: None,
+        retryable: None,
+        failure_digest: Some(CommandFailureDigest {
+            summary: remote_error.to_string(),
+            stdout_tail: None,
+            stderr_tail: None,
+            artifact_refs: Vec::new(),
+            next_actions,
+            retryable: None,
+        }),
+    })
+}
+
+fn runner_disconnect_failure_report(data: &Value) -> Option<&Value> {
+    let connection = data.get("connection");
+    let is_disconnect = data.get("command").and_then(Value::as_str) == Some("runner.disconnect")
+        || connection
+            .and_then(|value| value.get("action"))
+            .and_then(Value::as_str)
+            == Some("disconnect");
+    if !is_disconnect {
         return None;
     }
     Some(connection.unwrap_or(data))
@@ -2938,6 +3003,20 @@ mod tests {
                 "runner.reconcile.daemon_ownership_evidence_unavailable",
                 None,
             ),
+            (
+                "unresolved generation projection",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                        "retry_predicate": "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs",
+                    },
+                }),
+                "runner.reconcile.unresolved_generation_projection",
+                Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"),
+            ),
         ] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(payload.clone()),
@@ -2968,6 +3047,89 @@ mod tests {
             match action {
                 Some(action) => assert_eq!(value["next_actions"][0]["command"], action, "{label}"),
                 None => assert!(value["next_actions"].is_null(), "{label}"),
+            }
+            if let Some(actions) = value["next_actions"].as_array() {
+                for next in actions {
+                    let command = next["command"].as_str().unwrap_or_default();
+                    assert_ne!(
+                        command, "homeboy runner reconcile homeboy-lab",
+                        "{label} recommended the failed reconcile command"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runner_command_failure_next_actions_are_never_the_failed_command() {
+        let cases = [
+            (
+                "reconcile",
+                "homeboy runner reconcile homeboy-lab",
+                json!({
+                    "command": "runner.reconcile",
+                    "reconciliation": {
+                        "status": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                    },
+                }),
+            ),
+            (
+                "refresh-homeboy",
+                "homeboy runner refresh-homeboy homeboy-lab",
+                json!({
+                    "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
+                    "command": "runner.refresh_homeboy",
+                    "exit_code": 1,
+                    "error": {
+                        "code": "runner.policy_denied",
+                        "message": "runner rotation is blocked",
+                        "details": {
+                            "_homeboy_actions": [{
+                                "id": "inspect-runner-status",
+                                "label": "inspect runner admission",
+                                "program": "homeboy",
+                                "args": ["runner", "status", "homeboy-lab"],
+                                "safety": "read_only"
+                            }]
+                        }
+                    },
+                }),
+            ),
+            (
+                "doctor",
+                "homeboy runner doctor homeboy-lab",
+                json!({
+                    "command": "runner.doctor",
+                    "status": "error",
+                    "failure": {
+                        "code": "runner.doctor.daemon",
+                        "message": "daemon probe failed",
+                        "next_actions": [{
+                            "label": "reconnect the runner",
+                            "command": "homeboy runner connect homeboy-lab",
+                        }],
+                    },
+                }),
+            ),
+        ];
+        for (operation, failed_command, payload) in cases {
+            let response = cli_response_for_json_result_for_identity(
+                &Ok(payload),
+                1,
+                &CommandIdentity::with_operation("runner", operation),
+                None,
+            );
+            let value = serde_json::to_value(response).expect("serialize response");
+            if let Some(actions) = value["next_actions"].as_array() {
+                for action in actions {
+                    assert_ne!(
+                        action["command"].as_str().unwrap_or_default(),
+                        failed_command,
+                        "{operation}"
+                    );
+                }
             }
         }
     }
@@ -3055,6 +3217,55 @@ mod tests {
         assert_eq!(
             value["diagnostics"]["details"]["failure_message"],
             "remote daemon is unreachable; refusing to replace or persist a session"
+        );
+        assert!(
+            !value["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("without reporting a failure cause"),
+            "{}",
+            value["summary"]
+        );
+    }
+
+    #[test]
+    fn runner_disconnect_partial_failure_summarizes_remote_error() {
+        let payload = json!({
+            "command": "runner.disconnect",
+            "id": "homeboy-lab",
+            "status": "partial_failure",
+            "connection": {
+                "action": "disconnect",
+                "runner_id": "homeboy-lab",
+                "disconnected": false,
+                "partial": true,
+                "remote_error": "SSH timeout",
+                "local_recovery_command": "homeboy runner disconnect homeboy-lab --local-recovery",
+            }
+        });
+        let response = cli_response_for_json_result_for_identity(
+            &Ok(payload),
+            1,
+            &CommandIdentity::with_operation("runner", "disconnect"),
+            None,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(value["success"], false);
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(
+            value["diagnostics"]["code"],
+            "runner.disconnect.partial_failure"
+        );
+        assert_eq!(value["summary"], "SSH timeout");
+        assert_eq!(
+            value["diagnostics"]["details"]["remote_error"],
+            "SSH timeout"
+        );
+        assert_eq!(
+            value["next_actions"][0]["command"],
+            "homeboy runner disconnect homeboy-lab --local-recovery"
         );
         assert!(
             !value["summary"]

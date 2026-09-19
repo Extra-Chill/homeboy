@@ -4,6 +4,45 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.376.4] - 2026-09-19
+
+### Changed
+- give cook preview tests their own git fixture
+
+## [0.376.3] - 2026-09-19
+
+### Fixed
+- let the detached launcher claim the handoff it owns
+- verify the PATH-resolved controller after install
+- reap unclaimed residue from durable registries
+
+## [0.376.2] - 2026-09-18
+
+### Fixed
+- inspect config paths and schedule health without disk spelunking
+- recover version-skewed lab daemons without interrupting proven work
+- check resolved runner admission in cook preview
+
+## [0.376.1] - 2026-09-18
+
+### Fixed
+- resolve unclaimed generation projections on reconcile
+- fall back when auto's preferred runner is inadmissible
+- reclaim stale markers on tick and surface consecutive failures
+
+## [0.376.0] - 2026-09-18
+
+### Added
+- probe and bounded reconnect for auto placement; report dispatch readiness
+- report resolved placement, and treat a deferred gate as deferred
+- local dispatch admission ceiling; stop asking the agent to verify
+
+### Changed
+- stop using wp-codebox as the example agent backend
+
+### Fixed
+- report a failed cook accurately
+
 ## [0.375.0] - 2026-09-17
 
 ### Added

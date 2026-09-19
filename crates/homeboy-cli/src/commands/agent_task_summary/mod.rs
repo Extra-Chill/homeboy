@@ -469,9 +469,27 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
 
 fn render_cook_preview_summary(payload: &Value) -> Option<String> {
     let resolved = payload.get("resolved")?;
-    let placement = resolved
+    let requested_placement = resolved
         .pointer("/placement/requested")
         .and_then(Value::as_str)?;
+    // `selected` is the resolved answer to "where will this actually run";
+    // `requested` is only what the operator asked for. Reporting the request
+    // as though it were the outcome is how a silent auto -> local degrade went
+    // unreported in preview (#14729).
+    let selected_placement = resolved
+        .pointer("/placement/selected")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_placement);
+    let placement_line = if selected_placement == requested_placement {
+        format!("Placement: {selected_placement}")
+    } else {
+        let reason = resolved
+            .pointer("/placement/fallback_reason")
+            .and_then(Value::as_str)
+            .map(|reason| format!(" — {reason}"))
+            .unwrap_or_default();
+        format!("Placement: {selected_placement}  (requested: {requested_placement}{reason})")
+    };
     let provider = resolved
         .get("provider")
         .and_then(Value::as_object)
@@ -514,7 +532,7 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
         .collect::<Vec<_>>();
     let mut lines = vec![
         "Cook preview".to_string(),
-        format!("Placement: {placement}"),
+        placement_line,
         format!("Provider: {provider}"),
         format!("Model: {model}"),
         format!("Destination: {destination}"),
@@ -526,6 +544,31 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
     ];
     if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
         lines.push(format!("Blocked: {failure}"));
+    }
+    if let Some(next_action) = payload
+        .pointer("/failure/next_action")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/resolved/placement/admission/next_action")
+                .and_then(Value::as_str)
+        })
+    {
+        lines.push(format!("Next: {next_action}"));
+    }
+    if payload
+        .pointer("/resolved/placement/admission/state")
+        .and_then(Value::as_str)
+        == Some("indeterminate")
+        && payload.pointer("/failure/message").is_none()
+    {
+        lines.push(
+            payload
+                .pointer("/resolved/placement/admission/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("static inputs only; admission not checked")
+                .to_string(),
+        );
     }
     Some(finish(lines))
 }
@@ -950,6 +993,107 @@ mod tests {
         assert_eq!(
             render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
             Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
+
+    /// #14729: preview must report the *resolved* placement, not the
+    /// operator's request, and must name why they diverge when a Lab-desiring
+    /// request degrades to local execution.
+    #[test]
+    fn cook_preview_summary_reports_resolved_placement_and_fallback_reason() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "local",
+                    "fallback_reason": "no Lab runner is configured",
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+
+        assert!(
+            summary.starts_with(
+                "Cook preview\nPlacement: local  (requested: auto — no Lab runner is configured)\n"
+            ),
+            "summary did not report the resolved placement and fallback reason: {summary}"
+        );
+    }
+
+    #[test]
+    fn cook_preview_summary_names_unchecked_admission_instead_of_an_unqualified_plan() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "lab",
+                    "selected_runner": "homeboy-lab",
+                    "admission": {
+                        "schema": "homeboy/cook-preview-placement-admission/v1",
+                        "state": "indeterminate",
+                        "reason": "static inputs only; admission not checked",
+                    },
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 0 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+        assert!(
+            summary.contains("static inputs only; admission not checked"),
+            "unchecked admission must be explicit in stdout: {summary}"
+        );
+        assert!(!summary.contains("Blocked:"), "{summary}");
+    }
+
+    #[test]
+    fn cook_preview_summary_reports_admission_blocker_and_recovery_action() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "lab",
+                    "selected_runner": "homeboy-lab",
+                    "admission": {
+                        "schema": "homeboy/cook-preview-placement-admission/v1",
+                        "state": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner status homeboy-lab --full",
+                    },
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 0 },
+            },
+            "failure": {
+                "message": "unresolved_generation_projection",
+                "next_action": "homeboy runner status homeboy-lab --full",
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+        assert!(
+            summary.contains("Blocked: unresolved_generation_projection"),
+            "blocked admission must lead the operator-facing plan: {summary}"
+        );
+        assert!(
+            summary.contains("Next: homeboy runner status homeboy-lab --full"),
+            "recovery action must match runner status: {summary}"
         );
     }
 

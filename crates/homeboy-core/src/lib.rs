@@ -123,6 +123,7 @@ pub mod lab_offload;
 pub mod lab_routing;
 pub mod lab_workspace_provenance;
 pub use homeboy_lifecycle_contract::lifecycle;
+pub mod local_dispatch_admission;
 pub mod markdown;
 pub use homeboy_lab_contract::materialization_currency;
 pub mod matrix_artifact_summary;
@@ -137,6 +138,7 @@ pub(crate) mod ownership;
 pub use homeboy_lab_contract::path_materialization;
 pub mod parsed_command_preflight;
 pub mod performance_hotspots;
+pub mod reaping;
 // `phase_timing` (PhaseTimer/PhaseSpan/PhaseStatus/PhaseTimingReport) is a
 // std-only timing primitive shared by deploy, release, and the audit engine. It
 // lives in homeboy-engine-primitives so a future homeboy-code-audit crate can

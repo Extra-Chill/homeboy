@@ -244,7 +244,192 @@ pub(crate) fn prepared_progress_events(
             }
         }
     }
+    for request in gate_lifecycle_requests(record)? {
+        events.push(prepare_request(&run, record, request)?);
+    }
     Ok(events)
+}
+
+/// The phase that failed a run is absent from its own log whenever a
+/// promotion runs deterministic gates: `latest_promotion`/`promotions` were
+/// durable evidence, but no gate start, per-gate result, or terminal event
+/// ever reached the control-plane event stream (#14735). Every promotion
+/// checkpoint that reached the gate phase is projected here, so `agent-task
+/// logs` carries the same gate lifecycle regardless of whether promotion ran
+/// inline or was resumed later.
+fn gate_lifecycle_requests(
+    record: &AgentTaskRunRecord,
+) -> Result<Vec<ControlPlaneEventAppendRequest>> {
+    let promotions: Vec<Value> = record
+        .metadata
+        .get("promotions")
+        .and_then(Value::as_array)
+        .filter(|promotions| !promotions.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            record
+                .metadata
+                .get("latest_promotion")
+                .cloned()
+                .into_iter()
+                .collect()
+        });
+    let task_id = record
+        .tasks
+        .first()
+        .map(|task| task.task_id.clone())
+        .filter(|task_id| !task_id.is_empty());
+    let mut requests = Vec::new();
+    for (index, promotion) in promotions.iter().enumerate() {
+        requests.extend(gate_lifecycle_requests_for_promotion(
+            record,
+            promotion,
+            index,
+            task_id.as_deref(),
+        )?);
+    }
+    Ok(requests)
+}
+
+fn gate_lifecycle_requests_for_promotion(
+    record: &AgentTaskRunRecord,
+    promotion: &Value,
+    promotion_index: usize,
+    task_id: Option<&str>,
+) -> Result<Vec<ControlPlaneEventAppendRequest>> {
+    let Some(status) = promotion.get("status").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    // A gate phase never ran for these statuses: the patch was never applied
+    // (`dry_run`) or verification has not completed yet (`verification_pending`).
+    if matches!(status, "dry_run" | "verification_pending") {
+        return Ok(Vec::new());
+    }
+    let Some(gates) = promotion
+        .get("deterministic_gates")
+        .or_else(|| promotion.get("gate_results"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    let task_id = task_id
+        .or_else(|| promotion.pointer("/source/task_id").and_then(Value::as_str))
+        .unwrap_or("promotion");
+    let mut requests = Vec::new();
+    requests.push(progress_request(
+        &format!("gate\0{}\0{promotion_index}\0started", record.run_id),
+        "gate.started",
+        "agent-task-gate",
+        Some(task_id),
+        None,
+        json!({
+            "state": AgentTaskState::Running,
+            "message": format!("running {} deterministic gate(s)", gates.len()),
+            "progress": { "attempt": promotion_index as u32 + 1 },
+            "promotion_index": promotion_index,
+            "gate_count": gates.len(),
+        }),
+    )?);
+    for (gate_index, gate) in gates.iter().enumerate() {
+        let gate_status = gate.get("status").and_then(Value::as_str).unwrap_or("");
+        let gate_passed = matches!(gate_status, "succeeded" | "passed" | "skipped");
+        let gate_name = gate_display_name(gate);
+        requests.push(progress_request(
+            &format!(
+                "gate\0{}\0{promotion_index}\0result\0{gate_index}",
+                record.run_id
+            ),
+            "gate.result",
+            "agent-task-gate",
+            Some(task_id),
+            None,
+            json!({
+                "state": if gate_passed { AgentTaskState::Running } else { AgentTaskState::Failed },
+                "message": format!("gate `{gate_name}` {gate_status}"),
+                "progress": { "attempt": promotion_index as u32 + 1 },
+                "promotion_index": promotion_index,
+                "gate_index": gate_index,
+                "gate": gate_name,
+                "status": gate_status,
+                "output": gate_output_reference(gate),
+            }),
+        )?);
+    }
+    let gate_phase_failed = matches!(status, "gate_failed" | "no_changes_gate_failed");
+    requests.push(progress_request(
+        &format!("gate\0{}\0{promotion_index}\0terminal", record.run_id),
+        if gate_phase_failed {
+            "gate.failed"
+        } else {
+            "gate.completed"
+        },
+        "agent-task-gate",
+        Some(task_id),
+        None,
+        json!({
+            "state": if gate_phase_failed { AgentTaskState::Failed } else { AgentTaskState::Succeeded },
+            "message": format!("deterministic gate phase {status}"),
+            "progress": { "attempt": promotion_index as u32 + 1 },
+            "promotion_index": promotion_index,
+            "status": status,
+        }),
+    )?);
+    Ok(requests)
+}
+
+/// Best-effort human name for a gate report, mirroring
+/// `homeboy_cli::commands::agent_task::status::gate_display_name`: the real
+/// `AgentTaskGateReport` has no `name` field, only `id` and a `command`
+/// array, with any failure detail nested under `failure_evidence`.
+fn gate_display_name(gate: &Value) -> String {
+    gate.get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| gate.get("name").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            gate.pointer("/failure_evidence/command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            gate.get("command").and_then(|command| match command {
+                Value::String(command) => Some(command.clone()),
+                Value::Array(parts) => {
+                    let joined = parts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (!joined.is_empty()).then_some(joined)
+                }
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "deterministic gate".to_string())
+}
+
+/// A resolvable reference to the gate's own output: bounded excerpts rather
+/// than the full transcript, since events are retained durably.
+fn gate_output_reference(gate: &Value) -> Value {
+    const MAX_EXCERPT: usize = 4096;
+    let bounded = |value: &Value| -> Option<String> {
+        value.as_str().map(|text| {
+            if text.len() > MAX_EXCERPT {
+                format!("{}…", &text[..MAX_EXCERPT])
+            } else {
+                text.to_string()
+            }
+        })
+    };
+    json!({
+        "command": gate.pointer("/failure_evidence/command").or_else(|| gate.get("command")),
+        "exit_code": gate.pointer("/failure_evidence/exit_code").or_else(|| gate.get("exit_code")),
+        "summary": gate.pointer("/failure_evidence/summary"),
+        "stdout_tail": gate.pointer("/failure_evidence/stdout_tail").and_then(bounded)
+            .or_else(|| gate.get("stdout").and_then(bounded)),
+        "stderr_tail": gate.pointer("/failure_evidence/stderr_tail").and_then(bounded)
+            .or_else(|| gate.get("stderr").and_then(bounded)),
+    })
 }
 
 fn prepare_request(

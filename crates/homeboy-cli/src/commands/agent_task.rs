@@ -73,6 +73,7 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
         if let Some(run_id) = run_id {
             if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 run::announce_durable_cook_identity(cook_id, run_id);
+                run::announce_resolved_execution_placement();
             }
         }
         reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);

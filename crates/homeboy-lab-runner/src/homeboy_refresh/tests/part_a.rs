@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::{
-    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerExecMode, RunnerGenerationJobOwners,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerDaemonGenerationStatus, RunnerExecMode,
+    RunnerGenerationJobOwners, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
@@ -1982,6 +1982,98 @@ fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
 
     assert!(!admission.summary.safe_to_rotate);
     assert!(refresh_execution_route(&runner, &admission).is_err());
+}
+
+fn unproven_retained_generation() -> RunnerDaemonGenerationStatus {
+    RunnerDaemonGenerationStatus {
+        generation: "lease-old".to_string(),
+        admission_owner: false,
+        drain_state: crate::RollingDrainState::Draining,
+        active_job_count: 3,
+        observed_active_job_count: None,
+        active_job_count_authoritative: false,
+        job_owner_count: 0,
+        run_owner_count: 0,
+        artifact_owner_count: 0,
+        homeboy_build_identity: None,
+        remote_daemon_lease_id: Some("lease-old".to_string()),
+        remote_daemon_address: None,
+        local_url: None,
+    }
+}
+
+fn proven_non_owner_generation() -> RunnerDaemonGenerationStatus {
+    RunnerDaemonGenerationStatus {
+        generation: "lease-active".to_string(),
+        admission_owner: false,
+        drain_state: crate::RollingDrainState::Draining,
+        active_job_count: 2,
+        observed_active_job_count: Some(2),
+        active_job_count_authoritative: true,
+        job_owner_count: 2,
+        run_owner_count: 0,
+        artifact_owner_count: 0,
+        homeboy_build_identity: None,
+        remote_daemon_lease_id: Some("lease-active".to_string()),
+        remote_daemon_address: None,
+        local_url: None,
+    }
+}
+
+#[test]
+fn refresh_execution_route_uses_diagnostic_ssh_for_incompatible_idle_unproven_generations() {
+    let runner = crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let status = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
+    let admission = RunnerAdmissionSnapshot::from_status_and_generations(
+        status,
+        vec![unproven_retained_generation()],
+        Vec::new(),
+    );
+
+    assert!(!admission.summary.daemon_compatible);
+    assert_eq!(admission.summary.active_job_count, 0);
+    assert!(admission.summary.safe_to_rotate);
+    assert_eq!(
+        refresh_execution_route(&runner, &admission).expect("recovered incompatible daemon"),
+        RefreshExecutionRoute::DiagnosticSsh
+    );
+}
+
+#[test]
+fn refresh_execution_route_still_errors_for_proven_non_owner_work() {
+    let runner = crate::Runner {
+        id: "lab".to_string(),
+        kind: RunnerKind::Ssh,
+        server_id: None,
+        workspace_root: None,
+        settings: Default::default(),
+        env: Default::default(),
+        secret_env: Default::default(),
+        resources: Default::default(),
+        policy: Default::default(),
+    };
+    let status = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
+    let admission = RunnerAdmissionSnapshot::from_status_and_generations(
+        status,
+        vec![proven_non_owner_generation()],
+        Vec::new(),
+    );
+
+    assert!(!admission.summary.safe_to_rotate);
+    let error = refresh_execution_route(&runner, &admission)
+        .expect_err("authoritative non-owner work remains fenced");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error.message.contains("permits daemon rotation"));
 }
 
 #[test]

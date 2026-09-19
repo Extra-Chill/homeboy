@@ -409,6 +409,7 @@ fn default_placement_provider_discovery_stays_local_despite_connected_default_ru
                     rig_lease_severity: "ok".to_string(),
                     rig_lease_concurrency_limit: None,
                 },
+                auto_placement_reconnect: None,
             },
         );
         let matches = Cli::command_with_scoped_lab_args()
@@ -478,6 +479,7 @@ fn hot_cook_with_explicit_lab_placement_uses_the_admitted_ready_runner() {
             rig_lease_severity: "ok".to_string(),
             rig_lease_concurrency_limit: None,
         },
+        auto_placement_reconnect: None,
     };
     let cli = Cli::parse_from([
         "homeboy",

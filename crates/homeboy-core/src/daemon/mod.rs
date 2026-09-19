@@ -1748,11 +1748,9 @@ fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandl
 ///
 /// Runs are dispatched onto their own threads by the ticker, so a slow
 /// scheduled command delays neither this loop nor daemon shutdown. Stale
-/// `running` markers left by a previous process are reclaimed once at start,
-/// matching how the job store reconciles expired reservations when it opens.
+/// `running` markers are reclaimed on every tick, so a live daemon cannot
+/// leave an enabled schedule un-run for many cadences.
 fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
-    let _ = crate::schedule::reclaim_stale_runs(chrono::Utc::now());
-
     let runner: std::sync::Arc<dyn crate::schedule::ScheduleCommandRunner> =
         match crate::schedule::SubprocessRunner::new() {
             Ok(runner) => std::sync::Arc::new(runner),

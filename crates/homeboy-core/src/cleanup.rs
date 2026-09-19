@@ -475,6 +475,7 @@ fn run_automatic_artifact_retention_in(
         min_age_days: retention.reconstructable_artifact_days,
         reserve_bytes: retention.reconstructable_artifact_reserve_bytes,
     };
+    crate::worktree::retire_residue()?;
     let registry_quarantines = crate::worktree::reconcile_malformed_task_worktree_records(true)?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let mut worktrees = Vec::new();
