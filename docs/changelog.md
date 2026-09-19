@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.377.0] - 2026-09-19
+
+### Added
+- retain cgroup memory evidence
+
+### Fixed
+- make archive-install target swap atomic via renameat2 exchange
+- reject primary worktree dispatch
+- thread the recorded component identity into Cook finalization
+
 ## [0.376.4] - 2026-09-19
 
 ### Changed
