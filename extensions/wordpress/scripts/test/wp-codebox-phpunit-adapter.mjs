@@ -105,6 +105,35 @@ const selectedTestFile = (process.env.HOMEBOY_WORDPRESS_PHPUNIT_TEST_FILE || '')
 // Keep both, deliberately, and hand each consumer the one it can use.
 const changedTestFiles = phpunitChangedTestFiles();
 const changedTestFileScope = resolveChangedTestFileScope(changedTestFiles);
+// Per-suite scope (#14761): each suite receives only the changed files its own
+// PHPUnit config declares. A suite that declares none of them receives no
+// scope at all and runs its full declared set, so file selection can never
+// replace or suppress what a suite declares — and a file no suite declares is
+// reported as orphaned instead of being injected into every suite.
+const suiteMemberships = await Promise.all(phpunitSuites.map(async (suite) => [suite, await readSuiteMembership(suite)]));
+const suiteChangedScopeBySuite = new Map();
+const declaringSuitesByChangedFile = new Map();
+for (const [suite, membership] of suiteMemberships) {
+  const declaredFiles = changedTestFiles.filter((file) => suiteDeclaresFile(membership, file));
+  for (const file of declaredFiles) {
+    if (!declaringSuitesByChangedFile.has(file)) {
+      declaringSuitesByChangedFile.set(file, []);
+    }
+    declaringSuitesByChangedFile.get(file).push(suite.name || 'default');
+  }
+  if (suite.runtime !== 'host') {
+    suiteChangedScopeBySuite.set(suite, resolveChangedTestFileScope(declaredFiles));
+  }
+}
+const orphanedChangedTestFiles = changedTestFiles.filter((file) => !declaringSuitesByChangedFile.has(file));
+if (!discoveryOnly) {
+  for (const file of orphanedChangedTestFiles) {
+    process.stdout.write(`PHPUNIT_ORPHANED_TEST_FILE:${file}\n`);
+  }
+  if (orphanedChangedTestFiles.length > 0) {
+    process.stdout.write(`PHPUNIT_ORPHANED_TEST_FILES:count=${orphanedChangedTestFiles.length} action=none note=changed test files declared by no PHPUnit suite; reported instead of injected\n`);
+  }
+}
 // Validation dependencies activate before the plugin under review so the
 // target's own activation hooks observe the topology it declares. The target
 // is activated last and never omitted: an inactive target is excluded from WP
@@ -129,7 +158,7 @@ const options = clean({
   ],
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
   selectedTestFile: discoveryOnly ? '' : selectedTestFile,
-  changedTestFiles: discoveryOnly ? [] : changedTestFileScope.sandbox,
+  changedTestFiles: discoveryOnly ? [] : suiteChangedScopeBySuite.get(activeSuite).sandbox,
   discoveryOnly,
   testRoot: phpunitProfile.testRoot,
   phpunitXml: phpunitProfile.config,
@@ -244,6 +273,10 @@ async function runAdditionalSuite(suite) {
     const bootstrap = resolvePhpunitBootstrap(settings, profile);
     const suiteOptions = clean({
       ...options,
+      // The changed scope is per suite, not component-wide: this suite gets
+      // only the changed files its own config declares. An empty list is
+      // dropped below, so the suite runs its full declared set.
+      changedTestFiles: suiteChangedScopeBySuite.get(suite).sandbox,
       testRoot: profile.testRoot,
       phpunitXml: profile.config,
       cwd: profile.cwd,
@@ -723,6 +756,93 @@ function sandboxTestPath(hostRelative, mounts) {
     return null;
   }
   return `${sandboxPluginDirectory(slug)}/${relativeToPlugin.split(path.sep).join('/')}`;
+}
+// The suite's declared test membership, read from its own PHPUnit config:
+// <file> entries exactly, <directory> entries by containment with their
+// suffix/prefix matchers, and <exclude> entries removing files again. This is
+// what lets a changed file run in the suites that declare it and in no
+// others, instead of in every suite the runner dispatches.
+async function resolveSuiteConfigHostPath(suite) {
+  if (suite.config) {
+    return path.isAbsolute(suite.config) ? suite.config : path.join(pluginSourceDirectory, suite.config);
+  }
+  for (const candidate of ['phpunit.xml', 'phpunit.xml.dist']) {
+    const candidatePath = path.join(pluginSourceDirectory, candidate);
+    try {
+      await access(candidatePath);
+      return candidatePath;
+    } catch {}
+  }
+  return null;
+}
+async function readSuiteMembership(suite) {
+  const configPath = await resolveSuiteConfigHostPath(suite);
+  let xml = '';
+  if (configPath !== null) {
+    try {
+      xml = await readFile(configPath, 'utf8');
+    } catch {}
+  }
+  if (xml === '') {
+    // No config on disk means the runner's own default discovery scans the
+    // whole test root, so any routed test file belongs to this suite. A
+    // declared-but-unreadable config is a broken declaration nobody can scope
+    // against: following the inferSuiteEnvironment precedent, absence of
+    // evidence is not membership, so the scope passes through unchanged
+    // rather than silently deselecting the suite's tests.
+    return { known: false, files: [], directories: [], excludes: [] };
+  }
+  // PHPUnit resolves config entries relative to the config file's directory.
+  const configDirectory = path.dirname(configPath);
+  const toComponentRelative = (value) => {
+    const trimmed = value.trim().replaceAll('\\', '/');
+    if (trimmed === '') {
+      return null;
+    }
+    const resolved = path.isAbsolute(trimmed) ? trimmed : path.resolve(configDirectory, trimmed);
+    const relative = path.relative(componentPath, resolved).split(path.sep).join('/');
+    return relative === '' || relative.startsWith('..') || path.isAbsolute(relative) ? null : relative;
+  };
+  const membership = { known: true, files: [], directories: [], excludes: [] };
+  for (const match of xml.matchAll(/<(file|directory|exclude)\b([^>]*)>([^<]*)<\/\1>/g)) {
+    const entryPath = toComponentRelative(match[3]);
+    if (entryPath === null) {
+      continue;
+    }
+    if (match[1] === 'file') {
+      membership.files.push(entryPath);
+    } else if (match[1] === 'directory') {
+      // PHPUnit's <directory> default matcher is the Test.php suffix; an
+      // explicit suffix or prefix attribute replaces it.
+      membership.directories.push({
+        path: entryPath,
+        suffix: match[2].match(/\bsuffix\s*=\s*["']([^"']+)["']/i)?.[1] ?? 'Test.php',
+        prefix: match[2].match(/\bprefix\s*=\s*["']([^"']+)["']/i)?.[1] ?? '',
+      });
+    } else {
+      membership.excludes.push(entryPath);
+    }
+  }
+  return membership;
+}
+function suiteDeclaresFile(membership, relativeFile) {
+  if (!membership.known) {
+    return true;
+  }
+  const covers = (entry) => relativeFile === entry || relativeFile.startsWith(`${entry}/`);
+  if (membership.excludes.some(covers)) {
+    return false;
+  }
+  if (membership.files.some((file) => file === relativeFile)) {
+    return true;
+  }
+  return membership.directories.some((directory) => {
+    if (!relativeFile.startsWith(`${directory.path}/`)) {
+      return false;
+    }
+    const base = path.posix.basename(relativeFile);
+    return base.startsWith(directory.prefix) && base.endsWith(directory.suffix);
+  });
 }
 function resolveDatabaseService(configuration, environment) {
   const value = configuration.wp_codebox_database_service;
@@ -2141,7 +2261,7 @@ async function persistRecipeEvidence(artifactDirectory, recipeOptions, generated
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, project_bootstrap: recipeOptions.projectBootstrap || null, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles, changed_test_files_sandbox: changedTestFileScope.sandbox }, wp_codebox: { cli_bin: wpCodeboxCli, resolved_cli_path: wpCodeboxCli, command: wpCodeboxArgv } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, activation: { order: activationPlan.map(({ role, slug: planSlug }) => ({ role, slug: planSlug, activate: true })) }, scope: { selected_test_file: selectedTestFile || null, changed_test_files: changedTestFiles, changed_test_files_sandbox: changedTestFileScope.sandbox, changed_test_files_by_suite: Object.fromEntries([...suiteChangedScopeBySuite].map(([suite, suiteScope]) => [suite.name || 'default', suiteScope.sandbox])), orphaned_changed_test_files: orphanedChangedTestFiles }, wp_codebox: { cli_bin: wpCodeboxCli, resolved_cli_path: wpCodeboxCli, command: wpCodeboxArgv } }, null, 2)}\n`),
   ]);
 }
 function runScript(script, args) {

@@ -224,6 +224,12 @@ const recipe = {
 }
 fs.writeFileSync(process.argv[3], `${JSON.stringify(recipe, null, 2)}\n`)
 NODE
+    # Per-invocation options capture, used by the suite-membership section to
+    # attribute each recipe's options to the suite that produced it.
+    if [ -n "${WP_CODEBOX_OPTIONS_LOG:-}" ] && [ -n "$options_path" ]; then
+        printf '=== OPTIONS ===\n' >> "${WP_CODEBOX_OPTIONS_LOG}"
+        cat "$options_path" >> "${WP_CODEBOX_OPTIONS_LOG}"
+    fi
     exit 0
 fi
 component_path=""
@@ -685,6 +691,108 @@ WP_CODEBOX_ARGS_FILE="${TMPDIR}/wp-codebox-settings-args.txt" \
 
 assert_contains "${TMPDIR}/wp-codebox-settings.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/wp-codebox-settings-args.txt" "latest"
+
+# Suite membership (Extra-Chill/homeboy#14761): a changed PHPUnit file may only
+# run in the suites whose own config declares it. The alpha suite declares the
+# changed file via <file>; the beta suite scans tests/Beta via <directory> but
+# excludes the other changed file; no suite declares that file at all, so it
+# must surface as orphaned rather than being injected into either suite.
+suite_component="${TMPDIR}/suite-component"
+mkdir -p "${suite_component}/tests/Unit" "${suite_component}/tests/Beta"
+cat > "${suite_component}/tests/Unit/ImportAgentAbilityTest.php" <<'PHP'
+<?php
+// Declared by the alpha suite only.
+PHP
+cat > "${suite_component}/tests/Beta/BetaOwnTest.php" <<'PHP'
+<?php
+// Discovered by the beta suite's directory scan.
+PHP
+cat > "${suite_component}/tests/Beta/ExcludedBetaTest.php" <<'PHP'
+<?php
+// Inside beta's scanned directory but excluded from the suite.
+PHP
+cat > "${suite_component}/phpunit-alpha.xml.dist" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit>
+	<testsuites>
+		<testsuite name="alpha">
+			<file>tests/Unit/ImportAgentAbilityTest.php</file>
+		</testsuite>
+	</testsuites>
+</phpunit>
+XML
+cat > "${suite_component}/phpunit-beta.xml.dist" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit>
+	<testsuites>
+		<testsuite name="beta">
+			<directory>tests/Beta</directory>
+			<exclude>tests/Beta/ExcludedBetaTest.php</exclude>
+		</testsuite>
+	</testsuites>
+</phpunit>
+XML
+
+suite_membership_status=0
+WP_CODEBOX_OPTIONS_LOG="${TMPDIR}/suite-membership-options.log" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$suite_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_SETTINGS_JSON='{"wp_codebox_phpunit_suites":[{"name":"alpha","config":"phpunit-alpha.xml.dist"},{"name":"beta","config":"phpunit-beta.xml.dist"}]}' \
+HOMEBOY_CHANGED_TEST_FILES=$'tests/Unit/ImportAgentAbilityTest.php\ntests/Beta/ExcludedBetaTest.php' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/suite-membership.out" 2>&1 || suite_membership_status=$?
+
+if [ "$suite_membership_status" -ne 0 ]; then
+    echo "Expected the suite-membership changed scope to pass" >&2
+    sed 's/^/  /' "${TMPDIR}/suite-membership.out" >&2
+    exit 1
+fi
+assert_contains "${TMPDIR}/suite-membership.out" "PHPUNIT_SUITE_RESULT:name=alpha status=passed"
+assert_contains "${TMPDIR}/suite-membership.out" "PHPUNIT_SUITE_RESULT:name=beta status=passed"
+# (a) The declaring suite receives exactly its own changed file.
+alpha_options="$(grep -F '"phpunitXml":"phpunit-alpha.xml.dist"' "${TMPDIR}/suite-membership-options.log" || true)"
+[ -n "$alpha_options" ] || { echo "Expected alpha suite options in the options log" >&2; exit 1; }
+case "$alpha_options" in
+    *'"changedTestFiles":["/wordpress/wp-content/plugins/component/tests/Unit/ImportAgentAbilityTest.php"]'*) ;;
+    *) echo "Expected the alpha suite to receive only its declared changed file, got: $alpha_options" >&2; exit 1 ;;
+esac
+# (b) The suite the changed file does not belong to receives no scope, so its
+# own declared tests still run instead of an empty intersection.
+beta_options="$(grep -F '"phpunitXml":"phpunit-beta.xml.dist"' "${TMPDIR}/suite-membership-options.log" || true)"
+[ -n "$beta_options" ] || { echo "Expected beta suite options in the options log" >&2; exit 1; }
+case "$beta_options" in
+    *changedTestFiles*) echo "Expected the beta suite to keep its full declared set, got: $beta_options" >&2; exit 1 ;;
+esac
+# (c) The excluded file is declared by nobody here: reported as orphaned,
+# never run, and never injected into an unrelated suite.
+assert_contains "${TMPDIR}/suite-membership.out" "PHPUNIT_ORPHANED_TEST_FILE:tests/Beta/ExcludedBetaTest.php"
+assert_not_contains "${TMPDIR}/suite-membership.out" "PHPUNIT_ORPHANED_TEST_FILE:tests/Unit/ImportAgentAbilityTest.php"
+
+# The same membership rule when the only changed file is one a suite excludes:
+# both suites keep their full declared sets and the file is orphaned again.
+suite_excluded_status=0
+WP_CODEBOX_OPTIONS_LOG="${TMPDIR}/suite-excluded-options.log" \
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$suite_component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_WP_CODEBOX_BIN="${TMPDIR}/stubs/wp-codebox.sh" \
+HOMEBOY_SETTINGS_JSON='{"wp_codebox_phpunit_suites":[{"name":"alpha","config":"phpunit-alpha.xml.dist"},{"name":"beta","config":"phpunit-beta.xml.dist"}]}' \
+HOMEBOY_CHANGED_TEST_FILES='tests/Beta/ExcludedBetaTest.php' \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/suite-excluded.out" 2>&1 || suite_excluded_status=$?
+
+if [ "$suite_excluded_status" -ne 0 ]; then
+    echo "Expected the excluded-file changed scope to pass" >&2
+    sed 's/^/  /' "${TMPDIR}/suite-excluded.out" >&2
+    exit 1
+fi
+alpha_excluded_options="$(grep -F '"phpunitXml":"phpunit-alpha.xml.dist"' "${TMPDIR}/suite-excluded-options.log" || true)"
+case "$alpha_excluded_options" in
+    *changedTestFiles*) echo "Expected alpha to keep its full declared set when only an unrelated file changed, got: $alpha_excluded_options" >&2; exit 1 ;;
+esac
+assert_contains "${TMPDIR}/suite-excluded.out" "PHPUNIT_ORPHANED_TEST_FILE:tests/Beta/ExcludedBetaTest.php"
 
 # The registration-drift preflight classification (d0ffb219, #745) was removed
 # by ca924281 when the shell runner was replaced by the Node adapter, and it was
