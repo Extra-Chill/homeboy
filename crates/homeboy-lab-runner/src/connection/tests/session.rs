@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 use crate::{RunnerAvailability, RunnerDaemonVerification};
 
@@ -2120,6 +2120,7 @@ fn broker_typed_job_timeout_records_runner_attributed_partial_status() {
 fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("request");
         let mut request = [0; 1024];
@@ -2128,7 +2129,7 @@ fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
             .expect("headers");
         stream.flush().expect("flush headers");
-        std::thread::sleep(Duration::from_millis(1100));
+        let _ = release_rx.recv();
     });
     let mut session = reverse_controller_session();
     session.broker_url = Some(format!("http://{address}"));
@@ -2142,6 +2143,7 @@ fn broker_typed_job_body_timeout_records_runner_attributed_partial_status() {
         runner_jobs_with_client("homeboy-lab", &session, &client, Duration::from_secs(1)).is_err()
     );
 
+    drop(release_tx);
     server.join().expect("server");
     let degradations = crate::readonly_probe::take_degradations();
     assert_eq!(degradations.len(), 1);
@@ -2247,6 +2249,100 @@ fn daemon_count_divergence_reconciles_to_typed_owners_without_cancelling_them() 
     assert_eq!(reconciled_active_job_count(0, Some(2)), 0);
 }
 
+fn read_fixture_request_until(
+    stream: &mut TcpStream,
+    deadline: std::time::Instant,
+) -> std::io::Result<Vec<u8>> {
+    stream.set_nonblocking(true)?;
+    let mut request = Vec::new();
+    let mut buffer = [0; 1024];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => return Ok(request),
+            Ok(length) => {
+                let remaining = 4096 - request.len();
+                request.extend_from_slice(&buffer[..length.min(remaining)]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 4096 {
+                    return Ok(request);
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        "timed out waiting for fixture request",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[test]
+fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let address = listener.local_addr().expect("listener address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    assert!(std::time::Instant::now() < deadline, "accept request");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("accept request: {error}"),
+            }
+        };
+        accepted_tx.send(()).expect("record accepted request");
+        read_fixture_request_until(&mut stream, deadline).expect("read delayed request")
+    });
+
+    let mut client = TcpStream::connect(address).expect("connect fixture client");
+    accepted_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("server accepted client");
+    std::thread::sleep(Duration::from_millis(10));
+    client
+        .write_all(b"GET /jo")
+        .expect("write first request chunk");
+    std::thread::sleep(Duration::from_millis(10));
+    client
+        .write_all(b"bs HTTP/1.1\r\nHost: fixture\r\n\r\n")
+        .expect("write second request chunk");
+
+    assert_eq!(
+        server.join().expect("server"),
+        b"GET /jobs HTTP/1.1\r\nHost: fixture\r\n\r\n"
+    );
+}
+
+#[test]
+fn fixture_request_reader_times_out_without_a_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        read_fixture_request_until(
+            &mut stream,
+            std::time::Instant::now() + Duration::from_millis(50),
+        )
+        .expect_err("request reader times out")
+        .kind()
+    });
+
+    let _client = TcpStream::connect(address).expect("connect fixture client");
+
+    assert_eq!(server.join().expect("server"), ErrorKind::TimedOut);
+}
+
 #[test]
 fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
     test_support::with_isolated_home(|_| {
@@ -2268,9 +2364,9 @@ fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
                     std::thread::sleep(Duration::from_millis(1));
                     continue;
                 };
-                let mut request = [0; 4096];
-                let length = stream.read(&mut request).expect("read request");
-                let request = String::from_utf8_lossy(&request[..length]);
+                let request =
+                    read_fixture_request_until(&mut stream, deadline).expect("read request");
+                let request = String::from_utf8_lossy(&request);
                 let body = if request.starts_with("GET /health ") {
                     serde_json::json!({
                         "freshness": {

@@ -14,6 +14,7 @@ use homeboy::core::context;
 use homeboy::core::daemon;
 use homeboy::core::observation::{ObservationStore, RunListFilter};
 use homeboy::core::project;
+use homeboy::core::schedule;
 use homeboy::core::scope::{self, Scope};
 use homeboy::runner::runners as runner;
 use homeboy_deploy::ReleaseStateStatus;
@@ -37,8 +38,9 @@ use dashboard_table::log_dashboard_table;
 use git_cache::{fetch_project_remote_versions, log_unreleased_merges, StatusGitCache};
 
 pub use types::{
-    CompactContextStatus, CompactStatusOutput, GlobalActivityStatus, GlobalDaemonStatus,
-    GlobalInventoryStatus, GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
+    CompactContextStatus, CompactScheduleStatus, CompactStatusOutput, DispatchReadinessStatus,
+    DispatchRunnerReadinessStatus, GlobalActivityStatus, GlobalDaemonStatus, GlobalInventoryStatus,
+    GlobalRunnerStatus, GlobalStatusOutput, IsolatedStatusFallback,
     ProjectComponentDashboardStatus, ProjectDashboardOutput, ProjectDashboardSummary,
     ProjectStatusRow, StatusArgs, StatusOutput, StatusPartial, StatusPartialComponent,
     StatusResult, StatusTiming, UnregisteredContextStatusOutput, UnregisteredControlPlaneStatus,
@@ -152,7 +154,11 @@ fn run_unisolated(
         timer.begin("build_compact_snapshot");
         let cwd = std::env::current_dir()
             .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+        let schedules = compact_schedule_health();
         timer.finish("build_compact_snapshot");
+        timer.begin("refresh_dispatch_readiness");
+        let dispatch = compact_dispatch_readiness();
+        timer.finish("refresh_dispatch_readiness");
         return Ok((
             StatusResult::Compact(CompactStatusOutput {
                 command: "status",
@@ -161,9 +167,11 @@ fn run_unisolated(
                 controller,
                 context: CompactContextStatus {
                     status: "not_checked",
-                    detail: "CWD, Git, registry, runner, and control-plane inventory were not inspected.",
+                    detail: "CWD, Git, registry, and control-plane inventory were not inspected.",
                     command: "homeboy status --full",
                 },
+                dispatch,
+                schedules,
                 action: "Run `homeboy status --full` for context/inventory enrichment, `homeboy status --all` to inspect every configured component, or `homeboy status --global` for local control-plane health.",
             }),
             0,
@@ -507,6 +515,88 @@ fn requires_component_enrichment(args: &StatusArgs) -> bool {
 
 const GLOBAL_RUNNER_LIMIT: usize = 64;
 const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
+
+/// Live dispatch-readiness answer for the default `status` command.
+///
+/// Bounded by the same probe machinery `--placement auto` itself consults
+/// (`refresh_lab_runner_readiness_for_admission`), so this answer matches what
+/// a dispatch would actually observe (#14736): a disconnected runner is
+/// visible here without a second `runner status` call, and the answer is a
+/// fresh bounded probe rather than an unrefreshed cache. With no Lab runner
+/// configured this returns immediately (`state: "absent"`, no probes) —
+/// dispatch readiness is unconditionally reported, not conditionally cheap.
+fn compact_dispatch_readiness() -> DispatchReadinessStatus {
+    dispatch_readiness_from_refresh(runner::refresh_lab_runner_readiness_for_admission())
+}
+
+/// Local schedule health for the default `status` command.
+///
+/// Schedule declarations and runtime records are small JSON files. Reading
+/// them here is how a wedged or repeatedly-failing schedule becomes visible
+/// without the operator knowing to run `schedule list` or open state files.
+fn compact_schedule_health() -> CompactScheduleStatus {
+    match schedule::list_health(chrono::Utc::now()) {
+        Ok(reports) => CompactScheduleStatus {
+            declared: reports.len(),
+            unhealthy: reports
+                .into_iter()
+                .filter(|report| report.unhealthy)
+                .collect(),
+            drill_down: "homeboy schedule list",
+        },
+        Err(_) => CompactScheduleStatus {
+            declared: 0,
+            unhealthy: Vec::new(),
+            drill_down: "homeboy schedule list",
+        },
+    }
+}
+
+/// Pure mapping from a readiness refresh outcome to the compact dispatch
+/// answer. Split from [`compact_dispatch_readiness`] so the placement/state
+/// logic is testable without a live runner probe.
+fn dispatch_readiness_from_refresh(
+    refreshed: homeboy::core::Result<runner::LabRunnerReadiness>,
+) -> DispatchReadinessStatus {
+    match refreshed {
+        Ok(readiness) => {
+            let state = readiness.state.as_str();
+            let effective_placement =
+                if state == "connected_ready" && readiness.selected_runner_id.is_some() {
+                    "lab"
+                } else {
+                    "local"
+                };
+            DispatchReadinessStatus {
+                effective_placement,
+                runner: DispatchRunnerReadinessStatus {
+                    state,
+                    selected_runner_id: readiness.selected_runner_id,
+                    available_runner_ids: readiness.available_runner_ids,
+                    blockers: readiness.reasons,
+                    remediation_commands: readiness.remediation_commands,
+                },
+                drill_down: "homeboy runner status --full",
+            }
+        }
+        // A failed or timed-out refresh must not manufacture "lab is ready" —
+        // local is always the answer that stays correct.
+        Err(error) => DispatchReadinessStatus {
+            effective_placement: "local",
+            runner: DispatchRunnerReadinessStatus {
+                state: "unavailable",
+                selected_runner_id: None,
+                available_runner_ids: Vec::new(),
+                blockers: vec![format!(
+                    "bounded runner readiness refresh failed: {}",
+                    error.message
+                )],
+                remediation_commands: vec!["homeboy runner status --full".to_string()],
+            },
+            drill_down: "homeboy runner status --full",
+        },
+    }
+}
 
 /// Read the controller's own local stores without resolving the caller's CWD,
 /// fetching component remotes, or probing runner daemons. Counts are capped at
@@ -1599,6 +1689,109 @@ mod tests {
         log_controller_staleness(&empty_status_output().controller);
     }
 
+    fn readiness(
+        state: runner::LabRunnerReadinessState,
+        selected_runner_id: Option<&str>,
+        available_runner_ids: &[&str],
+        reasons: &[&str],
+        remediation_commands: &[&str],
+    ) -> runner::LabRunnerReadiness {
+        runner::LabRunnerReadiness {
+            state,
+            selected_runner_id: selected_runner_id.map(str::to_string),
+            available_runner_ids: available_runner_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            remediation_commands: remediation_commands
+                .iter()
+                .map(|command| command.to_string())
+                .collect(),
+        }
+    }
+
+    /// A connected, policy-selected runner is the one case where default
+    /// `status` reports the preferred placement as `lab` (#14736).
+    #[test]
+    fn dispatch_readiness_reports_lab_only_when_a_runner_is_connected_and_selected() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::ConnectedReady,
+            Some("homeboy-lab"),
+            &["homeboy-lab"],
+            &[],
+            &[],
+        )));
+
+        assert_eq!(output.effective_placement, "lab");
+        assert_eq!(output.runner.state, "connected_ready");
+        assert_eq!(
+            output.runner.selected_runner_id.as_deref(),
+            Some("homeboy-lab")
+        );
+        assert_eq!(output.runner.available_runner_ids, vec!["homeboy-lab"]);
+    }
+
+    /// A disconnected runner must be visible from the default `status`
+    /// answer, without requiring a second `runner status` call, and it must
+    /// never be reported as the effective placement (#14736).
+    #[test]
+    fn dispatch_readiness_names_a_disconnected_runner_and_falls_back_to_local() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::Disconnected,
+            None,
+            &[],
+            &["daemon_transport_unreachable"],
+            &["homeboy runner connect homeboy-lab"],
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "disconnected");
+        assert!(output.runner.selected_runner_id.is_none());
+        assert!(output
+            .runner
+            .blockers
+            .iter()
+            .any(|reason| reason == "daemon_transport_unreachable"));
+        assert!(output
+            .runner
+            .remediation_commands
+            .iter()
+            .any(|command| command == "homeboy runner connect homeboy-lab"));
+    }
+
+    /// No Lab runner configured at all is `absent`, and dispatch still falls
+    /// back to `local` rather than erroring.
+    #[test]
+    fn dispatch_readiness_with_no_runners_configured_is_absent_and_local() {
+        let output = dispatch_readiness_from_refresh(Ok(readiness(
+            runner::LabRunnerReadinessState::Absent,
+            None,
+            &[],
+            &[],
+            &["homeboy runner connect <runner-id>"],
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "absent");
+    }
+
+    /// A failed or timed-out bounded refresh must never manufacture "lab is
+    /// ready" — the safe answer is always `local`, with the failure surfaced
+    /// as a blocker rather than silently dropped.
+    #[test]
+    fn dispatch_readiness_falls_back_to_local_when_the_refresh_itself_fails() {
+        let output = dispatch_readiness_from_refresh(Err(homeboy::core::Error::new(
+            homeboy::core::ErrorCode::RemoteCommandTimeout,
+            "bounded admission refresh timed out",
+            serde_json::json!({}),
+        )));
+
+        assert_eq!(output.effective_placement, "local");
+        assert_eq!(output.runner.state, "unavailable");
+        assert!(!output.runner.blockers.is_empty());
+    }
+
     #[test]
     fn parser_accepts_status_timings() {
         let cli = Cli::try_parse_from(["homeboy", "status", "--timings"])
@@ -2095,6 +2288,96 @@ mod tests {
                 }
                 _ => panic!("expected unregistered context output"),
             }
+        });
+    }
+
+    fn declared_schedule(id: &str) -> schedule::Schedule {
+        schedule::Schedule {
+            id: id.to_string(),
+            command: Some(vec!["cleanup".to_string()]),
+            exec: None,
+            steps: Vec::new(),
+            every: schedule::Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on: schedule::NotifyPolicy::default(),
+            on_overlap: schedule::OverlapPolicy::Skip,
+            notification_transport: None,
+            notification_route: None,
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// A wedged `running` marker and a repeatedly-failing sibling must appear
+    /// on default `status` without the operator naming either schedule (#14755).
+    #[test]
+    fn default_status_surfaces_unhealthy_schedules_without_naming_them() {
+        crate::test_support::with_isolated_home(|_| {
+            let now = chrono::Utc::now();
+            let wedged = declared_schedule("wedged");
+            let failing = declared_schedule("failing");
+            schedule::save(&wedged).expect("save wedged");
+            schedule::save(&failing).expect("save failing");
+            schedule::save_state(
+                &wedged.id,
+                &schedule::ScheduleState {
+                    last_run_at: Some((now - chrono::Duration::days(7)).to_rfc3339()),
+                    last_status: Some("failed".to_string()),
+                    running: true,
+                    started_at: Some((now - chrono::Duration::hours(2)).to_rfc3339()),
+                    consecutive_failures: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("save wedged state");
+            schedule::save_state(
+                &failing.id,
+                &schedule::ScheduleState {
+                    last_run_at: Some(now.to_rfc3339()),
+                    last_status: Some("partial_failure".to_string()),
+                    consecutive_failures: 106,
+                    ..Default::default()
+                },
+            )
+            .expect("save failing state");
+
+            let (result, code) = run(default_status_args()).expect("compact status succeeds");
+            assert_eq!(code, 0);
+            let StatusResult::Compact(output) = result else {
+                panic!("expected compact status output");
+            };
+            assert_eq!(output.schedules.declared, 2);
+            assert_eq!(output.schedules.drill_down, "homeboy schedule list");
+            let ids: Vec<&str> = output
+                .schedules
+                .unhealthy
+                .iter()
+                .map(|report| report.id.as_str())
+                .collect();
+            assert!(ids.contains(&"wedged"), "wedged schedule missing: {ids:?}");
+            assert!(
+                ids.contains(&"failing"),
+                "failing schedule missing: {ids:?}"
+            );
+            let wedged = output
+                .schedules
+                .unhealthy
+                .iter()
+                .find(|report| report.id == "wedged")
+                .expect("wedged");
+            assert!(wedged.cadence_stale);
+            assert!(wedged.running);
+            assert_eq!(wedged.command, "homeboy schedule show wedged");
+            let failing = output
+                .schedules
+                .unhealthy
+                .iter()
+                .find(|report| report.id == "failing")
+                .expect("failing");
+            assert_eq!(failing.consecutive_failures, 106);
+            assert_eq!(failing.last_status.as_deref(), Some("partial_failure"));
+            assert_eq!(failing.command, "homeboy schedule show failing");
         });
     }
 

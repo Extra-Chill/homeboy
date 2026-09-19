@@ -127,6 +127,8 @@ pub struct RunnerReconciliationOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_predicate: Option<String>,
     pub retired_generation_count: usize,
+    pub retirement_blockers: std::collections::BTreeMap<String, String>,
+    pub retained_evidence_generation_count: usize,
     /// IDs retired by this reconciliation operation under the generation lock.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub retired_generation_ids: Vec<String>,

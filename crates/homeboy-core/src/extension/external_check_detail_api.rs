@@ -669,7 +669,7 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\ntouch {}\nprintf '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"%s\",\"actions\":[\"%s\"]}}\\n' \"$FIXTURE_SECRET\" \"$FIXTURE_SECRET\"\n",
+                    "#!/bin/sh\n: > {}\nprintf '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"%s\",\"actions\":[\"%s\"]}}\\n' \"$FIXTURE_SECRET\" \"$FIXTURE_SECRET\"\n",
                     homeboy_engine_primitives::shell::quote_path(&marker.to_string_lossy())
                 ),
             )
@@ -705,6 +705,11 @@ mod tests {
                     deadline: Instant::now() + Duration::from_secs(2),
                     resolve_environment: &resolve_environment,
                 },
+            );
+            assert!(
+                hydrated.diagnostic.is_none(),
+                "resolver diagnostic: {:?}",
+                hydrated.diagnostic
             );
             let detail = hydrated.detail.expect("resolver detail");
             assert_eq!(detail.summary.as_deref(), Some("[REDACTED]"));

@@ -52,8 +52,8 @@ use attempt_workspace::{
     prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
 };
 use candidate_adoption::{
-    attach_candidate_adoption_provenance, finalize_candidate_artifacts, select_candidate_adoption,
-    validate_and_apply_candidate_adoption,
+    attach_candidate_adoption_provenance, bind_candidate_artifact_fingerprint,
+    finalize_candidate_artifacts, select_candidate_adoption, validate_and_apply_candidate_adoption,
 };
 pub use engine::*;
 use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};

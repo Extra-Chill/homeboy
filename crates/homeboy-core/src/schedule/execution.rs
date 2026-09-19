@@ -445,6 +445,11 @@ pub fn run_schedule(schedule: &Schedule, runner: &dyn ScheduleCommandRunner) -> 
         .as_deref()
         .map(|last| last != digest)
         .unwrap_or(true);
+    let consecutive_failures = if succeeded {
+        0
+    } else {
+        previous.consecutive_failures.saturating_add(1)
+    };
 
     let mut outcome = ScheduleRunOutcome {
         schedule_id: schedule.id.clone(),
@@ -461,7 +466,7 @@ pub fn run_schedule(schedule: &Schedule, runner: &dyn ScheduleCommandRunner) -> 
     };
 
     if should_notify(schedule.notify_on, succeeded, changed) {
-        let (notified, error) = notify(schedule, &outcome);
+        let (notified, error) = notify(schedule, &outcome, consecutive_failures);
         outcome.notified = notified;
         outcome.notify_error = error;
     }
@@ -475,18 +480,18 @@ pub fn run_schedule(schedule: &Schedule, runner: &dyn ScheduleCommandRunner) -> 
             last_digest: Some(digest),
             running: false,
             started_at: None,
-            consecutive_failures: if succeeded {
-                0
-            } else {
-                previous.consecutive_failures.saturating_add(1)
-            },
+            consecutive_failures,
         },
     );
 
     outcome
 }
 
-fn notify(schedule: &Schedule, outcome: &ScheduleRunOutcome) -> (bool, Option<String>) {
+fn notify(
+    schedule: &Schedule,
+    outcome: &ScheduleRunOutcome,
+    consecutive_failures: u32,
+) -> (bool, Option<String>) {
     let route = match (
         schedule.notification_transport.as_deref(),
         schedule.notification_route.as_deref(),
@@ -500,13 +505,17 @@ fn notify(schedule: &Schedule, outcome: &ScheduleRunOutcome) -> (bool, Option<St
         _ => None,
     };
 
-    // The facts a schedule notification used to hand-format into prose are now
-    // structured once. The prose is rendered from them, so a text-only
-    // transport keeps the same information and a payload-aware one can act on
-    // it (re-run the schedule, inspect the failure) without parsing English.
+    // Failures escalate through the existing needs-attention kind rather than
+    // looking like a completed healthy run. Consecutive failures are a fact the
+    // operator can act on, not a counter that only lives on disk.
+    let kind = if consecutive_failures == 0 {
+        NotifyEventKind::Completed
+    } else {
+        NotifyEventKind::NeedsAttention
+    };
     let run_id = format!("schedule-{}-{}", schedule.id, outcome.started_at);
     let payload = NotifyPayload::new(
-        NotifyEventKind::Completed,
+        kind,
         NotifySubject::new("schedule", schedule.id.clone()).with_phase("scheduled_run"),
     )
     .with_fact("Command", schedule.command_display())
@@ -521,6 +530,10 @@ fn notify(schedule: &Schedule, outcome: &ScheduleRunOutcome) -> (bool, Option<St
         } else {
             "unchanged"
         },
+    )
+    .with_optional_fact(
+        "Consecutive failures",
+        (consecutive_failures > 0).then(|| consecutive_failures.to_string()),
     )
     .with_optional_fact("Summary", outcome.summary.clone())
     .with_action(NotifyAction::new(
@@ -540,7 +553,7 @@ fn notify(schedule: &Schedule, outcome: &ScheduleRunOutcome) -> (bool, Option<St
             "Schedule {} finished with status {}",
             schedule.id, outcome.status
         ),
-        kind: NotifyEventKind::Completed,
+        kind,
         transport: route.as_ref().map(|route| route.transport.clone()),
         route: route.as_ref().map(|route| route.route.clone()),
         payload: None,
@@ -972,8 +985,34 @@ mod tests {
 
             let state = load_state(&schedule.id);
             assert_eq!(state.consecutive_failures, 2);
+            assert!(state.is_unhealthy());
             assert_eq!(state.last_exit_code, Some(2));
             assert!(!state.running);
+        });
+    }
+
+    #[test]
+    fn a_successful_run_resets_consecutive_failures() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut schedule = schedule(NotifyPolicy::Failure);
+            schedule.id = "recovering-fixture".to_string();
+            let failing = StubRunner(serde_json::json!({
+                "status": "failed",
+                "exit_code": 1,
+            }));
+            run_schedule(&schedule, &failing);
+            assert_eq!(load_state(&schedule.id).consecutive_failures, 1);
+            assert!(load_state(&schedule.id).is_unhealthy());
+
+            let succeeding = StubRunner(serde_json::json!({
+                "status": "succeeded",
+                "exit_code": 0,
+            }));
+            run_schedule(&schedule, &succeeding);
+
+            let state = load_state(&schedule.id);
+            assert_eq!(state.consecutive_failures, 0);
+            assert!(!state.is_unhealthy());
         });
     }
 }

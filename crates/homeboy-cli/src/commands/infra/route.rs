@@ -3,6 +3,7 @@ use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
+use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
@@ -101,6 +102,21 @@ pub(crate) fn route_after_parse_with_provenance(
 
     if runner_side {
         return Ok(None);
+    }
+
+    // A compact local changed-only review is commonly launched from an
+    // interactive client. Hand its admitted observation to an independent
+    // worker so closing that client cannot terminate setup or test execution.
+    if cli.placement == homeboy::cli_surface::Placement::Local
+        && std::env::var_os("HOMEBOY_DETACHED_REVIEW_RUN_ID").is_none()
+    {
+        if let Commands::Review(review) = &cli.command {
+            if let Some(exit_code) =
+                crate::commands::review::detach_changed_only_summary(review, normalized_args)?
+            {
+                return Ok(Some(exit_code));
+            }
+        }
     }
 
     // Promotion owns target resolution because gate-feedback artifacts can
@@ -210,6 +226,14 @@ pub(crate) fn route_after_parse_with_provenance(
         .flatten();
     if cook_requires_unmaterialized_admission(cli, &preflight) && !is_unmaterialized_replay_worker()
     {
+        if let Some(error) =
+            auto_cook_unavailable_lab_replay_error(cli, &preflight, &normalized_args)
+        {
+            // Auto + stale/disconnected Lab must not persist a 20-retry
+            // `pending_resource_admission` park. Reject with the same local
+            // cook replay `runner status` already computed (#14715).
+            return Err(error);
+        }
         // Persist before provider execution. The scoped replay selector owns
         // ready and reverse-capacity admission after this durable boundary.
         return admit_unmaterialized_cook(
@@ -522,7 +546,7 @@ pub(crate) fn route_after_parse_with_provenance(
             allow_local_fallback: cli.placement.allows_local_fallback(),
             allow_dirty_lab_workspace: cli.allow_dirty_lab_workspace,
             skip_deps_hydration: cli.skip_deps_hydration,
-            preserve_workspace_on_failure: cli.preserve_workspace_on_failure,
+            delete_workspace_on_failure: cli.delete_workspace_on_failure,
             capture_patch: capture_mutation_patch,
             mutation_flag,
             timeout: lab_route_dispatch_timeout(&cli.command),
@@ -601,7 +625,7 @@ pub(crate) struct ComposedLabRouteOptions<'a> {
     pub runner: Option<&'a str>,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
-    pub preserve_workspace_on_failure: bool,
+    pub delete_workspace_on_failure: bool,
     pub detach_after_handoff: bool,
     pub runner_env: &'a [String],
     pub runner_secret_env: &'a [String],
@@ -701,7 +725,7 @@ pub(crate) fn route_composed_lab_command(
             allow_local_fallback: options.placement.allows_local_fallback(),
             allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
             skip_deps_hydration: options.skip_deps_hydration,
-            preserve_workspace_on_failure: options.preserve_workspace_on_failure,
+            delete_workspace_on_failure: options.delete_workspace_on_failure,
             capture_patch: route.lab_offload_captures_mutation_patch(),
             mutation_flag: route.lab_offload_mutation_flag(),
             timeout: None,
@@ -2094,6 +2118,72 @@ fn unmaterialized_admission_state(
     }
 }
 
+fn auto_cook_unavailable_lab_replay_error(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+    normalized_args: &[String],
+) -> Option<Error> {
+    if !matches!(cli.placement, homeboy::cli_surface::Placement::Auto) {
+        return None;
+    }
+    let state = preflight
+        .lab_readiness
+        .as_ref()
+        .map(|readiness| readiness.state.as_str())
+        .unwrap_or("absent");
+    if !matches!(state, "stale" | "disconnected") {
+        return None;
+    }
+    let local_args = cook_placement_replay_args(normalized_args, "local");
+    let lab_or_local_args = cook_placement_replay_args(normalized_args, "lab-or-local");
+    let local_command = homeboy::core::engine::shell::quote_args(&local_args);
+    let lab_or_local_command = homeboy::core::engine::shell::quote_args(&lab_or_local_args);
+    let reason = preflight
+        .lab_readiness
+        .as_ref()
+        .and_then(|readiness| readiness.reasons.first())
+        .cloned()
+        .unwrap_or_else(|| format!("Lab runner readiness is {state}"));
+    let mut error = Error::validation_invalid_argument(
+        "placement",
+        format!(
+            "Auto Cook cannot use Lab ({reason}); not parking a 20-retry admission. Replay locally with `--placement local`, or authorize fallback with `--placement lab-or-local`."
+        ),
+        Some("auto".to_string()),
+        Some(vec![
+            local_command.clone(),
+            lab_or_local_command,
+            "Use `--placement lab-or-local` to authorize controller execution when no Lab runner is ready.".to_string(),
+        ]),
+    )
+    .with_retryable(false);
+    error.details["next_action"] = serde_json::Value::String(local_command);
+    error.details["runner_readiness"] = serde_json::Value::String(state.to_string());
+    error.details["run_created"] = serde_json::Value::Bool(false);
+    Some(
+        error.with_action(ExecutableAction::new(
+            "replay-cook-on-local",
+            "replay Cook on this controller",
+            local_args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "homeboy".to_string()),
+            local_args.iter().skip(1).cloned(),
+            ActionSafety::Mutating,
+        )),
+    )
+}
+
+fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
+    let mut replay = portable_deferred_args(args);
+    if replay.is_empty() {
+        replay.push("homeboy".to_string());
+    }
+    replay.insert(1, "--placement".to_string());
+    replay.insert(2, placement.to_string());
+    replay
+}
+
 /// Explain a Lab placement that cannot be served, without contradicting the
 /// documented guidance.
 ///
@@ -2447,6 +2537,7 @@ fn run_split_placement_cook_with_runtime(
         if cook.no_progress && phase == "durable_identity" {
             if let Some(run_id) = run_id {
                 crate::commands::agent_task::run::announce_durable_cook_identity(cook_id, run_id);
+                crate::commands::agent_task::run::announce_resolved_execution_placement();
             }
         } else {
             progress_reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);
@@ -2726,7 +2817,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     allow_local_fallback: self.allow_local_fallback,
                     allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
                     skip_deps_hydration: self.skip_deps_hydration,
-                    preserve_workspace_on_failure: false,
+                    delete_workspace_on_failure: false,
                     capture_patch: false,
                     mutation_flag: None,
                     timeout: None,

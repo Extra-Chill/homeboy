@@ -3259,9 +3259,10 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         assert_eq!(loaded.provider_handles[0].provider_run_id, "provider-run-1");
         assert_eq!(loaded.metadata["remote_run_id"], "remote-run");
         assert_eq!(loaded.metadata["remote_plan_path"], "remote-plan");
-        assert_eq!(
-            log.events[0].data["message"].as_str(),
-            Some("Remote provider agent task failed.")
+        assert!(
+            log.events.iter().any(|event| event.data["message"].as_str()
+                == Some("Remote provider agent task failed.")),
+            "canonical logs retain the remote dispatch failure"
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "provider-run");
         assert!(raw_aggregate.contains("custom-provider/agent-task-run-result/v1"));

@@ -27,6 +27,10 @@ struct RawTestFailure {
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
+    stdout_excerpt: Option<String>,
+    #[serde(default)]
+    stderr_excerpt: Option<String>,
+    #[serde(default)]
     source: Option<String>,
     #[serde(default)]
     source_file: Option<String>,
@@ -48,6 +52,8 @@ impl From<RawTestFailure> for TestFailure {
             message: raw
                 .message
                 .unwrap_or_else(|| "test failure (no message provided)".to_string()),
+            stdout_excerpt: raw.stdout_excerpt.unwrap_or_default(),
+            stderr_excerpt: raw.stderr_excerpt.unwrap_or_default(),
             source_file: raw.source.or(raw.source_file).unwrap_or_default(),
             source_line: raw.line.or(raw.source_line).unwrap_or_default(),
         }
@@ -176,6 +182,16 @@ fn collect_nested_result_failures(value: &serde_json::Value, failures: &mut Vec<
                             .unwrap_or("test_failure")
                             .to_string(),
                         message: message.to_string(),
+                        stdout_excerpt: object
+                            .get("stdout_excerpt")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        stderr_excerpt: object
+                            .get("stderr_excerpt")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                         source_file: object
                             .get("source")
                             .or_else(|| object.get("file"))
@@ -250,6 +266,8 @@ fn append_phpunit_failure(
         test_file: source_file.clone(),
         error_type: "phpunit_failure".to_string(),
         message: message.to_string(),
+        stdout_excerpt: String::new(),
+        stderr_excerpt: String::new(),
         source_file,
         source_line,
     });
@@ -858,7 +876,9 @@ mod tests {
                     "file": "tests/suite.rs",
                     "line": 42,
                     "failure_type": "assertion",
-                    "message": "failed assertion"
+                    "message": "failed assertion",
+                    "stdout_excerpt": "assertion `left == right` failed",
+                    "stderr_excerpt": "thread 'suite::case' panicked"
                 }
             ]"#,
         )
@@ -876,6 +896,14 @@ mod tests {
         assert_eq!(parsed.failures[0].source_line, 42);
         assert_eq!(parsed.failures[0].error_type, "assertion");
         assert_eq!(parsed.failures[0].message, "failed assertion");
+        assert_eq!(
+            parsed.failures[0].stdout_excerpt,
+            "assertion `left == right` failed"
+        );
+        assert_eq!(
+            parsed.failures[0].stderr_excerpt,
+            "thread 'suite::case' panicked"
+        );
     }
 
     #[test]

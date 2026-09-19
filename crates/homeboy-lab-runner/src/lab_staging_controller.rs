@@ -128,7 +128,7 @@ pub struct LabStagingRecipe {
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
     #[serde(default)]
-    pub preserve_workspace_on_failure: bool,
+    pub delete_workspace_on_failure: bool,
     pub capture_patch: bool,
     pub mutation_flag: Option<String>,
     pub detach_after_handoff: bool,
@@ -211,7 +211,7 @@ impl LabStagingRecipe {
             allow_local_fallback: request.placement_decision.fallback.local_allowed,
             allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
             skip_deps_hydration: request.skip_deps_hydration,
-            preserve_workspace_on_failure: request.preserve_workspace_on_failure,
+            delete_workspace_on_failure: request.delete_workspace_on_failure,
             capture_patch: request.capture_patch,
             mutation_flag: request.mutation_flag.map(str::to_string),
             detach_after_handoff: request.detach_after_handoff,
@@ -3129,7 +3129,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             allow_local_fallback: request.recipe.allow_local_fallback,
             allow_dirty_lab_workspace: request.recipe.allow_dirty_lab_workspace,
             skip_deps_hydration: request.recipe.skip_deps_hydration,
-            preserve_workspace_on_failure: request.recipe.preserve_workspace_on_failure,
+            delete_workspace_on_failure: request.recipe.delete_workspace_on_failure,
             capture_patch: request.recipe.capture_patch,
             mutation_flag: request.recipe.mutation_flag.as_deref(),
             placement_outcome_target: Some(

@@ -27,8 +27,8 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 use super::super::CmdResult;
 use super::args::{
     ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
-    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs,
+    MigrateEventHistoryArgs, QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
 #[cfg(test)]
 use super::candidate::CandidateState;
@@ -1783,6 +1783,11 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(events).unwrap_or(Value::Null), 0))
 }
 
+pub(super) fn migrate_event_history(args: MigrateEventHistoryArgs) -> CmdResult<Value> {
+    let report = agent_task_service_direct::migrate_durable_event_history(&args.run_id)?;
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
+}
+
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
     let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
@@ -1953,6 +1958,24 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     }
 
     let ranked_reasons = ranked_diagnostics(nested_reasons);
+    // `diagnose` is the printed recovery verb for a failed run (#14679): a
+    // human-readable summary must exist whenever it runs, and it must say
+    // whether a root cause was actually found rather than leaving `succeeded`
+    // with an empty summary ambiguous between "nothing wrong" and "nothing
+    // reported".
+    let (diagnosis_outcome, summary) = match ranked_reasons.first() {
+        Some(diagnostic) => (
+            "root_cause_identified",
+            format!("{}: {}", diagnostic.class, diagnostic.message),
+        ),
+        None => (
+            "no_root_cause_found",
+            format!(
+                "no root cause diagnostic was found for run {} (state: {:?})",
+                record.run_id, record.state
+            ),
+        ),
+    };
     let root_cause = ranked_reasons
         .first()
         .cloned()
@@ -1999,6 +2022,8 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "schema": "homeboy/agent-task-diagnose/v1",
         "run_id": record.run_id.clone(),
         "state": record.state,
+        "summary": summary,
+        "diagnosis_outcome": diagnosis_outcome,
         "root_cause": root_cause,
         "diagnostic_chain": diagnostic_chain,
         "causal_chain": causal_chain,
@@ -4385,10 +4410,26 @@ fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<Collecte
 }
 
 fn ranked_diagnostics(collected: Vec<CollectedDiagnostic>) -> Vec<CollectedDiagnostic> {
+    // A provider that exited 0 makes every raw, unparsed process-stream
+    // excerpt (progress heartbeats, not a diagnostics payload) causally
+    // meaningless: it is a slice of the progress-event stream, not an
+    // explanation. When the provider succeeded, a later phase is the root
+    // cause; root-cause attribution must never select the heartbeat noise
+    // instead (#14735). Structured provider errors and nested diagnostics
+    // extracted *from* a stream still carry real signal and are unaffected.
+    let provider_succeeded = collected
+        .iter()
+        .any(|item| is_successful_process_exit(&format!("{} {}", item.class, item.message)));
+    let is_unparsed_stream_noise = |item: &CollectedDiagnostic| {
+        item.source == "hydrated_process_stream" && item.class == "provider.process_stream"
+    };
     // Dedupe by (class, message) keeping the first occurrence, then order the
     // most actionable root-cause diagnostics first.
     let mut deduped: Vec<CollectedDiagnostic> = Vec::new();
     for item in collected {
+        if provider_succeeded && is_unparsed_stream_noise(&item) {
+            continue;
+        }
         let trimmed = item.message.trim();
         if trimmed.is_empty() {
             continue;
@@ -5127,16 +5168,11 @@ fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<Collected
                     )
                 })
             });
-        let gate_name = gate
-            .and_then(|gate| gate.get("name").or_else(|| gate.get("command")))
-            .and_then(Value::as_str)
-            .unwrap_or("deterministic gate");
+        let gate_name = gate_display_name(gate);
         return Some(CollectedDiagnostic {
             task_id: "promotion".to_string(),
             class: "agent_task.promotion_gate_failed".to_string(),
-            message: gate
-                .and_then(|gate| gate.get("message").and_then(Value::as_str))
-                .map(str::to_string)
+            message: gate_failure_message(gate)
                 .unwrap_or_else(|| format!("Deterministic promotion gate failed: {gate_name}")),
             source: "current_lifecycle".to_string(),
             data: promotion.clone(),
@@ -5163,6 +5199,52 @@ fn current_lifecycle_diagnostic(record: &AgentTaskRunRecord) -> Option<Collected
             .to_string(),
         source: "current_lifecycle".to_string(),
         data: finalization.clone(),
+    })
+}
+
+/// Name a failed deterministic gate from whatever shape its report carries.
+/// The real, production `AgentTaskGateReport` has no `name`/`message` field
+/// at all: its identity is `id` and its command is `command: Vec<String>`, so
+/// naming it only fell back to the generic `"deterministic gate"` placeholder
+/// for every real gate failure (#14735). Legacy/test fixtures that carry a
+/// bare `name`/string `command` are still honored.
+fn gate_display_name(gate: Option<&Value>) -> String {
+    gate.and_then(|gate| {
+        gate.get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| gate.get("name").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| {
+                gate.pointer("/failure_evidence/command")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                gate.get("command").and_then(|command| match command {
+                    Value::String(command) => Some(command.clone()),
+                    Value::Array(parts) => {
+                        let joined = parts
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (!joined.is_empty()).then_some(joined)
+                    }
+                    _ => None,
+                })
+            })
+    })
+    .unwrap_or_else(|| "deterministic gate".to_string())
+}
+
+/// The human-readable reason a gate failed, preferring the producer's own
+/// summary (`failure_evidence.summary`) over the legacy bare `message` field.
+fn gate_failure_message(gate: Option<&Value>) -> Option<String> {
+    gate.and_then(|gate| {
+        gate.pointer("/failure_evidence/summary")
+            .and_then(Value::as_str)
+            .or_else(|| gate.get("message").and_then(Value::as_str))
+            .map(str::to_string)
     })
 }
 
@@ -5360,7 +5442,7 @@ fn collected_diagnostic_value_with_details(
     let mut value = json!({
         "task_id": item.task_id,
         "class": item.class,
-        "message": bounded_diagnostic_value(&Value::String(item.message)).unwrap_or(Value::Null),
+        "message": bounded_diagnostic_message(&item.message),
         "source": item.source,
         "owner": owner,
     });
@@ -5460,6 +5542,19 @@ fn structured_details(data: &Value, fields: &[&str]) -> Option<Value> {
     });
     let details = serde_json::Map::from_iter(details);
     (!details.is_empty()).then(|| Value::Object(details))
+}
+
+/// The diagnostic message is the causal answer `diagnose` exists to produce
+/// (#14679): an oversized message must still name the failure, not disappear.
+/// Unlike `bounded_diagnostic_value`'s atomic drop (correct for secondary
+/// `details` payloads), truncate on a char boundary and keep the prefix.
+fn bounded_diagnostic_message(text: &str) -> Value {
+    if text.chars().count() <= COMPACT_TEXT_LIMIT {
+        return Value::String(text.to_string());
+    }
+    let mut truncated: String = text.chars().take(COMPACT_TEXT_LIMIT).collect();
+    truncated.push('…');
+    Value::String(truncated)
 }
 
 fn bounded_diagnostic_value(value: &Value) -> Option<Value> {
@@ -6136,6 +6231,28 @@ mod tests {
             value["details"].get("canonical_path").is_none(),
             "oversized diagnostic text is omitted atomically"
         );
+    }
+
+    /// The `message` field is the causal answer `diagnose` exists to produce
+    /// (#14679): unlike secondary `details` payloads, an oversized message
+    /// must be truncated, not dropped to `null`.
+    #[test]
+    fn oversized_diagnostic_messages_are_truncated_not_dropped() {
+        let oversized = "x".repeat(COMPACT_TEXT_LIMIT + 100);
+        let value = collected_diagnostic_value(CollectedDiagnostic {
+            task_id: "cook".to_string(),
+            class: "agent_task.committed_harvest_git_failed".to_string(),
+            message: oversized.clone(),
+            source: "diagnostics".to_string(),
+            data: Value::Null,
+        });
+
+        let message = value["message"]
+            .as_str()
+            .expect("oversized message must remain a string, not null");
+        assert!(message.chars().count() < oversized.chars().count());
+        assert!(message.starts_with('x'));
+        assert!(message.ends_with('…'));
     }
 
     #[test]

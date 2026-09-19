@@ -1163,14 +1163,14 @@ fn sweep_leaked_test_tempdirs(roots: &[PathBuf], active_tempdir: Option<&Path>) 
 #[cfg(unix)]
 fn sweep_leaked_test_tempdirs_once() {
     LEAKED_TEMPDIR_SWEEP.get_or_init(|| {
-        let mut roots = exec_capable_tempdir_candidates();
-        for extra in short_tempdir_candidates() {
-            if !roots.contains(&extra) {
-                roots.push(extra);
-            }
-        }
         let active_tempdir = std::env::var_os("TMPDIR").map(PathBuf::from);
-        sweep_leaked_test_tempdirs(&roots, active_tempdir.as_deref());
+        // A test process owns its invocation directory, not the host's shared
+        // temporary roots. Global reclamation belongs to the cleanup command;
+        // scanning /tmp and /var/tmp here repeats host-sized work for every
+        // nextest process before the test body even starts.
+        if let Some(root) = active_tempdir.as_ref() {
+            sweep_leaked_test_tempdirs(std::slice::from_ref(root), Some(root));
+        }
     });
 }
 

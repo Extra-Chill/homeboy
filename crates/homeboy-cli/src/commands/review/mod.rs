@@ -30,8 +30,13 @@ use homeboy_review::review::{
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc,
+};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use super::parse_key_val;
 use super::utils::args::{
@@ -45,6 +50,43 @@ use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOpti
 
 mod observation;
 pub(super) mod raw_output;
+
+const DETACHED_REVIEW_RUN_ID_ENV: &str = "HOMEBOY_DETACHED_REVIEW_RUN_ID";
+const DETACHED_OWNERSHIP_TRANSFER_DEADLINE: Duration = Duration::from_secs(5);
+const REVIEW_PREFLIGHT_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Clone, Copy)]
+struct ReviewPreflightDeadline {
+    expires_at: Instant,
+}
+
+impl ReviewPreflightDeadline {
+    fn start() -> Self {
+        Self {
+            expires_at: Instant::now() + REVIEW_PREFLIGHT_DEADLINE,
+        }
+    }
+
+    fn remaining(self, phase: &str) -> homeboy::core::Result<Duration> {
+        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(homeboy::core::Error::internal_unexpected(format!(
+                "review preflight/setup deadline exceeded during {phase}"
+            )));
+        }
+        Ok(remaining)
+    }
+
+    fn run<T, F>(self, phase: &str, operation: F) -> homeboy::core::Result<T>
+    where
+        F: FnOnce() -> homeboy::core::Result<T>,
+    {
+        self.remaining(phase)?;
+        let result = operation()?;
+        self.remaining(phase)?;
+        Ok(result)
+    }
+}
 
 #[derive(Args)]
 pub struct ReviewArgs {
@@ -494,11 +536,12 @@ fn dispatch_review_plan_step(
 pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
     match args.command.take() {
         Some(ReviewCommand::Audit(review_audit)) => {
-            let audit_args = review_audit.audit;
-            let requested_source = audit_args.release_readiness_source.clone();
-            let component = audit_args.comp.load()?;
-            prepare_local_review_dependencies(&component)?;
-            let audit_args = review_audit_args(audit_args, &args.changed, &component.local_path)?;
+            let deadline = ReviewPreflightDeadline::start();
+            let requested_source = review_audit.audit.release_readiness_source.clone();
+            let component = load_component_with_deadline(&review_audit.audit.comp, deadline)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
+            let audit_args =
+                review_audit_args(review_audit.audit, &args.changed, &component.local_path)?;
             to_value_with_readiness_provenance(
                 audit::run(audit_args),
                 &component,
@@ -507,12 +550,12 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
             )
         }
         Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
-        Some(ReviewCommand::Lint(child_args)) => {
-            let lint_args = child_args;
+        Some(ReviewCommand::Lint(lint_args)) => {
+            let deadline = ReviewPreflightDeadline::start();
             let requested_source = lint_args.release_readiness_source.clone();
-            let component = lint_args.comp.load()?;
+            let component = load_component_with_deadline(&lint_args.comp, deadline)?;
             reject_manual_changelog_edit_for_lint(&component, &lint_args)?;
-            prepare_local_review_dependencies(&component)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(lint_args)),
                 &component,
@@ -520,11 +563,11 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
                 "lint",
             )
         }
-        Some(ReviewCommand::Test(child_args)) => {
-            let test_args = child_args;
+        Some(ReviewCommand::Test(test_args)) => {
+            let deadline = ReviewPreflightDeadline::start();
             let requested_source = test_args.release_readiness_source.clone();
-            let component = test_args.comp.load()?;
-            prepare_local_review_dependencies(&component)?;
+            let component = load_component_with_deadline(&test_args.comp, deadline)?;
+            prepare_local_review_dependencies(&component, &None, deadline)?;
             to_value_with_readiness_provenance(
                 test::run(test_args),
                 &component,
@@ -732,14 +775,58 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         return attach_to_persisted_review(run_id);
     }
 
+    let deadline = ReviewPreflightDeadline::start();
+    // Admit the durable review before resolving a component or probing scope.
+    // A caller that disappears during either bounded preflight can therefore
+    // still locate the exact run and its last persisted progress.
+    let review_observation = Some(match std::env::var(DETACHED_REVIEW_RUN_ID_ENV) {
+        Ok(run_id) => observation::resume_after_ownership_transfer(
+            &run_id,
+            DETACHED_OWNERSHIP_TRANSFER_DEADLINE,
+        )?,
+        Err(_) => observation::start(observation::ReviewObservationStart {
+            component_id: args.comp.component.as_deref(),
+            component_label: args.comp.component.as_deref(),
+            source_path: None,
+            args: &args,
+            scope: "pending-discovery",
+            changed_file_count: None,
+        })?,
+    });
+    observation::emit_early_lifecycle(&review_observation);
+    progress(
+        &review_observation,
+        "component_discovery",
+        "component",
+        "running",
+    );
+
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component_args = args.effective_component_args();
-    let component = component_args.load()?;
+    let component = match load_component_with_deadline(&component_args, deadline) {
+        Ok(component) => component,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
+    };
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
 
-    let review_context = preflight_review_scope(&args, &source_path)?;
+    progress(
+        &review_observation,
+        "scope_discovery",
+        "changed-files",
+        "running",
+    );
+    let review_context = match preflight_review_scope(&args.changed, &source_path, deadline) {
+        Ok(context) => context,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
+    };
     let scope = review_context.scope.clone();
     let changed_file_count = review_context.changed_file_count;
 
@@ -754,14 +841,6 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
         let message = format!("No files changed {} — skipping review", scope_label);
         println!("{}", message);
 
-        let review_observation = Some(observation::start(observation::ReviewObservationStart {
-            component_id: &component.id,
-            component_label: &component_label,
-            source_path: Path::new(&source_path),
-            args: &args,
-            scope: &scope,
-            changed_file_count: Some(0),
-        })?);
         let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
 
         let mut output = ReviewService::skipped_output(
@@ -788,18 +867,27 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     // The test phase restores its checkout, so establish the whole plan is
     // eligible before dependency hydration or any detector can begin.
-    homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&source_path))?;
-
-    let review_observation = Some(observation::start(observation::ReviewObservationStart {
-        component_id: &component.id,
-        component_label: &component_label,
-        source_path: Path::new(&source_path),
-        args: &args,
-        scope: &scope,
-        changed_file_count,
-    })?);
-    observation::emit_early_lifecycle(&review_observation);
-    if let Err(error) = prepare_local_review_dependencies(&component) {
+    progress(
+        &review_observation,
+        "test_checkout_preflight",
+        "clean-checkout",
+        "running",
+    );
+    let checkout_path = source_path.clone();
+    if let Err(error) = deadline.run("clean checkout validation", move || {
+        homeboy_core::extension::test::ensure_clean_review_checkout(Path::new(&checkout_path))
+    }) {
+        observation::finish_error(review_observation, &error);
+        return Err(error);
+    }
+    progress(
+        &review_observation,
+        "dependency_setup",
+        "dependencies",
+        "running",
+    );
+    if let Err(error) = prepare_local_review_dependencies(&component, &review_observation, deadline)
+    {
         observation::finish_error(review_observation, &error);
         return Err(error);
     }
@@ -839,6 +927,9 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             ));
         }
         // homeboy-audit: allow-thin-command-adapter
+        progress(&review_observation, "test_execution", &step.kind, "running");
+        let _heartbeat =
+            StageHeartbeat::start(review_run_id.as_deref(), "test_execution", &step.kind);
         dispatch_review_plan_step(step, &args, &component_label, &review_context)
         // homeboy-audit: allow-thin-command-adapter
     }) {
@@ -972,10 +1063,105 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     Ok((output, overall_exit))
 }
 
+/// Start changed-only summary review in an independent session. This narrow
+/// form is intentionally asynchronous: its durable run is admitted before any
+/// component, dependency, or changed-scope discovery can block.
+pub(crate) fn detach_changed_only_summary(
+    args: &ReviewArgs,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    if !args.changed.changed_only || !args.summary || args.command.is_some() {
+        return Ok(None);
+    }
+    let observation = Some(observation::start(observation::ReviewObservationStart {
+        component_id: args.comp.component.as_deref(),
+        component_label: args.comp.component.as_deref(),
+        source_path: None,
+        args,
+        scope: "pending-discovery",
+        changed_file_count: None,
+    })?);
+    let run_id = observation
+        .as_ref()
+        .expect("observation is present")
+        .run_id()
+        .to_string();
+    observation::emit_early_lifecycle(&observation);
+    observation
+        .as_ref()
+        .expect("observation is present")
+        .progress("handoff", "detached-worker", "starting");
+    let executable = std::env::current_exe().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("resolve detached review executable".to_string()),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .args(normalized_args.iter().skip(1))
+        .env(DETACHED_REVIEW_RUN_ID_ENV, &run_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    homeboy::core::process::detach_from_caller_session(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let error = homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("spawn detached review worker".to_string()),
+            );
+            observation::finish_error(observation, &error);
+            return Err(error);
+        }
+    };
+    if let Err(error) = observation
+        .as_ref()
+        .expect("observation is present")
+        .transfer_owner_to(child.id())
+    {
+        let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
+        observation::finish_error(observation, &error);
+        return Err(error);
+    }
+    let launcher_observation = observation.as_ref().expect("observation is present");
+    let handoff_started = Instant::now();
+    while !launcher_observation.handoff_accepted(child.id())? {
+        if handoff_started.elapsed() >= DETACHED_OWNERSHIP_TRANSFER_DEADLINE {
+            let reason = format!(
+                "detached review worker {} did not acknowledge ownership within {:?}",
+                child.id(),
+                DETACHED_OWNERSHIP_TRANSFER_DEADLINE
+            );
+            launcher_observation.fail_handoff(child.id(), &reason);
+            let _ = homeboy_engine_primitives::command::terminate_process_tree_and_reap(&mut child);
+            return Err(homeboy::core::Error::internal_unexpected(reason));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    launcher_observation.progress("handoff", "detached-worker", "accepted");
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "homeboy/review-local-handoff/v1",
+            "run_id": run_id,
+            "status": "running",
+            "watch_command": format!("homeboy runs watch {run_id}"),
+        })
+    );
+    Ok(Some(0))
+}
+
 fn prepare_local_review_dependencies(
     component: &homeboy::core::component::Component,
+    observation: &Option<observation::ReviewObservation>,
+    deadline: ReviewPreflightDeadline,
 ) -> homeboy::core::Result<()> {
-    let policy = homeboy::core::deps::DependencyHydrationPolicy::default();
+    let policy = homeboy::core::deps::DependencyHydrationPolicy {
+        timeout: deadline.remaining("dependency hydration")?,
+        ..Default::default()
+    };
     let deadline_ms = policy.timeout.as_millis();
     let started = Instant::now();
     emit_local_review_setup_progress(LocalReviewSetupProgress {
@@ -988,9 +1174,14 @@ fn prepare_local_review_dependencies(
         last_progress_ms_ago: None,
         deadline_ms,
     });
+    progress(observation, "dependency_setup", "dependencies", "running");
 
     let component_id = component.id.clone();
-    let progress = Arc::new(
+    let run_id = observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
+    let cancellation_run_id = run_id.clone();
+    let dependency_progress = Arc::new(
         move |progress: &homeboy::core::deps::DependencyHydrationProgress| {
             emit_local_review_setup_progress(LocalReviewSetupProgress {
                 phase: &progress.phase,
@@ -1002,10 +1193,21 @@ fn prepare_local_review_dependencies(
                 last_progress_ms_ago: progress.last_progress_ms_ago,
                 deadline_ms,
             });
+            if let Some(run_id) = run_id.as_deref() {
+                update_progress(
+                    run_id,
+                    &progress.phase,
+                    progress.current.as_deref().unwrap_or(&progress.provider_id),
+                    "heartbeat",
+                );
+            }
         },
     );
     let policy = homeboy::core::deps::DependencyHydrationPolicy {
-        on_progress: progress,
+        on_progress: dependency_progress,
+        is_cancelled: Arc::new(move || {
+            review_dependency_hydration_is_cancelled(cancellation_run_id.as_deref())
+        }),
         ..policy
     };
     let outcomes = homeboy::core::deps::hydrate_declared_dependencies(
@@ -1029,6 +1231,12 @@ fn prepare_local_review_dependencies(
             last_progress_ms_ago: None,
             deadline_ms,
         });
+        progress(
+            observation,
+            "dependency_setup",
+            &failed.provider_id,
+            "failed",
+        );
         return Err(homeboy::core::Error::dependency_step_failed(
             "dependency.setup",
             &component.id,
@@ -1056,7 +1264,97 @@ fn prepare_local_review_dependencies(
         last_progress_ms_ago: None,
         deadline_ms,
     });
+    progress(observation, "dependency_setup", "dependencies", "completed");
     Ok(())
+}
+
+fn review_dependency_hydration_is_cancelled(run_id: Option<&str>) -> bool {
+    run_id.is_some_and(observation::is_cancelled)
+}
+
+fn load_component_with_deadline(
+    args: &PositionalComponentArgs,
+    deadline: ReviewPreflightDeadline,
+) -> homeboy::core::Result<homeboy::core::component::Component> {
+    let args = args.clone();
+    deadline.run("component discovery", move || args.load())
+}
+
+fn progress(
+    observation: &Option<observation::ReviewObservation>,
+    phase: &str,
+    current: &str,
+    status: &str,
+) {
+    if let Some(observation) = observation {
+        observation.progress(phase, current, status);
+    }
+}
+
+fn update_progress(run_id: &str, phase: &str, current: &str, status: &str) {
+    let Ok(store) = ObservationStore::open_initialized() else {
+        return;
+    };
+    let Ok(Some(run)) = store.get_run(run_id) else {
+        return;
+    };
+    let metadata = homeboy::core::observation::merge_metadata(
+        run.metadata_json,
+        serde_json::json!({
+            "observation_status": "running",
+            "progress": {
+                "phase": phase,
+                "current": current,
+                "status": status,
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            },
+        }),
+    );
+    let _ = store.update_running_run_metadata(run_id, metadata);
+}
+
+/// Keep the durable run fresh while an extension-owned command is silent. The
+/// metadata update is the canonical heartbeat; stderr is never its only sink.
+struct StageHeartbeat {
+    stop: Arc<AtomicBool>,
+    wake: mpsc::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl StageHeartbeat {
+    fn start(run_id: Option<&str>, phase: &str, current: &str) -> Option<Self> {
+        let run_id = run_id?.to_string();
+        let phase = phase.to_string();
+        let current = current.to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (wake, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                if receiver.recv_timeout(Duration::from_secs(5)).is_ok() {
+                    break;
+                }
+                if !worker_stop.load(Ordering::Relaxed) {
+                    update_progress(&run_id, &phase, &current, "heartbeat");
+                }
+            }
+        });
+        Some(Self {
+            stop,
+            wake,
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for StageHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.wake.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct LocalReviewSetupProgress<'a> {
@@ -1281,34 +1579,38 @@ fn attach_review_actionable(output: &mut ReviewCommandOutput) {
 }
 
 fn preflight_review_scope(
-    args: &ReviewArgs,
+    changed: &ChangedScopeArgs,
     source_path: &str,
+    deadline: ReviewPreflightDeadline,
 ) -> homeboy::core::Result<ReviewExecutionContext> {
-    let scope = if args.changed.changed_since().is_some() {
-        "changed-since"
-    } else if args.changed.changed_only {
-        "changed-only"
-    } else {
-        "full"
-    }
-    .to_string();
+    let changed = changed.clone();
+    let source_path = source_path.to_string();
+    deadline.run("changed-scope discovery", move || {
+        let scope = if changed.changed_since().is_some() {
+            "changed-since"
+        } else if changed.changed_only {
+            "changed-only"
+        } else {
+            "full"
+        }
+        .to_string();
 
-    // Probe once at the umbrella level so review can short-circuit before
-    // extension setup, include a stable changed-file count in its artifact,
-    // and pass the same resolved scope to each internal stage.
-    let precomputed_changed_files = match (args.changed.changed_since(), args.changed.changed_only)
-    {
-        _ if args.changed.lab.lab_changed_files_json.is_some() => args.changed.resolve()?,
-        (Some(git_ref), _) => Some(git::get_files_changed_since(source_path, git_ref)?),
-        (_, true) => Some(git::get_dirty_files(source_path)?),
-        _ => None,
-    };
-    let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
+        // Probe once at the umbrella level so review can short-circuit before
+        // extension setup, include a stable changed-file count in its artifact,
+        // and pass the same resolved scope to each internal stage.
+        let precomputed_changed_files = match (changed.changed_since(), changed.changed_only) {
+            _ if changed.lab.lab_changed_files_json.is_some() => changed.resolve()?,
+            (Some(git_ref), _) => Some(git::get_files_changed_since(&source_path, git_ref)?),
+            (_, true) => Some(git::get_dirty_files(&source_path)?),
+            _ => None,
+        };
+        let changed_file_count = precomputed_changed_files.as_ref().map(Vec::len);
 
-    Ok(ReviewExecutionContext {
-        scope,
-        changed_file_count,
-        precomputed_changed_files,
+        Ok(ReviewExecutionContext {
+            scope,
+            changed_file_count,
+            precomputed_changed_files,
+        })
     })
 }
 
@@ -1542,6 +1844,7 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::utils::args::{BaselineArgs, PositionalComponentArgs};
     use clap::Parser;
+    use homeboy::core::observation::{NewRunRecord, RunStatus};
 
     /// Minimal CLI wrapper to exercise clap parsing of `ReviewArgs`.
     #[derive(Parser)]
@@ -1858,6 +2161,26 @@ mod tests {
             assert!(message.contains("--changed-only"), "{action}: {message}");
             assert!(message.contains("--changed-since"), "{action}: {message}");
         }
+    }
+
+    #[test]
+    fn review_dependency_hydration_observes_durable_cancellation() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "cancelled-review-hydration".to_string(),
+                )
+                .expect("review run");
+            assert!(!review_dependency_hydration_is_cancelled(Some(&run.id)));
+            store
+                .finish_running_run(&run.id, RunStatus::Skipped, None)
+                .expect("cancel review");
+            assert!(review_dependency_hydration_is_cancelled(Some(&run.id)));
+        });
     }
 
     #[test]

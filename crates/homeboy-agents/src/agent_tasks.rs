@@ -234,6 +234,7 @@ pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel_run, cook_index, durable_local_read,
         fail_detached_cook_handoff_parent, list_records, load_plan, logs,
+        migrate_durable_event_history, migrate_durable_event_history_in_store,
         reconcile_terminal_artifact_projection, record_cook_finalization,
         record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
         run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
@@ -265,11 +266,11 @@ pub mod lifecycle {
         run_record_exists_resolved_in_store, runner_diagnostic_probe,
         runner_pinned_runtime_for_mutation,
         transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceVerdict,
-        AgentTaskArtifactRef, AgentTaskDurableReadUnavailable, AgentTaskLifecycleStore,
-        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunRecord,
-        AgentTaskRunState, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
-        AgentTaskStatusOptions, ClaimOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
-        LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
+        AgentTaskArtifactRef, AgentTaskDurableReadUnavailable, AgentTaskEventHistoryMigration,
+        AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure,
+        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunnerDiagnosticProbe,
+        AgentTaskRunnerProbe, AgentTaskStatusOptions, ClaimOutcome, ControllerRuntimePruneResult,
+        DetachedLabRunRecord, LabOffloadProxyPlan, LocalCookRetryLaunchClaim, RunnerPinnedRuntime,
     };
     pub use super::super::agent_task_lifecycle::{
         cook_index_exists, mark_running, record_run_aggregate, record_runner_job_identity,

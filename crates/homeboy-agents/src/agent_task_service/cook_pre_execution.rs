@@ -534,6 +534,13 @@ pub(crate) struct PreExecutionFailureDetails {
     pub(crate) retryable: bool,
     pub(crate) phase: Option<String>,
     pub(crate) classification: Option<String>,
+    /// The underlying cause's own message when `phase`/`classification` were
+    /// derived from a run's outcome diagnostics rather than dispatch-boundary
+    /// metadata (see `pre_provider_outcome_failure_cause`). For a
+    /// `committed_harvest_*` reason code this already carries the exact git
+    /// invocation, its exit status, and its stderr; the dispatch-boundary
+    /// error alone (e.g. a Lab transport's bare exit code) never does.
+    pub(crate) detail: Option<String>,
 }
 
 pub(crate) fn with_pre_execution_phase(mut error: Error, phase: &str) -> Error {
@@ -564,20 +571,69 @@ pub(crate) fn pre_execution_failure_details(
     error: &Error,
 ) -> PreExecutionFailureDetails {
     let failure = record.and_then(|record| record.metadata.get("pre_execution_failure"));
-    PreExecutionFailureDetails {
-        retryable: failure
-            .and_then(|failure| failure.get("retryable"))
-            .and_then(Value::as_bool)
-            .unwrap_or(error.retryable == Some(true)),
-        phase: failure
-            .and_then(|failure| failure.get("phase"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        classification: failure
-            .and_then(|failure| failure.get("failure_classification"))
-            .and_then(Value::as_str)
-            .map(str::to_string),
+    let retryable = failure
+        .and_then(|failure| failure.get("retryable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(error.retryable == Some(true));
+    let phase = failure
+        .and_then(|failure| failure.get("phase"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let classification = failure
+        .and_then(|failure| failure.get("failure_classification"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if phase.is_some() && classification.is_some() {
+        return PreExecutionFailureDetails {
+            retryable,
+            phase,
+            classification,
+            detail: None,
+        };
     }
+    // A dispatched attempt can fail before any provider ran without ever
+    // passing through `record_pre_execution_failure` — a Lab-offloaded
+    // attempt whose remote runner refused the run in `committed_harvest_preflight`
+    // terminalizes through the scheduler's own outcome aggregate, not the
+    // `pre_execution_failure` metadata field record_pre_execution_failure_locked
+    // writes. That aggregate still carries a specific reason code,
+    // classification, and (for a git-backed harvest failure) the exact
+    // command and stderr; without this fallback the report would say
+    // `unknown` next to a cause that is already durable (#14678).
+    let derived = record.and_then(pre_provider_outcome_failure_cause);
+    PreExecutionFailureDetails {
+        retryable,
+        phase: phase.or_else(|| derived.as_ref().map(|cause| cause.0.clone())),
+        classification: classification.or_else(|| derived.as_ref().map(|cause| cause.1.clone())),
+        detail: derived.and_then(|cause| cause.2),
+    }
+}
+
+/// Derive a pre-provider `(phase, classification, detail_message)` triple
+/// from a run's own outcome aggregate when its terminal failure never went
+/// through [`record_pre_execution_failure`]. See the fallback in
+/// [`pre_execution_failure_details`] for why this is needed. This mirrors the
+/// same `pre_provider_diagnostic_cause` enrichment the local (non-Lab)
+/// provider failure report already applies once its aggregate is durable.
+fn pre_provider_outcome_failure_cause(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<(String, String, Option<String>)> {
+    let provider_executions_consumed = record.metadata["provider_executions_consumed"]
+        .as_u64()
+        .unwrap_or(0);
+    let aggregate = agent_task_lifecycle::read_attempt_aggregate(&record.run_id).ok()?;
+    let (phase, classification, diagnostic) = super::cook_promotion::pre_provider_diagnostic_cause(
+        provider_executions_consumed,
+        aggregate
+            .outcomes
+            .iter()
+            .flat_map(|outcome| &outcome.diagnostics),
+    )?;
+    let detail = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((phase, classification, detail))
 }
 
 pub(crate) fn pre_execution_failure_report(
@@ -592,6 +648,28 @@ pub(crate) fn pre_execution_failure_report(
         .clone()
         .unwrap_or_else(|| "cook_pre_execution".to_string());
     let classification = failure.classification.as_deref().unwrap_or("unknown");
+    // A dispatch-boundary error (e.g. a Lab transport reporting only "exit
+    // code 1") is a generic wrapper. When the run's own outcome diagnostics
+    // already carry the specific cause — the git command, its exit status,
+    // and its stderr, for a `committed_harvest_*` reason code — report that
+    // instead of the wrapper alone.
+    let error_message = error.to_string();
+    let cause = failure.detail.as_deref().unwrap_or(&error_message);
+    // The stop reason is what an operator sees before reading deeper run
+    // metadata, so it carries the recovery next to the failing condition.
+    let cause = if error.hints.is_empty() {
+        cause.to_string()
+    } else {
+        format!(
+            "{cause}; recovery: {}",
+            error
+                .hints
+                .iter()
+                .map(|hint| hint.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    };
     let mut report = cook_report(CookReportInput {
         cook_id,
         status: "pre_execution_failure",
@@ -599,7 +677,7 @@ pub(crate) fn pre_execution_failure_report(
         attempts,
         finalization: None,
         stop_reason: Some(format!(
-            "pre-provider failure in phase `{phase}` classified as `{classification}`: {error}"
+            "pre-provider failure in phase `{phase}` classified as `{classification}`: {cause}"
         )),
         exit_code: 1,
         invocation_latest_run_id,
@@ -892,6 +970,95 @@ mod tests {
                 .expect_err("ordinary terminal record cancels runtime admission");
             assert_eq!(error.retryable, Some(true));
             assert!(error.message.contains("admission request was cancelled"));
+        });
+    }
+
+    /// #14678: a Lab-dispatched attempt whose remote runner fails
+    /// `committed_harvest_preflight` before any provider runs terminalizes
+    /// through the scheduler's own outcome aggregate — never through
+    /// `record_pre_execution_failure` — so `pre_execution_failure` metadata is
+    /// absent. The dispatch boundary itself only ever observes a generic Lab
+    /// transport error ("failed with exit code 1"). Without deriving from the
+    /// aggregate's own diagnostic, the report would say `unknown` next to a
+    /// specific, already-durable reason code and never surface the git
+    /// command or its stderr.
+    #[test]
+    fn pre_execution_failure_details_derives_committed_harvest_cause_from_outcome_aggregate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle_store =
+                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let run_id = "lab-dispatch-committed-harvest-failure";
+            let plan = plan("lab-dispatch-committed-harvest-plan", "harvest");
+            lifecycle_store
+                .submit_plan_with_current_runtime(&plan, run_id)
+                .expect("submit plan");
+
+            let diagnostic = crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.committed_harvest_git_failed".to_string(),
+                message: "committed-change harvest failed while running git status --porcelain: fatal: not a git repository".to_string(),
+                data: serde_json::json!({
+                    "command": "git status --porcelain",
+                    "cwd": "/work/lab-dispatch-committed-harvest-failure",
+                    "stderr": "fatal: not a git repository",
+                }),
+            };
+            let outcome = crate::agent_task::AgentTaskOutcome {
+                task_id: plan.tasks[0].task_id.clone(),
+                status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
+                failure_classification: Some(
+                    crate::agent_task::AgentTaskFailureClassification::ExecutionFailed,
+                ),
+                diagnostics: vec![diagnostic],
+                ..Default::default()
+            };
+            let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
+                plan_id: plan.plan_id.clone(),
+                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Failed,
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                    failed: 1,
+                    ..Default::default()
+                },
+                outcomes: vec![outcome],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: crate::agent_task_scheduler::AgentTaskQueueStatus::default(),
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+            };
+            lifecycle_store
+                .write_aggregate(run_id, &aggregate)
+                .expect("write scheduler aggregate");
+            let record = lifecycle_store
+                .mutate_record(run_id, |record| {
+                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    record.metadata["provider_executions_consumed"] = serde_json::json!(0);
+                    true
+                })
+                .expect("mutate record")
+                .expect("record mutated");
+
+            // The dispatch boundary saw only the generic Lab transport error.
+            let wrapping_error = Error::validation_invalid_argument(
+                "agent-task cook attempt",
+                format!("Lab provider attempt {run_id} failed with exit code 1"),
+                Some(run_id.to_string()),
+                None,
+            );
+
+            let failure = pre_execution_failure_details(Some(&record), &wrapping_error);
+
+            assert_eq!(
+                failure.phase.as_deref(),
+                Some("committed_harvest_preflight")
+            );
+            assert_eq!(
+                failure.classification.as_deref(),
+                Some("agent_task.committed_harvest_git_failed")
+            );
+            let detail = failure.detail.as_deref().expect("derived detail message");
+            assert!(detail.contains("git status --porcelain"));
+            assert!(detail.contains("fatal: not a git repository"));
         });
     }
 

@@ -302,3 +302,56 @@ pub enum RunnerRepairAction {
     /// Executor: `repair::repair_managed_sources`.
     RefreshManagedSources,
 }
+
+impl RunnerRepairAction {
+    pub(crate) fn to_next_action(
+        &self,
+        runner_id: &str,
+    ) -> Option<crate::commands::utils::response::CommandNextAction> {
+        self.to_executable(runner_id)
+            .map(crate::commands::utils::response::CommandNextAction::from_action)
+    }
+
+    fn to_executable(&self, runner_id: &str) -> Option<homeboy::core::error::ExecutableAction> {
+        use homeboy::core::error::{ActionSafety, ExecutableAction};
+        match self {
+            Self::RefreshHomeboy {
+                git_ref,
+                allow_downgrade,
+            } => {
+                let mut args = vec![
+                    "runner".to_string(),
+                    "refresh-homeboy".to_string(),
+                    runner_id.to_string(),
+                ];
+                if let Some(git_ref) = git_ref {
+                    args.push("--ref".to_string());
+                    args.push(git_ref.clone());
+                }
+                args.push("--reconnect".to_string());
+                if *allow_downgrade {
+                    args.push("--allow-downgrade".to_string());
+                }
+                Some(ExecutableAction::new(
+                    "runner.refresh_homeboy",
+                    format!("refresh runner {runner_id}"),
+                    "homeboy",
+                    args,
+                    ActionSafety::Mutating,
+                ))
+            }
+            Self::Reconnect => Some(ExecutableAction::new(
+                "runner.connect",
+                format!("connect runner {runner_id}"),
+                "homeboy",
+                [
+                    "runner".to_string(),
+                    "connect".to_string(),
+                    runner_id.to_string(),
+                ],
+                ActionSafety::Mutating,
+            )),
+            Self::RefreshManagedSources => None,
+        }
+    }
+}

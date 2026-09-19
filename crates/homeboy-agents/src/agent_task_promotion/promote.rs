@@ -2490,6 +2490,9 @@ fn run_promotion_gates(
     let has_gate_failure = deterministic_gates
         .iter()
         .any(|gate| gate.status == AgentTaskGateStatus::Failed);
+    let has_gate_deferral = deterministic_gates
+        .iter()
+        .any(|gate| gate.status == AgentTaskGateStatus::Deferred);
     let gate_results = deterministic_gates
         .iter()
         .cloned()
@@ -2503,7 +2506,7 @@ fn run_promotion_gates(
         }
     }
     Ok(PromotionGateRun {
-        status: status_for_report(options.dry_run, has_gate_failure),
+        status: status_for_report(options.dry_run, has_gate_failure, has_gate_deferral),
         deterministic_gates,
         gate_results,
         dependencies_materialized: destination_gate_setup
@@ -3443,11 +3446,19 @@ fn is_git_transport_failure(stderr: &str) -> bool {
     .any(|needle| stderr.contains(needle))
 }
 
-fn status_for_report(dry_run: bool, has_gate_failure: bool) -> AgentTaskPromotionStatus {
+fn status_for_report(
+    dry_run: bool,
+    has_gate_failure: bool,
+    has_gate_deferral: bool,
+) -> AgentTaskPromotionStatus {
     if dry_run {
         AgentTaskPromotionStatus::DryRun
     } else if has_gate_failure {
+        // A failure is decisive evidence even alongside a deferral elsewhere:
+        // the candidate is rejected regardless of what else could not run.
         AgentTaskPromotionStatus::GateFailed
+    } else if has_gate_deferral {
+        AgentTaskPromotionStatus::GateDeferred
     } else {
         AgentTaskPromotionStatus::Applied
     }
@@ -3479,6 +3490,14 @@ fn promotion_notification(
             message: "patch promoted, but deterministic gates failed".to_string(),
             resumable_blocker: Some(
                 "run `homeboy agent-task gate-feedback` with the promotion report, then retry the follow-up request".to_string(),
+            ),
+            next_command: None,
+        },
+        AgentTaskPromotionStatus::GateDeferred => AgentTaskPromotionNotification {
+            status: "blocked".to_string(),
+            message: "patch promoted, but at least one deterministic gate could not execute under the resolved placement and deferred; the candidate is unverified, not rejected".to_string(),
+            resumable_blocker: Some(
+                "retry verification once the required environment (e.g. a ready Lab runner) is available; the existing candidate does not need to be regenerated".to_string(),
             ),
             next_command: None,
         },
@@ -3533,8 +3552,9 @@ fn promotion_notification_with_gate_summary(
             AgentTaskGateStatus::AcceptedInheritedFailure,
         ]);
         let skipped = gate_ids(&[AgentTaskGateStatus::Skipped]);
+        let deferred = gate_ids(&[AgentTaskGateStatus::Deferred]);
         notification.message.push_str(&format!(
-            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}]"
+            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}]"
         ));
     }
     notification

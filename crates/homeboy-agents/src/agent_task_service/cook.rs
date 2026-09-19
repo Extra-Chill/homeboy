@@ -1151,7 +1151,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), optional structured `verification` entries (exact command plus total/passed/failed/ignored counts), and `used_for` (a concise reflection of the process used). Homeboy links verification entries to durable candidate gate evidence. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Do not run or report verification commands: Homeboy runs the declared deterministic gates itself after harvest and records the authoritative verification evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
         let form_timeout_ms = review_form_timeout_ms(request);
@@ -1191,7 +1191,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
     }
 
     let mut instructions = vec![
-        "Declared deterministic gates are controller-owned. Homeboy runs them after it harvests your candidate, so use this attempt for the source change and a focused check only when it directly reduces uncertainty.".to_string(),
+        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate: use this attempt entirely for the source change, not for running or improvising your own verification.".to_string(),
     ];
     if !public_gates.is_empty() {
         instructions.push(format!(
@@ -1205,7 +1205,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
         ));
     }
     instructions.push(
-        "Report any focused command you run and its result in the reviewer-facing verification evidence; Homeboy records the authoritative final gate evidence separately."
+        "Do not run or report a verification command yourself; Homeboy records the authoritative gate evidence separately after harvest."
             .to_string(),
     );
     let contract = instructions.join("\n");
@@ -4587,14 +4587,18 @@ fn make_provider_timeout_actionable(
                 ),
             });
         }
+        // A resume command is only offered when it is actually admitted right
+        // now. While deferred cleanup is pending, `recovery_legal` is false and
+        // the durable retry route itself refuses the same command (#14732) —
+        // advertising it in `next_actions` printed a command the operator could
+        // not yet run. The `status`/`diagnose` action above remains the correct
+        // next step until cleanup goes terminal.
         if let Some(command) = command {
-            let action = AgentTaskCookRecoveryAction {
-                action: "resume".to_string(),
-                command,
-            };
-            if deferred_cleanup_pending {
-                context.next_actions.push(action);
-            } else {
+            if !deferred_cleanup_pending {
+                let action = AgentTaskCookRecoveryAction {
+                    action: "resume".to_string(),
+                    command,
+                };
                 context.legal_actions.push(action.clone());
                 context.next_actions.push(action);
             }
@@ -4835,14 +4839,15 @@ fn make_review_form_timeout_actionable(
                 ),
             });
         }
+        // See the identical reasoning in `make_provider_timeout_actionable`:
+        // a resume command is only offered when it is admitted right now, not
+        // merely once deferred cleanup finishes (#14732).
         if let Some(command) = command {
-            let action = AgentTaskCookRecoveryAction {
-                action: "resume".to_string(),
-                command,
-            };
-            if deferred_cleanup_pending {
-                context.next_actions.push(action);
-            } else {
+            if !deferred_cleanup_pending {
+                let action = AgentTaskCookRecoveryAction {
+                    action: "resume".to_string(),
+                    command,
+                };
                 context.legal_actions.push(action.clone());
                 context.next_actions.push(action);
             }
@@ -4981,6 +4986,50 @@ fn reserve_cook_materialization_capacity(
         "Cook controller scratch and workspace materialization",
         demand,
         homeboy_core::capacity::CapacityReserve::configured(),
+    )
+}
+
+/// Surface the same filesystem pressure the materialization capacity reserve
+/// would later hit, in orchestration terms, before an unrelated build or write
+/// fails on the byte reserve. Advisory while above the reserve; exhausted
+/// filesystems refuse admission with a measured, attributed error.
+pub fn preflight_cook_materialization_capacity(
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<homeboy_core::capacity::CapacityPreflight> {
+    Ok(homeboy_core::capacity::preflight_capacity(
+        &lifecycle_store.controller_scratch_root(),
+        "Cook controller scratch and workspace materialization",
+        homeboy_core::capacity::CapacityReserve::configured(),
+    ))
+}
+
+/// Record an advisory-only disk-pressure observation alongside the orchestration
+/// state, naming the reclaim routes an operator can run before the next
+/// capacity reserve refuses admission.
+fn record_cook_disk_pressure_advisory(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    preflight: &homeboy_core::capacity::CapacityPreflight,
+) -> Result<()> {
+    let advisory = serde_json::json!({
+        "schema": "homeboy/cook-disk-pressure-advisory/v1",
+        "subject": preflight.subject,
+        "status": preflight.status,
+        "available_bytes": preflight.available_bytes,
+        "available_inodes": preflight.available_inodes,
+        "reserve_bytes": preflight.reserve_bytes,
+        "reserve_inodes": preflight.reserve_inodes,
+        "warning": preflight.warning,
+        "reclaim_actions": [
+            "homeboy worktree reclaim --apply",
+            "homeboy cleanup --apply",
+        ],
+    });
+    agent_task_lifecycle::record_metadata_value_in_store(
+        lifecycle_store,
+        run_id,
+        "cook_workspace_disk_pressure_advisory",
+        advisory,
     )
 }
 
@@ -5973,6 +6022,36 @@ fn run_cook_spine(
         }
     }
     validate_cook_candidate_group(&options.identity.initial_plan)?;
+    // Surface disk pressure in orchestration terms BEFORE the byte reserve:
+    // an advisory below the reserve is recorded on the run, and an exhausted
+    // filesystem refuses admission here with measured, attributed evidence
+    // rather than leaving an unrelated build to fail opaque on the reserve.
+    let disk_pressure = run_cook_startup_phase(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "workspace_disk_pressure",
+        || preflight_cook_materialization_capacity(lifecycle_store),
+    )?;
+    if !disk_pressure.is_exhausted() {
+        record_cook_disk_pressure_advisory(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+            &disk_pressure,
+        )?;
+    } else if let Some(error) = disk_pressure.error() {
+        let mut error = error;
+        error.details["cook_disk_pressure_preflight"] = serde_json::json!({
+            "subject": disk_pressure.subject,
+            "path": disk_pressure.path,
+            "reclaim_actions": [
+                "homeboy worktree reclaim --apply",
+                "homeboy cleanup --apply",
+            ],
+        });
+        return Err(error);
+    }
     // Reserve the source tree's projected copy before the scheduler creates its
     // controller scratch lease or detached workspace. This includes dependency
     // trees (for example node_modules and vendor), whose inode demand can be
@@ -7926,6 +8005,30 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            // #14731: a gate that could not execute under the resolved
+            // placement is control-plane evidence, not a candidate verdict.
+            // The candidate patch is already durably promoted; this is
+            // deliberately not `policy_failure` and does not run
+            // differential-baseline comparison (no failure exists to
+            // compare). Retry re-verifies from the existing candidate rather
+            // than spending another provider execution.
+            AgentTaskCookLoopStatus::GatesDeferred => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "gates_deferred",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "at least one deterministic gate could not execute under the resolved \
+     placement and deferred; the candidate patch is promoted and unverified, not rejected. \
+     Retry once the required environment (e.g. a ready Lab runner) is available"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
                     return Ok(cook_report(CookReportInput {
@@ -8814,7 +8917,10 @@ fn preflight_cook_workspace_resolved_base_ancestry(
                 "candidate_only_commits": ahead,
                 "next_action": "converge_destination_before_provider",
             });
-            return Err(error.with_retryable(true));
+            // A behind destination under a recipe-pinned base is a deterministic
+            // workspace topology condition, not a transport failure: retrying
+            // cannot converge it and must not spend transport retries (#14699).
+            return Err(error);
         }
         return Ok(Some(serde_json::json!({
             "schema": "homeboy/cook-workspace-base-snapshot/v1",
@@ -8849,7 +8955,10 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         "candidate_only_commits": ahead,
         "next_action": "converge_destination_before_provider",
     });
-    Err(error.with_retryable(true))
+    // Divergence requires an operator merge/rebase; retrying without one can
+    // never change the outcome, so it is deterministic and consumes no
+    // transport retries (#14699).
+    Err(error)
 }
 
 /// Admit a locally committed, unpushed provider checkout only when Cook can

@@ -205,6 +205,18 @@ pub(super) fn admitting() -> Result<Option<LocalDaemonEndpoint>> {
     }))
 }
 
+/// Locate a registered generation by its lease so lifecycle recovery can act on
+/// the same state directory that status used to authorize the operation.
+pub(super) fn endpoint_for_lease(lease_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
+    Ok(read_registry()?.and_then(|registry| {
+        registry
+            .generations
+            .generations
+            .get(lease_id)
+            .map(|entry| entry.endpoint.clone())
+    }))
+}
+
 pub(super) fn endpoint_for_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
     Ok(read_registry()?.and_then(|registry| {
         registry.generations.job_owner(job_id).and_then(|owner| {
@@ -230,6 +242,99 @@ pub(super) fn record_job(job_id: &str, lease_id: &str) -> Result<()> {
             ));
         }
         Ok(())
+    })
+}
+
+/// Record one new durable admission against a lease the requesting client
+/// named, self-healing the registry invariant that previously made a
+/// replacement daemon reject its own admissions (#14706).
+///
+/// A request may still carry the lease of a generation that an earlier
+/// recovery retired before its successor started. The registry can prove
+/// exactly that shape: the lease has no endpoint registered, so it owns no
+/// durable routing and no active work. Binding such an unowned admission to
+/// the live serving generation keeps the plan-then-admission sequence
+/// executable; any lease that *is* registered keeps its exact routing.
+pub(super) fn record_job_for_admission(
+    job_id: &str,
+    requested_lease_id: &str,
+    serving: &DaemonState,
+) -> Result<()> {
+    mutate_registry(|registry| {
+        let registry = registry.as_mut().ok_or_else(|| {
+            Error::internal_unexpected("local daemon admitted a job without a generation registry")
+        })?;
+        if registry.generations.job_owner(job_id).is_some() {
+            return Ok(());
+        }
+        if registry
+            .generations
+            .admit_job_for(requested_lease_id, job_id)
+        {
+            return Ok(());
+        }
+        let serving_lease_id = serving.lease_id.as_str();
+        if !registry
+            .generations
+            .generations
+            .contains_key(serving_lease_id)
+        {
+            registry.generations.begin(
+                serving_lease_id.to_string(),
+                LocalDaemonEndpoint::from_state(serving),
+            );
+        }
+        // The serving daemon is the only live authority in this registry, so
+        // it owns new admissions whose requested lease cannot be honored.
+        registry
+            .generations
+            .activate_preserving_drained(serving_lease_id);
+        if !registry.generations.admit_job_for(serving_lease_id, job_id) {
+            return Err(Error::internal_unexpected(format!(
+                "serving daemon lease `{serving_lease_id}` is not a registered generation after registry repair"
+            )));
+        }
+        Ok(())
+    })
+}
+
+/// Remove one exact dead+idle generation endpoint from the registry.
+///
+/// Retirement of a stopped lease previously left its registry generation
+/// behind, so a successor's admission could be rejected with "job owner was
+/// not present in the generation registry". This cleanup runs only for a
+/// generation that is dead, idle (`active_jobs == 0`), and registered against
+/// the exact state directory that proved it retired; a live or busy
+/// generation, or a mismatched frame, is left untouched.
+pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> Result<bool> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(false);
+        };
+        let matched = registry
+            .generations
+            .generations
+            .get(lease_id)
+            .is_some_and(|entry| entry.active_jobs == 0 && entry.endpoint.state_dir == state_dir);
+        if !matched {
+            return Ok(false);
+        }
+        registry.generations.generations.remove(lease_id);
+        registry
+            .generations
+            .job_owners
+            .retain(|_, owner| owner != lease_id);
+        if registry.generations.admission_owner == lease_id
+            && !registry.generations.generations.is_empty()
+        {
+            // A non-empty registry re-points admission at a remaining
+            // generation; an empty one is re-seeded by the next daemon start.
+            registry.generations.recover();
+        }
+        registry
+            .completed_jobs
+            .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
+        Ok(true)
     })
 }
 
@@ -336,6 +441,24 @@ pub(super) fn activate(state: &DaemonState) -> Result<()> {
         registry
             .generations
             .activate_preserving_drained(&state.lease_id);
+        Ok(())
+    })
+}
+
+/// Rebuild one durable job-to-generation binding during startup recovery.
+///
+/// Unlike [`record_job`], a generation that is no longer registered is ordinary
+/// history here rather than an invariant violation. Startup replays leases
+/// recorded by earlier daemons, so restarting must never require that every
+/// generation which ever admitted a job still be present in the registry.
+pub(super) fn rebuild_job_owner(job_id: &str, lease_id: &str) -> Result<()> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(());
+        };
+        if registry.generations.generations.contains_key(lease_id) {
+            registry.generations.admit_job_for(lease_id, job_id);
+        }
         Ok(())
     })
 }
@@ -537,6 +660,29 @@ mod tests {
     }
 
     #[test]
+    fn finds_a_generation_by_its_exact_lease() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1001");
+            seed(&a).expect("seed A");
+            let b = state("B", "127.0.0.1:1002");
+            activate(&b).expect("activate B");
+
+            assert_eq!(
+                endpoint_for_lease("A")
+                    .expect("look up A")
+                    .expect("A endpoint")
+                    .state_dir,
+                a.state_path
+                    .strip_suffix("/state.json")
+                    .expect("state path has filename")
+            );
+            assert!(endpoint_for_lease("missing")
+                .expect("look up missing")
+                .is_none());
+        });
+    }
+
+    #[test]
     fn concurrent_job_ownership_writes_preserve_every_admission() {
         with_isolated_home(|_| {
             let a = state("A", "127.0.0.1:1001");
@@ -585,6 +731,40 @@ mod tests {
                     .expect("owner")
                     .lease_id,
                 "A"
+            );
+        });
+    }
+
+    #[test]
+    fn startup_rebuild_survives_jobs_owned_by_retired_generations() {
+        with_isolated_home(|_| {
+            // The registry holds one live generation, while durable jobs still
+            // name the long-gone daemons that admitted them.
+            let live = state("live", "127.0.0.1:1001");
+            seed(&live).expect("seed live generation");
+
+            rebuild_job_owner("historical-job", "retired-generation")
+                .expect("a retired generation must not fail startup recovery");
+
+            // The retired generation owns nothing to route, and the live
+            // generation is left free to admit work.
+            assert!(endpoint_for_job("historical-job")
+                .expect("route historical job")
+                .is_none());
+            assert_eq!(
+                admitting().expect("admitting").expect("live").lease_id,
+                "live"
+            );
+
+            // A job belonging to a generation that is still registered is
+            // rebuilt and routable.
+            rebuild_job_owner("live-job", "live").expect("rebuild live job");
+            assert_eq!(
+                endpoint_for_job("live-job")
+                    .expect("route live job")
+                    .expect("live owner")
+                    .lease_id,
+                "live"
             );
         });
     }
@@ -653,6 +833,103 @@ mod tests {
                 Some(router.join("generations").as_path())
             );
             assert!(!third_generation.starts_with(&second_generation));
+        });
+    }
+
+    /// #14706: a replacement daemon must admit work whose request still names
+    /// the retired lease, instead of failing with "job owner was not present
+    /// in the generation registry".
+    #[test]
+    fn an_admission_named_for_a_retired_lease_rehomes_to_the_serving_generation() {
+        with_isolated_home(|_| {
+            let serving = state("serving", "127.0.0.1:1101");
+            seed(&serving).expect("seed serving");
+            record_job("existing", "serving").expect("record existing job");
+
+            record_job_for_admission("stale-request", "retired", &serving)
+                .expect("stale lease is not an invariant violation");
+
+            assert_eq!(
+                endpoint_for_job("stale-request")
+                    .expect("route stale request")
+                    .expect("owner")
+                    .lease_id,
+                "serving"
+            );
+            // Existing durable ownership is untouched and the serving
+            // generation stays the admission owner.
+            assert_eq!(
+                endpoint_for_job("existing")
+                    .expect("route existing")
+                    .expect("owner")
+                    .lease_id,
+                "serving"
+            );
+        });
+    }
+
+    /// The strict historical spelling keeps refusing leases that are simply
+    /// absent: only the daemon's own admission path re-homes.
+    #[test]
+    fn record_job_still_refuses_an_unregistered_owner() {
+        with_isolated_home(|_| {
+            let a = state("A", "127.0.0.1:1102");
+            seed(&a).expect("seed A");
+            assert!(record_job("unrouted", "missing").is_err());
+        });
+    }
+
+    #[test]
+    fn exact_dead_generation_retirement_removes_only_that_registry_entry() {
+        with_isolated_home(|home| {
+            let state_dir = home.path().join("exact-generation");
+            std::fs::create_dir_all(&state_dir).expect("create exact state dir");
+            let exact_dir = state_dir.display().to_string();
+            mutate_registry(|registry| {
+                let mut generations = RollingGenerations::new(
+                    "exact",
+                    LocalDaemonEndpoint {
+                        lease_id: "exact".to_string(),
+                        address: "127.0.0.1:1103".to_string(),
+                        state_dir: exact_dir.clone(),
+                        build_identity: "test".to_string(),
+                    },
+                );
+                generations.begin(
+                    "other",
+                    LocalDaemonEndpoint {
+                        lease_id: "other".to_string(),
+                        address: "127.0.0.1:1104".to_string(),
+                        state_dir: format!("{exact_dir}/../other"),
+                        build_identity: "test".to_string(),
+                    },
+                );
+                *registry = Some(LocalDaemonGenerationRegistry {
+                    schema: SCHEMA.to_string(),
+                    generations,
+                    completed_jobs: BTreeSet::new(),
+                });
+                Ok(())
+            })
+            .expect("register two generations");
+            record_job("busy", "exact").expect("record busy job");
+
+            // A generation with durable work is never retired.
+            assert!(!retire_exact_dead_generation("exact", exact_dir.as_str())
+                .expect("consult registry"));
+            // A mismatched frame never retires another endpoint.
+            assert!(!retire_exact_dead_generation("exact", "/nowhere").expect("consult registry"));
+            assert!(read_registry().expect("read").is_some_and(|registry| {
+                registry.generations.generations.contains_key("exact")
+            }));
+
+            mark_job_terminal("busy").expect("drain exact generation");
+            assert!(retire_exact_dead_generation("exact", exact_dir.as_str())
+                .expect("consult registry"));
+            let registry = read_registry().expect("read registry").expect("registry");
+            assert!(!registry.generations.generations.contains_key("exact"));
+            assert!(registry.generations.generations.contains_key("other"));
+            assert!(!registry.completed_jobs.contains("busy"));
         });
     }
 }

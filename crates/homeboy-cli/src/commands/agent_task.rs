@@ -41,9 +41,9 @@ pub use args::{
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PlacementUpdateArgs,
-    PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs,
-    ReconcileRecordsArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
+    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, MigrateEventHistoryArgs,
+    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
+    RearmArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
     RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
     RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs,
     VerifyGateArgs, VerifyReplacementArgs,
@@ -73,6 +73,7 @@ pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
         if let Some(run_id) = run_id {
             if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 run::announce_durable_cook_identity(cook_id, run_id);
+                run::announce_resolved_execution_placement();
             }
         }
         reporter.report(phase, cook_id, run_id, activity, terminal_retry_command);
@@ -361,6 +362,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             latest_args.into(),
         ),
         AgentTaskCommand::Logs(status_args) => status::logs(status_args),
+        AgentTaskCommand::MigrateEventHistory(args) => status::migrate_event_history(args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),

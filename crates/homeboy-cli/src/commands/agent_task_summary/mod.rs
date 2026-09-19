@@ -94,6 +94,7 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
             .unwrap_or("no reported cause");
         lines.push(format!("Blocked before admission in {stage}: {cause}"));
     }
+    lines.extend(fanout_child_placement_lines(payload));
     if payload
         .pointer("/batch/resumable")
         .and_then(Value::as_bool)
@@ -104,6 +105,37 @@ fn render_fanout_status_summary(payload: &Value) -> Option<String> {
         }
     }
     Some(lines.join("\n"))
+}
+
+/// Per-child runner id and remote workspace path for every child dispatched
+/// to a runner. An idle-looking local worktree is indistinguishable from "no
+/// progress" without this: the remote workspace is where the work actually
+/// runs, and this is the one place that names it without SSHing to the
+/// runner (#14683).
+fn fanout_child_placement_lines(payload: &Value) -> Vec<String> {
+    let Some(children) = payload
+        .pointer("/batch/batch/child_runs")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    children
+        .iter()
+        .filter_map(|child| {
+            let runner_id = child
+                .pointer("/placement/runner_id")
+                .and_then(Value::as_str)?;
+            let task_id = child.get("task_id").and_then(Value::as_str).unwrap_or("?");
+            let state = child.get("state").and_then(Value::as_str).unwrap_or("?");
+            let workspace = child
+                .pointer("/placement/workspace_path")
+                .and_then(Value::as_str)
+                .unwrap_or("pending");
+            Some(format!(
+                "  {task_id} ({state}): runner {runner_id}, workspace {workspace}"
+            ))
+        })
+        .collect()
 }
 
 /// Compact "2 succeeded, 1 failed" child tally from the batch totals.
@@ -136,8 +168,11 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
         return None;
     }
     let status = payload.get("status")?.as_str()?;
-    if status != "blocked" {
+    if matches!(status, "failed" | "partial_failure") {
         return render_failed_fanout_child_summary(payload, status);
+    }
+    if status != "blocked" {
+        return render_fanout_cook_batch_progress_summary(payload, status);
     }
     let fanout_id = payload.get("fanout_id")?.as_str()?;
     let primary = payload.get("primary_failure")?.as_object()?;
@@ -188,6 +223,44 @@ fn render_fanout_cook_batch_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Plan: plan_ref.sha256={sha256}"));
     }
     Some(lines.join("\n"))
+}
+
+/// `cook-batch` succeeds for `ready` (a plan or preview with nothing blocked)
+/// and for every terminal `run_result.status` a completed batch can carry
+/// (`completed`, `review_ready`, `running`, and friends). None of those are
+/// failures, so [`render_failed_fanout_child_summary`] never matches them and
+/// the envelope summary was landing empty on every successful cook-batch
+/// (#14682). `summary.issues`/`worktrees_total`/`worktrees_blocked` are
+/// unconditional fields on every cook-batch payload, dry-run or materialized,
+/// so this renders for any status this function is reached with.
+fn render_fanout_cook_batch_progress_summary(payload: &Value, status: &str) -> Option<String> {
+    let fanout_id = payload.get("fanout_id")?.as_str()?;
+    let summary = payload.get("summary")?;
+    let issues = summary.get("issues")?.as_u64()?;
+    let worktrees_total = summary.get("worktrees_total")?.as_u64()?;
+    let worktrees_blocked = summary
+        .get("worktrees_blocked")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mode = if payload
+        .get("dry_run")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "planned"
+    } else {
+        "materialized"
+    };
+    let mut line = format!(
+        "Fanout {fanout_id}: {status} ({mode}, {issues} issue(s), {worktrees_total} worktree(s), {worktrees_blocked} blocked)"
+    );
+    if let Some(next_action) = payload
+        .pointer("/next_actions/0/command")
+        .and_then(Value::as_str)
+    {
+        line.push_str(&format!("; next={next_action}"));
+    }
+    Some(line)
 }
 
 fn render_failed_fanout_child_summary(payload: &Value, status: &str) -> Option<String> {
@@ -396,9 +469,27 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
 
 fn render_cook_preview_summary(payload: &Value) -> Option<String> {
     let resolved = payload.get("resolved")?;
-    let placement = resolved
+    let requested_placement = resolved
         .pointer("/placement/requested")
         .and_then(Value::as_str)?;
+    // `selected` is the resolved answer to "where will this actually run";
+    // `requested` is only what the operator asked for. Reporting the request
+    // as though it were the outcome is how a silent auto -> local degrade went
+    // unreported in preview (#14729).
+    let selected_placement = resolved
+        .pointer("/placement/selected")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_placement);
+    let placement_line = if selected_placement == requested_placement {
+        format!("Placement: {selected_placement}")
+    } else {
+        let reason = resolved
+            .pointer("/placement/fallback_reason")
+            .and_then(Value::as_str)
+            .map(|reason| format!(" — {reason}"))
+            .unwrap_or_default();
+        format!("Placement: {selected_placement}  (requested: {requested_placement}{reason})")
+    };
     let provider = resolved
         .get("provider")
         .and_then(Value::as_object)
@@ -441,7 +532,7 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
         .collect::<Vec<_>>();
     let mut lines = vec![
         "Cook preview".to_string(),
-        format!("Placement: {placement}"),
+        placement_line,
         format!("Provider: {provider}"),
         format!("Model: {model}"),
         format!("Destination: {destination}"),
@@ -453,6 +544,31 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
     ];
     if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
         lines.push(format!("Blocked: {failure}"));
+    }
+    if let Some(next_action) = payload
+        .pointer("/failure/next_action")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .pointer("/resolved/placement/admission/next_action")
+                .and_then(Value::as_str)
+        })
+    {
+        lines.push(format!("Next: {next_action}"));
+    }
+    if payload
+        .pointer("/resolved/placement/admission/state")
+        .and_then(Value::as_str)
+        == Some("indeterminate")
+        && payload.pointer("/failure/message").is_none()
+    {
+        lines.push(
+            payload
+                .pointer("/resolved/placement/admission/reason")
+                .and_then(Value::as_str)
+                .unwrap_or("static inputs only; admission not checked")
+                .to_string(),
+        );
     }
     Some(finish(lines))
 }
@@ -877,6 +993,107 @@ mod tests {
         assert_eq!(
             render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
             Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
+
+    /// #14729: preview must report the *resolved* placement, not the
+    /// operator's request, and must name why they diverge when a Lab-desiring
+    /// request degrades to local execution.
+    #[test]
+    fn cook_preview_summary_reports_resolved_placement_and_fallback_reason() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "local",
+                    "fallback_reason": "no Lab runner is configured",
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 2 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+
+        assert!(
+            summary.starts_with(
+                "Cook preview\nPlacement: local  (requested: auto — no Lab runner is configured)\n"
+            ),
+            "summary did not report the resolved placement and fallback reason: {summary}"
+        );
+    }
+
+    #[test]
+    fn cook_preview_summary_names_unchecked_admission_instead_of_an_unqualified_plan() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "lab",
+                    "selected_runner": "homeboy-lab",
+                    "admission": {
+                        "schema": "homeboy/cook-preview-placement-admission/v1",
+                        "state": "indeterminate",
+                        "reason": "static inputs only; admission not checked",
+                    },
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 0 },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+        assert!(
+            summary.contains("static inputs only; admission not checked"),
+            "unchecked admission must be explicit in stdout: {summary}"
+        );
+        assert!(!summary.contains("Blocked:"), "{summary}");
+    }
+
+    #[test]
+    fn cook_preview_summary_reports_admission_blocker_and_recovery_action() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": {
+                    "requested": "auto",
+                    "selected": "lab",
+                    "selected_runner": "homeboy-lab",
+                    "admission": {
+                        "schema": "homeboy/cook-preview-placement-admission/v1",
+                        "state": "blocked",
+                        "remaining_blocker": "unresolved_generation_projection",
+                        "next_action": "homeboy runner status homeboy-lab --full",
+                    },
+                },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 0 },
+            },
+            "failure": {
+                "message": "unresolved_generation_projection",
+                "next_action": "homeboy runner status homeboy-lab --full",
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+        assert!(
+            summary.contains("Blocked: unresolved_generation_projection"),
+            "blocked admission must lead the operator-facing plan: {summary}"
+        );
+        assert!(
+            summary.contains("Next: homeboy runner status homeboy-lab --full"),
+            "recovery action must match runner status: {summary}"
         );
     }
 
@@ -2105,6 +2322,52 @@ mod tests {
         ));
     }
 
+    /// #14683: a lab-dispatched child's runner id and remote workspace path
+    /// are durably known, but nothing surfaced them to an operator watching a
+    /// wave — an idle local worktree looked indistinguishable from no
+    /// progress. `fanout status` is the one command that answers "is this
+    /// wave alive" without SSHing to the runner.
+    #[test]
+    fn fanout_status_summary_names_the_runner_and_remote_workspace_per_child() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-fanout-status/v2",
+            "batch": {
+                "status": "running",
+                "batch": {
+                    "batch_id": "issue-wave",
+                    "state": "running",
+                    "task_count": 2,
+                    "child_runs": [
+                        {
+                            "task_id": "issue-220",
+                            "run_id": "issue-wave-issue-220",
+                            "state": "running",
+                            "placement": {
+                                "runner_id": "lab-runner-1",
+                                "workspace_path": "/srv/homeboy/_lab_workspaces/data-liberation-issue-220"
+                            }
+                        },
+                        {
+                            "task_id": "issue-221",
+                            "run_id": "issue-wave-issue-221",
+                            "state": "queued",
+                            "placement": { "runner_id": "lab-runner-1" }
+                        }
+                    ]
+                },
+                "totals": { "running": 1, "queued": 1 },
+            },
+        });
+
+        let summary =
+            render_agent_task_summary(AgentTaskSummaryKind::FanoutStatus, &payload).unwrap();
+
+        assert!(summary.contains(
+            "  issue-220 (running): runner lab-runner-1, workspace /srv/homeboy/_lab_workspaces/data-liberation-issue-220"
+        ));
+        assert!(summary.contains("  issue-221 (queued): runner lab-runner-1, workspace pending"));
+    }
+
     #[test]
     fn controller_resume_summary_surfaces_last_failure_and_generic_resume_command() {
         let payload = json!({
@@ -2236,6 +2499,52 @@ mod tests {
 
         assert!(summary.starts_with("Fanout issue-wave: failed phase=committed_harvest_preflight classification=agent_task.committed_harvest_dirty_workspace children=3 provider_budget=unspent reason=refusing committed-change harvest from a workspace with pre-existing uncommitted changes; next=homeboy agent-task cook-continue cook-1"), "{summary}");
         assert!(summary.contains("Evidence: run_result.result.cooks (3 child references)"));
+    }
+
+    /// #14682: a successful `--preview` plan (`status: "ready"`) has no
+    /// `primary_failure`, so it must not fall through the failure-only
+    /// renderer and land as an empty envelope summary.
+    #[test]
+    fn ready_cook_batch_preview_summary_reports_the_plan() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "ready",
+            "dry_run": true,
+            "summary": {"issues": 2, "worktrees_total": 2, "worktrees_blocked": 0},
+            "next_actions": [
+                {"kind": "run", "command": "homeboy agent-task fanout run-plan --input @plan.json"}
+            ]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("ready preview summary");
+
+        assert_eq!(
+            summary,
+            "Fanout issue-wave: ready (planned, 2 issue(s), 2 worktree(s), 0 blocked); next=homeboy agent-task fanout run-plan --input @plan.json"
+        );
+    }
+
+    /// #14682: a completed `--run-plan` batch also has no `primary_failure`
+    /// and must render a populated summary, not an empty one.
+    #[test]
+    fn completed_cook_batch_run_summary_reports_the_outcome() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-batch/v1",
+            "fanout_id": "issue-wave",
+            "status": "completed",
+            "dry_run": false,
+            "summary": {"issues": 2, "worktrees_total": 2, "worktrees_blocked": 0, "causal_worktree_failures": 0},
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::FanoutCookBatch, &payload)
+            .expect("completed run summary");
+
+        assert_eq!(
+            summary,
+            "Fanout issue-wave: completed (materialized, 2 issue(s), 2 worktree(s), 0 blocked)"
+        );
     }
 
     #[test]

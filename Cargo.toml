@@ -19,7 +19,7 @@ members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
-version = "0.373.14"
+version = "0.376.4"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
@@ -93,6 +93,9 @@ homeboy-cli = { version = "0.1.0", path = "crates/homeboy-cli", features = ["tes
 # dev-only edge is what activates it for the test build of that binary (#11118).
 homeboy-agents = { version = "0.1.0", path = "crates/homeboy-agents", features = ["test-support"] }
 homeboy-extension-contract = { version = "0.1.0", path = "crates/contracts/homeboy-extension-contract" }
+# Parses `.github/workflows/*.yml` in trigger-semantics tests; version mirrors
+# homeboy-core's production edge to keep a single yaml implementation in the lock.
+serde_yml = "0.0.12"
 
 [features]
 default = []

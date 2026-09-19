@@ -138,6 +138,7 @@ where
                 run_id: run_id.clone(),
                 state: AgentTaskRunState::Queued,
                 placement: None,
+                predecessor_run_ids: Vec::new(),
             })
             .collect(),
         metadata: batch_metadata(plan),
@@ -262,6 +263,7 @@ pub fn persist_fanout_run_batch_in_store(
                     run_id: child.run_id.clone(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 })
                 .collect(),
             metadata,
@@ -514,6 +516,12 @@ pub fn record_fanout_child_run_replacement_in_store(
                     None,
                 )
             })?;
+        // The replaced run id is the only pointer to the failed first
+        // attempt's durable lifecycle record. Losing it here — the sole
+        // place a fanout child's run_id changes — orphans that record: it
+        // still exists on disk, but nothing an operator or `fanout status`
+        // consults ever names it again.
+        child.predecessor_run_ids.push(child.run_id.clone());
         child.run_id = replacement_run_id.to_string();
         child.state = AgentTaskRunState::Queued;
         child.placement = None;
@@ -1381,6 +1389,11 @@ fn child_placement(
                     .map(|runner| runner.runner_id.clone())
             }),
         runner_source: decision.runner.as_ref().map(|runner| runner.source),
+        workspace_path: record
+            .metadata
+            .get("remote_workspace")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         authority: authority.to_string(),
         decision_id: decision.decision_id,
         outcome_decision_id: outcome.map(|outcome| outcome.decision_id),
@@ -2435,6 +2448,7 @@ mod tests {
             run_id: "batch_restart-orphan".to_string(),
             state: AgentTaskRunState::Running,
             placement: None,
+            predecessor_run_ids: Vec::new(),
         });
         batch.task_count = batch.child_runs.len();
         batch_store
@@ -2680,6 +2694,106 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("resume is idempotent")));
+    }
+
+    /// #14683: the remote workspace path is durably recorded on a lab-placed
+    /// child (`metadata.remote_workspace`) at dispatch time, but `fanout
+    /// status` never projected it into the typed placement it already
+    /// returns per child — an operator had to SSH the runner and guess the
+    /// `_lab_workspaces` layout to find work that was in fact progressing.
+    #[test]
+    fn batch_status_surfaces_the_remote_workspace_path_for_a_lab_placed_child() {
+        use homeboy_lab_runner_contract::{
+            EffectiveExecutionPlacement, ExecutionPlacementFallback, ExecutionPlacementIdentity,
+            ExecutionPlacementOverrideAuthorization, ExecutionPlacementRequirement,
+            ExecutionPlacementRunnerSelection, Placement,
+        };
+
+        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
+        let plan = AgentTaskPlan::new("fanout/workspace-path", vec![request("a"), request("b")]);
+        submit_batch(
+            &batch_store,
+            &lifecycle_store,
+            &plan,
+            "batch/workspace-path",
+        );
+
+        let lab_decision = ExecutionPlacementDecision::new(
+            "lab-route",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "a".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Lab,
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Lab,
+            Some(ExecutionPlacementRunnerSelection {
+                runner_id: "lab-runner-1".to_string(),
+                source: RunnerSelectionSource::Policy,
+            }),
+            ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        );
+        let lab_outcome = lab_decision
+            .outcome(
+                EffectiveExecutionPlacement::Lab,
+                Some("lab-runner-1".to_string()),
+            )
+            .expect("verified lab outcome");
+        rewrite_record(&lifecycle_store, "batch_workspace-path-a", |record| {
+            record.metadata["execution_placement_decision"] =
+                serde_json::to_value(&lab_decision).expect("serialize lab decision");
+            record.metadata["execution_placement_outcome"] =
+                serde_json::to_value(&lab_outcome).expect("serialize lab outcome");
+            record.metadata["remote_workspace"] =
+                json!("/srv/homeboy/_lab_workspaces/repo-issue-1");
+        });
+
+        let local_decision = ExecutionPlacementDecision::controller_local(
+            "controller-local-submission",
+            "1",
+            ExecutionPlacementIdentity {
+                repository: "repo".to_string(),
+                workspace: "workspace".to_string(),
+                task: "b".to_string(),
+                candidate: None,
+                base: None,
+            },
+            Placement::Local,
+        );
+        rewrite_record(&lifecycle_store, "batch_workspace-path-b", |record| {
+            record.metadata["execution_placement_decision"] =
+                serde_json::to_value(&local_decision).expect("serialize local decision");
+        });
+
+        let report = batch_status(&batch_store, &lifecycle_store, "batch/workspace-path");
+
+        let lab_placement = report.batch.child_runs[0]
+            .placement
+            .as_ref()
+            .expect("lab child placement projection");
+        assert_eq!(lab_placement.runner_id.as_deref(), Some("lab-runner-1"));
+        assert_eq!(
+            lab_placement.workspace_path.as_deref(),
+            Some("/srv/homeboy/_lab_workspaces/repo-issue-1"),
+            "the remote workspace path known to the system must reach fanout status"
+        );
+
+        let local_placement = report.batch.child_runs[1]
+            .placement
+            .as_ref()
+            .expect("local child placement projection");
+        assert_eq!(local_placement.workspace_path, None);
     }
 
     #[test]
@@ -3078,6 +3192,38 @@ mod tests {
             "cook-issue-1419-transport-retry"
         );
         assert_eq!(batch.child_runs[0].state, AgentTaskRunState::Queued);
+        // The failed first attempt's run id must survive the overwrite: it is
+        // the only durable pointer a reader has to correlate the retry back
+        // to the attempt that produced no other observable record (#14681).
+        // The idempotent replay above must not duplicate it.
+        assert_eq!(
+            batch.child_runs[0].predecessor_run_ids,
+            vec!["cook-issue-1419".to_string()]
+        );
+
+        // A second transport failure on the retried attempt must extend the
+        // lineage rather than replace it, so every prior attempt for this
+        // child stays reachable from the roster.
+        record_fanout_child_run_replacement_in_store(
+            &store,
+            "retry-wave",
+            "cook-issue-1419-transport-retry",
+            "cook-issue-1419-transport-retry-transport-retry",
+        )
+        .expect("replace canonical child run a second time");
+
+        let batch = store.read_batch("retry-wave").expect("updated roster");
+        assert_eq!(
+            batch.child_runs[0].run_id,
+            "cook-issue-1419-transport-retry-transport-retry"
+        );
+        assert_eq!(
+            batch.child_runs[0].predecessor_run_ids,
+            vec![
+                "cook-issue-1419".to_string(),
+                "cook-issue-1419-transport-retry".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -3355,12 +3501,14 @@ mod tests {
                     run_id: "a-run".to_string(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 },
                 AgentTaskBatchChildRun {
                     task_id: "b".to_string(),
                     run_id: "b-run".to_string(),
                     state: AgentTaskRunState::Queued,
                     placement: None,
+                    predecessor_run_ids: Vec::new(),
                 },
             ],
             metadata: json!({

@@ -2304,6 +2304,60 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
 }
 
 #[test]
+fn diagnose_drops_heartbeat_noise_when_the_provider_succeeded_and_no_gate_ran() {
+    with_temp_home(|| {
+        // The gate-priority path already covers a recorded gate failure. This
+        // covers the case that path cannot reach: a provider that exited 0
+        // leaving only progress heartbeats, and no promotion gate at all.
+        // Without the stream-noise rejection the heartbeat excerpt becomes the
+        // reported root cause, which is the shape observed in production
+        // (#14735).
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let stream_path = evidence_dir.path().join("executor.stdout");
+        std::fs::write(
+            &stream_path,
+            "{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:00Z\"}\n{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:01Z\"}",
+        )
+        .expect("write heartbeat stream");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "provider",
+                    "message": "OpenCode CLI exited with status 0."
+                }],
+                "stdout_uri": format!("file://{}", stream_path.display()),
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-stream-noise-without-a-gate";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorInputEvidenceExecutor {
+                evidence_uris: vec![format!("file://{}", evidence_path.display())],
+            }),
+        )
+        .expect("run completed with a succeeded provider outcome");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_ne!(
+            diagnosis["root_cause"]["class"], "provider.process_stream",
+            "heartbeat noise was reported as the root cause: {diagnosis}"
+        );
+    });
+}
+
+#[test]
 fn diagnose_reads_no_change_gate_results_as_the_current_denial() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-no-change-gate";
@@ -2348,6 +2402,209 @@ fn diagnose_reads_no_change_gate_results_as_the_current_denial() {
         assert_eq!(
             diagnosis["root_cause"]["details"]["gate_results"][0]["id"],
             "gate-1"
+        );
+    });
+}
+
+#[test]
+fn diagnose_names_the_gate_not_the_successful_provider_stream_noise() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let stream_path = evidence_dir.path().join("executor.stdout");
+        std::fs::write(
+            &stream_path,
+            "{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:00Z\"}\n{\"category\":\"command.completed\",\"latest_activity_at\":\"2026-01-01T00:00:01Z\"}",
+        )
+        .expect("write heartbeat stream");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({
+                "diagnostics": [{
+                    "class": "provider",
+                    "message": "OpenCode CLI exited with status 0."
+                }],
+                "stdout_uri": format!("file://{}", stream_path.display()),
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-gate-over-successful-stream";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorInputEvidenceExecutor {
+                evidence_uris: vec![format!("file://{}", evidence_path.display())],
+            }),
+        )
+        .expect("run completed with a succeeded provider outcome");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "patch_artifact": { "sha256": "candidate" },
+                "deterministic_gates": [{
+                    "name": "cargo test -p homeboy-cli",
+                    "status": "failed",
+                    "message": "gate proof failed"
+                }]
+            }),
+        )
+        .expect("persist gate failure after a successful provider");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        // The provider exited 0 and only heartbeat noise came from its
+        // process stream; the deterministic gate that actually failed after
+        // the provider succeeded must be named, never a slice of the
+        // progress-event stream (#14735).
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.promotion_gate_failed"
+        );
+        assert_eq!(diagnosis["root_cause"]["message"], "gate proof failed");
+        assert_ne!(diagnosis["root_cause"]["class"], "provider.process_stream");
+    });
+}
+
+#[test]
+fn logs_carry_gate_lifecycle_events_for_a_run_that_reached_the_gate_phase() {
+    with_temp_home(|| {
+        let run_id = "run-cli-logs-gate-lifecycle";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "patch_artifact": { "sha256": "candidate" },
+                "deterministic_gates": [{
+                    "id": "gate-cargo-test",
+                    "status": "failed",
+                    "command": ["cargo", "test", "-p", "homeboy-cli"],
+                    "exit_code": 101,
+                    "failure_evidence": {
+                        "classification": "candidate_code",
+                        "summary": "2 tests failed",
+                        "command": "cargo test -p homeboy-cli",
+                        "exit_code": 101,
+                        "stdout_tail": "test result: FAILED. 2 failed",
+                        "stderr_tail": "",
+                        "agent_feedback": "2 tests failed"
+                    }
+                }]
+            }),
+        )
+        .expect("persist gate failure");
+
+        let (value, exit_code) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("logs resolve");
+
+        assert_eq!(exit_code, 0);
+        let kinds: Vec<&str> = value["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .filter_map(|event| event["kind"].as_str())
+            .collect();
+        // The phase that failed the run must be present in its own log
+        // (#14735): a gate start, a per-gate result, and a terminal outcome.
+        assert!(
+            kinds.contains(&"gate.started"),
+            "expected a gate.started event, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"gate.result"),
+            "expected a gate.result event, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"gate.failed"),
+            "expected a gate.failed terminal event, got {kinds:?}"
+        );
+        let result_event = value["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .find(|event| event["kind"] == "gate.result")
+            .expect("gate.result event");
+        assert_eq!(result_event["data"]["gate"], "gate-cargo-test");
+        assert_eq!(
+            result_event["data"]["output"]["stdout_tail"],
+            "test result: FAILED. 2 failed"
+        );
+    });
+}
+
+#[test]
+fn diagnose_names_the_real_gate_command_and_failure_summary_from_a_production_shaped_report() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-production-shaped-gate";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "patch_artifact": { "sha256": "candidate" },
+                // The real `AgentTaskGateReport` shape has no `name`/`message`
+                // fields: naming and the human summary live under `id` and
+                // `failure_evidence`. A gate report with only these fields
+                // must still name the gate and its failure, not fall back to
+                // the generic "deterministic gate" placeholder (#14735).
+                "deterministic_gates": [{
+                    "id": "gate-cargo-test",
+                    "status": "failed",
+                    "command": ["cargo", "test", "-p", "homeboy-cli"],
+                    "exit_code": 101,
+                    "failure_evidence": {
+                        "classification": "candidate_code",
+                        "summary": "2 tests failed",
+                        "command": "cargo test -p homeboy-cli",
+                        "exit_code": 101,
+                        "stdout_tail": "test result: FAILED. 2 failed",
+                        "stderr_tail": "",
+                        "agent_feedback": "2 tests failed"
+                    }
+                }]
+            }),
+        )
+        .expect("persist production-shaped gate failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            diagnosis["root_cause"]["class"],
+            "agent_task.promotion_gate_failed"
+        );
+        assert_eq!(diagnosis["root_cause"]["message"], "2 tests failed");
+        assert!(
+            diagnosis["root_cause"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 tests failed"),
+            "root cause must name the actual gate failure, not a generic placeholder"
+        );
+        // The gate's own output must be resolvable from the diagnosis, not
+        // just its message.
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["deterministic_gates"][0]["failure_evidence"]
+                ["stdout_tail"],
+            "test result: FAILED. 2 failed"
         );
     });
 }
@@ -3718,6 +3975,99 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
                 format!("homeboy agent-task review {run_id}"),
             ]
         );
+    });
+}
+
+#[test]
+fn diagnose_names_the_reason_code_and_preserves_an_oversized_causal_message() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-oversized-git-failure";
+        // A real `git push`/`git commit` stderr routinely exceeds the compact
+        // text limit; the causal message must survive at whatever length it
+        // was recorded, not disappear (#14679).
+        let git_stderr = "remote: rejected fixture push detail. ".repeat(20);
+        let message =
+            format!("committed-change harvest failed while running git push origin fixture-branch: {git_stderr}");
+        assert!(
+            message.len() > 512,
+            "fixture message must exceed the compact text limit"
+        );
+
+        let outcome = AgentTaskOutcome {
+            task_id: "task-a".to_string(),
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some(message.clone()),
+            failure_classification: Some(AgentTaskFailureClassification::ExecutionFailed),
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "agent_task.committed_harvest_git_failed".to_string(),
+                message: message.clone(),
+                data: json!({ "command": "git push origin fixture-branch" }),
+            }],
+            ..Default::default()
+        };
+
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(FixtureOutcomeExecutor { outcome }),
+        )
+        .expect("run completed with a failed outcome");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["root_cause"]["class"],
+            "agent_task.committed_harvest_git_failed"
+        );
+        let root_message = value["root_cause"]["message"]
+            .as_str()
+            .expect("root cause message must not be dropped to null");
+        assert!(root_message.starts_with("committed-change harvest failed while running git push"));
+
+        // `diagnose` must distinguish "found a root cause" from "completed
+        // with nothing to report" (#14679).
+        assert_eq!(value["diagnosis_outcome"], "root_cause_identified");
+
+        // The top-level `summary` is what the generic command envelope prints;
+        // it must name the reason code and the underlying error, not stay empty.
+        let summary = value["summary"]
+            .as_str()
+            .expect("diagnose summary must not be empty");
+        assert!(summary.contains("agent_task.committed_harvest_git_failed"));
+        assert!(summary.contains("committed-change harvest failed while running git push"));
+    });
+}
+
+#[test]
+fn diagnose_summary_is_explicit_when_no_root_cause_is_found() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-no-root-cause";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.state = AgentTaskRunState::Succeeded;
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("job-success");
+        })
+        .expect("persist successful runner record");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose successful runner record");
+
+        assert_eq!(exit_code, 0);
+        assert!(value["root_cause"].is_null());
+        assert_eq!(value["diagnosis_outcome"], "no_root_cause_found");
+        let summary = value["summary"]
+            .as_str()
+            .expect("diagnose summary must not be empty even without a finding");
+        assert!(!summary.trim().is_empty());
     });
 }
 
@@ -5811,5 +6161,131 @@ fn cook_without_gate_and_finalizing_reports_actionable_gate_error() {
                 .is_some_and(|hint| hint.contains("--no-finalize"))),
             "a hint must point read-only cooks at --no-finalize: {hints:?}"
         );
+    });
+}
+
+#[test]
+fn migrate_event_history_backfills_terminal_run_without_changing_state() {
+    with_temp_home(|| {
+        let run_id = "cli-migrate-event-history";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let mut record = store.read_record(run_id).expect("submitted record");
+        record.state = AgentTaskRunState::Succeeded;
+        record.metadata["provider_executions"] = json!([{
+            "key": "task-a:1",
+            "task_id": "task-a",
+            "attempt": 1,
+            "backend": "opencode",
+            "state": "running",
+            "started_at": "2026-07-24T00:00:00Z"
+        }]);
+        record.metadata["cook_operation_claims"] = json!([{
+            "operation_key": "control-plane-action:cancel:unreceipted",
+            "leased_at": "2026-07-24T00:00:03Z",
+            "completed_at": "2026-07-24T00:00:04Z",
+            "intent": { "action": "cancel" },
+            "result": { "outcome": "succeeded" }
+        }]);
+        if let Some(metadata) = record.metadata.as_object_mut() {
+            metadata.remove("durable_event_history");
+        }
+        record.artifact_refs = vec![agent_task_lifecycle::AgentTaskArtifactRef {
+            task_id: "task-a".to_string(),
+            kind: "patch".to_string(),
+            uri: "file:///tmp/cli-historical.patch".to_string(),
+            role: Some("review".to_string()),
+            label: Some("historical patch".to_string()),
+            semantic_key: None,
+            size_bytes: Some(16),
+        }];
+        store
+            .open_observation_initialized()
+            .expect("observation")
+            .upsert_imported_run(&homeboy::core::observation::RunRecord {
+                id: record.run_id.clone(),
+                kind: "agent-task".to_string(),
+                component_id: Some(record.plan_id.clone()),
+                started_at: record.submitted_at.clone(),
+                finished_at: Some("2026-07-24T00:00:10Z".to_string()),
+                status: "pass".to_string(),
+                command: Some("homeboy agent-task".to_string()),
+                cwd: None,
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: json!({
+                    "schema": "homeboy/agent-task-observation-record/v1",
+                    "agent_task_run": record,
+                }),
+            })
+            .expect("historical terminal run");
+
+        let before = store.read_record(run_id).expect("unmarked terminal");
+        let (pre_logs, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("pre-migration logs");
+        assert!(
+            pre_logs["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .all(|event| event["data"]["state"] != "running"),
+            "reads must not migrate provider progress"
+        );
+
+        let args = MigrateEventHistoryArgs {
+            run_id: run_id.to_string(),
+        };
+        let (first, status) = migrate_event_history(args).expect("first migration");
+        assert_eq!(status, 0);
+        assert_eq!(first["state"], "succeeded");
+        assert_eq!(first["run_id"], run_id);
+        assert_eq!(
+            first["durable_event_history"],
+            "homeboy/durable-progress/v1"
+        );
+
+        let after = store.read_record(run_id).expect("migrated record");
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.artifact_refs, before.artifact_refs);
+        assert_eq!(
+            after.metadata["provider_executions"],
+            before.metadata["provider_executions"]
+        );
+        let (logs_page, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("migrated logs");
+        let events = logs_page["events"].as_array().expect("events");
+        assert!(events.iter().any(|event| event["data"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("provider execution running"))));
+        assert!(events
+            .iter()
+            .any(|event| event["kind"] == "action.accepted"));
+        let artifacts = agent_task_lifecycle::artifacts(run_id).expect("artifacts remain readable");
+        assert_eq!(artifacts.run_id, run_id);
+        assert_eq!(
+            after.artifact_refs[0].uri,
+            "file:///tmp/cli-historical.patch"
+        );
+
+        let (second, status) = migrate_event_history(MigrateEventHistoryArgs {
+            run_id: run_id.to_string(),
+        })
+        .expect("second migration");
+        assert_eq!(status, 0);
+        assert_eq!(second, first);
+        let (replay_logs, _) = logs(LogsArgs {
+            run_id: run_id.to_string(),
+            cursor: None,
+        })
+        .expect("replay logs");
+        assert_eq!(replay_logs["events"], logs_page["events"]);
     });
 }

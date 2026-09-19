@@ -928,7 +928,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
-            preserve_workspace_on_failure: false,
+            delete_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
             placement_outcome_target: None,
@@ -3453,6 +3453,129 @@ fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authoriz
         &automatic,
         &preflight(&automatic, FallbackDirective::LocalCapacity),
     ));
+
+    let mut stale = preflight(&automatic, FallbackDirective::None);
+    stale.lab_readiness = Some(
+        homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+            state: "stale".to_string(),
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: vec!["lab daemon is stale".to_string()],
+            remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+            repair_admitted_runner_ids: Vec::new(),
+        },
+    );
+    assert!(cook_requires_unmaterialized_admission(&automatic, &stale));
+    let error = auto_cook_unavailable_lab_replay_error(
+        &automatic,
+        &stale,
+        &[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@stale-refresh-timeout".to_string(),
+            "--verify".to_string(),
+            "true".to_string(),
+            "--prompt".to_string(),
+            "wait for a confirmed placement".to_string(),
+        ],
+    )
+    .expect("stale Auto Cook rejects instead of parking");
+    assert_eq!(error.details["run_created"], false);
+    assert_eq!(error.details["runner_readiness"], "stale");
+    assert_eq!(
+        error.details["next_action"],
+        "homeboy --placement local agent-task cook --to-worktree fixture@stale-refresh-timeout --verify true --prompt 'wait for a confirmed placement'"
+    );
+    assert!(error.retryable == Some(false));
+    assert!(!error.message.contains("pending_resource_admission"));
+
+    let mut queued = stale.clone();
+    queued
+        .lab_readiness
+        .as_mut()
+        .expect("stale readiness")
+        .state = "capacity_blocked".to_string();
+    assert!(
+        auto_cook_unavailable_lab_replay_error(&automatic, &queued, &[]).is_none(),
+        "capacity-blocked Auto Cook still queues instead of rejecting"
+    );
+}
+
+#[test]
+fn auto_cook_stale_lab_does_not_persist_blocked_runner_stale_retries() {
+    use homeboy::core::parsed_command_preflight::{
+        DeferredWorkloadDecision, FallbackDirective, ParsedCommandPreflightResult,
+        ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
+    };
+
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@stale-lab",
+        "--verify",
+        "true",
+        "--prompt",
+        "continue locally when Lab is stale",
+    ]);
+    let normalized = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--to-worktree".to_string(),
+        "fixture@stale-lab".to_string(),
+        "--verify".to_string(),
+        "true".to_string(),
+        "--prompt".to_string(),
+        "continue locally when Lab is stale".to_string(),
+    ];
+    let mut preflight = ParsedCommandPreflightResult::new(
+        normalized.clone(),
+        resource_policy::parsed_command_preflight_input(&cli, &normalized),
+        None,
+        Some(
+            homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+                state: "stale".to_string(),
+                selected_runner_id: None,
+                available_runner_ids: Vec::new(),
+                reasons: vec!["homeboy-lab daemon is stale".to_string()],
+                remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+                repair_admitted_runner_ids: Vec::new(),
+            },
+        ),
+        DeferredWorkloadDecision::NotApplicable,
+        FallbackDirective::None,
+        crate::cli_runtime::placement_directive(&cli, None, false),
+        None,
+    );
+    preflight.resource_admission = ResourceAdmissionDecision::Rejected {
+        label: "cook".to_string(),
+        engages_at: ResourceHeat::Warm,
+        evidence: ResourceAdmissionEvidence::Observed {
+            pressure: ResourceHeat::Warm,
+        },
+    };
+
+    assert!(cook_requires_unmaterialized_admission(&cli, &preflight));
+    let error = auto_cook_unavailable_lab_replay_error(&cli, &preflight, &normalized)
+        .expect("stale Lab with available local rejects instead of persisting retries");
+    assert_eq!(error.details["run_created"], false);
+    assert_eq!(
+        error.details["next_action"].as_str().expect("next_action"),
+        "homeboy --placement local agent-task cook --to-worktree fixture@stale-lab --verify true --prompt 'continue locally when Lab is stale'"
+    );
+    assert!(error.details["tried"]
+        .as_array()
+        .expect("tried")
+        .iter()
+        .any(|value| {
+            value.as_str().is_some_and(|command| {
+                command.contains("--placement lab-or-local") && command.contains("agent-task cook")
+            })
+        }));
 }
 
 #[test]

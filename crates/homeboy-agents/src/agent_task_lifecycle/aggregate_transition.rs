@@ -25,6 +25,7 @@ pub(crate) fn apply_aggregate_transition_in_store(
         .to_string();
     apply_aggregate_to_record(record, plan, aggregate, aggregate_path);
     lifecycle_store.write_aggregate_and_record(record, aggregate)?;
+    *record = lifecycle_store.read_record(&record.run_id)?;
     record_terminal_artifact_projection_in_store(lifecycle_store, record, aggregate)?;
     Ok(record.clone())
 }

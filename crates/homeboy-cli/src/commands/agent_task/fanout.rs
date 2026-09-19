@@ -309,6 +309,34 @@ impl DryRunPlanner {
         }
     }
 
+    /// Run a phase that must not ride the fixed planning deadline.
+    ///
+    /// Registered-component repository resolution (#14658) can legitimately run
+    /// past the planner's preview budget, and where it fails, the resolution
+    /// error is the diagnosis — not "planner deadline exceeded". The wall clock
+    /// it consumed is returned to the shared budget so the remaining preview
+    /// phases start with a whole budget again.
+    fn run_without_phase_deadline<T>(
+        &mut self,
+        phase: &'static str,
+        unresolved_dependency: &'static str,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.begin(phase);
+        let deadline_remaining = self.deadline.checked_duration_since(Instant::now());
+        let result = operation();
+        let elapsed = self.phase_started_at.elapsed();
+        self.deadline = match deadline_remaining {
+            Some(_remaining) => self.deadline + elapsed,
+            None => Instant::now() + Duration::from_secs(self.configured_timeout_seconds),
+        };
+        let result = result.map_err(|error| self.failure(error, unresolved_dependency));
+        if result.is_ok() {
+            self.record_progress("completed", Some(unresolved_dependency));
+        }
+        result
+    }
+
     fn finish(&mut self, unresolved_dependency: &'static str) -> Result<()> {
         let elapsed = self.phase_started_at.elapsed();
         if Instant::now() > self.deadline
@@ -644,10 +672,15 @@ fn reconcile_fanout_pr_states(batch_id: &str, mutate: bool) -> Result<BTreeMap<S
             match agent_task_lifecycle::status(&child.run_id) {
                 Ok(record) => record,
                 // The batch report retains the last durable child state and
-                // marks observation freshness separately below. A transient
-                // projection lock must not make status itself unavailable.
-                Err(error) if error.code == ErrorCode::ObservationStoreBusy => continue,
-                Err(error) => return Err(error),
+                // marks observation freshness separately below, so a read
+                // must never fail the whole status on one child's record.
+                // That record can be transiently unreadable (a projection
+                // lock) or not exist yet at all: children beyond the
+                // coordinator's concurrency limit have no durable run record
+                // until a worker claims them, even while the batch itself has
+                // already left `admitting` for `running` (#14677). Either way
+                // there is nothing to reconcile for this child yet.
+                Err(_) => continue,
             }
         };
         let Some(mut finalization) = record.metadata.get("cook_finalization").cloned() else {
@@ -1327,16 +1360,38 @@ fn portfolio_observation(
     let path = promotion
         .and_then(|value| value.pointer("/provenance/worktree_path"))
         .and_then(Value::as_str)
+        .map(str::to_string)
         .or_else(|| {
-            recipe
+            // `to_worktree` on the recipe is a workspace *handle*
+            // (`component@branch`), not a filesystem path. Treating it as a
+            // path here always failed `git status`, reporting a worktree
+            // that was still durably registered and present on disk as
+            // `missing` whenever the promotion checkpoint had not been
+            // written yet or could not be read (#14734, #14735). Resolve the
+            // handle through the worktree registry so the real path backs
+            // the observation instead.
+            let handle = recipe
                 .as_ref()
                 .and_then(|recipe| recipe.finalization.get("to_worktree"))
-                .and_then(Value::as_str)
+                .and_then(Value::as_str)?;
+            // `resolve_worktree_ownership_if_present` also gates on reuse
+            // safety (it rejects a dirty worktree), which is the wrong
+            // question for a read-only observation: an uncommitted candidate
+            // is exactly the state this projection needs to surface, not
+            // reject. Read the raw registered record instead.
+            homeboy_core::worktree::resolve_workspace_ref_if_present(handle)
+                .ok()
+                .flatten()
+                .filter(|record| {
+                    *record.state() != homeboy_core::worktree::TaskWorktreeState::Removed
+                })
+                .map(|record| record.path().to_string())
         });
     let declared_base = promotion
         .and_then(|value| value.pointer("/verified_base/base"))
         .and_then(Value::as_str);
     let (worktree, head_sha, current_base_sha) = path
+        .as_deref()
         .map(|path| git_candidate_state(path, declared_base))
         .unwrap_or((
             supervisor::AgentTaskFanoutWorktreeState::Missing,
@@ -1356,8 +1411,18 @@ fn portfolio_observation(
         .and_then(|value| value.get("status"))
         .and_then(Value::as_str)
     {
-        Some("applied") => supervisor::AgentTaskFanoutEvidenceState::Current,
-        Some("failed") => supervisor::AgentTaskFanoutEvidenceState::Failed,
+        // `applied`/`verified_no_changes` are the real terminal promotion
+        // status strings for a passing gate phase; `gate_failed`/
+        // `no_changes_gate_failed` are the real strings for a failing one.
+        // The literal `"failed"` this matched against before never occurs,
+        // so a gate-failed candidate was silently reported as `missing`
+        // evidence instead of `failed` (#14735).
+        Some("applied" | "verified_no_changes") => {
+            supervisor::AgentTaskFanoutEvidenceState::Current
+        }
+        Some("gate_failed" | "no_changes_gate_failed") => {
+            supervisor::AgentTaskFanoutEvidenceState::Failed
+        }
         _ => supervisor::AgentTaskFanoutEvidenceState::Missing,
     };
     let finalization = record
@@ -1376,7 +1441,7 @@ fn portfolio_observation(
         .and_then(|receipt| receipt.get("after_sha"))
         .and_then(Value::as_str)
         .is_some_and(|after_sha| head_sha.as_deref() == Some(after_sha));
-    let (tracker, pr, remote_head_sha, findings) = match path {
+    let (tracker, pr, remote_head_sha, findings) = match path.as_deref() {
         Some(path) => github_observation(path, record.as_ref(), finalization, declared_tracker)?,
         None => (
             tracker_state_without_observation(record.as_ref(), recipe.as_ref(), declared_tracker),
@@ -3123,12 +3188,15 @@ fn cook_batch_dry_run_with_deadline(
     }
     planner.finish("declared gate inputs")?;
     let mut normalized_args = args.clone();
-    normalized_args =
-        planner.run_bounded("repository", "registered primary repository", move || {
+    normalized_args = planner.run_without_phase_deadline(
+        "repository",
+        "registered primary repository",
+        move || {
             normalize_static_cook_batch_repo_with_placement(&mut normalized_args, placement)?;
             resolve_cook_batch_default_branch(&mut normalized_args)?;
             Ok(normalized_args)
-        })?;
+        },
+    )?;
     args = normalized_args;
     // Profile/default resolution is part of the effective child identity. It is
     // local catalog/config projection only; readiness and provider execution
@@ -7228,6 +7296,94 @@ mod tests {
         });
     }
 
+    #[test]
+    fn portfolio_observation_never_reports_a_registered_worktree_as_missing() {
+        with_isolated_home(|home| {
+            let source = home.path().join("Developer/fixture");
+            std::fs::create_dir_all(&source).expect("source checkout");
+            for args in [
+                vec!["init", "--quiet", "-b", "main"],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Homeboy Test"],
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .expect("git runs")
+                    .success());
+            }
+            std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("component manifest");
+            assert!(Command::new("git")
+                .args(["add", "."])
+                .current_dir(&source)
+                .status()
+                .expect("git add")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(&source)
+                .status()
+                .expect("git commit")
+                .success());
+            init_git_primary(&source);
+            write_component_registration(home.path(), "fixture", &source);
+
+            let mut plan = test_batch_plan();
+            plan.cooks.truncate(1);
+            plan.cooks[0].to_worktree = "fixture@portfolio-recover".to_string();
+            let mut options = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("compile child invocation")
+                .options;
+            materialize_test_child(&mut options);
+            let run_id = options.identity.initial_run_id.clone();
+            let cook_id = options.identity.cook_id.clone();
+
+            agent_task_service::persist_initial_recipe(&options).expect("persist recipe");
+            // A lifecycle record whose promotion checkpoint was never written
+            // models a provider interruption or an unread projection: exactly
+            // the case where `latest_promotion.provenance.worktree_path` is
+            // unavailable and the recipe's declared handle is the only lead.
+            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+                .expect("persist lifecycle record without a promotion checkpoint");
+
+            let created =
+                homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                    component_id: "fixture".to_string(),
+                    branch: "portfolio-recover".to_string(),
+                    from: Some("main".to_string()),
+                    task_url: None,
+                    run_id: Some(run_id.clone()),
+                    cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
+                    require_handoff_freshness: false,
+                })
+                .expect("materialize destination worktree");
+            std::fs::write(
+                std::path::Path::new(&created.record.worktree_path).join("harvested.txt"),
+                "candidate change",
+            )
+            .expect("harvest an uncommitted candidate change");
+
+            let observation = portfolio_observation(&cook_id, &run_id, false, None)
+                .expect("observe a child whose promotion checkpoint was never written");
+
+            // The worktree is durably registered and holds a real,
+            // uncommitted candidate change; it must never be reported
+            // `missing` just because `latest_promotion` was never written
+            // (#14734, #14735).
+            assert_ne!(
+                observation.worktree,
+                supervisor::AgentTaskFanoutWorktreeState::Missing
+            );
+            assert_eq!(
+                observation.worktree,
+                supervisor::AgentTaskFanoutWorktreeState::Dirty
+            );
+        });
+    }
+
     struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvRestore {
@@ -11016,6 +11172,62 @@ fi
     }
 
     #[test]
+    fn repository_resolution_outlives_the_planner_budget_and_extends_it() {
+        let mut planner = DryRunPlanner::new(&cook_batch_args(), Placement::Auto);
+        planner.deadline = Instant::now() - Duration::from_millis(1);
+        planner
+            .run_without_phase_deadline("repository", "registered primary repository", || {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(())
+            })
+            .expect("repository resolution does not ride the fixed planner deadline");
+        // The repository phase's elapsed time is returned to the shared budget,
+        // so a follow-on phase bounded by the same deadline still starts fresh.
+        assert!(planner.deadline > Instant::now());
+        planner
+            .run_bounded("provider_selection", "static provider selection", || Ok(()))
+            .expect("follow-on phases keep a fresh budget after repository resolution");
+    }
+
+    #[test]
+    fn repository_resolution_failure_surfaces_the_resolver_error_not_a_timeout() {
+        let mut planner = DryRunPlanner::new(&cook_batch_args(), Placement::Auto);
+        planner.deadline = Instant::now() - Duration::from_millis(1);
+        let error = planner
+            .run_without_phase_deadline(
+                "repository",
+                "registered primary repository",
+                move || -> homeboy_core::Result<()> {
+                    Err(Error::validation_invalid_argument(
+                        "repo",
+                        "component `website` is not registered",
+                        None,
+                        None,
+                    ))
+                },
+            )
+            .expect_err("registered-component resolver failed");
+
+        assert_ne!(error.details["reason"], "planner_deadline_exceeded");
+        assert_eq!(error.details["phase"], "repository");
+        assert_eq!(
+            error.details["unresolved_dependency"],
+            "registered primary repository"
+        );
+        assert_eq!(
+            error.details["phase_elapsed_ms"].as_u64(),
+            Some(0),
+            "elapsed ms value itself cannot be a timeout marker"
+        );
+
+        // The next phase still rides the shared budget the resolver refilled.
+        assert!(planner.deadline > Instant::now());
+        planner
+            .run_bounded("provider_selection", "static provider selection", || Ok(()))
+            .expect("shared budget was extended after resolver work");
+    }
+
+    #[test]
     fn dry_run_rejects_a_blocking_gate_file_without_opening_it() {
         with_isolated_home(|home| {
             let fifo = home.path().join("blocking-gate-input");
@@ -12032,6 +12244,58 @@ fi
             assert!(value["batch"]["unavailable_child_runs"]
                 .as_array()
                 .is_none_or(Vec::is_empty));
+        });
+    }
+
+    /// #14677: a coordinator leaves `admitting` for `running` as soon as it
+    /// starts dispatching children, but a concurrency limit below the child
+    /// count means later children have no durable run record yet even though
+    /// the batch itself is no longer `admitting`. `fanout status` must still
+    /// read cleanly instead of failing on the first child without a record.
+    #[test]
+    fn public_status_reads_a_running_batch_with_a_child_still_unadmitted() {
+        with_isolated_home(|_| {
+            let batch_id = "running-with-throttled-child";
+            batch::persist_fanout_run_batch(
+                batch_id,
+                batch_id,
+                &[
+                    batch::FanoutRunBatchChild {
+                        task_id: "child-a".to_string(),
+                        run_id: "cook-child-a".to_string(),
+                    },
+                    batch::FanoutRunBatchChild {
+                        task_id: "child-b".to_string(),
+                        run_id: "cook-child-b".to_string(),
+                    },
+                ],
+                json!({}),
+            )
+            .expect("persist fanout roster");
+            let claim_id = batch::claim_fanout_run_batch(batch_id)
+                .expect("claim batch")
+                .expect("coordinator claim");
+            batch::start_fanout_run_batch(batch_id, &claim_id)
+                .expect("coordinator leaves admission for execution");
+            agent_task_lifecycle::submit_plan(
+                &AgentTaskPlan::new("running-with-throttled-child", Vec::new()),
+                Some("cook-child-a"),
+            )
+            .expect("materialize the one worker-claimed child");
+            // `cook-child-b` is still queued behind the concurrency limit and
+            // has no durable run record at all yet.
+
+            let (value, exit_code) = batch_status(
+                AgentTaskFanoutBatchStatusArgs {
+                    batch_id: batch_id.to_string(),
+                },
+                Placement::Lab,
+            )
+            .expect("a running batch with an unadmitted child is still a readable status");
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["batch"]["admission"]["admitted"], 1);
+            assert_eq!(value["batch"]["admission"]["absent"], 1);
         });
     }
 

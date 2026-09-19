@@ -1,6 +1,7 @@
 //! Data types for the `status` command: CLI args, serialized output shapes,
 //! dashboard rows/summaries, and the phase timer.
 
+use homeboy::core::schedule::ScheduleHealth;
 use homeboy_upgrade::controller_staleness::ControllerStaleness;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -252,7 +253,22 @@ pub struct CompactStatusOutput {
     pub cwd: String,
     pub controller: ControllerStaleness,
     pub context: CompactContextStatus,
+    /// Can work be dispatched right now, and to which placement? The default
+    /// answer to "can I dispatch" belongs in the default command (#14736):
+    /// this is a live, bounded refresh, never a cached negative served
+    /// without a reprobe.
+    pub dispatch: DispatchReadinessStatus,
+    /// Local schedule run health. Wedged or repeatedly-failing schedules are
+    /// named here so default `status` does not require knowing to look for them.
+    pub schedules: CompactScheduleStatus,
     pub action: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompactScheduleStatus {
+    pub declared: usize,
+    pub unhealthy: Vec<ScheduleHealth>,
+    pub drill_down: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -260,6 +276,37 @@ pub struct CompactContextStatus {
     pub status: &'static str,
     pub detail: &'static str,
     pub command: &'static str,
+}
+
+/// Answers "can work be dispatched right now, and to which placement" — the
+/// question compact `status` previously left to a second `runner status`
+/// call. `effective_placement` is what a `--placement auto` command would
+/// resolve to at this instant given `runner`'s live readiness.
+#[derive(Debug, Serialize)]
+pub struct DispatchReadinessStatus {
+    /// Where a `--placement auto` command would run right now: `"lab"` when a
+    /// policy-eligible runner is connected and ready, `"local"` otherwise.
+    pub effective_placement: &'static str,
+    /// Live Lab runner readiness, refreshed with a bounded probe rather than
+    /// read from a long-lived cache. Present unconditionally — including when
+    /// no Lab runner is configured — so a disconnected runner is visible
+    /// without a second command.
+    pub runner: DispatchRunnerReadinessStatus,
+    pub drill_down: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DispatchRunnerReadinessStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_runner_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub available_runner_ids: Vec<String>,
+    /// Why the preferred (Lab) placement is currently blocked, when it is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remediation_commands: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

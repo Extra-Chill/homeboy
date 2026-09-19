@@ -487,6 +487,57 @@ fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start(
 }
 
 #[test]
+fn agent_task_plan_stages_declared_inputs_without_historical_checkout_paths() {
+    let controller = tempfile::tempdir().expect("controller");
+    let primary = controller.path().join("primary");
+    let selected = controller.path().join("selected");
+    let provider = controller.path().join("provider");
+    init_task_worktree(&primary, &selected, "selected-task");
+    std::fs::create_dir_all(primary.join("unrelated/vendor/cache/_logs"))
+        .expect("unrelated primary cache");
+    std::fs::write(
+        primary.join("unrelated/vendor/cache/_logs/run.log"),
+        "private cache",
+    )
+    .expect("dirty primary content");
+    std::fs::create_dir_all(&provider).expect("declared provider input");
+    let plan = serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "plan_id": "workspace-authority",
+        "tasks": [{
+            "task_id": "task-1",
+            "workspace": { "mode": "existing", "root": selected },
+            "executor": { "backend": "external", "config": { "provider_root": provider } },
+            "metadata": { "previous_workspace": primary },
+            "source_refs": [{ "kind": "historical", "uri": primary }],
+            "instructions": "Observe the selected workspace"
+        }],
+        "metadata": { "cook_base_resolution": { "evidence_path": primary } }
+    });
+    let args = vec![
+        "homeboy".into(),
+        "agent-task".into(),
+        "run-plan".into(),
+        "--plan".into(),
+        plan.to_string(),
+    ];
+
+    let extras = agent_task_plan_extra_workspaces(&args, &selected).expect("declared inputs");
+
+    assert_eq!(
+        extras.len(),
+        1,
+        "historical metadata is evidence, not a transfer input: {extras:?}"
+    );
+    assert_eq!(extras[0].path, provider.canonicalize().unwrap());
+    assert_eq!(extras[0].role, "agent_task_plan_config");
+    assert!(!selected.join("unrelated").exists());
+    assert!(git_output(&selected, &["status", "--porcelain"])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn agent_task_fanout_extra_workspaces_syncs_child_cook_paths() {
     let controller = tempfile::tempdir().expect("controller");
     let source = controller.path().join("primary");

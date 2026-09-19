@@ -171,11 +171,11 @@ fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
     );
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner status homeboy-lab --full")
+        Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab")
     );
     assert_eq!(
         outcome.retry_predicate.as_deref(),
-        Some("a fresh authoritative generation projection resolves every retained count")
+        Some("reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs")
     );
 }
 
@@ -240,8 +240,97 @@ fn reconcile_does_not_converge_when_admission_accepts_with_unresolved_projection
     );
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner status homeboy-lab --full")
+        Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab")
     );
+}
+
+#[test]
+fn reconcile_converges_after_unclaimed_projection_retirement() {
+    let mut admission = admission_fixture();
+    admission.accepting_jobs = true;
+    admission.safe_to_rotate = true;
+
+    let outcome = reconciliation_outcome(
+        "homeboy-lab",
+        vec!["lease-old".to_string()],
+        &connected_report(),
+        &admission,
+    );
+
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Converged);
+    assert_eq!(outcome.retired_generation_ids, ["lease-old"]);
+    assert_eq!(outcome.next_action, None);
+}
+
+#[test]
+fn runner_command_failure_next_action_is_never_the_failed_command() {
+    let reconcile = "homeboy runner reconcile homeboy-lab";
+    let mut cases = Vec::new();
+
+    let mut unresolved = admission_fixture();
+    unresolved.unresolved_retained_projection_count = 1;
+    unresolved.next_action = Some(reconcile.to_string());
+    cases.push((
+        "unresolved_projection",
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &unresolved),
+    ));
+
+    let mut disconnected = admission_fixture();
+    disconnected.connected = false;
+    disconnected.next_action = Some(reconcile.to_string());
+    cases.push((
+        "disconnected",
+        reconciliation_outcome(
+            "homeboy-lab",
+            Vec::new(),
+            &disconnected_report(),
+            &disconnected,
+        ),
+    ));
+
+    let mut ownership = admission_fixture();
+    ownership.blocking_generation = Some("lease-retained".to_string());
+    ownership.next_action = Some(reconcile.to_string());
+    cases.push((
+        "retained_ownership",
+        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &ownership),
+    ));
+
+    let mut stale = admission_fixture();
+    stale.daemon_fresh = false;
+    stale.next_action = Some(reconcile.to_string());
+    let mut stale_report = connected_report();
+    stale_report.daemon_freshness = Some(DaemonFreshnessReport {
+        fresh: false,
+        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        restartable: true,
+        lease_id: None,
+        pid: None,
+        recovery_evidence: Some(DaemonRecoveryEvidence::Recoverable),
+        ownership_evidence: None,
+        adoption_command: None,
+        binary_hash: None,
+        daemon_version: None,
+        daemon_build_identity: None,
+        runtime_paths: None,
+        active_jobs: 0,
+        termination_evidence: None,
+        repair_plan: Vec::new(),
+    });
+    cases.push((
+        "daemon_freshness",
+        reconciliation_outcome("homeboy-lab", Vec::new(), &stale_report, &stale),
+    ));
+
+    for (label, outcome) in cases {
+        if let Some(action) = outcome.next_action.as_deref() {
+            assert_ne!(action, reconcile, "{label}");
+            assert!(
+                !action.starts_with("homeboy runner reconcile "),
+                "{label}: {action}"
+            );
+        }
+    }
 }
 
 #[test]

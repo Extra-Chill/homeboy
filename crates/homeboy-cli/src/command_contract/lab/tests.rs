@@ -434,7 +434,7 @@ fn composed_options(placement: crate::cli_surface::Placement) -> ComposedLabRout
         runner: None,
         allow_dirty_lab_workspace: false,
         skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
+        delete_workspace_on_failure: false,
         detach_after_handoff: false,
         runner_env: &[],
         runner_secret_env: &[],

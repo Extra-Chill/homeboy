@@ -142,4 +142,14 @@ homeboy schedule tick
 
 A schedule is marked in flight while it runs so an overlapping tick declines it. If the process is killed between that marker and the recorded result, the marker would otherwise block the schedule forever under `--on-overlap skip`.
 
-The daemon clears markers older than six hours when it starts, in the same way it reconciles expired job reservations. A marker with no recorded start time cannot be aged and is cleared as well.
+The daemon clears markers older than six hours on every tick, so a live daemon cannot leave a schedule wedged under skip-on-overlap. A marker with no recorded start time cannot be aged and is cleared as well.
+
+## Health
+
+`homeboy schedule list` and `homeboy schedule show <id>` report run health from the runtime record: `last_run_at`, `last_status`, `consecutive_failures`, and `running`. They also classify:
+
+- `stale_running` — the in-flight marker is older than the six-hour reclaim window (or has no start time), so overlap-skip would block the schedule until the daemon recovers it
+- `cadence_stale` — the in-flight marker has outlived this schedule's own cadence, even when that is still inside the reclaim window
+- `unhealthy` — stale-running, cadence-stale, a failed last status, or a non-zero consecutive failure count
+
+A wedged or repeatedly-failing schedule is also named by `homeboy status` without being asked for. Runtime state files are not the operator access path.

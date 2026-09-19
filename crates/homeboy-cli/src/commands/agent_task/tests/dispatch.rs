@@ -327,15 +327,22 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
 
 #[cfg(unix)]
 #[test]
-fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
+fn cook_repository_selection_skips_unrelated_portable_git_enrichment() {
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home(|_| {
         let target = tempfile::tempdir().expect("target checkout");
-        register_component(
-            "target",
+        init_runtime_component_checkout(target.path());
+        add_remote(
             target.path(),
-            "https://github.com/example/target.git",
+            "origin",
+            "https://github.com/example/importer.git",
+        );
+        register_component_with_aliases(
+            "target",
+            &["target-alias"],
+            target.path(),
+            "https://github.com/example/importer.git",
         );
         let stale = tempfile::tempdir().expect("stale checkout");
         std::fs::write(stale.path().join("homeboy.json"), r#"{"id":"stale"}"#)
@@ -350,7 +357,7 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
         let git = bin.path().join("git");
         std::fs::write(
             &git,
-            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then sleep 30; exit 0; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
+            "#!/bin/sh\nif [ \"$PWD\" = \"$HOMEBOY_STALE_CHECKOUT\" ]; then touch \"$PWD/probed\"; exit 1; fi\nPATH=/usr/bin:/bin git \"$@\"\n",
         )
         .expect("write fake git");
         let mut permissions = std::fs::metadata(&git).expect("metadata").permissions();
@@ -375,29 +382,34 @@ fn cook_explicit_repo_skips_unrelated_portable_git_enrichment() {
             ),
         );
 
-        let started = std::time::Instant::now();
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "cook".to_string(),
-            "--prompt".to_string(),
-            "targeted lookup".to_string(),
-            "--repo".to_string(),
-            "target".to_string(),
-            "--to-worktree".to_string(),
-            target.path().display().to_string(),
-            "--no-finalize".to_string(),
-        ]))
-        .expect("explicit repo must not inspect unrelated registrations");
+        for selector in [
+            "target",
+            "target-alias",
+            "https://github.com/example/importer.git",
+        ] {
+            let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "targeted lookup".to_string(),
+                "--repo".to_string(),
+                selector.to_string(),
+                "--to-worktree".to_string(),
+                target.path().display().to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("repository selection must not inspect unrelated registrations");
 
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(2),
-            "unrelated portable checkout was probed"
-        );
-        assert_eq!(
-            args.repository_identity.expect("identity")["remote_identity"],
-            "git://github.com/example/target"
-        );
+            assert!(
+                !stale.path().join("probed").exists(),
+                "selector {selector} probed an unrelated portable checkout"
+            );
+            assert_eq!(
+                args.repository_identity.expect("identity")["remote_identity"],
+                "git://github.com/example/importer"
+            );
+        }
     });
 }
 
@@ -2122,6 +2134,8 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
             force: true,
             cleanup_branch: false,
             allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
         })
         .expect("remove managed worktree");
 
@@ -2768,7 +2782,7 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
             "2".to_string(),
         ]);
         assert_eq!(first["limit"], 2);
-        assert_eq!(first["physical_count"], 2);
+        assert_eq!(first["physical_count"], 4);
         assert_eq!(
             first["runs"]
                 .as_array()
@@ -2797,6 +2811,12 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
                 ["tie-c"],
             )
             .expect("delete any mission link for boundary");
+        connection
+            .execute(
+                "DELETE FROM control_plane_event_appends WHERE run_id = ?1",
+                ["tie-c"],
+            )
+            .expect("delete canonical events for boundary");
         connection
             .execute("DELETE FROM runs WHERE id = ?1", ["tie-c"])
             .expect("delete emitted boundary");
@@ -2856,29 +2876,19 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
             "--limit".to_string(),
             "2".to_string(),
         ]);
-        assert_eq!(first["physical_count"], 2);
-        assert_eq!(first["runs"][0]["run_id"], "page-z");
-        assert_eq!(first["record_health"]["healthy"], 1);
+        assert_eq!(first["physical_count"], 3);
+        assert_eq!(
+            first["runs"]
+                .as_array()
+                .expect("matching rows")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["page-z", "page-a"]
+        );
+        assert_eq!(first["record_health"]["healthy"], 2);
         assert_eq!(first["record_health"]["legacy"], 0);
-        let cursor = first["next_cursor"]
-            .as_str()
-            .expect("continuation after legacy row")
-            .to_string();
-
-        let second = run_discovery_page(vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "list".to_string(),
-            "--branch".to_string(),
-            "fix/page-health".to_string(),
-            "--limit".to_string(),
-            "2".to_string(),
-            "--cursor".to_string(),
-            cursor,
-        ]);
-        assert_eq!(second["runs"][0]["run_id"], "page-a");
-        assert_eq!(second["record_health"]["healthy"], 1);
-        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(first["next_cursor"], Value::Null);
     });
 }
 
@@ -2927,10 +2937,15 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
 }
 
 #[test]
-fn list_sparse_scope_requires_the_matching_opaque_continuation() {
+fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
     with_isolated_home(|_| {
         persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);
+        persist_discovery_record("sparse-b", "fix/sparse", AgentTaskRunState::Running);
+        persist_discovery_record("sparse-c", "fix/sparse", AgentTaskRunState::Running);
         persist_discovery_record("sparse-z", "fix/sparse", AgentTaskRunState::Queued);
+        for run_id in ["unrelated-x", "unrelated-y", "unrelated-z"] {
+            persist_discovery_record(run_id, "fix/unrelated", AgentTaskRunState::Running);
+        }
 
         let lifecycle =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
@@ -2952,7 +2967,7 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--limit".to_string(),
             "10".to_string(),
         ]);
-        assert_eq!(active["count"], 2);
+        assert_eq!(active["count"], 4);
         assert!(active["runs"]
             .as_array()
             .expect("active branch-scoped runs")
@@ -2968,10 +2983,20 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--branch".to_string(),
             "fix/sparse".to_string(),
             "--limit".to_string(),
-            "1".to_string(),
+            "2".to_string(),
         ]);
-        assert_eq!(first["count"], 0);
-        assert_eq!(first["physical_count"], 1);
+        assert_eq!(first["count"], 2);
+        assert_eq!(first["physical_count"], 7);
+        assert_eq!(first["search_status"], "matching_limit_reached");
+        assert_eq!(
+            first["runs"]
+                .as_array()
+                .expect("first matching page")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["sparse-c", "sparse-b"]
+        );
         let cursor = first["next_cursor"]
             .as_str()
             .expect("sparse continuation")
@@ -2982,7 +3007,7 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             .iter()
             .find_map(|action| action["command"].as_str())
             .expect("next command");
-        assert!(next_action.contains("--state running --branch fix/sparse --limit 1 --cursor"));
+        assert!(next_action.contains("--state running --branch fix/sparse --limit 2 --cursor"));
 
         let second = run_discovery_page(vec![
             "homeboy".to_string(),
@@ -2993,12 +3018,14 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
             "--branch".to_string(),
             "fix/sparse".to_string(),
             "--limit".to_string(),
-            "1".to_string(),
+            "2".to_string(),
             "--cursor".to_string(),
             cursor.clone(),
         ]);
         assert_eq!(second["count"], 1);
         assert_eq!(second["runs"][0]["run_id"], "sparse-a");
+        assert_eq!(second["search_status"], "complete");
+        assert_eq!(second["next_cursor"], Value::Null);
 
         let changed_scope = Cli::try_parse_from([
             "homeboy",
@@ -3031,6 +3058,70 @@ fn list_sparse_scope_requires_the_matching_opaque_continuation() {
         };
         let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
         assert_eq!(error.details["field"], "cursor");
+    });
+}
+
+#[test]
+fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
+    with_isolated_home(|_| {
+        for index in 0..101 {
+            persist_discovery_record(
+                &format!("unrelated-{index:03}"),
+                "fix/unrelated",
+                AgentTaskRunState::Running,
+            );
+        }
+        for run_id in ["match-a", "match-b", "match-c"] {
+            persist_discovery_record(run_id, "fix/window-match", AgentTaskRunState::Running);
+        }
+
+        let first = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+        ]);
+        assert_eq!(first["requested_limit"], 250);
+        assert_eq!(first["limit"], 100);
+        assert_eq!(first["physical_count"], 100);
+        assert_eq!(first["count"], 0);
+        assert_eq!(first["search_status"], "search_window_exhausted");
+        assert!(first["truncated"].as_bool().expect("incomplete search"));
+        let cursor = first["next_cursor"]
+            .as_str()
+            .expect("replayable incomplete-search continuation")
+            .to_string();
+
+        let second = run_discovery_page(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "list".to_string(),
+            "--state".to_string(),
+            "running".to_string(),
+            "--branch".to_string(),
+            "fix/window-match".to_string(),
+            "--limit".to_string(),
+            "250".to_string(),
+            "--cursor".to_string(),
+            cursor,
+        ]);
+        assert_eq!(second["search_status"], "complete");
+        assert_eq!(second["truncated"], false);
+        assert_eq!(second["next_cursor"], Value::Null);
+        assert_eq!(
+            second["runs"]
+                .as_array()
+                .expect("completed matching page")
+                .iter()
+                .map(|run| run["run_id"].as_str().expect("run id"))
+                .collect::<Vec<_>>(),
+            ["match-c", "match-b", "match-a"]
+        );
     });
 }
 

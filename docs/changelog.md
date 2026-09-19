@@ -4,6 +4,141 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.376.4] - 2026-09-19
+
+### Changed
+- give cook preview tests their own git fixture
+
+## [0.376.3] - 2026-09-19
+
+### Fixed
+- let the detached launcher claim the handoff it owns
+- verify the PATH-resolved controller after install
+- reap unclaimed residue from durable registries
+
+## [0.376.2] - 2026-09-18
+
+### Fixed
+- inspect config paths and schedule health without disk spelunking
+- recover version-skewed lab daemons without interrupting proven work
+- check resolved runner admission in cook preview
+
+## [0.376.1] - 2026-09-18
+
+### Fixed
+- resolve unclaimed generation projections on reconcile
+- fall back when auto's preferred runner is inadmissible
+- reclaim stale markers on tick and surface consecutive failures
+
+## [0.376.0] - 2026-09-18
+
+### Added
+- probe and bounded reconnect for auto placement; report dispatch readiness
+- report resolved placement, and treat a deferred gate as deferred
+- local dispatch admission ceiling; stop asking the agent to verify
+
+### Changed
+- stop using wp-codebox as the example agent backend
+
+### Fixed
+- report a failed cook accurately
+
+## [0.375.0] - 2026-09-17
+
+### Added
+- add homeboy-edge-apply privileged config wrapper
+- claim-aware workspace reclamation with reaping audit
+
+### Fixed
+- report one status for an unreachable edge-apply probe
+- omit preview-generated run ids from Replay
+- fingerprint timeout uncommitted worktree patches
+- surface connect failure causes and stop Auto Cook parking on stale Lab
+- admit preview replay for unmaterialized worktrees
+- dispatch reliability — resolver surfacing, owned handoff claims, dispatch heartbeats
+- make recover --yes self-sufficient for dead lease recovery
+- report the real failure cause for daemon startup timeouts and pre-provider validation
+
+## [0.374.6] - 2026-09-16
+
+### Changed
+- run CI for PRs with any base branch and on retarget
+
+## [0.374.5] - 2026-09-16
+
+### Changed
+- Explain an SSH second factor instead of reporting a dead transport
+
+### Fixed
+- derive pre-provider phase and classification from outcome diagnostics
+- surface runner id and remote workspace path per child
+- tolerate not-yet-admitted children when reading status
+- retain failed cook workspaces by default
+- preserve run id lineage across transport retries
+- key the prepared-source hydration cache on repository, not checkout path
+- settle endpoint-proven terminal jobs during reconcile
+- render cook-batch summary on successful outcomes
+- name the root cause in diagnose instead of an empty summary
+- branch task worktrees from the shared base
+
+## [0.374.4] - 2026-09-15
+
+### Changed
+- replace synthetic reads with canonical ledger history
+
+### Fixed
+- scope generation retirement fencing to unsafe ownership
+- survive startup when jobs outlive their generation
+- keep changed-only review within the client window
+- refresh automatic admission readiness
+- bound repository-name and alias component selection
+
+## [0.374.3] - 2026-09-15
+
+### Changed
+- materialize one declared snapshot selection
+
+### Fixed
+- propagate partial inventory continuation
+- retire idle generations with preserved evidence
+
+## [0.374.2] - 2026-09-15
+
+### Changed
+- bound session fixture socket reads
+
+### Fixed
+- make filtered discovery pages useful
+- bound destination resolution
+- retain nextest failure evidence
+
+## [0.374.1] - 2026-09-15
+
+### Changed
+- use generation-owned controller job fixtures
+
+### Fixed
+- retire registered dead lease
+
+## [0.374.0] - 2026-09-14
+
+### Added
+- publish immutable commit candidates
+
+### Changed
+- isolate release artifact lease directory
+
+### Fixed
+- bound candidate tag verification
+- verify candidate asset identities
+- verify immutable candidate publication
+- bound recovery admission waits
+- recover missing review forms
+- bind candidate assets to authority manifest
+- initialize repository integrity evidence at remaining call sites
+- allow ignored repository portability policy
+- scope paged discovery health
+
 ## [0.373.14] - 2026-09-14
 
 ### Fixed

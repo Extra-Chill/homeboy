@@ -166,89 +166,94 @@ pub(super) fn attach_candidate_adoption_provenance(
 }
 
 pub(super) fn finalize_candidate_artifacts(outcome: &mut AgentTaskOutcome, running: &RunningTask) {
-    let Some(run_id) = running.run_id.as_deref() else {
+    for artifact in &mut outcome.artifacts {
+        if is_actionable_patch_artifact(artifact) {
+            bind_candidate_artifact_fingerprint(artifact, running);
+        }
+    }
+}
+
+pub(super) fn bind_candidate_artifact_fingerprint(
+    artifact: &mut AgentTaskArtifact,
+    running: &RunningTask,
+) {
+    let Some(run_id) = running.run_id.as_deref().filter(|id| !id.is_empty()) else {
         return;
     };
-    let timeout_or_recoverable = matches!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Timeout | AgentTaskOutcomeStatus::CandidateRecoverable
-    ) || outcome.artifacts.iter().any(|artifact| {
-        artifact.metadata.get("incomplete") == Some(&serde_json::Value::Bool(true))
-    });
-    let provenance_root = running.source_workspace_root.as_deref().or_else(|| {
-        timeout_or_recoverable
-            .then_some(running.request.workspace.root.as_deref())
-            .flatten()
-    });
-    let repository_identity =
-        canonical_repository_identity_for_root(provenance_root).or_else(|| {
-            timeout_or_recoverable
-                .then(|| local_repository_identity_for_root(provenance_root))
-                .flatten()
-        });
+    let provenance_root = running.source_workspace_root.as_deref().or(running
+        .request
+        .workspace
+        .root
+        .as_deref());
+    let repository_identity = canonical_repository_identity_for_root(provenance_root)
+        .or_else(|| local_repository_identity_for_root(provenance_root));
     let workspace_identity = running
         .source_provenance
         .as_ref()
         .and_then(|value| value.get("workspace_snapshot_identity"))
         .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| repository_identity.clone());
-    for artifact in &mut outcome.artifacts {
-        if !is_actionable_patch_artifact(artifact) {
-            continue;
+    if let Some(path) = artifact.path.as_deref() {
+        if let Ok(content) = std::fs::read(path) {
+            artifact.sha256 = Some(content_hash::sha256_hex(&content));
+            artifact.size_bytes = Some(content.len() as u64);
         }
-        let Some(path) = artifact.path.as_deref() else {
-            continue;
-        };
-        let Ok(content) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if !artifact.metadata.is_object() {
-            artifact.metadata = serde_json::json!({});
-        }
-        artifact.sha256 = Some(sha256(&content));
-        artifact
-            .metadata
-            .as_object_mut()
-            .expect("object metadata")
-            .extend(serde_json::Map::from_iter([
-                ("run_id".to_string(), serde_json::json!(run_id)),
-                ("task_id".to_string(), serde_json::json!(running.task_id)),
-                (
-                    "producer_attempt".to_string(),
-                    serde_json::json!(running.attempt),
-                ),
-                (
-                    "base_ref".to_string(),
-                    serde_json::json!(running.task_base_sha),
-                ),
-                (
-                    "provider_backend".to_string(),
-                    serde_json::json!(running.request.executor.backend),
-                ),
-                (
-                    "provider_selector".to_string(),
-                    serde_json::json!(running.request.executor.selector),
-                ),
-                (
-                    "provider_model".to_string(),
-                    serde_json::json!(running.request.executor.model()),
-                ),
-                (
-                    "repository_identity".to_string(),
-                    serde_json::json!(repository_identity),
-                ),
-                (
-                    "workspace_identity".to_string(),
-                    serde_json::json!(workspace_identity),
-                ),
-            ]));
-        artifact.url = Some(candidate_artifact_url(
-            run_id,
-            &running.task_id,
-            &artifact.id,
-        ));
     }
+    if !artifact.metadata.is_object() {
+        artifact.metadata = serde_json::json!({});
+    }
+    let metadata = artifact.metadata.as_object_mut().expect("object metadata");
+    metadata.extend(serde_json::Map::from_iter([
+        ("run_id".to_string(), serde_json::json!(run_id)),
+        ("task_id".to_string(), serde_json::json!(running.task_id)),
+        (
+            "producer_attempt".to_string(),
+            serde_json::json!(running.attempt),
+        ),
+        (
+            "provider_backend".to_string(),
+            serde_json::json!(running.request.executor.backend),
+        ),
+        (
+            "provider_selector".to_string(),
+            serde_json::json!(running.request.executor.selector),
+        ),
+        (
+            "provider_model".to_string(),
+            serde_json::json!(running.request.executor.model()),
+        ),
+    ]));
+    if let Some(base_ref) = running.task_base_sha.as_deref().filter(|id| !id.is_empty()) {
+        metadata.insert("base_ref".to_string(), serde_json::json!(base_ref));
+    }
+    if let Some(repository_identity) = repository_identity {
+        metadata.insert(
+            "repository_identity".to_string(),
+            serde_json::json!(repository_identity),
+        );
+    }
+    if let Some(workspace_identity) = workspace_identity {
+        metadata.insert(
+            "workspace_identity".to_string(),
+            serde_json::json!(workspace_identity),
+        );
+    }
+    if let Some(root) = running
+        .request
+        .workspace
+        .root
+        .as_deref()
+        .filter(|root| !root.is_empty())
+    {
+        metadata.insert("workspace_root".to_string(), serde_json::json!(root));
+    }
+    artifact.url = Some(candidate_artifact_url(
+        run_id,
+        &running.task_id,
+        &artifact.id,
+    ));
 }
 
 fn candidate_adoption_failure(message: String) -> AgentTaskOutcome {
