@@ -157,9 +157,14 @@ assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-acti
 # tooling-identity and the release gated on it share one tooling revision.
 assert_contains 'workflow_call:' "${REUSABLE_RELEASE}" "reusable release workflow is callable"
 assert_contains 'action-ref:' "${REUSABLE_RELEASE}" "reusable release workflow exposes action-ref revision pinning"
-assert_contains 'uses: Extra-Chill/homeboy-action@${{ steps.action-sha.outputs.sha }}' "${REUSABLE_RELEASE}" "reusable release check runs the resolved action revision"
-assert_contains 'uses: Extra-Chill/homeboy-action@${{ needs.check.outputs.action-sha }}' "${REUSABLE_RELEASE}" "reusable release job runs the same resolved action revision as the check"
-assert_not_contains 'uses: ./' "${REUSABLE_RELEASE}" "reusable release workflow never uses the caller-relative ./ path"
+# `uses:` does not accept expressions, so the resolved revision is checked out
+# into .homeboy-action and invoked by local path — the reusable CI contract.
+assert_contains 'ref: ${{ steps.action-sha.outputs.sha }}' "${REUSABLE_RELEASE}" "reusable release check checks out the resolved action revision"
+assert_contains 'ref: ${{ needs.check.outputs.action-sha }}' "${REUSABLE_RELEASE}" "reusable release job checks out the same resolved action revision as the check"
+assert_contains 'uses: ./.homeboy-action' "${REUSABLE_RELEASE}" "reusable release workflow invokes the nested action checkout by local path"
+assert_not_contains 'uses: Extra-Chill/homeboy-action@${{' "${REUSABLE_RELEASE}" "reusable release workflow never interpolates an expression into uses:"
+assert_not_contains 'uses: \./$' "${REUSABLE_RELEASE}" "reusable release workflow never uses the bare caller-relative ./ path"
+assert_contains ".homeboy-action/' >> .git/info/exclude" "${REUSABLE_RELEASE}" "reusable release workflow excludes the nested action checkout from the release working-tree gate"
 assert_contains 'startsWith(github.event.head_commit.message' "${REUSABLE_RELEASE}" "reusable release workflow skips pushes of release commits"
 assert_contains "github.event_name == 'workflow_dispatch'" "${REUSABLE_RELEASE}" "reusable release workflow detects manual dispatch for the marker bypass"
 assert_contains 'IS_MANUAL_DISPATCH' "${REUSABLE_RELEASE}" "reusable release workflow gates the failed-SHA skip on non-dispatch runs"

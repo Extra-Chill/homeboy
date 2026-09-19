@@ -35,13 +35,14 @@
 #       secrets: inherit
 #
 # Action revision: inside a reusable workflow, a caller-relative action path
-# resolves to the CALLER's checkout, not this repository. The composite action
-# is therefore invoked as Extra-Chill/homeboy-action@<action-ref>, following
-# the same
-# contract as the reusable CI workflow: action-ref is resolved to one
-# immutable revision in the check job and reused by the release job, so the
-# dry-run that computed tooling-identity and the release gated on it run the
-# same tooling even if the floating tag moves mid-run.
+# resolves to the CALLER's checkout, not this repository, and `uses:` does not
+# accept expressions, so the revision cannot be interpolated into the `uses:`
+# line either. The workflow therefore follows the reusable CI workflow's
+# contract exactly: action-ref is resolved to one immutable SHA in the check
+# job, that SHA is checked out into `.homeboy-action` in every job that needs
+# the composite action, and the action is invoked as `uses: ./.homeboy-action`.
+# The dry-run that computed tooling-identity and the release gated on it run
+# the same tooling even if the floating tag moves mid-run.
 
 name: Homeboy Release
 
@@ -171,9 +172,24 @@ jobs:
           echo "Resolved ${ACTION_REF} -> ${sha}"
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
 
+      - name: Check out resolved action revision
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ steps.action-sha.outputs.sha }}
+          path: .homeboy-action
+
+      # The nested action checkout is untracked in the consumer repository and
+      # `homeboy release` treats untracked paths as a dirty working tree.
+      # Exclude it per-clone (never a tracked change) so the gate stays honest
+      # about the consumer's own files.
+      - name: Exclude nested action checkout from the working tree
+        shell: bash
+        run: echo '.homeboy-action/' >> .git/info/exclude
+
       - name: Dry-run release check
         id: release-check
-        uses: Extra-Chill/homeboy-action@${{ steps.action-sha.outputs.sha }}
+        uses: ./.homeboy-action
         with:
           commands: release
           args: ${{ inputs.args }}
@@ -255,7 +271,22 @@ jobs:
           persist-credentials: false
           token: ${{ steps.app-token.outputs.token || github.token }}
 
-      - uses: Extra-Chill/homeboy-action@${{ needs.check.outputs.action-sha }}
+      - name: Check out resolved action revision
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.check.outputs.action-sha }}
+          path: .homeboy-action
+
+      # The nested action checkout is untracked in the consumer repository and
+      # `homeboy release` treats untracked paths as a dirty working tree.
+      # Exclude it per-clone (never a tracked change) so the gate stays honest
+      # about the consumer's own files.
+      - name: Exclude nested action checkout from the working tree
+        shell: bash
+        run: echo '.homeboy-action/' >> .git/info/exclude
+
+      - uses: ./.homeboy-action
         id: release
         with:
           commands: release
