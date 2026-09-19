@@ -528,6 +528,23 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     let cook_id = sanitize_run_id(cook_id);
     let _ = record_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id)?;
     let launcher_id = launcher_id.to_string();
+    // The local launcher claims, then publishes supervision (`supervising`),
+    // then a later step in the same admission — output-file bootstrap in the
+    // detached child — claims again with that same owner id. Refusing because
+    // admission has advanced is a self-collision: the owner is asking for the
+    // handoff it already holds (#14768). Identity match here is not a second
+    // owner; it is idempotent re-entry.
+    if let Ok(existing) = lifecycle_store.read_record(&cook_id) {
+        let handoff = &existing.metadata["detached_cook_handoff"];
+        if handoff["cook_id"] == cook_id
+            && handoff["launcher_id"] == launcher_id
+            && handoff["cancellation_fence"]["state"] == "open"
+            && !existing.state.is_terminal()
+            && detached_cook_launcher_is_live(&existing, chrono::Utc::now())
+        {
+            return Ok(existing);
+        }
+    }
     let launcher_pid = std::process::id();
     let launcher_start_identity = homeboy_core::process::process_start_identity(launcher_pid)
         .ok()
@@ -573,6 +590,16 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         true
     })?;
     if let Some(record) = claimed {
+        // The pending-with-no-PID parking phase cannot outlive an ownership
+        // claim: an owner is on record now, and recovery reads that, not the
+        // unclaimed placeholder phase (#14710, #14706).
+        record_cook_progress_in_store(
+            lifecycle_store,
+            &record.run_id,
+            "detached_handoff_claimed",
+            0,
+            Some("a live launcher owns the handoff and is materializing the first attempt"),
+        )?;
         return Ok(record);
     }
     let existing = lifecycle_store.read_record(&cook_id).ok();

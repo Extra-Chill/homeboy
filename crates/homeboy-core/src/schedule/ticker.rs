@@ -67,13 +67,15 @@ impl ScheduleTicker {
     ///
     /// Returns the ids dispatched. Run threads are intentionally not joined —
     /// the daemon must be able to shut down promptly without waiting on an
-    /// arbitrarily long scheduled command. Each run records its own outcome, and
-    /// [`reclaim_stale_runs`] recovers state if the process dies mid-run.
+    /// arbitrarily long scheduled command. Each run records its own outcome.
+    /// Stale `running` markers are reclaimed on this path so a live daemon
+    /// cannot leave an enabled schedule un-run for many cadences.
     pub fn dispatch_due(
         &self,
         now: chrono::DateTime<chrono::Utc>,
         runner: Arc<dyn ScheduleCommandRunner>,
     ) -> Vec<String> {
+        let _ = reclaim_stale_runs(now);
         let claimed = self.claim_due(now);
         let mut dispatched = Vec::with_capacity(claimed.len());
         for schedule in claimed {
@@ -100,8 +102,10 @@ impl ScheduleTicker {
 
 /// Clear `running` markers left behind by a process that died mid-run.
 ///
-/// Runs once at ticker start, matching how the daemon reconciles expired
-/// reservations and admissions when it opens its job store.
+/// Called on every tick before due schedules are claimed, so a live daemon
+/// cannot leave a stale marker wedged under skip-on-overlap. A marker younger
+/// than [`STALE_RUN_RECLAIM_SECS`] is left alone so a genuinely in-flight run
+/// is not reclaimed out from under itself.
 pub fn reclaim_stale_runs(now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
     let Ok(schedules) = super::list() else {
         return Vec::new();
@@ -322,6 +326,82 @@ mod tests {
 
             assert!(reclaim_stale_runs(now).is_empty());
             assert!(load_state("still-going").running, "slow is not abandoned");
+        });
+    }
+
+    /// A live ticker that did not just start must still reclaim a marker older
+    /// than the threshold and run the schedule on that tick.
+    #[test]
+    fn a_live_ticker_reclaims_a_stale_marker_and_runs_the_due_schedule() {
+        crate::test_support::with_isolated_home(|_| {
+            super::super::save(&schedule("stale-live")).expect("save");
+            let now = chrono::Utc::now();
+            save_state(
+                "stale-live",
+                &ScheduleState {
+                    last_run_at: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+                    running: true,
+                    started_at: Some(
+                        (now - chrono::Duration::seconds(STALE_RUN_RECLAIM_SECS + 60)).to_rfc3339(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .expect("save state");
+
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let runner = Arc::new(CountingRunner {
+                calls: Arc::clone(&calls),
+                block: None,
+            });
+            let ticker = ScheduleTicker::new();
+            let dispatched = ticker.dispatch_due(now, runner);
+            assert_eq!(dispatched, vec!["stale-live".to_string()]);
+
+            for _ in 0..200 {
+                if ticker.in_flight_count() == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(calls.lock().expect("calls").len(), 1);
+            assert!(!load_state("stale-live").running, "stale marker reclaimed");
+        });
+    }
+
+    /// A genuinely in-flight run younger than the reclaim threshold must keep
+    /// single-flight: the live tick must not reclaim it out from under itself.
+    #[test]
+    fn a_live_ticker_does_not_reclaim_a_young_in_flight_run() {
+        crate::test_support::with_isolated_home(|_| {
+            super::super::save(&schedule("young-inflight")).expect("save");
+            let now = chrono::Utc::now();
+            save_state(
+                "young-inflight",
+                &ScheduleState {
+                    last_run_at: Some((now - chrono::Duration::hours(24)).to_rfc3339()),
+                    running: true,
+                    started_at: Some((now - chrono::Duration::minutes(5)).to_rfc3339()),
+                    ..Default::default()
+                },
+            )
+            .expect("save state");
+
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let runner = Arc::new(CountingRunner {
+                calls: Arc::clone(&calls),
+                block: None,
+            });
+            let dispatched = ScheduleTicker::new().dispatch_due(now, runner);
+            assert!(
+                dispatched.is_empty(),
+                "a young in-flight run must not be reclaimed"
+            );
+            assert!(
+                load_state("young-inflight").running,
+                "single-flight preserved"
+            );
+            assert!(calls.lock().expect("calls").is_empty());
         });
     }
 

@@ -456,6 +456,92 @@ fn clean_snapshot_reuse_ignores_legacy_metadata_without_a_lease() {
     });
 }
 
+/// Two children of one fanout wave never share a controller-side checkout:
+/// each attempt materializes into its own linked Git worktree
+/// (`agent_task_scheduler::attempt_workspace`). The prepared-source cache
+/// must still recognize them as the same install when the worktrees share a
+/// repository and an identical commit, or a wave pays for the same hydration
+/// once per child instead of once per repository (#14684).
+#[test]
+fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-prepared-cache-worktree", runner_root.path());
+        let source = git_source(
+            "homeboy@prepared-cache-worktree",
+            "fix/prepared-cache",
+            "source\n",
+        );
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/prepared-cache-worktree.git",
+            ],
+        );
+        // A second wave child at the identical commit, materializing from an
+        // independent worktree of the same repository rather than the first
+        // child's checkout path.
+        let second_attempt_parent = tempfile::tempdir().expect("second attempt parent");
+        let second_attempt_path = second_attempt_parent.path().join("workspace");
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                second_attempt_path.to_str().expect("second attempt path"),
+                "HEAD",
+            ],
+        );
+
+        let mut options = sync_options(
+            source.path().display().to_string(),
+            Some("job-one".to_string()),
+        );
+        options.mode = RunnerWorkspaceSyncMode::Git;
+        options.controller_routed_git = true;
+        let (first, _) = sync_workspace("lab-local-prepared-cache-worktree", options.clone())
+            .expect("first child materializes source");
+        std::fs::write(
+            std::path::Path::new(&first.remote_path).join("dependency-marker"),
+            "hydrated\n",
+        )
+        .expect("simulate dependency hydration");
+        save_prepared_source_cache(
+            "lab-local-prepared-cache-worktree",
+            &first.local_path,
+            &first.remote_path,
+        )
+        .expect("save immutable prepared source");
+
+        options.path = second_attempt_path.display().to_string();
+        options.run_isolation_token = Some("job-two".to_string());
+        let (second, _) = sync_workspace("lab-local-prepared-cache-worktree", options)
+            .expect("second child materializes from its own worktree");
+
+        assert_ne!(first.remote_path, second.remote_path);
+        assert_eq!(
+            second
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some("prepared_source_view"),
+            "a sibling worktree of the same repository at the identical commit must reuse \
+             the already-hydrated prepared source instead of hydrating again"
+        );
+        assert!(
+            std::path::Path::new(&second.remote_path)
+                .join("dependency-marker")
+                .is_file(),
+            "the reused view must carry the first child's completed hydration"
+        );
+        make_cache_fixture_writable(&runner_root.path().join("_lab_prepared_sources"));
+    });
+}
+
 #[test]
 fn same_commit_prepared_source_cache_creates_private_job_views() {
     homeboy_core::test_support::with_isolated_home(|_| {

@@ -9,7 +9,6 @@ use serde_json::Value;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 const DAEMON_TEST_RESPONSE_LIMIT_BYTES: u64 = 64 * 1024;
@@ -291,11 +290,21 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
     panic!("timed out waiting for {label}");
 }
 
+fn serving_daemon_generation() -> (DaemonState, JobStore) {
+    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    generation_store::seed(&state).expect("seed generation");
+    let store = JobStore::open_without_reconciliation(
+        &crate::paths::daemon_jobs_file().expect("jobs path"),
+    )
+    .expect("durable store")
+    .with_daemon_lease(state.lease_id.clone());
+    (state, store)
+}
+
 #[test]
 fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (old, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -523,8 +532,8 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
             .expect("unresolved ID"),
     )
     .expect("valid unresolved ID");
-    let restarted =
-        JobStore::open_without_reconciliation(&path).expect("restart opens durable store");
+    let (current, restarted) = serving_daemon_generation();
+    assert_ne!(old.lease_id, current.lease_id);
     recover_controller_jobs(&restarted);
     started_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -554,8 +563,7 @@ fn controller_jobs_are_durable_idempotent_and_fail_closed_after_restart() {
 #[test]
 fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (old, store) = serving_daemon_generation();
     let (cancelled_checkpoint_tx, cancelled_checkpoint_rx) = mpsc::channel();
     let (release_cancel_tx, release_cancel_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -599,7 +607,8 @@ fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
         .request_controller_cancellation(job_id, "daemon crashed".to_string())
         .expect("persist cancellation intent");
 
-    let restarted = JobStore::open_without_reconciliation(&path).expect("reopen durable store");
+    let (current, restarted) = serving_daemon_generation();
+    assert_ne!(old.lease_id, current.lease_id);
     recover_controller_jobs(&restarted);
     assert_eq!(
         cancelled_checkpoint_rx
@@ -637,8 +646,7 @@ fn recovered_cancellation_calls_driver_with_checkpoint_before_terminalizing() {
 #[test]
 fn cancelling_queued_controller_job_before_start_is_terminal_and_blocks_execution() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (_release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -718,8 +726,7 @@ fn cancelling_queued_controller_job_before_start_is_terminal_and_blocks_executio
 #[test]
 fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let executions = Arc::new(AtomicUsize::new(0));
@@ -792,8 +799,7 @@ fn generic_cancel_rejects_running_controller_work_without_touching_its_driver() 
 #[test]
 fn cancelling_running_controller_job_acknowledges_before_blocked_shutdown_finishes() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let (cancellation_release, cancellation_rx) = mpsc::channel();
@@ -1023,8 +1029,7 @@ fn controller_job_created_by_disconnected_tcp_client_stays_queued_and_cancellabl
 #[test]
 fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(
@@ -1088,8 +1093,7 @@ fn controller_job_cancel_failure_is_diagnostic_and_non_cancelled() {
 #[test]
 fn controller_job_errors_use_driver_safe_public_projection() {
     let _home = HomeGuard::new();
-    let path = crate::paths::daemon_jobs_file().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(SecretErrorControllerDriver {
@@ -2173,14 +2177,24 @@ fn stop_without_state_reports_noop() {
 #[test]
 fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
     let _home = HomeGuard::new();
+    let _wait = OperationLockWaitGuard::set("150");
 
-    let _held = acquire_daemon_operation_lock().expect("first lock");
+    let holder = acquire_daemon_operation_lock().expect("first lock");
     let err = acquire_daemon_operation_lock().expect_err("second lock fails");
+    drop(holder);
 
-    assert!(err
-        .message
-        .contains("daemon lifecycle operation already in progress"));
+    assert!(
+        err.message
+            .contains("daemon lifecycle operation is held by live PID"),
+        "the refusal names the live holder: {}",
+        err.message
+    );
     assert!(err.message.contains("operation.lock"));
+    assert!(
+        err.message.contains("daemon recover --yes"),
+        "the refusal carries the reclaim step: {}",
+        err.message
+    );
 }
 
 #[cfg(unix)]
@@ -2231,10 +2245,14 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
         panic!("operation lock holder did not become ready");
     }
 
+    let _wait = OperationLockWaitGuard::set("200");
     let err = acquire_daemon_operation_lock().expect_err("live child excludes lifecycle operation");
-    assert!(err
-        .message
-        .contains("daemon lifecycle operation already in progress"));
+    assert!(
+        err.message
+            .contains("daemon lifecycle operation is held by live PID"),
+        "the refusal names the live child: {}",
+        err.message
+    );
 
     std::fs::write(&release, "release").expect("release operation lock holder");
     assert!(child.wait().expect("wait for lock holder").success());
@@ -2244,18 +2262,60 @@ fn daemon_operation_lock_recovers_after_owner_exits_without_drop() {
 #[cfg(unix)]
 #[test]
 fn daemon_operation_lock_is_released_when_a_lifecycle_child_execs() {
+    const CHILD_ENV: &str = "HOMEBOY_TEST_DAEMON_OPERATION_LOCK_EXEC_CHILD";
+
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let ready = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-exec-child.ready");
+        let release = state_path()
+            .expect("state path")
+            .with_file_name("operation-lock-exec-child.release");
+        // Reaching the test body proves exec closed the CLOEXEC lock descriptor.
+        std::fs::write(&ready, "ready").expect("signal exec child readiness");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(release.exists(), "lifecycle exec child was not released");
+        return;
+    }
+
     let _home = HomeGuard::new();
+    let ready = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-exec-child.ready");
+    let release = state_path()
+        .expect("state path")
+        .with_file_name("operation-lock-exec-child.release");
     let mut child = {
         let _lock = acquire_daemon_operation_lock().expect("acquire launcher lock");
-        Command::new("sh")
-            .args(["-c", "sleep 30"])
+        Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--exact")
+            .arg(crate::test_support::harness_test_name(
+                module_path!(),
+                "daemon_operation_lock_is_released_when_a_lifecycle_child_execs",
+            ))
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
             .spawn()
-            .expect("spawn detached lifecycle child")
+            .expect("spawn lifecycle exec child")
     };
 
-    acquire_daemon_operation_lock().expect("child exec must not retain lifecycle lock");
-    child.kill().expect("stop lifecycle child");
-    child.wait().expect("reap lifecycle child");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !ready.exists() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("lifecycle exec child did not become ready");
+    }
+    let reacquired = acquire_daemon_operation_lock();
+    std::fs::write(&release, "release").expect("release lifecycle exec child");
+    let child_status = child.wait().expect("reap lifecycle exec child");
+    let _lock = reacquired.expect("child exec must not retain lifecycle lock");
+    assert!(child_status.success());
 }
 
 #[test]
@@ -3268,11 +3328,38 @@ fn reverse_runner_submission_cannot_persist_while_reconciliation_holds_admission
     assert_eq!(store.list().len(), 1);
 }
 
+#[test]
+fn destructive_recovery_bounds_admission_contention_before_mutating() {
+    let _home = HomeGuard::new();
+    let shared =
+        super::acquire_daemon_admission_lock().expect("admission preflight holds shared lock");
+    let started = Instant::now();
+
+    let error = match super::acquire_daemon_job_admission_fence_with_wait(Duration::from_millis(10))
+    {
+        Ok(_) => panic!("recovery must not wait indefinitely for an unpersisted admission"),
+        Err(error) => error,
+    };
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert_eq!(
+        error.details["classification"],
+        "daemon_admission_fence_timeout"
+    );
+    assert_eq!(error.details["lifecycle_mutation"], "not_started");
+    assert_eq!(error.retryable, Some(true));
+    drop(shared);
+
+    super::acquire_daemon_job_admission_fence_with_wait(Duration::ZERO)
+        .expect("idle recovery acquires the released admission fence");
+}
+
 #[cfg(unix)]
 #[test]
 fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admission() {
     let _home = HomeGuard::new();
-    let store = JobStore::default();
+    let (_current, store) = serving_daemon_generation();
     let (started_tx, _started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     controller_job_driver::register_controller_job_driver(Arc::new(BlockingControllerDriver {
@@ -3287,9 +3374,8 @@ fn parallel_build_recovery_cannot_replace_daemon_between_cook_preflight_and_admi
 
     // This is the guard retained by LocalControllerJobClient after it has
     // verified the resident build but before it posts the Cook job.
-    let preflight_guard =
-        super::acquire_daemon_admission_lock(super::DaemonAdmissionLockMode::Shared)
-            .expect("Cook preflight acquires shared generation guard");
+    let preflight_guard = super::acquire_daemon_admission_lock()
+        .expect("Cook preflight acquires shared generation guard");
     let (recovery_attempt_tx, recovery_attempt_rx) = mpsc::channel();
     let (recovery_acquired_tx, recovery_acquired_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -3884,4 +3970,92 @@ fn status_is_not_running_without_state_file() {
     assert!(!status.running);
     assert!(status.state.is_none());
     assert!(status.state_path.ends_with("daemon/state.json"));
+}
+
+struct OperationLockWaitGuard {
+    prior: Option<std::ffi::OsString>,
+}
+
+impl OperationLockWaitGuard {
+    fn set(wait_ms: &str) -> Self {
+        let prior = std::env::var_os(DAEMON_OPERATION_LOCK_WAIT_MS_ENV);
+        std::env::set_var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV, wait_ms);
+        Self { prior }
+    }
+}
+
+impl Drop for OperationLockWaitGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(value) => std::env::set_var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV, value),
+            None => std::env::remove_var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV),
+        }
+    }
+}
+
+fn test_operation_lock() -> crate::Result<std::path::PathBuf> {
+    let state = state_path().expect("state path");
+    std::fs::create_dir_all(state.parent().expect("parent")).expect("create lock dir");
+    Ok(state.parent().expect("parent").join("operation.lock"))
+}
+
+/// #14706: an unowned lock file is reclaimable — a fresh descriptor takes the
+/// advisory lock after the stale inode is dropped, and the released holder
+/// reacquires normally afterwards.
+#[cfg(unix)]
+#[test]
+fn an_unowned_daemon_operation_lock_is_reclaimable() {
+    let _home = HomeGuard::new();
+    let path = test_operation_lock().expect("lock path");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create lock dir");
+    if operation_lock_holder_pids(&path) == OperationLockHolderState::Undetermined {
+        return;
+    }
+    let _reclaimed =
+        reclaim_unowned_daemon_operation_lock(&path).expect("reclaim unowned lock file");
+    let reacquired = acquire_daemon_operation_lock().expect("acquire reclaimed lock");
+    drop(reacquired);
+}
+
+/// A live, namable holder is reported with its PID instead of being killed.
+#[cfg(unix)]
+#[test]
+fn a_live_daemon_operation_lock_holder_is_named_by_the_error() {
+    if Command::new("python3").arg("-V").output().is_err() {
+        return;
+    }
+    let _home = HomeGuard::new();
+    let path = test_operation_lock().expect("lock path");
+    let mut holder = Command::new("python3")
+        .args([
+            "-c",
+            "import fcntl,sys,time;f=open(sys.argv[1],'a+');fcntl.flock(f,fcntl.LOCK_EX);time.sleep(60)",
+        ])
+        .arg(&path)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn lock holder");
+    let holder_pid = holder.id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for _ in 0..100 {
+        if matches!(
+            operation_lock_holder_pids(&path),
+            OperationLockHolderState::Live(holders) if holders.contains(&holder_pid)
+        ) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("lsof never observed the spawned holder");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _wait = OperationLockWaitGuard::set("200");
+    let error = acquire_daemon_operation_lock().expect_err("live holder blocks acquire");
+    assert!(
+        error.message.contains(&format!("live PID {holder_pid}"))
+            || error.message.contains(&holder_pid.to_string()),
+        "the error names the holder: {}",
+        error.message
+    );
+    holder.kill().expect("kill holder");
 }

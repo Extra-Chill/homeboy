@@ -43,8 +43,11 @@ enum DaemonCommand {
     ///
     /// Reads `homeboy daemon status` once to plan and fill every recovery
     /// argument, then re-reads it after execution to verify freshness. The
-    /// explicit subcommands below stay available as escape hatches for the
-    /// cases this cannot resolve.
+    /// specialized subcommands stay available as escape hatches: any one of
+    /// them is surfaced with its own exact argv in `recover`'s plan when the
+    /// current evidence requires it (#14707: `recover` is the primary
+    /// recovery surface, so the specialist verbs are hidden from general
+    /// discovery and appear only when a plan names them).
     Recover {
         /// Print the resolved plan without running it. This is the default.
         #[arg(long)]
@@ -62,6 +65,7 @@ enum DaemonCommand {
         addr: String,
     },
     /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
+    #[command(hide = true)]
     AdoptOrphan {
         /// Exact lease ID reported by `homeboy daemon status`
         #[arg(long)]
@@ -73,6 +77,7 @@ enum DaemonCommand {
         addr: String,
     },
     /// Reconcile an exact PID-less job set after one proven unexpected daemon exit
+    #[command(hide = true)]
     ReconcileDeadLeaseOrphans {
         #[arg(long)]
         lease_id: String,
@@ -91,6 +96,7 @@ enum DaemonCommand {
         addr: String,
     },
     /// Recover one legacy job with exact PID and Linux start-tick evidence.
+    #[command(hide = true)]
     RecoverMissingChildIdentity {
         #[arg(long)]
         lease_id: String,
@@ -106,6 +112,7 @@ enum DaemonCommand {
         child_starttime_ticks: u64,
     },
     /// Explicitly reconcile active jobs after proving a missing-lease store has no daemon owner
+    #[command(hide = true)]
     ReconcileLeaselessOrphans {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
@@ -115,6 +122,7 @@ enum DaemonCommand {
     },
     /// On Linux, preview unleased daemon candidates, or explicitly retire only
     /// proven orphan candidates and start a replacement when the durable store is idle.
+    #[command(hide = true)]
     ReconcileUnleasedCandidates {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
@@ -130,6 +138,7 @@ enum DaemonCommand {
         replacement_operation_id: Option<String>,
     },
     /// Recover one exact lease after its daemon state record was lost
+    #[command(hide = true)]
     RecoverMissingLeaseState {
         /// Exact lease ID captured before the daemon state record was lost
         #[arg(long)]

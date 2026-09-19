@@ -205,6 +205,18 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
         }
     }
 
+    for component in standalone_base_at(config_root)? {
+        if seen.insert(component.id.clone()) {
+            components.push(component);
+        }
+    }
+
+    components.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(components)
+}
+
+fn standalone_base_at(config_root: Option<&Path>) -> Result<Vec<Component>> {
+    let mut components = Vec::new();
     let dir = components_dir(config_root)?;
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -215,9 +227,6 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if seen.contains(id) {
-                continue;
-            }
             let Some(content) = read_bounded_base_registration(&path) else {
                 continue;
             };
@@ -225,7 +234,6 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
                 continue;
             };
             if let Some(component) = component_from_standalone_config(id, json) {
-                seen.insert(component.id.clone());
                 components.push(component);
             }
         }
@@ -277,12 +285,14 @@ pub fn registered_primary_by_id(id: &str) -> Result<Option<Component>> {
     load_standalone_component_core(None, id)
 }
 
-/// List standalone component registrations without project attachments.
+/// List standalone registration metadata without opening registered checkouts.
 ///
-/// This preserves the durable component identity for unscoped operations while
-/// [`registered`] and [`registered_by_id`] retain project attachment precedence.
+/// Repository and alias selection needs persisted identity, not portable config
+/// enrichment or sibling discovery. Load the selected component through
+/// [`registered_primary_by_id`] when repo-owned execution fields are needed.
+/// Project attachments remain scoped to [`registered`] and [`registered_by_id`].
 pub fn registered_primary() -> Result<Vec<Component>> {
-    load_standalone_components_core(None)
+    standalone_base_at(None)
 }
 
 /// [`registered_by_id`] against an already-resolved config root (#7505).

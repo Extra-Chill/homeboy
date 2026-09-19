@@ -877,6 +877,7 @@ pub(super) fn intercept_local_detached_cook(
                 Some(&cook_id),
                 run_id,
             );
+            crate::commands::agent_task::run::announce_resolved_execution_placement();
         }
         let envelope = handoff_envelope(
             &cook_id,

@@ -20,10 +20,10 @@ use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
 use super::fanout::AgentTaskFanoutArgs;
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
-    RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs,
-    RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
-    SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
+    LifecycleReadArgs, LogsArgs, MigrateEventHistoryArgs, PlacementUpdateArgs, PromoteArgs,
+    QuarantineArgs, RearmArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
+    ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunNextArgs, RunPlanArgs, RuntimeRecoverArgs,
+    RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs, VerifyReplacementArgs,
 };
 
 pub use super::super::auth::{
@@ -136,6 +136,9 @@ pub enum AgentTaskCommand {
     Latest(LatestArgs),
     /// Read the canonical durable event stream for a run.
     Logs(LogsArgs),
+    /// Persist recoverable historical progress onto the canonical ledger for one
+    /// exact run without reconciling provider or lifecycle state.
+    MigrateEventHistory(MigrateEventHistoryArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(LifecycleReadArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
@@ -382,7 +385,8 @@ mod cook_continue_tests {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// Maximum matching durable runs to return.
+    /// Maximum matching durable runs to return (effective maximum: 100; output
+    /// reports both the requested and effective limits).
     #[arg(
         long = "limit",
         value_name = "N",
@@ -427,8 +431,9 @@ pub struct ListArgs {
 }
 #[derive(Args, Debug)]
 pub struct ActiveArgs {
-    /// Cap active discovery to a positive page size. Cannot be combined with
-    /// `--full` or fleet-wide `--reconcile`.
+    /// Cap active discovery to a positive page size (effective maximum: 100;
+    /// output reports both the requested and effective limits). Cannot be
+    /// combined with `--full` or fleet-wide `--reconcile`.
     #[arg(
         long = "limit",
         value_name = "N",
@@ -684,5 +689,28 @@ mod tests {
             "{help}"
         );
         assert!(!help.contains("--verify 'cargo test'"), "{help}");
+    }
+
+    #[test]
+    fn migrate_event_history_parses_an_exact_run_id() {
+        use clap::Parser;
+
+        use crate::cli_surface::{Cli, Commands};
+        use crate::commands::agent_task::AgentTaskCommand;
+
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "migrate-event-history",
+            "run-historical",
+        ])
+        .expect("migrate-event-history parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::MigrateEventHistory(args) = agent_task.command else {
+            panic!("expected migrate-event-history command");
+        };
+        assert_eq!(args.run_id, "run-historical");
     }
 }

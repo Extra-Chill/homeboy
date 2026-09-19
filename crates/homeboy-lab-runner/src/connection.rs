@@ -2231,19 +2231,19 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     let active_job_count = selected_active_job_count;
     let (generation_inventory, generation_owners) =
         super::generation_store::status_admission_projection(runner_id, session.as_ref())?;
-    let authoritative_generation_count = generation_inventory
+    let authoritative_live_count = generation_inventory
         .iter()
         .find(|generation| generation.admission_owner)
         .filter(|generation| generation.active_job_count_authoritative)
-        .map(|generation| generation.active_job_count);
+        .map(|generation| generation.live_job_count());
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(_)) if authoritative_generation_count.is_some_and(|count| count != active_job_count) => {
+        (None, Some(_)) if authoritative_live_count.is_some_and(|count| count != active_job_count) => {
             Some(RunnerActiveJobError {
                 code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
                     "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger retains {}",
-                    authoritative_generation_count.expect("guarded by is_some_and")
+                    authoritative_live_count.expect("guarded by is_some_and")
                 ),
             })
         }
@@ -2333,6 +2333,8 @@ pub fn reconcile_status_with_outcome_in_roots(
     Ok(RunnerReconcileStatusOutcome {
         status: status_in_roots(roots, runner_id)?,
         retired_generation_ids: generation_reconcile.retired_generation_ids,
+        retirement_blockers: generation_reconcile.retirement_blockers,
+        retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
     })
 }
 
@@ -2340,6 +2342,8 @@ pub fn reconcile_status_with_outcome_in_roots(
 pub struct RunnerReconcileStatusOutcome {
     pub status: RunnerStatusReport,
     pub retired_generation_ids: Vec<String>,
+    pub retirement_blockers: std::collections::BTreeMap<String, String>,
+    pub retained_evidence_generation_count: usize,
 }
 
 /// Return the persisted controller-side session projection without reconnecting,
@@ -3021,6 +3025,13 @@ pub(crate) fn tunnel_process_is_owned_with_observation(
     )
 }
 
+fn typed_probe_timed_out(error: &Error, started: Instant, timeout: Duration) -> bool {
+    error.details["request_timeout"]
+        .as_bool()
+        .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"))
+        || started.elapsed() >= timeout
+}
+
 fn runner_jobs_with_client(
     runner_id: &str,
     session: &RunnerSession,
@@ -3075,9 +3086,7 @@ fn runner_jobs_with_client(
         Ok((active_jobs, stale_jobs))
     })();
     if let Err(error) = &result {
-        let timed_out = error.details["request_timeout"]
-            .as_bool()
-            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
+        let timed_out = typed_probe_timed_out(error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_typed_jobs".to_string(),
             runner_id: Some(runner_id.to_string()),
@@ -3158,9 +3167,7 @@ fn runner_running_runs_with_client(
 ) -> Result<Vec<RunSummary>> {
     let started = Instant::now();
     let data = daemon_get(client, local_url, "/runs?status=running&limit=1000").map_err(|error| {
-        let timed_out = error.details["request_timeout"]
-            .as_bool()
-            .unwrap_or_else(|| error.message.to_ascii_lowercase().contains("timed out"));
+        let timed_out = typed_probe_timed_out(&error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_running_runs".to_string(),
             runner_id: Some(runner_id.to_string()),
@@ -3550,6 +3557,27 @@ pub(crate) fn reverse_broker_artifact_content_at(
 /// transport. Direct sessions read the daemon's persisted job result; reverse
 /// sessions use the broker content endpoint.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
+    if super::generation_store::job_session(runner_id, job_id, None)?.is_none()
+        && super::generation_store::has_retired_evidence_owner(runner_id, None, Some(artifact_id))?
+    {
+        let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+        let artifact = store.get_artifact(artifact_id)?.ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "retained controller artifact {artifact_id} is missing"
+            ))
+        })?;
+        super::evidence::validate_controller_artifact_bytes(&artifact)?;
+        let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+            method: homeboy_core::http_api::HttpMethod::Get,
+            path: format!(
+                "/runs/{}/artifacts/{}/content",
+                homeboy_core::execution_contract::encode_uri_component(&artifact.run_id),
+                homeboy_core::execution_contract::encode_uri_component(artifact_id)
+            ),
+            body: None,
+        })?;
+        return Ok(response.body);
+    }
     let report = status(runner_id)?;
     let Some(legacy_session) = report.session.filter(|_| report.connected) else {
         return Err(Error::validation_invalid_argument(

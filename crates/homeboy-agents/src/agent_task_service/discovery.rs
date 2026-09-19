@@ -34,6 +34,13 @@ pub enum AgentTaskDiscoveryFilter {
 }
 
 const AGENT_TASK_PAGE_CURSOR_SCHEMA: &str = "homeboy/agent-task-discovery-cursor/v1";
+/// Filter identities are stored in durable plans rather than indexed observation
+/// columns. Inspect enough physical history to make sparse scopes useful, while
+/// keeping every request's storage work explicitly bounded.
+const FILTERED_DISCOVERY_PHYSICAL_LIMIT: usize = 100;
+/// Both the matching output and the physical sparse-search window are bounded
+/// at this ceiling. The response retains a larger requested limit separately.
+pub const MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT: usize = 100;
 
 /// Discovery options layered on top of an [`AgentTaskDiscoveryFilter`]. Today
 /// this carries the operator-facing `--limit` cap shared by the `list`/`active`
@@ -62,8 +69,9 @@ pub struct AgentTaskDiscoveryOptions {
 /// wire compatibility while new callers cannot accidentally use an offset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentTaskDiscoveryPageOptions {
-    /// Maximum physical rows to parse. Filtering is applied only to this page;
-    /// callers resume the opaque keyset cursor to continue sparse searches.
+    /// Requested maximum matching rows to return. The effective output limit
+    /// is capped at [`MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT`]; sparse filters
+    /// inspect one bounded physical window before returning a continuation.
     pub limit: usize,
     /// Opaque continuation returned by the previous page.
     pub cursor: Option<String>,
@@ -138,13 +146,29 @@ pub struct AgentTaskDiscoveryPage {
     /// A bounded page cannot truthfully compute a filtered global total.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    /// Original `--limit` request before the bounded effective ceiling applies.
+    pub requested_limit: usize,
     pub limit: usize,
     pub physical_count: usize,
+    /// Whether this page exhausted the scoped discovery history, reached the
+    /// matching output cap, or stopped at its bounded physical search window.
+    pub search_status: AgentTaskDiscoverySearchStatus,
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
+}
+
+/// Completion state for one bounded filtered discovery page. In particular,
+/// an empty `search_window_exhausted` page means "not found in this window",
+/// not "no matching durable run exists"; follow `next_cursor` to continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskDiscoverySearchStatus {
+    Complete,
+    MatchingLimitReached,
+    SearchWindowExhausted,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -371,7 +395,8 @@ pub fn discover_runs_page(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryPageOptions,
 ) -> Result<AgentTaskDiscoveryPage> {
-    let limit = options.limit.clamp(1, 100);
+    let requested_limit = options.limit;
+    let limit = requested_limit.clamp(1, MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT);
     let scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
     let after = options
         .cursor
@@ -379,9 +404,8 @@ pub fn discover_runs_page(
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let (mut records, _physical_record_health, physical_count, truncated, next) =
-        store.read_record_page_with_health(after, limit)?;
-    records.retain(|record| !is_fixture_runner_record(record));
+    let (records, _physical_record_health, physical_count, physical_truncated, next) =
+        store.read_record_page_with_health(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
     let submitted_after = options
         .submitted_after
         .as_deref()
@@ -398,23 +422,51 @@ pub fn discover_runs_page(
         branch: options.branch,
         ..Default::default()
     };
-    if filter == AgentTaskDiscoveryFilter::Active {
-        records.retain(|record| {
-            matches!(
-                record.state,
-                agent_task_lifecycle::AgentTaskRunState::Queued
-                    | agent_task_lifecycle::AgentTaskRunState::Running
-            )
-        });
-    }
-    records.retain(|record| matches_discovery_options(record, &legacy, submitted_after.as_ref()));
+    let mut records = records
+        .into_iter()
+        .filter(|page_record| !is_fixture_runner_record(&page_record.record))
+        .filter(|page_record| {
+            filter != AgentTaskDiscoveryFilter::Active
+                || matches!(
+                    page_record.record.state,
+                    agent_task_lifecycle::AgentTaskRunState::Queued
+                        | agent_task_lifecycle::AgentTaskRunState::Running
+                )
+        })
+        .filter(|page_record| {
+            matches_discovery_options(&page_record.record, &legacy, submitted_after.as_ref())
+        })
+        .collect::<Vec<_>>();
     if filter == AgentTaskDiscoveryFilter::Latest {
         records.truncate(1);
     }
+    let matching_truncated = records.len() > limit;
+    records.truncate(limit);
+    let next_cursor = if let Some(last) = records.last() {
+        (physical_truncated || matching_truncated)
+            .then(|| encode_page_cursor(last.cursor.clone(), scope))
+    } else {
+        physical_truncated
+            .then(|| encode_page_cursor(next.expect("truncated page has cursor"), scope))
+    };
+    let truncated = next_cursor.is_some();
+    let search_status = if records.len() == limit && (matching_truncated || physical_truncated) {
+        AgentTaskDiscoverySearchStatus::MatchingLimitReached
+    } else if physical_truncated {
+        AgentTaskDiscoverySearchStatus::SearchWindowExhausted
+    } else {
+        AgentTaskDiscoverySearchStatus::Complete
+    };
     let now = chrono::Utc::now();
     let runs = records
         .into_iter()
-        .map(|record| discovery_run(record, filter == AgentTaskDiscoveryFilter::Active, now))
+        .map(|page_record| {
+            discovery_run(
+                page_record.record,
+                filter == AgentTaskDiscoveryFilter::Active,
+                now,
+            )
+        })
         .collect::<Vec<_>>();
     // The page cursor bounds storage reads, but selectors apply after that read.
     // Do not present malformed rows from the physical page as health of the
@@ -429,10 +481,12 @@ pub fn discover_runs_page(
         filter: filter_name(filter),
         count: runs.len(),
         total: None,
+        requested_limit,
         limit,
         physical_count,
+        search_status,
         truncated,
-        next_cursor: next.map(|keyset| encode_page_cursor(keyset, scope)),
+        next_cursor,
         record_health,
         runs,
     })

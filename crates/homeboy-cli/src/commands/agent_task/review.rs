@@ -28,7 +28,7 @@ use homeboy::agents::agent_tasks::review_dossier::{
     AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
     AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
     AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
-    AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+    AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::AgentTaskRequest;
@@ -871,7 +871,58 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             .iter()
             .map(|raw| parse_override(raw))
             .collect::<homeboy::core::Result<Vec<_>>>()?;
-        let value = agent_task_service::recover_cook_pr(run_or_cook_id, overrides, args.preflight)?;
+        let review_form = args
+            .review_form
+            .as_deref()
+            .map(config::read_json_spec_to_string)
+            .transpose()?
+            .map(|raw| {
+                serde_json::from_str::<AiFilledReviewForm>(&raw).map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "review_form",
+                        format!("review form must be a complete typed JSON object: {error}"),
+                        None,
+                        None,
+                    )
+                })
+            })
+            .transpose()?
+            .map(|form| {
+                Ok::<_, Error>(agent_task_service::AgentTaskSuppliedReviewForm {
+                    form,
+                    tool: args.review_form_tool.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_tool",
+                            "--review-form-tool is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                    model: args.review_form_model.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_model",
+                            "--review-form-model is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                    operator: args.review_form_author.clone().ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "review_form_author",
+                            "--review-form-author is required with --review-form",
+                            None,
+                            None,
+                        )
+                    })?,
+                })
+            })
+            .transpose()?;
+        let value = agent_task_service::recover_cook_pr_with_review_form(
+            run_or_cook_id,
+            review_form,
+            overrides,
+            args.preflight,
+        )?;
         let success = value
             .get("status")
             .and_then(Value::as_str)

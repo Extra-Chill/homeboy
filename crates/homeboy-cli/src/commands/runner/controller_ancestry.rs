@@ -24,7 +24,22 @@
 //! `runner status` already drains into `probe_degradations`. A plain
 //! non-ancestor answer — exit 1 with no stderr — is a real answer and records
 //! nothing.
+//!
+//! ### Independence from the caller's working directory (#14736)
+//!
+//! `git merge-base` needs a repository to run against. The probe used to run
+//! with no `-C`, so its answer depended on whatever directory the operator's
+//! shell happened to be standing in when they ran `homeboy runner status` —
+//! meaningful from inside a Homeboy checkout, meaningless (and previously
+//! degraded) everywhere else. [`homeboy_upgrade::controller_source_checkout`]
+//! resolves the checkout that built the *running* binary from its own
+//! executable path, independent of the caller's cwd, and that checkout is
+//! preferred here. The bare-cwd probe remains a fallback for the case a
+//! resolvable checkout cannot be found (e.g. a controller invoked before
+//! `controller_source_checkout` is available in a test harness), so behavior
+//! never regresses for a caller that already stands inside a checkout.
 
+use std::path::Path;
 use std::process::Command;
 
 use homeboy::runner::readonly_probe::{self, ReadOnlyProbeDegradation, REASON_PROBE_UNAVAILABLE};
@@ -44,19 +59,42 @@ pub(crate) enum CommitAncestry {
     Unavailable,
 }
 
-/// Is `older` an ancestor of `newer` in the controller's ambient checkout?
+/// Is `older` an ancestor of `newer` in the checkout that built the running
+/// controller?
 ///
 /// An unavailable probe remains distinct from a real "not an ancestor" answer:
 /// recovery guidance must not turn an unknown build relationship into a
 /// potentially downgrading controller refresh.
 pub(crate) fn commits_are_ancestral(older: &str, newer: &str) -> CommitAncestry {
+    commits_are_ancestral_in(controller_checkout(), older, newer)
+}
+
+/// The checkout the probe runs against, resolved once per process. Cached
+/// because it is asked for every recovery-guidance decision on a `runner
+/// status --full` call that inspects several runners.
+fn controller_checkout() -> Option<&'static Path> {
+    use std::sync::OnceLock;
+    static CHECKOUT: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    CHECKOUT
+        .get_or_init(homeboy_upgrade::controller_source_checkout)
+        .as_deref()
+}
+
+/// [`commits_are_ancestral`] against an explicit checkout, so the resolution
+/// (exe-path based, no cwd) and the classification stay independently
+/// testable.
+fn commits_are_ancestral_in(checkout: Option<&Path>, older: &str, newer: &str) -> CommitAncestry {
     // `output()` captures both child streams. `status()` would inherit them and
     // print git's `fatal:` line straight past the structured envelope.
-    ancestry_from_probe(
-        Command::new("git")
-            .args(["merge-base", "--is-ancestor", older, newer])
-            .output(),
-    )
+    let mut command = Command::new("git");
+    if let Some(checkout) = checkout {
+        // `-C` makes the repository explicit rather than implied by the
+        // caller's cwd (#14736): the controller's own checkout answers this
+        // probe regardless of where `homeboy runner status` was invoked from.
+        command.arg("-C").arg(checkout);
+    }
+    command.args(["merge-base", "--is-ancestor", older, newer]);
+    ancestry_from_probe(command.output())
 }
 
 /// Classify a completed probe. Split from the spawn so the "answered false"
@@ -215,6 +253,66 @@ mod tests {
 
         assert!(long.contains("(truncated)"));
         assert!(long.chars().count() < MAX_DETAIL_CHARS * 2);
+    }
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(path: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .expect("run git");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// The probe must answer from the explicit checkout it is given, not from
+    /// wherever the test process's cwd happens to be (#14736). The test
+    /// process's actual cwd is the crate directory — unrelated to the
+    /// fabricated repository below — so a correct answer here can only have
+    /// come from the explicit `-C` argument.
+    #[test]
+    fn commits_are_ancestral_in_answers_from_the_explicit_checkout_not_cwd() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        git(repo.path(), &["init", "--initial-branch", "main"]);
+        git(repo.path(), &["config", "user.email", "test@example.com"]);
+        git(repo.path(), &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(repo.path().join("a.txt"), "one").expect("write file");
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "first"]);
+        let older = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join("a.txt"), "two").expect("write file");
+        git(repo.path(), &["commit", "-am", "second"]);
+        let newer = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+
+        assert_ne!(
+            std::env::current_dir().expect("cwd"),
+            repo.path(),
+            "the test process must not already be standing in the fabricated repo"
+        );
+
+        assert_eq!(
+            commits_are_ancestral_in(Some(repo.path()), &older, &newer),
+            CommitAncestry::Ancestor
+        );
+        assert_eq!(
+            commits_are_ancestral_in(Some(repo.path()), &newer, &older),
+            CommitAncestry::NotAncestor
+        );
     }
 
     /// Structural guard for the leak itself: `status()` inherits the parent's

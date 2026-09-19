@@ -562,6 +562,77 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
 }
 
 #[test]
+fn create_branches_from_the_shared_base_when_the_primary_checkout_has_drifted() {
+    crate::test_support::with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let upstream = home.path().join("upstream.git");
+        let source = parent.join("drift-fixture");
+        fs::create_dir_all(&source).expect("source directory");
+        run_git(&source, &["init", "-q"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+
+        // The shared base advances with work every task must build on.
+        fs::create_dir_all(&upstream).expect("upstream directory");
+        run_git(&upstream, &["init", "-q", "--bare"]);
+        run_git(
+            &source,
+            &["remote", "add", "origin", &upstream.to_string_lossy()],
+        );
+        run_git(
+            &source,
+            &["push", "-q", "-u", "origin", "HEAD:refs/heads/main"],
+        );
+        run_git(&source, &["branch", "--set-upstream-to=origin/main"]);
+        fs::write(source.join("shared.txt"), "shared base work\n").expect("shared file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "shared base work"]);
+        run_git(&source, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        let shared_base = crate::git::output_optional(&source, &["rev-parse", "origin/main"])
+            .expect("shared base sha");
+
+        // The contributor's own branch then drifts away from that shared base.
+        run_git(&source, &["reset", "-q", "--hard", "HEAD~1"]);
+        fs::write(source.join("local-only.txt"), "unpushed local work\n").expect("local file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "unpushed local work"]);
+        let drifted_head =
+            crate::git::output_optional(&source, &["rev-parse", "HEAD"]).expect("drifted head sha");
+        assert_ne!(drifted_head, shared_base, "the fixture must actually drift");
+
+        let created = create(WorktreeCreateOptions {
+            component_id: source.to_string_lossy().to_string(),
+            branch: "fix/drifted-base".to_string(),
+            from: Some("main".to_string()),
+            task_url: Some("https://example.com/tasks/drift".to_string()),
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect("create from a drifted primary checkout");
+
+        let worktree = Path::new(&created.record.worktree_path);
+        let worktree_head = crate::git::output_optional(worktree, &["rev-parse", "HEAD"])
+            .expect("worktree head sha");
+        assert_eq!(
+            worktree_head, shared_base,
+            "a task worktree starts from the shared base, not the contributor's drift"
+        );
+        assert!(
+            worktree.join("shared.txt").is_file(),
+            "shared base work is present in the task worktree"
+        );
+        assert!(
+            !worktree.join("local-only.txt").is_file(),
+            "unpushed local work does not leak into a task worktree"
+        );
+    });
+}
+
+#[test]
 fn create_accepts_an_existing_repository_path_without_component_registration() {
     crate::test_support::with_isolated_home(|home| {
         let parent = home.path().join("Developer");
@@ -673,6 +744,7 @@ fn import_records_an_exact_existing_worktree_without_changing_git_and_replays_id
             dry_run: true,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         })
         .expect("preview imported worktree cleanup");
         assert!(cleanup.dry_run);
@@ -782,6 +854,7 @@ fn default_ownerless_create_remains_eligible_for_safe_cleanup() {
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         })
         .expect("clean up ownerless task worktree");
 
@@ -820,6 +893,7 @@ fn owned_remove_when_safe_worktree_requires_succeeded_terminal_finalization() {
                 dry_run: false,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             &store,
         )
@@ -896,6 +970,7 @@ fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit(
                 dry_run: false,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             })
             .expect("cleanup before PR creation");
             assert_eq!(before_pr.counts.removed, 0);
@@ -985,6 +1060,8 @@ fi
                 force: true,
                 cleanup_branch: false,
                 allow_unmerged_branch: false,
+                reason: None,
+                reaper: None,
             })
             .expect_err("forced direct removal cannot remove the caller cwd");
             assert!(direct_remove
@@ -995,6 +1072,7 @@ fi
                 dry_run: false,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             })
             .expect("cleanup while caller cwd is live");
             assert_eq!(live_cwd.counts.removed, 0);
@@ -1010,6 +1088,7 @@ fi
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         })
         .expect("cleanup after terminal finalization and cwd exit");
         assert_eq!(after_cwd_exit.counts.removed, 1);
@@ -1561,6 +1640,7 @@ fn cleanup_marks_missing_worktree_record_removed() {
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -1573,6 +1653,104 @@ fn cleanup_marks_missing_worktree_record_removed() {
     assert_eq!(output.counts.reconciliation_blockers, 1);
     assert!(output.skipped[0].reasons[0].contains("inventory --apply"));
     assert_eq!(updated.state, TaskWorktreeState::Active);
+}
+
+#[test]
+fn tombstoned_missing_worktree_is_retired_and_live_path_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let live_path = sibling_worktree_path(source.path(), "live");
+    fs::create_dir_all(&live_path).unwrap();
+    let store = dir.path().join("store");
+
+    let mut live = fixture_record(source.path(), &live_path);
+    live.id = "fixture@live".to_string();
+    write_record(&store, &live).unwrap();
+
+    let mut tombstone = fixture_record(source.path(), &dir.path().join("gone"));
+    tombstone.id = "fixture@gone".to_string();
+    tombstone.state = TaskWorktreeState::Removed;
+    write_record(&store, &tombstone).unwrap();
+
+    let retired = retire_residue_with_store(&store).unwrap();
+    assert_eq!(retired, ["fixture@gone"]);
+    assert_eq!(
+        read_record(&store, "fixture@live").unwrap().id,
+        "fixture@live"
+    );
+    assert!(read_record(&store, "fixture@gone").is_err());
+
+    let listed = list_with_store(&store).unwrap();
+    assert_eq!(
+        listed
+            .worktrees
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture@live"]
+    );
+}
+
+#[test]
+fn listing_and_cleanup_inventory_count_live_records_not_residue() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let live_path = sibling_worktree_path(source.path(), "live-inventory");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "live-inventory",
+            &live_path.to_string_lossy(),
+        ],
+    );
+    let store = dir.path().join("store");
+    let mut live = succeeded_record(source.path(), &live_path);
+    live.id = "fixture@live-inventory".to_string();
+    write_record(&store, &live).unwrap();
+    let mut tombstone = fixture_record(source.path(), &dir.path().join("gone-inventory"));
+    tombstone.id = "fixture@gone-inventory".to_string();
+    tombstone.state = TaskWorktreeState::Removed;
+    write_record(&store, &tombstone).unwrap();
+
+    let listed = list_with_store(&store).unwrap();
+    assert_eq!(listed.worktrees.len(), 1);
+    assert_eq!(listed.worktrees[0].id, "fixture@live-inventory");
+
+    let cleanup = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+    assert_eq!(cleanup.counts.candidates, 1);
+    assert_eq!(cleanup.counts.skipped, 0);
+    assert_eq!(cleanup.candidates[0].record.id, "fixture@live-inventory");
+
+    let inventory = inventory_with_store_and_authority(
+        WorktreeInventoryOptions {
+            limit: 10,
+            apply: false,
+            ..Default::default()
+        },
+        &store,
+        &dir.path().join("adopted"),
+        &FixedLivenessAuthority(WorktreeLivenessAuthority::Live {
+            provenance: "preview".to_string(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(inventory.total, 1);
+    assert_eq!(inventory.records.len(), 1);
+    assert_eq!(inventory.records[0].record.id, "fixture@live-inventory");
+    assert_eq!(inventory.cross_tab.removed_path_missing, 0);
 }
 
 #[test]
@@ -1612,6 +1790,7 @@ fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
                 dry_run: false,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             &store,
         )
@@ -1629,6 +1808,8 @@ fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
             force: true,
             cleanup_branch: false,
             allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
         },
         &store,
     )
@@ -1642,6 +1823,8 @@ fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
             force: false,
             cleanup_branch: false,
             allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
         },
         &store,
     )
@@ -1675,6 +1858,7 @@ fn cleanup_reports_missing_active_records_as_reconciliation_blockers() {
             dry_run: true,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2121,6 +2305,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
             dry_run: false,
             cleanup_branches: true,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2144,6 +2329,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
             dry_run: false,
             cleanup_branches: true,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2170,6 +2356,8 @@ fn remove_deletes_merged_branch_with_stale_upstream_when_requested() {
             force: false,
             cleanup_branch: true,
             allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
         },
         &store,
     )
@@ -2222,6 +2410,7 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
             dry_run: false,
             cleanup_branches: true,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2277,6 +2466,7 @@ fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
             dry_run: true,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2309,6 +2499,7 @@ fn cleanup_reports_unmerged_task_branch_without_deleting_by_default() {
             dry_run: false,
             cleanup_branches: true,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2518,6 +2709,7 @@ fn cleanup_skips_unrepairable_missing_source_and_continues() {
                 dry_run: false,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             &store,
         )
@@ -2567,6 +2759,7 @@ fn cleanup_skips_dirty_worktree_without_force() {
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2600,6 +2793,7 @@ fn cleanup_force_still_skips_primary_checkout_hard_gate() {
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2643,6 +2837,7 @@ fn cleanup_dry_run_reports_safe_candidate_without_removing() {
             dry_run: true,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -2702,6 +2897,7 @@ fn cleanup_page_paginates_real_candidates_and_preserves_page_options_in_continua
                 dry_run: true,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             limit: 1,
             cursor: None,
@@ -2727,6 +2923,7 @@ fn cleanup_page_paginates_real_candidates_and_preserves_page_options_in_continua
                 dry_run: true,
                 cleanup_branches: false,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             limit: 1,
             cursor: first_page.next_cursor,
@@ -2766,6 +2963,7 @@ fn expired_cleanup_apply_keeps_the_unprocessed_candidate_active_and_replays_appl
                 dry_run: false,
                 cleanup_branches: true,
                 allow_unmerged_branches: false,
+                reaper: None,
             },
             limit: 7,
             cursor: None,
@@ -2815,6 +3013,7 @@ fn cleanup_force_removes_dirty_worktree_after_homeboy_gates_pass() {
             dry_run: false,
             cleanup_branches: false,
             allow_unmerged_branches: false,
+            reaper: None,
         },
         &store,
     )
@@ -3091,4 +3290,224 @@ impl Drop for CurrentDirGuard {
     fn drop(&mut self) {
         std::env::set_current_dir(&self.prior).unwrap();
     }
+}
+
+fn reclaim_fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    PathBuf,
+    TaskWorktreeRecord,
+) {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "reclaim-fixture");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let record = succeeded_record(source.path(), &worktree);
+    write_record(&store, &record).unwrap();
+    (data_root, source, worktree, record)
+}
+
+#[test]
+fn reclaim_dry_run_plans_completed_loops_without_mutating() {
+    let (data_root, _source, worktree, _) = reclaim_fixture();
+    let output = reclaim_with_store(
+        WorktreeReclaimOptions {
+            dry_run: true,
+            limit: 100,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &data_root.path().join("task-worktrees"),
+    )
+    .unwrap();
+
+    assert!(output.dry_run);
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 0);
+    assert!(output.counts.reclaimable_bytes > 0);
+    assert!(worktree.exists(), "a reclaim plan must not remove anything");
+    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
+    assert!(audit.is_empty(), "a reclaim plan must not audit a removal");
+}
+
+#[test]
+fn reclaim_apply_removes_completed_loops_and_audits_reaping() {
+    let (data_root, _source, worktree, record) = reclaim_fixture();
+    let output = reclaim_with_store(
+        WorktreeReclaimOptions {
+            dry_run: false,
+            limit: 100,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &data_root.path().join("task-worktrees"),
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert!(!worktree.exists());
+    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
+    assert_eq!(audit.len(), 1, "every removal must be reaping-audited");
+    assert_eq!(audit[0].record_id, record.id);
+    assert_eq!(audit[0].reason.as_deref(), Some("worktree reclaim"));
+    assert_eq!(audit[0].run_id.as_deref(), Some("completed-owner"));
+    assert!(
+        audit[0].reaper.is_none(),
+        "core reapers carry no CLI identity"
+    );
+    assert_eq!(audit[0].schema, TASK_WORKTREE_REAPING_AUDIT_SCHEMA);
+}
+
+#[test]
+fn reclaim_refuses_claimed_workspace_and_names_the_holder() {
+    let (data_root, _source, worktree, record) = reclaim_fixture();
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root
+            .path()
+            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    );
+    let workspace = WorkspaceIdentity::new(
+        "task-worktree",
+        format!("{}/{}", record.component_id, record.id),
+    )
+    .expect("fixture workspace identity");
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let _lease = claims
+        .register_owner(
+            workspace.clone(),
+            "live-run-14709",
+            crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS,
+            now,
+        )
+        .unwrap();
+
+    let output = reclaim_with_store(
+        WorktreeReclaimOptions {
+            dry_run: true,
+            limit: 100,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &data_root.path().join("task-worktrees"),
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.removed, 0);
+    assert_eq!(output.counts.skipped, 1);
+    let skipped = &output.skipped[0];
+    assert_eq!(skipped.live_owners, vec!["live-run-14709".to_string()]);
+    assert!(
+        skipped.reasons.iter().any(|reason| {
+            reason.contains("live-run-14709")
+                && reason.contains("refuses to reclaim")
+                && reason.contains("durable live owner lease(s)")
+        }),
+        "the reclaim plan must attribute the claim to its holder run"
+    );
+    assert!(worktree.exists());
+
+    // The lease expired: reclaim durably releases the stale registration.
+    // Direct reaping refuses with the same attribution.
+    let error = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+            reason: Some("test".to_string()),
+            reaper: None,
+        },
+        &data_root.path().join("task-worktrees"),
+    )
+    .expect_err("claimed workspaces must refuse direct reaping");
+    assert!(error.message.contains("live-run-14709"));
+    let released = claims
+        .prune_expired_owner_leases(
+            &workspace.clone(),
+            now + crate::workspace_claim::MAX_WORKSPACE_CLAIM_TTL_MS + 1,
+        )
+        .unwrap()
+        .expect("expired owner lease is released");
+    assert_eq!(released, vec!["live-run-14709".to_string()]);
+    assert!(claims.owner_status(&workspace, now).unwrap().is_empty());
+
+    let removed = remove_with_store(
+        WorktreeRemoveOptions {
+            id: record.id,
+            force: false,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+            reason: Some("post-release".to_string()),
+            reaper: Some("session:operator-1".to_string()),
+        },
+        &data_root.path().join("task-worktrees"),
+    )
+    .unwrap();
+    assert!(removed.removed);
+    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
+    assert_eq!(
+        audit.last().unwrap().reaper.as_deref(),
+        Some("session:operator-1")
+    );
+}
+
+#[test]
+fn reclaim_skips_nonterminal_loops_without_leadership_over_lifecycle_owner() {
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "reclaim-nonterminal");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    let store = data_root.path().join("task-worktrees");
+    let mut record = fixture_record(source.path(), &worktree);
+    record.run_id = Some("live-owner".to_string());
+    write_record(&store, &record).unwrap();
+
+    let output = reclaim_with_store(
+        WorktreeReclaimOptions {
+            dry_run: false,
+            limit: 100,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.removed, 0);
+    assert_eq!(output.counts.skipped, 1);
+    assert!(output.skipped[0]
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("live-owner")));
+    assert!(worktree.exists());
+}
+
+#[test]
+fn reaping_audit_requires_removal_not_a_plan() {
+    let (data_root, _source, _worktree, record) = reclaim_fixture();
+    reaping::append_reaping_audit_in_root(
+        data_root.path(),
+        &record,
+        1_000,
+        Some("cleanup --include task-worktrees"),
+        Some("cli-pid:1"),
+        false,
+        false,
+    )
+    .unwrap();
+    let audit = reaping::read_task_worktree_reaping_audit_in_root(data_root.path()).unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].at_ms, 1_000);
+    assert_eq!(
+        audit[0].reason.as_deref(),
+        Some("cleanup --include task-worktrees")
+    );
 }

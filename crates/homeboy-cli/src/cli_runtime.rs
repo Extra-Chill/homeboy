@@ -929,8 +929,7 @@ impl CliRuntime {
                     runner,
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
-                    preserve_workspace_on_failure: matches
-                        .get_flag("preserve_workspace_on_failure"),
+                    delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
                     detach_after_handoff: matches.get_flag("detach_after_handoff"),
                     runner_env: &runner_env,
                     runner_secret_env: &runner_secret_env,
@@ -1364,7 +1363,7 @@ impl CliRuntime {
                 cli.runner
                     .as_deref()
                     .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
                     .ok()
             } else {
                 None
@@ -1418,6 +1417,14 @@ impl CliRuntime {
         // placement routing can consume controller transport markers.
         let preflight = crate::core::parsed_command_preflight::captured_result()
             .expect("completed parsed-command preflight was captured");
+        if matches!(
+            preflight.fallback,
+            crate::core::parsed_command_preflight::FallbackDirective::LocalAllowed
+        ) {
+            if let Some(reason) = preflight.placement.fallback.reason.as_deref() {
+                eprintln!("{reason}");
+            }
+        }
         crate::commands::utils::execution_provenance::capture(&preflight);
 
         let route_result = crate::core::notification_route::with_current_resolution(
@@ -2785,7 +2792,7 @@ fn preflight_composed_lab_route(
         options
             .runner
             .map(crate::runner::lab_runner_readiness_for_admission)
-            .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+            .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
             .ok()
     } else {
         None
@@ -2911,7 +2918,7 @@ fn resolve_composed_capability_preflight(
         })
         .or_else(|| {
             (options.placement != crate::cli_surface::Placement::Local)
-                .then(|| crate::runner::lab_runner_readiness().ok())
+                .then(|| crate::runner::refresh_lab_runner_readiness_for_admission().ok())
                 .flatten()
                 .map(|readiness| resource_policy::lab_readiness_snapshot(&readiness))
         });
@@ -2998,11 +3005,50 @@ fn preflight_hot_command_with_input(
                 cli.runner
                     .as_deref()
                     .map(crate::runner::lab_runner_readiness_for_admission)
-                    .unwrap_or_else(|| crate::runner::lab_runner_readiness())
+                    .unwrap_or_else(|| crate::runner::refresh_lab_runner_readiness_for_admission())
                     .ok()
             } else {
                 None
             };
+            // For `--placement auto` specifically, a disconnected runner gets
+            // one bounded reconnect attempt before this command commits to
+            // local execution. Explicit `--runner`/`--placement lab` pin their
+            // own runner and already surface their own connection failure
+            // through their own contract, so this stays scoped to the case
+            // that previously degraded silently (#14730).
+            let mut auto_placement_reconnect_diagnostic: Option<serde_json::Value> = None;
+            if hot_command.lab_offload_supported
+                && cli.runner.is_none()
+                && matches!(cli.placement, crate::cli_surface::Placement::Auto)
+                && lab_readiness.as_ref().is_some_and(|readiness| {
+                    readiness.state == crate::runner::runners::LabRunnerReadinessState::Disconnected
+                })
+            {
+                let observed = lab_readiness.take().expect("checked Some above");
+                let (resolved, attempt) =
+                    crate::runner::auto_placement_reconnect::attempt_auto_placement_reconnect(
+                        &observed,
+                    );
+                if attempt.attempted {
+                    eprintln!(
+                        "{}",
+                        if attempt.succeeded {
+                            format!(
+                                "Lab runner `{}` was disconnected; reconnected before dispatch.",
+                                attempt.runner_id.as_deref().unwrap_or("?")
+                            )
+                        } else {
+                            format!(
+                                "Lab runner `{}` was disconnected; a bounded reconnect was attempted and failed ({}). Falling back to local.",
+                                attempt.runner_id.as_deref().unwrap_or("?"),
+                                attempt.reason.as_deref().unwrap_or("unknown reason")
+                            )
+                        }
+                    );
+                }
+                auto_placement_reconnect_diagnostic = Some(attempt.to_json());
+                lab_readiness = Some(resolved);
+            }
             // Timestamp the projection after it has completed; it describes the
             // exact inventory consumed by the terminal placement decision.
             let lab_inventory_observed_at_ms = unix_timestamp_ms();
@@ -3140,6 +3186,7 @@ fn preflight_hot_command_with_input(
                 resource_policy_context.runner_selection.reason = "explicit_lab_runner".to_string();
                 resource_policy_context.runner_selection.runner_id = cli.runner.clone();
             }
+            resource_policy_context.auto_placement_reconnect = auto_placement_reconnect_diagnostic;
             let selected_runner_id = resource_policy_context.runner_selection.runner_id.clone();
             resource_policy::capture_context(resource_policy_context.clone());
             let result =
@@ -3293,6 +3340,77 @@ pub(crate) fn placement_directive(
     )
     .expect("test placement fixture supplies admitted runner evidence")
     .placement
+}
+
+/// Capture the exact preflight result a real dispatch would compute for
+/// `cli` when Lab readiness resolves to `lab_readiness`, then persist it into
+/// the process-wide captured slot preview and dispatch both read. Exercises
+/// the production `resolve_parsed_command_preflight` (including
+/// `generic_route_policy_snapshot`) rather than hand-building a placement
+/// directive, so tests prove the same wiring a real invocation uses (#14729).
+#[cfg(test)]
+pub(crate) fn capture_preflight_result_for_test(
+    cli: &Cli,
+    lab_readiness: Option<crate::core::parsed_command_preflight::LabReadinessSnapshot>,
+) {
+    crate::core::parsed_command_preflight::reset_captured_result_for_test();
+    let normalized_args = vec!["homeboy".to_string()];
+    let input = resource_policy::parsed_command_preflight_input(cli, &normalized_args);
+    let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        normalized_args,
+        input,
+        crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
+            resource_admission_evidence:
+                crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness,
+            selected_runner_id: None,
+            generic_route: generic_route_policy_snapshot(cli, None),
+            deferred_pressure_refusal: false,
+            runner_admitted: false,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect("test preflight fixture resolves without a selected runner");
+    crate::core::parsed_command_preflight::capture_result(result);
+}
+
+/// Capture an admitted Lab runner as the resolved placement, the same way a
+/// real dispatch records `connected_ready` evidence before Cook preview runs.
+#[cfg(test)]
+pub(crate) fn capture_admitted_runner_preflight_for_test(cli: &Cli, runner_id: &str) {
+    crate::core::parsed_command_preflight::reset_captured_result_for_test();
+    let normalized_args = vec!["homeboy".to_string()];
+    let input = resource_policy::parsed_command_preflight_input(cli, &normalized_args);
+    let selected_runner_id = Some(runner_id.to_string());
+    let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+        normalized_args,
+        input,
+        crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
+            resource_admission_evidence:
+                crate::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: Some(
+                crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                    state: "connected_ready".to_string(),
+                    selected_runner_id: selected_runner_id.clone(),
+                    available_runner_ids: vec![runner_id.to_string()],
+                    reasons: Vec::new(),
+                    remediation_commands: Vec::new(),
+                    repair_admitted_runner_ids: Vec::new(),
+                },
+            ),
+            selected_runner_id: selected_runner_id.clone(),
+            generic_route: generic_route_policy_snapshot(cli, selected_runner_id),
+            deferred_pressure_refusal: false,
+            runner_admitted: true,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect("test preflight fixture supplies admitted connected readiness evidence");
+    crate::core::parsed_command_preflight::capture_result(result);
 }
 
 #[cfg(test)]
@@ -4431,6 +4549,51 @@ mod tests {
             None,
             "Cook must reach its durable admission lifecycle before resource placement"
         );
+    }
+
+    #[test]
+    fn unmaterialized_runner_selection_fails_fast_on_an_unready_fleet_with_reason() {
+        crate::test_support::with_isolated_home(|_| {
+            // A configured SSH runner with no daemon observation. Automatic
+            // admission must not name it as an eligible runner; it reports the
+            // unready fleet state and a reason instead of stalling on a
+            // dispatch that would never be accepted (#14710).
+            homeboy::core::server::create(
+                r#"{"id":"lab-offline","host":"192.168.86.63","user":"user"}"#,
+                false,
+            )
+            .expect("create server");
+            homeboy::runner::runners::create(
+                r#"{"id":"lab-offline","kind":"ssh","server_id":"lab-offline"}"#,
+                false,
+            )
+            .expect("create runner");
+
+            let outcome = select_unmaterialized_cook_runner(&serde_json::json!({
+                "binding": {
+                    "placement": {},
+                    "provider_runtime_refs": { "required_capabilities": [] }
+                }
+            }));
+            match outcome {
+                Ok(selection) => {
+                    assert_ne!(selection["state"], "eligible");
+                    assert!(selection["runner_id"].is_null());
+                    assert!(selection["reason"].is_string());
+                }
+                Err(error) => {
+                    // A hard refresh failure is also a fast rejection: the
+                    // runners' own reasons ride with it and no runner id is
+                    // offered for dispatch.
+                    assert!(
+                        error.details["runner_failures"]
+                            .as_array()
+                            .is_some_and(|failures| !failures.is_empty()),
+                        "{error}"
+                    );
+                }
+            }
+        });
     }
 
     #[test]

@@ -917,7 +917,11 @@ impl AgentTaskLifecycleStore {
         limit: usize,
     ) -> Result<(Vec<AgentTaskRunRecord>, bool, Option<ObservationRunCursor>)> {
         let (records, _, _, truncated, next) = self.read_record_page_with_health(after, limit)?;
-        Ok((records, truncated, next))
+        Ok((
+            records.into_iter().map(|record| record.record).collect(),
+            truncated,
+            next,
+        ))
     }
 
     /// Read one immutable-keyset page while retaining health evidence for raw
@@ -928,7 +932,7 @@ impl AgentTaskLifecycleStore {
         after: Option<ObservationRunCursor>,
         limit: usize,
     ) -> Result<(
-        Vec<AgentTaskRunRecord>,
+        Vec<AgentTaskRecordPageRecord>,
         super::AgentTaskRecordHealthSummary,
         usize,
         bool,
@@ -1029,6 +1033,43 @@ impl AgentTaskLifecycleStore {
             true
         })
         .map(|_| ())
+    }
+
+    /// Atomically persist a metadata value only when it is absent or already
+    /// byte-for-byte identical. This prevents concurrent recovery callers from
+    /// publishing against a receipt another caller authored.
+    pub(crate) fn compare_and_set_metadata_value(
+        &self,
+        run_id: &str,
+        key: &str,
+        value: Value,
+    ) -> Result<()> {
+        let run_id = sanitize_run_id(run_id);
+        let mut conflict = false;
+        self.mutate_record(&run_id, |record| {
+            let metadata = record.ensure_metadata_object();
+            match metadata.get(key) {
+                Some(existing) if existing == &value => false,
+                Some(_) => {
+                    conflict = true;
+                    false
+                }
+                None => {
+                    metadata.insert(key.to_string(), value.clone());
+                    record.updated_at = Some(super::now_timestamp());
+                    true
+                }
+            }
+        })?;
+        if conflict {
+            return Err(Error::validation_invalid_argument(
+                key,
+                "durable metadata already contains a different value",
+                Some(run_id),
+                None,
+            ));
+        }
+        Ok(())
     }
 
     pub fn read_record_bounded(&self, run_id: &str) -> Result<AgentTaskRunRecord> {
@@ -1273,6 +1314,14 @@ impl AgentTaskLifecycleStore {
         })?;
         self.project_terminal_record_after_unlock(&committed.run_id)
     }
+}
+
+/// A decoded lifecycle record with the exact observation keyset that produced
+/// it. Filtered discovery must retain this boundary rather than reconstructing
+/// it from record fields, which are not the observation ordering contract.
+pub(crate) struct AgentTaskRecordPageRecord {
+    pub record: AgentTaskRunRecord,
+    pub cursor: ObservationRunCursor,
 }
 
 fn default_store() -> Result<AgentTaskLifecycleStore> {
@@ -1580,6 +1629,25 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             record.metadata["cook_operation_claims"] = claims;
         }
     }
+    let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    let receipts = store
+        .control_plane_event_receipt_digests(&run)?
+        .into_iter()
+        .collect();
+    let ledger = store.control_plane_event_stream(&run)?.unwrap_or_default();
+    let mut events =
+        super::durable_progress::prepared_progress_events(&record, aggregate.as_ref())?;
+    events.extend(super::durable_progress::prepared_unreceipted_action_events(
+        &record, &store, &receipts, &ledger,
+    )?);
+    super::durable_progress::stamp_durable_event_history(&mut record);
     let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);
     if !preserve_terminal {
@@ -1600,20 +1668,14 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         metadata_json,
     };
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
-    if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
-        store.upsert_imported_run_with_mission_and_resource_projection(
-            &projected,
-            mission.as_str(),
-            &resource_projection,
-            preserve_terminal,
-        )?;
-    } else {
-        store.upsert_imported_run_with_resource_projection(
-            &projected,
-            &resource_projection,
-            preserve_terminal,
-        )?;
-    }
+    let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
+    store.upsert_imported_run_with_events(
+        &projected,
+        preserve_terminal,
+        mission.as_ref().map(|mission| mission.as_str()),
+        Some(&resource_projection),
+        &events,
+    )?;
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
             "committed agent-task run record is unavailable: {}",
@@ -2261,7 +2323,10 @@ fn records_with_health(
 /// unreadable row is omitted, while its diagnostic remains in the page health.
 fn page_records_with_health(
     observation_runs: Vec<RunRecord>,
-) -> (Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary) {
+) -> (
+    Vec<AgentTaskRecordPageRecord>,
+    super::AgentTaskRecordHealthSummary,
+) {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();
     let mut records = Vec::new();
     for run in observation_runs {
@@ -2272,7 +2337,10 @@ fn page_records_with_health(
                 } else {
                     health.healthy += 1;
                 }
-                records.push(record);
+                records.push(AgentTaskRecordPageRecord {
+                    record,
+                    cursor: ObservationRunCursor::from_run(&run),
+                });
             }
             Err(_) => {
                 if let Err(item) = super::health::diagnose_run(&run) {

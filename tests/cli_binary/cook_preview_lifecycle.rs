@@ -73,10 +73,14 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let replay = preview["replay_argv"]
         .as_array()
         .expect("preview replay argv");
-    let run_id = replay_flag_value(replay, "--run-id");
-    let attempt_run_id = replay_flag_value(replay, "--attempt-run-id");
-    assert_eq!(run_id, attempt_run_id);
-    assert!(run_id.starts_with("agent-task-"), "{run_id}");
+    assert!(
+        !replay_has_flag(replay, "--run-id"),
+        "preview Replay must not inject a generated --run-id: {replay:?}"
+    );
+    assert!(
+        !replay_has_flag(replay, "--attempt-run-id"),
+        "preview Replay must not inject a generated --attempt-run-id: {replay:?}"
+    );
 
     for choice in preview["resolved"]["provider"]["backend"]["ready_choices"]
         .as_array()
@@ -85,10 +89,13 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
         let choice_replay = choice["replay_argv"]
             .as_array()
             .expect("choice replay argv");
-        assert_eq!(replay_flag_value(choice_replay, "--run-id"), run_id);
-        assert_eq!(
-            replay_flag_value(choice_replay, "--attempt-run-id"),
-            attempt_run_id
+        assert!(
+            !replay_has_flag(choice_replay, "--run-id"),
+            "choice Replay must not inject a generated --run-id: {choice_replay:?}"
+        );
+        assert!(
+            !replay_has_flag(choice_replay, "--attempt-run-id"),
+            "choice Replay must not inject a generated --attempt-run-id: {choice_replay:?}"
         );
     }
 
@@ -324,13 +331,12 @@ fn initialize_git_repository(path: &std::path::Path) {
     assert!(output.status.success(), "name fixture branch failed");
 }
 
-fn replay_flag_value<'a>(argv: &'a [Value], flag: &str) -> &'a str {
-    let matches = argv
-        .windows(2)
-        .filter(|pair| pair[0].as_str() == Some(flag))
-        .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1, "{flag} must occur exactly once: {argv:?}");
-    matches[0][1].as_str().expect("replay flag value")
+fn replay_has_flag(argv: &[Value], flag: &str) -> bool {
+    argv.iter().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
+    })
 }
 
 fn homeboy_bin() -> PathBuf {

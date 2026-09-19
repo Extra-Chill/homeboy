@@ -32,6 +32,14 @@ pub struct AgentTaskBatchChildRun {
     pub state: AgentTaskRunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<AgentTaskBatchChildPlacement>,
+    /// Run ids this child was dispatched under before `run_id`, oldest first.
+    /// A transport-level retry replaces `run_id` in place to keep the roster
+    /// pointing at the canonical durable run, but that must not erase the
+    /// correlation between the failed first attempt and the run that
+    /// replaced it — this is the only durable record that ties them
+    /// together for `fanout status`/`fanout logs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predecessor_run_ids: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskBatchChildPlacement {
@@ -44,6 +52,13 @@ pub struct AgentTaskBatchChildPlacement {
     pub runner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_source: Option<RunnerSelectionSource>,
+    /// Remote workspace path on `runner_id`, when dispatch has synced source
+    /// there. This is the same path recorded on the child's own durable run
+    /// (`metadata.remote_workspace`); surfacing it here means a wave's
+    /// per-child liveness and location no longer requires SSHing to the
+    /// runner to find it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     pub authority: String,
     pub decision_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

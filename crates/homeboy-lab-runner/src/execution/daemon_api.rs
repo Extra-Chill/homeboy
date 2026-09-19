@@ -97,6 +97,26 @@ fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions)
 }
 
 pub fn daemon_api_get(runner_id: &str, path: &str) -> Result<Value> {
+    use homeboy_core::http_api::{self, HttpApiRequest, HttpEndpoint, HttpMethod};
+    let run_id = match http_api::route(HttpMethod::Get, path) {
+        Ok(
+            HttpEndpoint::Run { id }
+            | HttpEndpoint::RunArtifacts { id }
+            | HttpEndpoint::RunArtifactContent { id, .. }
+            | HttpEndpoint::RunFindings { id },
+        ) => Some(id),
+        _ => None,
+    };
+    if let Some(id) = run_id {
+        if crate::generation_store::has_retired_evidence_owner(runner_id, Some(&id), None)? {
+            let response = http_api::handle(HttpApiRequest {
+                method: HttpMethod::Get,
+                path: path.to_string(),
+                body: None,
+            })?;
+            return Ok(json!({"body": response.body}));
+        }
+    }
     daemon_api_request(runner_id, path, "GET")
 }
 

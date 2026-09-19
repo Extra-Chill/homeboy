@@ -488,14 +488,6 @@ pub(crate) fn shell_command_for_runner(runner: &Runner, command: &str) -> Result
     }
 }
 
-pub(super) fn tar_exclude_args(excludes: &[String]) -> String {
-    excludes
-        .iter()
-        .map(|pattern| format!("--exclude {}", shell::quote_arg(pattern)))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub(super) fn ssh_args(client: &SshClient) -> String {
     homeboy_core::server::ssh_args::shell_join_args(
         &homeboy_core::server::ssh_args::client_option_args(

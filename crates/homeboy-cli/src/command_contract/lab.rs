@@ -18,7 +18,7 @@ const LAB_CLI_ARGUMENT_IDS: &[&str] = &[
     "runner",
     "allow_dirty_lab_workspace",
     "skip_deps_hydration",
-    "preserve_workspace_on_failure",
+    "delete_workspace_on_failure",
     "runner_env",
     "runner_secret_env",
     "lab_env_json",

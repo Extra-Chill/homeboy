@@ -2352,22 +2352,12 @@ pub(crate) fn run_lab_offload_inner(
             "Lab workspace staging changed the pre-acceptance agent-task lifecycle identity",
         ));
     }
-    // The safe default deletes every known terminal result. The explicit debug
-    // profile keeps failures only through the registered runner TTL lifecycle.
-    // Detached and uncertain in-flight work explicitly relinquishes ownership.
-    let cleanup_policy = if request.preserve_workspace_on_failure {
-        WorkspaceCleanupPolicy::PreserveOnFailure
-    } else {
-        WorkspaceCleanupPolicy::DeleteAlways
-    };
+    let cleanup_policy = workspace_cleanup_policy_for_request(request.delete_workspace_on_failure);
     let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
-    if request.preserve_workspace_on_failure {
-        workspace_resource_lifecycle.cleanup_policy =
-            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+    workspace_resource_lifecycle.cleanup_policy =
+        workspace_resource_cleanup_policy_for_request(request.delete_workspace_on_failure);
+    if !request.delete_workspace_on_failure {
         workspace_resource_lifecycle.ttl = Some(runner_workspace_ttl());
-    } else {
-        workspace_resource_lifecycle.cleanup_policy =
-            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
     }
     workspace_resource_lifecycle.cleanup_command = Some(format!(
         "homeboy runner workspace prune {} --apply --min-age-hours 0",
@@ -2525,10 +2515,10 @@ pub(crate) fn run_lab_offload_inner(
     )
     .unwrap_or(serde_json::json!(null));
     lab_metadata["workspace_cleanup"] = serde_json::json!({
-        "policy": if request.preserve_workspace_on_failure {
-            "preserve-on-failure"
-        } else {
+        "policy": if request.delete_workspace_on_failure {
             "delete-on-terminal"
+        } else {
+            "preserve-on-failure"
         },
         "lifecycle_owner": workspace_resource_lifecycle.owner,
         "retained_artifact_location": remote_cwd,
@@ -2882,6 +2872,36 @@ fn runner_workspace_ttl() -> String {
         .unwrap_or_else(|| "P7D".to_string())
 }
 
+/// The safe default keeps a failed cook's workspace through the registered
+/// runner TTL lifecycle so post-mortem evidence (e.g. the git tree a
+/// `git_failed` diagnostic named) survives long enough to inspect (#14680).
+/// The explicit `delete_workspace_on_failure` opt-in deletes every known
+/// terminal result immediately. Detached and uncertain in-flight work
+/// explicitly relinquishes ownership elsewhere and never reaches this policy.
+fn workspace_cleanup_policy_for_request(
+    delete_workspace_on_failure: bool,
+) -> WorkspaceCleanupPolicy {
+    if delete_workspace_on_failure {
+        WorkspaceCleanupPolicy::DeleteAlways
+    } else {
+        WorkspaceCleanupPolicy::PreserveOnFailure
+    }
+}
+
+/// Mirrors [`workspace_cleanup_policy_for_request`] in the registered
+/// `homeboy_core::resource_lifecycle_index` metadata so `runs artifacts` and
+/// `runner workspace prune` observe the same retention decision the run-owned
+/// [`MaterializedWorkspace`] handle enforces.
+fn workspace_resource_cleanup_policy_for_request(
+    delete_workspace_on_failure: bool,
+) -> homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy {
+    if delete_workspace_on_failure {
+        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal
+    } else {
+        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl
+    }
+}
+
 pub(crate) struct ControllerJobRetrievalCommands {
     pub(crate) show: String,
     pub(crate) watch: String,
@@ -3224,6 +3244,33 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::sync::{Arc, Barrier, Mutex};
+
+    #[test]
+    fn workspace_cleanup_policy_defaults_to_preserving_failed_workspaces() {
+        // #14680: a failed cook's workspace is the evidence for its own
+        // failure. Retention on failure must be the default; immediate
+        // deletion is only reached through the explicit opt-in.
+        assert_eq!(
+            workspace_cleanup_policy_for_request(false),
+            WorkspaceCleanupPolicy::PreserveOnFailure
+        );
+        assert_eq!(
+            workspace_cleanup_policy_for_request(true),
+            WorkspaceCleanupPolicy::DeleteAlways
+        );
+    }
+
+    #[test]
+    fn workspace_resource_cleanup_policy_matches_materialized_workspace_default() {
+        assert_eq!(
+            workspace_resource_cleanup_policy_for_request(false),
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl
+        );
+        assert_eq!(
+            workspace_resource_cleanup_policy_for_request(true),
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal
+        );
+    }
 
     #[test]
     fn lab_offload_progress_omits_refresh_when_identities_match() {

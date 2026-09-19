@@ -1791,6 +1791,7 @@ fn automatic_retention() -> CmdResult<Value> {
     let deadline = SystemTime::now().checked_add(Duration::from_secs(
         retention.automatic_retention_max_run_seconds,
     ));
+    let _residue = homeboy::core::worktree::retire_residue()?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
     let roots = homeboy::core::component::registered()
         .unwrap_or_default()
@@ -2029,6 +2030,7 @@ fn cleanup_inventory_with_deadline(
                         dry_run: !apply,
                         cleanup_branches: apply,
                         allow_unmerged_branches: false,
+                        reaper: None,
                     },
                     limit: args.limit.unwrap_or(500).max(1) as usize,
                     cursor: args.cursor.clone(),
@@ -3133,6 +3135,7 @@ fn run_cleanup_category_fixture(_category: &str) -> homeboy::core::Result<()> {
 /// scheduler disabled automatic retention entirely (#12727).
 fn is_bounded_continuation(category: &CleanupInventoryCategory) -> bool {
     category.outcome == CLEANUP_CATEGORY_OUTCOME_TIMED_OUT
+        || (category.failure.is_none() && category.inventory_completeness == "partial")
 }
 
 /// Outcome marker for a category that exhausted its bounded time budget.
@@ -6340,6 +6343,10 @@ mod tests {
         assert_eq!(category[0].category, "external_storage");
         assert_eq!(category[0].inventory_completeness, "partial");
         assert_eq!(category[0].output["unknown_bytes"], 12);
+        assert!(is_bounded_continuation(&category[0]));
+        let mut complete = category.into_iter().next().expect("category");
+        complete.inventory_completeness = "complete".to_string();
+        assert!(!is_bounded_continuation(&complete));
     }
 
     #[test]

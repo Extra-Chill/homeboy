@@ -872,6 +872,8 @@ mod tests {
                 force: false,
                 cleanup_branch: false,
                 allow_unmerged_branch: false,
+                reason: None,
+                reaper: None,
             })
             .expect_err("cleanup must retain unpushed committed worktree");
             assert!(error.message.contains("not safe to remove"));

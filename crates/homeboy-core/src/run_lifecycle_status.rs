@@ -167,6 +167,12 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // say `PartialFailure`; they were changed together so the two
             // routes still agree.
             CookStatus::CandidateRecoverable => Self::CandidateRecoverable,
+            // A gate deferred rather than failed: the patch is promoted and
+            // durable, but verification did not complete. This is the same
+            // "stopped, unsuccessful, promotable candidate survived" shape as
+            // `CandidateRecoverable`, not a verdict against the candidate
+            // (#14731).
+            CookStatus::GatesDeferred => Self::CandidateRecoverable,
             // Stopped waiting on a verdict that is not this run's to produce.
             CookStatus::AwaitingAcceptance => Self::PartialFailure,
             // Re-running reproduces the block identically until the dependency
@@ -291,6 +297,7 @@ mod tests {
             CookStatus::NoChanges,
             CookStatus::NoOpGateFailed,
             CookStatus::GateFailed,
+            CookStatus::GatesDeferred,
             CookStatus::AwaitingAcceptance,
             CookStatus::CandidateRecoverable,
             CookStatus::BlockedByDependency,
@@ -325,6 +332,7 @@ mod tests {
                 CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoOpGateFailed => RunLifecycleStatus::Failed,
                 CookStatus::GateFailed => RunLifecycleStatus::Failed,
+                CookStatus::GatesDeferred => RunLifecycleStatus::CandidateRecoverable,
                 CookStatus::AwaitingAcceptance => RunLifecycleStatus::PartialFailure,
                 CookStatus::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
                 CookStatus::BlockedByDependency => RunLifecycleStatus::PartialFailure,

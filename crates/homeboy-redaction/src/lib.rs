@@ -416,11 +416,13 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     // redacted after a recognized scheme word: `Authorization: opaquevalue`
     // (no scheme) survived both this pass and the inline-assignment pass,
     // because the latter deliberately skips `authorization` keys.
-    let header = Regex::new(
+    static HEADER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
         r"(?i)\b((?:proxy-)?authorization)(\s*[:=]\s*)((?:bearer|basic|token|digest|negotiate)\s+)?([^\s,;]+)",
     )
-    .expect("authorization header redaction regex is valid");
-    let value = header
+    .expect("authorization header redaction regex is valid")
+    });
+    let value = HEADER
         .replace_all(value, |captures: &Captures<'_>| {
             format!(
                 "{}{}{}{replacement}",
@@ -436,9 +438,11 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
     // credential; redacting the word after `basic` corrupted it. Only redact
     // when the following token is not plain prose. Credentials reachable this
     // way (JWTs, base64, `sk-`/`ghp_` tokens, hex) all fail the prose test.
-    let pattern = Regex::new(r"(?i)\b(bearer|basic|token)\s+([^\s,;]+)")
-        .expect("authorization redaction regex is valid");
-    let value = pattern
+    static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)\b(bearer|basic|token)\s+([^\s,;]+)")
+            .expect("authorization redaction regex is valid")
+    });
+    let value = PATTERN
         .replace_all(&value, |captures: &Captures<'_>| {
             if looks_like_prose_word(&captures[2]) {
                 captures[0].to_string()
@@ -447,9 +451,11 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
             }
         })
         .into_owned();
-    let credentials = Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@")
-        .expect("URL credential redaction regex is valid");
-    credentials
+    static CREDENTIALS: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@")
+            .expect("URL credential redaction regex is valid")
+    });
+    CREDENTIALS
         .replace_all(&value, |captures: &Captures<'_>| {
             format!("{}{}@", &captures[1], replacement)
         })
@@ -457,9 +463,11 @@ fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
 }
 
 fn redact_inline_assignments(value: &str, policy: &RedactionPolicy) -> String {
-    let pattern = Regex::new(r"([A-Za-z0-9_.-]+)(\s*[:=]\s*)([^&\s,;]+)")
-        .expect("inline secret redaction regex is valid");
-    pattern
+    static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"([A-Za-z0-9_.-]+)(\s*[:=]\s*)([^&\s,;]+)")
+            .expect("inline secret redaction regex is valid")
+    });
+    PATTERN
         .replace_all(value, |captures: &Captures<'_>| {
             let key = &captures[1];
             // Authorization keys were already handled, scheme name intact.

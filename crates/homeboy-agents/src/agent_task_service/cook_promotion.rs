@@ -9,6 +9,7 @@
 //! terminal provider result and publish controller-owned state; grouping them
 //! keeps the promote → finalize boundary in one place.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -3066,22 +3067,40 @@ pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizati
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
+#[cfg(test)]
 pub(crate) fn cook_finalization_options(
     options: &CookRequest,
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
     overrides: Vec<AgentTaskReviewOverride>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
+    cook_finalization_options_with_review_form(
+        options,
+        successful_run_id,
+        promotion,
+        overrides,
+        None,
+    )
+}
+
+fn cook_finalization_options_with_review_form(
+    options: &CookRequest,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    overrides: Vec<AgentTaskReviewOverride>,
+    review_form: Option<&AgentTaskSuppliedReviewForm>,
+) -> Result<AgentTaskPrFinalizationOptions> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    cook_finalization_options_with_stores(
+    cook_finalization_options_with_stores_and_review_form(
         &store,
         &lifecycle_store,
         options,
         successful_run_id,
         promotion,
         overrides,
+        review_form,
     )
 }
 
@@ -3092,6 +3111,26 @@ pub(crate) fn cook_finalization_options_with_stores(
     successful_run_id: &str,
     promotion: &AgentTaskPromotionReport,
     overrides: Vec<AgentTaskReviewOverride>,
+) -> Result<AgentTaskPrFinalizationOptions> {
+    cook_finalization_options_with_stores_and_review_form(
+        store,
+        lifecycle_store,
+        options,
+        successful_run_id,
+        promotion,
+        overrides,
+        None,
+    )
+}
+
+fn cook_finalization_options_with_stores_and_review_form(
+    store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    successful_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    overrides: Vec<AgentTaskReviewOverride>,
+    review_form: Option<&AgentTaskSuppliedReviewForm>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
     let path = promotion
         .provenance
@@ -3129,12 +3168,13 @@ pub(crate) fn cook_finalization_options_with_stores(
             )
         })?;
     let (mut review_dossier, composed_ai_model_disclosure, preserve_used_for_disclosure) =
-        cook_review_dossier_with_stores(
+        cook_review_dossier_with_stores_and_review_form(
             store,
             lifecycle_store,
             options,
             promotion,
             successful_run_id,
+            review_form,
         )?;
     review_dossier.overrides = overrides;
     // A non-empty option is an explicit operator disclosure. Otherwise retain
@@ -3173,6 +3213,8 @@ pub(crate) fn cook_finalization_options_with_stores(
             promotion.deterministic_gates.len()
         )
     };
+    let review_profile = resolve_review_profile(None, &path)?;
+    review_dossier.validate(&review_profile)?;
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
@@ -3212,7 +3254,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         ai_used_for,
         review_dossier,
         composed_ai_model_disclosure,
-        review_profile: resolve_review_profile(None, &path)?,
+        review_profile,
         manual_finalization: false,
         expected_candidate_sha: None,
         verified_candidate_sha: None,
@@ -3506,8 +3548,60 @@ pub fn recover_cook_pr(
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
 ) -> Result<Value> {
-    recover_cook_pr_with_backend(
+    recover_cook_pr_with_review_form(run_or_cook_id, None, overrides, preflight)
+}
+
+/// Auditable authorship for a review form supplied outside provider execution.
+/// The Cook controller owns the surrounding deterministic dossier, while this
+/// records who authored the non-deterministic reviewer prose.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskSuppliedReviewForm {
+    pub form: crate::agent_task_review_dossier::AiFilledReviewForm,
+    pub tool: String,
+    pub model: String,
+    pub operator: String,
+}
+
+impl AgentTaskSuppliedReviewForm {
+    fn validate(&self) -> Result<()> {
+        self.form.validate()?;
+        for (field, value) in [
+            ("review_form.tool", &self.tool),
+            ("review_form.model", &self.model),
+            ("review_form.operator", &self.operator),
+        ] {
+            if value.trim().is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    field,
+                    "supplied review form provenance must not be empty",
+                    None,
+                    None,
+                ));
+            }
+        }
+        if concrete_provider_model(Some(&self.model)).is_none() {
+            return Err(Error::validation_invalid_argument(
+                "review_form.model",
+                "supplied review form provenance requires a concrete authoring model",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Recover publication using an operator-supplied form only when the immutable
+/// candidate's historical provider outcome did not retain one.
+pub fn recover_cook_pr_with_review_form(
+    run_or_cook_id: &str,
+    review_form: Option<AgentTaskSuppliedReviewForm>,
+    overrides: Vec<AgentTaskReviewOverride>,
+    preflight: bool,
+) -> Result<Value> {
+    recover_cook_pr_with_backend_and_review_form(
         run_or_cook_id,
+        review_form,
         overrides,
         preflight,
         &mut RealAgentTaskPrFinalizationBackend,
@@ -3520,6 +3614,25 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     preflight: bool,
     backend: &mut B,
 ) -> Result<Value> {
+    recover_cook_pr_with_backend_and_review_form(
+        run_or_cook_id,
+        None,
+        overrides,
+        preflight,
+        backend,
+    )
+}
+
+pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinalizationBackend>(
+    run_or_cook_id: &str,
+    review_form: Option<AgentTaskSuppliedReviewForm>,
+    overrides: Vec<AgentTaskReviewOverride>,
+    preflight: bool,
+    backend: &mut B,
+) -> Result<Value> {
+    if let Some(form) = &review_form {
+        form.validate()?;
+    }
     let (recipe, recovered_retry) = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
         (super::cook_recipe::load_recipe(run_or_cook_id)?, false)
     } else if let Some(recipe) = super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)? {
@@ -3662,8 +3775,35 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
-    let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
+    let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
+    if supplied_review_form.is_some()
+        && review_form_for_finalization_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+            &run_id,
+        )
+        .is_ok()
+    {
+        return Err(Error::validation_invalid_argument(
+            "review_form",
+            "recovery already has a valid recorded review form; --review-form is only for missing historical forms and cannot replace it",
+            Some(run_id),
+            None,
+        ));
+    }
+    let finalization = cook_finalization_options_with_review_form(
+        &options,
+        &run_id,
+        &promotion,
+        overrides,
+        supplied_review_form.as_ref(),
+    )?;
     if !preflight {
+        if let Some(submission) = &supplied_review_form {
+            // Record the exact validated submission before publication. A retry
+            // reuses this immutable receipt rather than losing provenance after
+            // an interrupted finalization.
+            persist_supplied_recovery_review_form(&run_id, submission, &promotion, &options)?;
+        }
         agent_task_lifecycle::record_promotion(
             &run_id,
             serde_json::to_value(&promotion).unwrap_or(Value::Null),
@@ -3674,11 +3814,69 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     } else {
         finalize_pr_with_backend(finalization, backend)?
     };
-    let value = serde_json::to_value(report).unwrap_or(Value::Null);
+    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
     if !preflight {
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
+}
+
+fn resolve_supplied_recovery_review_form(
+    run_id: &str,
+    supplied: Option<AgentTaskSuppliedReviewForm>,
+) -> Result<Option<AgentTaskSuppliedReviewForm>> {
+    let record = agent_task_lifecycle::reconcile_status(run_id)?;
+    let persisted = record
+        .metadata
+        .get("recovery_review_form")
+        .map(|value| {
+            serde_json::from_value::<AgentTaskSuppliedReviewForm>(value["submission"].clone())
+                .map_err(|_| {
+                    Error::validation_invalid_argument(
+                        "recovery_review_form",
+                        "persisted supplied review form is malformed",
+                        Some(run_id.to_string()),
+                        None,
+                    )
+                })
+        })
+        .transpose()?;
+    match (supplied, persisted) {
+        (Some(submitted), Some(existing)) if submitted != existing => Err(Error::validation_invalid_argument(
+            "review_form",
+            "recovery already has a different supplied review form receipt; retry with the recorded submission",
+            Some(run_id.to_string()),
+            None,
+        )),
+        (Some(submitted), _) => Ok(Some(submitted)),
+        (None, Some(existing)) => Ok(Some(existing)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn persist_supplied_recovery_review_form(
+    run_id: &str,
+    submission: &AgentTaskSuppliedReviewForm,
+    promotion: &AgentTaskPromotionReport,
+    options: &CookRequest,
+) -> Result<()> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    lifecycle_store.compare_and_set_metadata_value(
+        run_id,
+        "recovery_review_form",
+        serde_json::json!({
+            "schema": "homeboy/agent-task-recovery-review-form/v1",
+            "submission": submission,
+            "provenance": {
+                "source": "operator_supplied_recovery",
+                "run_id": run_id,
+                "patch_sha256": promotion.patch_artifact.sha256,
+                "source_refs": options.workspace.source_refs,
+                "deterministic_gates": promotion.deterministic_gates,
+            },
+        }),
+    )
 }
 
 /// Resolve an ordinary durable retry back to the Cook attempt whose policy it
@@ -4694,12 +4892,13 @@ fn validate_manual_preflight_report(
     })
 }
 
-fn cook_review_dossier_with_stores(
+fn cook_review_dossier_with_stores_and_review_form(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
+    review_form: Option<&AgentTaskSuppliedReviewForm>,
 ) -> Result<(AgentTaskReviewDossier, bool, bool)> {
     // A form-only run owns reviewer metadata but carries forward the durable
     // gate proof while its authenticated source owns candidate scope.
@@ -4767,7 +4966,10 @@ fn cook_review_dossier_with_stores(
     // A form-only follow-up owns reviewer metadata, not the candidate it carries
     // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
     // erase the implementation attempt that produced the delivered patch.
-    let terminal_form = review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?;
+    let terminal_form = match review_form {
+        Some(form) => form.form.clone(),
+        None => review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?,
+    };
     let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
     let lineage = cook_ai_lineage_with_stores(
         store,
@@ -4803,6 +5005,15 @@ fn cook_review_dossier_with_stores(
             url: None,
         },
     ];
+    if let Some(form) = review_form {
+        evidence.push(AgentTaskReviewEvidence {
+            summary: format!(
+                "Review form provenance: supplied by {} using {} ({}) rather than a recorded provider outcome.",
+                form.operator, form.tool, form.model
+            ),
+            url: None,
+        });
+    }
     // Form-only continuations may substitute the implementation promotion for
     // candidate metadata; the persisted terminal record remains recovery proof.
     if let Some(replacement) = lifecycle_store
@@ -5617,7 +5828,7 @@ fn review_form_for_finalization_in_store(
             Error::validation_invalid_argument(
                 "review_form",
                 format!(
-                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. {}",
+                    "cook finalization requires an AI-authored review form on run {run_id}; none was recorded. Supply a complete replacement with `homeboy agent-task finalize-pr --recover {run_id} --review-form @FORM.json`. {}",
                     crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback()
                 ),
                 None,
@@ -6222,6 +6433,18 @@ fn cook_failure_context_with_stores(
                     .map(super::cook_recovery_command_prefix_for_record),
             )
         })
+        .or_else(|| {
+            unfingerprinted_timeout_worktree_recovery(
+                &recipe,
+                record.as_ref(),
+                &chronological_latest_run_id,
+                diagnostic.as_ref(),
+                lifecycle_store,
+                record
+                    .as_ref()
+                    .map(super::cook_recovery_command_prefix_for_record),
+            )
+        })
         .unwrap_or_else(|| {
             cook_recovery_actions_with_prefix(
                 status,
@@ -6389,6 +6612,104 @@ fn dirty_candidate_adoption_recovery_actions(
         legal_actions: actions.clone(),
         next_actions: actions,
     })
+}
+
+/// Timeout left a real worktree candidate that could not be bound to its
+/// producing run. Retry and cook-continue --artifact-id are both ineligible
+/// until an operator inspects that checkout.
+fn unfingerprinted_timeout_worktree_recovery(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    run_id: &str,
+    diagnostic: Option<&Value>,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    prefix: Option<String>,
+) -> Option<CookRecoveryActions> {
+    let message = diagnostic.and_then(|diagnostic| {
+        diagnostic
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                diagnostic
+                    .pointer("/deepest_cause/message")
+                    .and_then(Value::as_str)
+            })
+    })?;
+    if !message.contains("fingerprinted artifact") {
+        return None;
+    }
+    let worktree = timeout_worktree_path(recipe, record, run_id, lifecycle_store)?;
+    let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
+    let command = |args: &[&str]| super::cook_recovery_command_with_prefix(&prefix, args);
+    let inspect = super::AgentTaskCookRecoveryAction {
+        action: "inspect_worktree".to_string(),
+        command: format!("git -C {} status", quote_arg(&worktree)),
+    };
+    Some(CookRecoveryActions {
+        reason: "Timeout left uncommitted worktree changes that could not be fingerprinted as the producing run's patch. Inspect the worktree; retry is not eligible.".to_string(),
+        legal_actions: vec![
+            super::AgentTaskCookRecoveryAction {
+                action: "status".to_string(),
+                command: command(&["status", run_id]),
+            },
+            super::AgentTaskCookRecoveryAction {
+                action: "diagnose".to_string(),
+                command: command(&["diagnose", run_id]),
+            },
+            inspect.clone(),
+        ],
+        next_actions: vec![inspect],
+    })
+}
+
+fn timeout_worktree_path(
+    recipe: &super::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+    run_id: &str,
+    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+) -> Option<String> {
+    let from_artifact = lifecycle_store
+        .map(|store| store.read_aggregate(run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id))
+        .ok()
+        .and_then(|aggregate| {
+            aggregate.outcomes.iter().find_map(|outcome| {
+                outcome.artifacts.iter().find_map(|artifact| {
+                    artifact
+                        .metadata
+                        .get("workspace_root")
+                        .and_then(Value::as_str)
+                        .filter(|root| !root.is_empty())
+                        .map(str::to_string)
+                })
+            })
+        });
+    from_artifact
+        .or_else(|| {
+            recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == run_id)
+                .and_then(|attempt| attempt.plan.tasks.first())
+                .and_then(|task| task.workspace.root.clone())
+                .filter(|root| !root.is_empty())
+        })
+        .or_else(|| {
+            record
+                .and_then(|record| record.metadata.get("source_checkout"))
+                .and_then(|checkout| checkout.get("path").or_else(|| checkout.get("root")))
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            super::reconstruct_options(recipe)
+                .ok()?
+                .workspace
+                .source_worktree_path
+                .map(|path| path.display().to_string())
+                .filter(|path| !path.is_empty())
+        })
 }
 
 /// Artifact IDs are durable controller metadata. Expose them only when the

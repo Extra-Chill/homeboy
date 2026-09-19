@@ -652,7 +652,7 @@ pub struct WorktreeStatusOutput {
     pub safety: WorktreeSafetyReport,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorktreeRemoveOutput {
     pub record: TaskWorktreeRecord,
     pub safety: WorktreeSafetyReport,
@@ -740,6 +740,97 @@ pub struct WorktreeRemoveOptions {
     pub force: bool,
     pub cleanup_branch: bool,
     pub allow_unmerged_branch: bool,
+    /// Why the reaper removed this workspace, recorded in the reaping audit.
+    pub reason: Option<String>,
+    /// Which session/run invoked the reaper, recorded in the reaping audit.
+    pub reaper: Option<String>,
+}
+
+/// One durable reaping fact appended when a task worktree is removed.
+///
+/// The reaping audit answers "what was removed, by which session/run, and why"
+/// after the fact, so a victim of reclamation — or an operator investigating
+/// reclaimed disk space — can attribute the removal instead of finding only a
+/// missing directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskWorktreeReapingAudit {
+    pub schema: String,
+    pub at_ms: u64,
+    pub record_id: String,
+    pub component_id: String,
+    pub worktree_path: String,
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub lifecycle_revision: u64,
+    pub force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaper: Option<String>,
+    pub removed: bool,
+    pub branch_deleted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorktreeReclaimOptions {
+    pub dry_run: bool,
+    pub limit: usize,
+    pub cleanup_branches: bool,
+    pub allow_unmerged_branches: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeReclaimCandidate {
+    pub record: TaskWorktreeRecord,
+    pub reclaimable: bool,
+    pub live_owners: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimable_bytes: Option<u64>,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeReclaimSkipped {
+    pub record: TaskWorktreeRecord,
+    pub live_owners: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaimable_bytes: Option<u64>,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeReclaimRemoved {
+    pub remove: WorktreeRemoveOutput,
+    pub reclaimed_bytes: Option<u64>,
+}
+
+/// One workspace whose expired owner leases were durably released by reclaim.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorktreeStaleLeaseRelease {
+    pub workspace: WorkspaceIdentity,
+    pub released_owners: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct WorktreeReclaimCounts {
+    pub candidates: usize,
+    pub removed: usize,
+    pub skipped: usize,
+    pub reclaimable_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub released_stale_leases: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeReclaimOutput {
+    pub dry_run: bool,
+    pub counts: WorktreeReclaimCounts,
+    pub candidates: Vec<WorktreeReclaimCandidate>,
+    pub removed: Vec<WorktreeReclaimRemoved>,
+    pub skipped: Vec<WorktreeReclaimSkipped>,
+    pub released_stale_leases: Vec<WorktreeStaleLeaseRelease>,
+    pub audit_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +839,8 @@ pub struct WorktreeCleanupOptions {
     pub dry_run: bool,
     pub cleanup_branches: bool,
     pub allow_unmerged_branches: bool,
+    /// Which session/run invoked the reaper, recorded in the reaping audit.
+    pub reaper: Option<String>,
 }
 
 #[derive(Debug, Clone)]

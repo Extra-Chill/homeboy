@@ -6,8 +6,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -172,7 +173,7 @@ pub struct LocalControllerJobClient {
     // Keep the shared side until this client has durably handed off the job.
     // Recovery takes the exclusive side before proving zero active jobs, so a
     // different build cannot replace this generation after preflight.
-    _admission_guard: Option<File>,
+    _admission_guard: Option<DaemonAdmissionGuard>,
 }
 
 /// The durable admission result for a typed controller job submission.
@@ -208,7 +209,12 @@ impl LocalControllerJobClient {
     /// can deserialize a request while applying stale ownership semantics. Fail
     /// before submission instead of handing new lifecycle records to it.
     pub fn connect_current_build() -> Result<Self> {
-        let admission_guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+        // Dead-lease cleanup needs exclusive admission. Recover before taking
+        // our shared guard, then retain the guarded validation below.
+        if !read_status()?.running {
+            ensure_running(DEFAULT_ADDR)?;
+        }
+        let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
         match Self::connect_with_admission_guard(Some(admission_guard)) {
             Ok(client) => Ok(client),
@@ -289,7 +295,7 @@ impl LocalControllerJobClient {
         })
     }
 
-    fn connect_with_admission_guard(admission_guard: Option<File>) -> Result<Self> {
+    fn connect_with_admission_guard(admission_guard: Option<DaemonAdmissionGuard>) -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -1666,13 +1672,16 @@ where
 
 fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
     for job in job_store.list() {
+        // Only a live job needs its owner rebuilt. A terminal job has no work
+        // left to route, and generation retirement prunes its bookkeeping
+        // anyway, so recording it just to mark it terminal is pure churn.
+        if job.status.is_terminal() {
+            continue;
+        }
         let Some(lease_id) = job.daemon_lease_id.as_deref() else {
             continue;
         };
-        generation_store::record_job(&job.id.to_string(), lease_id)?;
-        if job.status.is_terminal() {
-            generation_store::mark_job_terminal(&job.id.to_string())?;
-        }
+        generation_store::rebuild_job_owner(&job.id.to_string(), lease_id)?;
     }
     Ok(())
 }
@@ -1739,11 +1748,9 @@ fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandl
 ///
 /// Runs are dispatched onto their own threads by the ticker, so a slow
 /// scheduled command delays neither this loop nor daemon shutdown. Stale
-/// `running` markers left by a previous process are reclaimed once at start,
-/// matching how the job store reconciles expired reservations when it opens.
+/// `running` markers are reclaimed on every tick, so a live daemon cannot
+/// leave an enabled schedule un-run for many cadences.
 fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
-    let _ = crate::schedule::reclaim_stale_runs(chrono::Utc::now());
-
     let runner: std::sync::Arc<dyn crate::schedule::ScheduleCommandRunner> =
         match crate::schedule::SubprocessRunner::new() {
             Ok(runner) => std::sync::Arc::new(runner),
@@ -2231,8 +2238,8 @@ where
                     .ok_or_else(|| {
                         Error::internal_unexpected("controller admission has no daemon lease owner")
                     })?;
-                heartbeat_lease()?;
-                generation_store::record_job(job_id, lease_id)?;
+                let serving = heartbeat_lease()?;
+                generation_store::record_job_for_admission(job_id, lease_id, &serving)?;
                 Ok(body)
             }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
@@ -7110,7 +7117,47 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
+/// How long a lifecycle command waits for a lock held by a live owner before
+/// it inspects the holder. Hermetic fixtures shrink this through
+/// [`DAEMON_OPERATION_LOCK_WAIT_MS_ENV`]; the default matches the bounded
+/// admission-fence wait so an in-flight stop/start never times out recovery.
+const DAEMON_OPERATION_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const DAEMON_OPERATION_LOCK_WAIT_MS_ENV: &str = "HOMEBOY_DAEMON_OPERATION_LOCK_WAIT_MS";
+
+fn daemon_operation_lock_wait() -> Duration {
+    std::env::var(DAEMON_OPERATION_LOCK_WAIT_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DAEMON_OPERATION_LOCK_DEFAULT_WAIT)
+}
+
+fn open_daemon_operation_lock_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The daemon supervisor is detached from this launcher. It must not inherit
+    // the lifecycle lock and strand later recovery after the launcher exits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_CLOEXEC);
+    }
+    options.open(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+    })
+}
+
+pub(crate) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
+    acquire_daemon_operation_lock_with_wait(daemon_operation_lock_wait())
+}
+
+/// The ensure path carries its own explicit wait so its timeout stays
+/// meaningful even though destructive lifecycle acquisition reclaims
+/// unowned locks after the shared probe window.
+pub(super) fn acquire_daemon_operation_lock_with_wait(
+    wait: Duration,
+) -> Result<DaemonOperationLock> {
     let state = state_path()?;
     let Some(parent) = state.parent() else {
         return Err(Error::internal_io(
@@ -7122,26 +7169,132 @@ pub(super) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
         Error::internal_io(e.to_string(), Some(format!("create {}", parent.display())))
     })?;
     let path = parent.join("operation.lock");
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    // The daemon supervisor is detached from this launcher. It must not inherit
-    // the lifecycle lock and strand later recovery after the launcher exits.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
 
-        options.custom_flags(libc::O_CLOEXEC);
+    // A short retry absorbs a live owner that is mid-lifecycle. If the wait
+    // expires, classify the holder instead of confusing an operator with an
+    // unexplained lock report (#14706: an unowned lock must self-heal, and a
+    // live holder must be named with the exact path it is holding).
+    let deadline = Instant::now() + wait;
+    loop {
+        let file = open_daemon_operation_lock_file(&path)?;
+        if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+            return Ok(DaemonOperationLock { file });
+        }
+        if Instant::now() >= deadline {
+            // Drop this probe descriptor first: holder detection must not
+            // observe the caller itself, or the caller would look like a live
+            // holder and an in-process reclaim could never converge.
+            drop(file);
+            return claim_daemon_operation_lock_after_wait(&path);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    let file = options.open(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
-    })?;
-    if !try_lock_file_exclusive(&file, "daemon lifecycle")? {
-        return Err(Error::internal_unexpected(format!(
-            "daemon lifecycle operation already in progress; lock is held at {}",
-            path.display()
-        )));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum OperationLockHolderState {
+    /// Live PIDs that currently hold the lock open.
+    Live(Vec<u32>),
+    /// The lock path is provably unowned: no running process holds it open.
+    Unowned,
+    /// Unverifiable, so reclaiming would be a guess; report that instead.
+    Undetermined,
+}
+
+/// Identify live processes holding the lifecycle lock open.
+///
+/// `flock` dies with the holder, so when an operator reports "lock held with
+/// no process", the holder is unobservable through the lock itself. This
+/// distinguishes a named live holder from a genuinely unowned lock file
+/// without ever guessing.
+fn operation_lock_holder_pids(path: &Path) -> OperationLockHolderState {
+    let output = Command::new("lsof")
+        .args(["-t", "--"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => return OperationLockHolderState::Undetermined,
+    };
+    let pids: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect();
+    if output.status.success() {
+        if pids.is_empty() {
+            OperationLockHolderState::Unowned
+        } else {
+            OperationLockHolderState::Live(pids)
+        }
+    } else {
+        // lsof reports no match with a failure status; it may also fail on
+        // sandboxed or restricted environments, which stays unverifiable.
+        OperationLockHolderState::Undetermined
     }
-    Ok(DaemonOperationLock { file })
+}
+
+fn claim_daemon_operation_lock_after_wait(path: &Path) -> Result<DaemonOperationLock> {
+    match operation_lock_holder_pids(path) {
+        OperationLockHolderState::Live(holders) => {
+            let live: Vec<u32> = holders
+                .iter()
+                .copied()
+                .filter(|pid| pid_is_running(*pid))
+                .collect();
+            if !live.is_empty() {
+                let mut error = Error::internal_unexpected(format!(
+                    "daemon lifecycle operation is held by live PID {} at {}; wait for the holder, then retry `homeboy daemon recover --yes`",
+                    live.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    path.display()
+                ));
+                error.details["operation_lock_path"] =
+                    serde_json::json!(path.display().to_string());
+                error.details["operation_lock_holder_pids"] = serde_json::json!(live);
+                error.details["lifecycle_mutation"] = serde_json::json!("reclaim");
+                return Err(error);
+            }
+            // Every listed holder exited between lsof and now. The final try
+            // below absorbs the common race before any reclaim is attempted.
+            reclaim_unowned_daemon_operation_lock(path)
+        }
+        OperationLockHolderState::Unowned => reclaim_unowned_daemon_operation_lock(path),
+        OperationLockHolderState::Undetermined => {
+            // The holder could not be observed. Try once more; if the lock is
+            // still held by something lsof cannot see, say so instead of
+            // reclaiming on a guess.
+            let file = open_daemon_operation_lock_file(path)?;
+            if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+                return Ok(DaemonOperationLock { file });
+            }
+            Err(Error::internal_unexpected(format!(
+                "daemon lifecycle operation is in progress; the lock holder at {} could not be verified; rerun `homeboy daemon status` and retry the lifecycle command on the machine that holds the file",
+                path.display()
+            )))
+        }
+    }
+}
+
+/// Reclaim a lifecycle lock proven unowned.
+///
+/// Every lock holder observed has exited, so the advisory ownership is gone.
+/// Reopening requires a fresh descriptor because removing the held inode is
+/// the only way to break a stranded lock; the removal happens only after the
+/// holder proof above, and the final flock still has to succeed on the new
+/// inode.
+fn reclaim_unowned_daemon_operation_lock(path: &Path) -> Result<DaemonOperationLock> {
+    let _ = fs::remove_file(path);
+    let file = open_daemon_operation_lock_file(path)?;
+    if try_lock_file_exclusive(&file, "daemon lifecycle")? {
+        return Ok(DaemonOperationLock { file });
+    }
+    Err(Error::internal_unexpected(format!(
+        "daemon lifecycle lock was reclaimed at {} but raced a new holder; retry the lifecycle command",
+        path.display()
+    )))
 }
 
 pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
@@ -7181,53 +7334,117 @@ pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>>
 /// admission. Normal admissions take a shared lock; destructive recovery takes
 /// the exclusive side for its complete proof-and-signal interval.
 pub(super) fn acquire_daemon_job_admission_fence() -> Result<DaemonAdmissionFence> {
-    acquire_daemon_admission_lock(DaemonAdmissionLockMode::Exclusive).map(DaemonAdmissionFence)
+    acquire_daemon_job_admission_fence_with_wait(Duration::from_secs(5))
+}
+
+/// A destructive lifecycle action must not wait indefinitely behind a Cook that
+/// has preflighted a daemon but has not persisted its durable job yet.
+pub(super) fn acquire_daemon_job_admission_fence_with_wait(
+    wait: Duration,
+) -> Result<DaemonAdmissionFence> {
+    const RETRY: Duration = Duration::from_millis(500);
+
+    let deadline = Instant::now() + wait;
+    loop {
+        match try_acquire_daemon_job_admission_fence()? {
+            Some(fence) => return Ok(fence),
+            None if Instant::now() >= deadline => {
+                return Err(daemon_admission_fence_timeout_error(wait));
+            }
+            None => {}
+        }
+        std::thread::sleep(RETRY.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn try_acquire_daemon_job_admission_fence() -> Result<Option<DaemonAdmissionFence>> {
+    let (state_lock, _) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    if state.shared_holders > 0 || state.exclusive_held {
+        return Ok(None);
+    }
+    state.exclusive_held = true;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            return Err(error);
+        }
+    };
+    match try_lock_file_exclusive(&file, "daemon admission") {
+        Ok(true) => Ok(Some(DaemonAdmissionFence { file })),
+        Ok(false) => {
+            release_daemon_admission_exclusive();
+            Ok(None)
+        }
+        Err(error) => {
+            release_daemon_admission_exclusive();
+            Err(error)
+        }
+    }
+}
+
+fn daemon_admission_fence_timeout_error(wait: Duration) -> Error {
+    let path = state_path()
+        .map(|state| state.with_file_name("admission.lock"))
+        .unwrap_or_else(|_| PathBuf::from("daemon admission lock"));
+    daemon_admission_fence_timeout_error_at(&path, wait)
+}
+
+fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "daemon_admission_fence",
+        "timed out waiting for daemon admission; no daemon recovery or lease cleanup was performed",
+        Some(path.display().to_string()),
+        Some(vec![
+            "Wait for the concurrent admission to finish, then retry `homeboy daemon recover --yes`."
+                .to_string(),
+            "Run `homeboy daemon status` to inspect durable job evidence before retrying."
+                .to_string(),
+        ]),
+    )
+    .with_retryable(true);
+    error.details = serde_json::json!({
+        "classification": "daemon_admission_fence_timeout",
+        "lock_path": path,
+        "wait_ms": wait.as_millis(),
+        "lifecycle_mutation": "not_started",
+    });
+    error
 }
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _guard = acquire_daemon_admission_lock(DaemonAdmissionLockMode::Shared)?;
+    let _guard = acquire_daemon_admission_lock()?;
     operation()
 }
 
-enum DaemonAdmissionLockMode {
-    Shared,
-    Exclusive,
-}
-
-fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> {
-    let state = state_path()?;
-    let parent = state
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
-    fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(parent.join("admission.lock"))
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("open daemon admission lock".to_string()),
-            )
+fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    let mut state = state_lock
+        .lock()
+        .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    while state.exclusive_held {
+        state = state_changed.wait(state).map_err(|_| {
+            Error::internal_unexpected("daemon admission process state is poisoned")
         })?;
+    }
+    state.shared_holders += 1;
+    drop(state);
+
+    let (_, file) = match open_daemon_admission_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            release_daemon_admission_shared();
+            return Err(error);
+        }
+    };
     #[cfg(unix)]
-    if unsafe {
-        libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            match mode {
-                DaemonAdmissionLockMode::Shared => libc::LOCK_SH,
-                DaemonAdmissionLockMode::Exclusive => libc::LOCK_EX,
-            },
-        )
-    } != 0
-    {
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
+        release_daemon_admission_shared();
         return Err(Error::internal_io(
             std::io::Error::last_os_error().to_string(),
             Some("lock daemon admission".to_string()),
@@ -7240,14 +7457,10 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-        let flags = match mode {
-            DaemonAdmissionLockMode::Shared => 0,
-            DaemonAdmissionLockMode::Exclusive => LOCKFILE_EXCLUSIVE_LOCK,
-        };
         if unsafe {
             LockFileEx(
                 file.as_raw_handle(),
-                flags,
+                0,
                 0,
                 u32::MAX,
                 u32::MAX,
@@ -7255,15 +7468,41 @@ fn acquire_daemon_admission_lock(mode: DaemonAdmissionLockMode) -> Result<File> 
             )
         } == 0
         {
+            release_daemon_admission_shared();
             return Err(Error::internal_io(
                 std::io::Error::last_os_error().to_string(),
                 Some("lock daemon admission".to_string()),
             ));
         }
     }
-    #[cfg(not(any(unix, windows)))]
-    let _ = mode;
-    Ok(file)
+    Ok(DaemonAdmissionGuard { file })
+}
+
+fn open_daemon_admission_lock() -> Result<(PathBuf, File)> {
+    let state = state_path()?;
+    let parent = state
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("daemon state path has no parent directory"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let path = parent.join("admission.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open daemon admission lock".to_string()),
+            )
+        })?;
+    Ok((path, file))
 }
 
 /// Acquires a non-blocking exclusive advisory lock backed by the OS. Platforms
@@ -7341,13 +7580,51 @@ impl Drop for DaemonOwnerLock {
     }
 }
 
-pub(super) struct DaemonAdmissionFence(File);
+pub(super) struct DaemonAdmissionFence {
+    file: File,
+}
+
+struct DaemonAdmissionGuard {
+    file: File,
+}
+
+#[derive(Default)]
+struct DaemonAdmissionProcessState {
+    shared_holders: usize,
+    exclusive_held: bool,
+}
+
+fn daemon_admission_process_state() -> &'static (Mutex<DaemonAdmissionProcessState>, Condvar) {
+    static STATE: OnceLock<(Mutex<DaemonAdmissionProcessState>, Condvar)> = OnceLock::new();
+    STATE.get_or_init(|| {
+        (
+            Mutex::new(DaemonAdmissionProcessState::default()),
+            Condvar::new(),
+        )
+    })
+}
+
+fn release_daemon_admission_shared() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.shared_holders = state.shared_holders.saturating_sub(1);
+        state_changed.notify_all();
+    }
+}
+
+fn release_daemon_admission_exclusive() {
+    let (state_lock, state_changed) = daemon_admission_process_state();
+    if let Ok(mut state) = state_lock.lock() {
+        state.exclusive_held = false;
+        state_changed.notify_all();
+    }
+}
 
 impl Drop for DaemonAdmissionFence {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
-            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN);
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
         }
         #[cfg(windows)]
         unsafe {
@@ -7357,13 +7634,39 @@ impl Drop for DaemonAdmissionFence {
 
             let mut overlapped: OVERLAPPED = std::mem::zeroed();
             let _ = UnlockFileEx(
-                self.0.as_raw_handle(),
+                self.file.as_raw_handle(),
                 0,
                 u32::MAX,
                 u32::MAX,
                 &mut overlapped,
             );
         }
+        release_daemon_admission_exclusive();
+    }
+}
+
+impl Drop for DaemonAdmissionGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.file), libc::LOCK_UN);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+            use windows_sys::Win32::System::IO::OVERLAPPED;
+
+            let mut overlapped: OVERLAPPED = std::mem::zeroed();
+            let _ = UnlockFileEx(
+                self.file.as_raw_handle(),
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            );
+        }
+        release_daemon_admission_shared();
     }
 }
 
@@ -7376,12 +7679,12 @@ pub(super) fn acquire_daemon_operation_lock_for_ensure(
     const RETRY: Duration = Duration::from_millis(50);
     let deadline = Instant::now() + wait;
     loop {
-        match acquire_daemon_operation_lock() {
+        match acquire_daemon_operation_lock_with_wait(wait) {
             Ok(lock) => return Ok(lock),
             Err(err)
                 if err
                     .message
-                    .contains("daemon lifecycle operation already in progress")
+                    .contains("daemon lifecycle operation is held by live PID")
                     && Instant::now() < deadline =>
             {
                 std::thread::sleep(RETRY);
@@ -7389,7 +7692,7 @@ pub(super) fn acquire_daemon_operation_lock_for_ensure(
             Err(err)
                 if err
                     .message
-                    .contains("daemon lifecycle operation already in progress") =>
+                    .contains("daemon lifecycle operation is held by live PID") =>
             {
                 return Err(Error::internal_unexpected(format!(
                     "timed out after {}s waiting for daemon ensure-running lifecycle lock; another caller may still be starting the daemon",

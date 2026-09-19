@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use homeboy_control_plane_contract::RunId;
 use rusqlite::{params, params_from_iter, OptionalExtension, ToSql};
 use uuid::Uuid;
 
@@ -46,6 +47,113 @@ fn run_page_from_probe(mut runs: Vec<RunRecord>, limit: i64, offset: i64) -> Run
         next_cursor,
         next_offset,
     }
+}
+
+fn apply_imported_run_in_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    run: &RunRecord,
+    metadata_json: &str,
+    preserve_terminal: bool,
+    mission_id: Option<&str>,
+    resource_projection: Option<&ControlPlaneResourceProjection>,
+) -> rusqlite::Result<bool> {
+    let terminal_guard = if preserve_terminal {
+        " WHERE runs.status = 'running' OR ?6 != 'running'"
+    } else {
+        ""
+    };
+    transaction.execute(
+        &format!(
+            r#"
+                INSERT INTO runs(
+                    id,
+                    kind,
+                    component_id,
+                    started_at,
+                    finished_at,
+                    status,
+                    command,
+                    cwd,
+                    homeboy_version,
+                    git_sha,
+                    rig_id,
+                    metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    kind = excluded.kind,
+                    component_id = excluded.component_id,
+                    started_at = excluded.started_at,
+                    finished_at = excluded.finished_at,
+                    status = excluded.status,
+                    command = excluded.command,
+                    cwd = excluded.cwd,
+                    homeboy_version = excluded.homeboy_version,
+                    git_sha = excluded.git_sha,
+                    rig_id = excluded.rig_id,
+                    metadata_json = excluded.metadata_json
+                {terminal_guard}
+                "#
+        ),
+        params![
+            run.id,
+            run.kind,
+            run.component_id,
+            run.started_at,
+            run.finished_at,
+            run.status,
+            run.command,
+            run.cwd,
+            run.homeboy_version,
+            run.git_sha,
+            run.rig_id,
+            metadata_json,
+        ],
+    )?;
+    let run_applied = transaction.changes() > 0;
+    if !run_applied {
+        return Ok(false);
+    }
+    if let Some(mission_id) = mission_id {
+        let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
+        transaction.execute(
+            r#"
+                    INSERT INTO control_plane_missions(id, created_at, updated_at)
+                    VALUES (?1, ?2, ?3)
+                    ON CONFLICT(id) DO UPDATE SET
+                        updated_at = MAX(updated_at, excluded.updated_at)
+                    "#,
+            params![mission_id, run.started_at, updated_at],
+        )?;
+        transaction.execute(
+            r#"
+                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
+                    VALUES (?1, ?2)
+                    ON CONFLICT(mission_id, run_id) DO NOTHING
+                    "#,
+            params![mission_id, run.id],
+        )?;
+    }
+    if let Some(projection) = resource_projection {
+        let eligibility = serde_json::to_string(&projection.eligibility)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let provenance = serde_json::to_string(&projection.provenance)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        transaction.execute(
+            "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
+            params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
+        )?;
+        transaction.execute(
+            "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
+            params![projection.resource_type, projection.resource_id],
+        )?;
+        for alias in &projection.aliases {
+            transaction.execute(
+                "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
+                params![projection.resource_type, alias, projection.resource_id],
+            )?;
+        }
+    }
+    Ok(run_applied)
 }
 
 impl ObservationStore {
@@ -947,6 +1055,191 @@ impl ObservationStore {
         self.get_run(run_id)
     }
 
+    /// Start a durable detached-owner handoff. A watcher treats `transferring`
+    /// as live only until its recorded deadline, preventing an exited launcher
+    /// from being mistaken for the worker before that worker acknowledges.
+    pub fn begin_running_run_handoff(
+        &self,
+        run_id: &str,
+        worker_pid: u32,
+        deadline_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let owner = serialize_metadata(&serde_json::json!({
+            "pid": worker_pid,
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        }))?;
+        let handoff = serialize_metadata(&serde_json::json!({
+            "state": "transferring",
+            "launcher_pid": std::process::id(),
+            "worker_pid": worker_pid,
+            "deadline_unix_ms": deadline_at.timestamp_millis(),
+        }))?;
+        let rows = execute_with_retry("begin running run handoff", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.homeboy_run_owner', json(?1), '$.homeboy_ownership_handoff', json(?2)) WHERE id = ?3 AND status = ?4",
+                params![owner, handoff, run_id, RunStatus::Running.as_str()],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
+    /// A detached worker may resume only by acknowledging the exact handoff
+    /// offered to its PID. This is the durable ownership boundary.
+    pub fn accept_running_run_handoff(
+        &self,
+        run_id: &str,
+        worker_pid: u32,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let accepted_at = chrono::Utc::now().to_rfc3339();
+        let now_unix_ms = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("accept running run handoff", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(metadata_json, '$.homeboy_ownership_handoff.state', 'accepted', '$.homeboy_ownership_handoff.accepted_at', ?1) WHERE id = ?2 AND status = ?3 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?4 AND CAST(json_extract(metadata_json, '$.homeboy_ownership_handoff.deadline_unix_ms') AS INTEGER) > ?5",
+                params![accepted_at, run_id, RunStatus::Running.as_str(), worker_pid, now_unix_ms],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
+    /// Settle an unacknowledged handoff as an error. This is deliberately a
+    /// conditional terminal write so a late child cannot resurrect the run.
+    pub fn fail_running_run_handoff(
+        &self,
+        run_id: &str,
+        worker_pid: u32,
+        reason: &str,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        if run.status != RunStatus::Running.as_str()
+            || run
+                .metadata_json
+                .pointer("/homeboy_ownership_handoff/state")
+                .and_then(serde_json::Value::as_str)
+                != Some("transferring")
+            || run
+                .metadata_json
+                .pointer("/homeboy_ownership_handoff/worker_pid")
+                .and_then(serde_json::Value::as_u64)
+                != Some(worker_pid as u64)
+        {
+            return Ok(None);
+        }
+        let mut metadata = run.metadata_json.clone();
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "homeboy_ownership_handoff".to_string(),
+                serde_json::json!({
+                    "state": "failed",
+                    "worker_pid": worker_pid,
+                    "failed_at": chrono::Utc::now().to_rfc3339(),
+                    "reason": reason,
+                }),
+            );
+            object.insert("observation_status".to_string(), serde_json::json!("error"));
+            object.insert("error".to_string(), serde_json::json!(reason));
+        }
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let metadata = serialize_metadata(&metadata)?;
+        let rows = execute_with_retry("fail running run handoff", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6",
+                params![
+                    finished_at,
+                    RunStatus::Error.as_str(),
+                    metadata,
+                    run_id,
+                    RunStatus::Running.as_str(),
+                    worker_pid,
+                ],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
+    /// A watcher uses this to make a dead launcher/never-started worker visible
+    /// as a terminal error rather than eventually classifying it as a generic
+    /// stale owner.
+    pub fn expire_running_run_handoff(&self, run_id: &str) -> Result<Option<RunRecord>> {
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        let handoff = run.metadata_json.get("homeboy_ownership_handoff");
+        let state = handoff
+            .and_then(|handoff| handoff.get("state"))
+            .and_then(serde_json::Value::as_str);
+        let worker_pid = handoff
+            .and_then(|handoff| handoff.get("worker_pid"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok());
+        let deadline_unix_ms = handoff
+            .and_then(|handoff| handoff.get("deadline_unix_ms"))
+            .and_then(serde_json::Value::as_i64);
+        if state == Some("transferring")
+            && deadline_unix_ms
+                .is_some_and(|deadline| deadline <= chrono::Utc::now().timestamp_millis())
+        {
+            return self.fail_expired_running_run_handoff(
+                run_id,
+                worker_pid.unwrap_or_default(),
+                deadline_unix_ms.expect("expired handoff has a deadline"),
+            );
+        }
+        Ok(None)
+    }
+
+    fn fail_expired_running_run_handoff(
+        &self,
+        run_id: &str,
+        worker_pid: u32,
+        deadline_unix_ms: i64,
+    ) -> Result<Option<RunRecord>> {
+        let Some(run) = self.get_run(run_id)? else {
+            return Ok(None);
+        };
+        let reason = "detached worker did not acknowledge ownership before the handoff deadline";
+        let mut metadata = run.metadata_json.clone();
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert(
+                "homeboy_ownership_handoff".to_string(),
+                serde_json::json!({
+                    "state": "failed",
+                    "worker_pid": worker_pid,
+                    "failed_at": chrono::Utc::now().to_rfc3339(),
+                    "reason": reason,
+                }),
+            );
+            object.insert("observation_status".to_string(), serde_json::json!("error"));
+            object.insert("error".to_string(), serde_json::json!(reason));
+        }
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let metadata = serialize_metadata(&metadata)?;
+        let now_unix_ms = chrono::Utc::now().timestamp_millis();
+        let rows = execute_with_retry("expire running run handoff", || {
+            self.connection.execute(
+                "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6 AND CAST(json_extract(metadata_json, '$.homeboy_ownership_handoff.deadline_unix_ms') AS INTEGER) = ?7 AND ?7 <= ?8",
+                params![finished_at, RunStatus::Error.as_str(), metadata, run_id, RunStatus::Running.as_str(), worker_pid, deadline_unix_ms, now_unix_ms],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         validate_required("run_id", run_id)?;
         self.connection
@@ -1536,6 +1829,26 @@ impl ObservationStore {
         mission_id: Option<&str>,
         resource_projection: Option<&ControlPlaneResourceProjection>,
     ) -> Result<()> {
+        self.upsert_imported_run_with_events(
+            run,
+            preserve_terminal,
+            mission_id,
+            resource_projection,
+            &[],
+        )
+    }
+
+    /// Commit one run projection, optional resource authority, and prepared
+    /// canonical events on the same SQLite transaction. Event failure rolls
+    /// back the run write.
+    pub fn upsert_imported_run_with_events(
+        &self,
+        run: &RunRecord,
+        preserve_terminal: bool,
+        mission_id: Option<&str>,
+        resource_projection: Option<&ControlPlaneResourceProjection>,
+        events: &[PreparedControlPlaneEventAppend],
+    ) -> Result<()> {
         validate_required("run.id", &run.id)?;
         let mut run = run.clone();
         if crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json).is_none()
@@ -1549,103 +1862,57 @@ impl ObservationStore {
             }
         }
         let metadata_json = serialize_metadata(&run.metadata_json)?;
-        let terminal_guard = if preserve_terminal {
-            " WHERE runs.status = 'running' OR ?6 != 'running'"
+        let bound_run = if events.is_empty() {
+            None
         } else {
-            ""
+            Some(RunId::new(&run.id).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "run.id",
+                    error.to_string(),
+                    Some(run.id.clone()),
+                    None,
+                )
+            })?)
         };
-        execute_with_retry("upsert imported run record", || {
+        let mut captured = None;
+        execute_with_retry("upsert imported run with canonical events", || {
+            captured = None;
             let transaction = self.connection.unchecked_transaction()?;
-            transaction.execute(
-                &format!(
-                    r#"
-                INSERT INTO runs(
-                    id,
-                    kind,
-                    component_id,
-                    started_at,
-                    finished_at,
-                    status,
-                    command,
-                    cwd,
-                    homeboy_version,
-                    git_sha,
-                    rig_id,
-                    metadata_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ON CONFLICT(id) DO UPDATE SET
-                    kind = excluded.kind,
-                    component_id = excluded.component_id,
-                    started_at = excluded.started_at,
-                    finished_at = excluded.finished_at,
-                    status = excluded.status,
-                    command = excluded.command,
-                    cwd = excluded.cwd,
-                    homeboy_version = excluded.homeboy_version,
-                    git_sha = excluded.git_sha,
-                    rig_id = excluded.rig_id,
-                    metadata_json = excluded.metadata_json
-                {terminal_guard}
-                "#
-                ),
-                params![
-                    run.id,
-                    run.kind,
-                    run.component_id,
-                    run.started_at,
-                    run.finished_at,
-                    run.status,
-                    run.command,
-                    run.cwd,
-                    run.homeboy_version,
-                    run.git_sha,
-                    run.rig_id,
-                    metadata_json,
-                ],
+            let run_applied = apply_imported_run_in_tx(
+                &transaction,
+                &run,
+                &metadata_json,
+                preserve_terminal,
+                mission_id,
+                resource_projection,
             )?;
-            if let Some(mission_id) = mission_id {
-                let updated_at = run.finished_at.as_deref().unwrap_or(&run.started_at);
-                transaction.execute(
-                    r#"
-                    INSERT INTO control_plane_missions(id, created_at, updated_at)
-                    VALUES (?1, ?2, ?3)
-                    ON CONFLICT(id) DO UPDATE SET
-                        updated_at = MAX(updated_at, excluded.updated_at)
-                    "#,
-                    params![mission_id, run.started_at, updated_at],
-                )?;
-                transaction.execute(
-                    r#"
-                    INSERT INTO control_plane_mission_runs(mission_id, run_id)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(mission_id, run_id) DO NOTHING
-                    "#,
-                    params![mission_id, run.id],
-                )?;
-            }
-            if let Some(projection) = resource_projection {
-                let eligibility = serde_json::to_string(&projection.eligibility)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                let provenance = serde_json::to_string(&projection.provenance)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                transaction.execute(
-                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state, eligibility_json, provenance_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(resource_type, resource_id) DO UPDATE SET version = excluded.version, state = excluded.state, eligibility_json = excluded.eligibility_json, provenance_json = excluded.provenance_json",
-                    params![projection.resource_type, projection.resource_id, projection.version, projection.state, eligibility, provenance],
-                )?;
-                transaction.execute(
-                    "DELETE FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2",
-                    params![projection.resource_type, projection.resource_id],
-                )?;
-                for alias in &projection.aliases {
-                    transaction.execute(
-                        "INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES (?1, ?2, ?3)",
-                        params![projection.resource_type, alias, projection.resource_id],
-                    )?;
+            if run_applied {
+                if let Some(bound_run) = bound_run.as_ref() {
+                    for prepared in events {
+                        if let Err(error) =
+                            super::control_plane_events::append_control_plane_event_on(
+                                &transaction,
+                                bound_run,
+                                &prepared.request,
+                                &prepared.idempotency_digest,
+                                &prepared.request_digest,
+                            )
+                        {
+                            captured = Some(error);
+                            return match transaction.rollback() {
+                                Ok(()) => Ok(()),
+                                Err(rollback_error) => Err(rollback_error),
+                            };
+                        }
+                    }
                 }
             }
             transaction.commit()
         })?;
-        Ok(())
+        match captured {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     pub fn get_mission(&self, mission_id: &str) -> Result<Option<MissionRecord>> {
@@ -1742,6 +2009,153 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn detached_handoff_requires_acknowledgement_or_persists_terminal_error() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "handoff-review".to_string(),
+                )
+                .expect("running review");
+
+            store
+                .begin_running_run_handoff(
+                    "handoff-review",
+                    42_424,
+                    chrono::Utc::now() + chrono::Duration::seconds(1),
+                )
+                .expect("begin handoff")
+                .expect("running handoff");
+            let accepted = store
+                .accept_running_run_handoff("handoff-review", 42_424)
+                .expect("accept handoff")
+                .expect("accepted handoff");
+            assert_eq!(
+                accepted.metadata_json["homeboy_ownership_handoff"]["state"],
+                "accepted"
+            );
+            assert!(store
+                .fail_running_run_handoff("handoff-review", 42_424, "late failure")
+                .expect("late failure")
+                .is_none());
+
+            store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "expired-handoff-review".to_string(),
+                )
+                .expect("second running review");
+            store
+                .begin_running_run_handoff(
+                    "expired-handoff-review",
+                    42_425,
+                    chrono::Utc::now() - chrono::Duration::seconds(1),
+                )
+                .expect("begin expired handoff");
+            assert!(store
+                .accept_running_run_handoff("expired-handoff-review", 42_425)
+                .expect("expired handoff cannot be accepted")
+                .is_none());
+            let failed = store
+                .expire_running_run_handoff("expired-handoff-review")
+                .expect("expire handoff")
+                .expect("terminal handoff");
+            assert_eq!(failed.status, RunStatus::Error.as_str());
+            assert_eq!(
+                failed.metadata_json["homeboy_ownership_handoff"]["state"],
+                "failed"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_renewal_fences_an_expiry_snapshot_with_the_same_worker_pid() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({}))
+                        .build(),
+                    "renewed-handoff-review".to_string(),
+                )
+                .expect("running review");
+            let expired_deadline = chrono::Utc::now() - chrono::Duration::seconds(1);
+            store
+                .begin_running_run_handoff(&run.id, 42_426, expired_deadline)
+                .expect("begin expired handoff");
+
+            // A launcher retry can renew the same worker PID between an expiry
+            // reader's snapshot and its terminal write.
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    42_426,
+                    chrono::Utc::now() + chrono::Duration::minutes(1),
+                )
+                .expect("renew handoff");
+            assert!(store
+                .fail_expired_running_run_handoff(
+                    &run.id,
+                    42_426,
+                    expired_deadline.timestamp_millis(),
+                )
+                .expect("expire stale handoff snapshot")
+                .is_none());
+            let current = store.get_run(&run.id).expect("read run").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(
+                current.metadata_json["homeboy_ownership_handoff"]["state"],
+                "transferring"
+            );
+        });
+    }
+
+    #[test]
+    fn handoff_metadata_fences_stale_reconciliation_terminal_writes() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run_with_id(
+                    NewRunRecord::builder("review")
+                        .metadata(serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }))
+                        .build(),
+                    "handoff-fenced-reconcile".to_string(),
+                )
+                .expect("running review");
+            let snapshot = run.metadata_json.clone();
+            store
+                .begin_running_run_handoff(
+                    &run.id,
+                    42_427,
+                    chrono::Utc::now() + chrono::Duration::minutes(1),
+                )
+                .expect("begin handoff");
+
+            assert!(store
+                .finish_running_run_if_metadata(
+                    &run.id,
+                    RunStatus::Stale,
+                    serde_json::json!({ "homeboy_reconciled": { "reason": "owner_process_not_running" } }),
+                    &snapshot,
+                )
+                .expect("fenced finish")
+                .is_none());
+            let current = store.get_run(&run.id).expect("read run").expect("run");
+            assert_eq!(current.status, RunStatus::Running.as_str());
+            assert_eq!(
+                current.metadata_json["homeboy_ownership_handoff"]["state"],
+                "transferring"
+            );
+        });
+    }
 
     #[test]
     fn mission_index_is_transactional_forward_only_and_keyset_paginated() {

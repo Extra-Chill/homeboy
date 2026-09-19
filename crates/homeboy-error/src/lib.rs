@@ -755,7 +755,7 @@ impl Error {
         // Not retryable: the same write fails identically until capacity is
         // reclaimed, so an automatic retry only burns the remaining budget.
         .with_retryable(false)
-        .with_hint("Reclaim capacity with `homeboy cleanup --apply`.")
+        .with_hint("Reclaim capacity with `homeboy cleanup --apply` or scoped `homeboy worktree reclaim --apply`.")
         .with_hint(
             "If cleanup cannot start because the observation store will not open, run the \
              store-independent categories: `homeboy cleanup --include orphaned-artifact-bytes \

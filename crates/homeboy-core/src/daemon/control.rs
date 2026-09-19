@@ -2708,6 +2708,9 @@ struct StartupLeaseObservation {
     observed_pid: Option<u32>,
     observed_lease_id: Option<String>,
     observed_token: Option<String>,
+    observed_running: Option<bool>,
+    observed_fresh: Option<bool>,
+    observed_reachable: Option<bool>,
 }
 
 /// A launch token is an attempt identity, never a general daemon readiness
@@ -2728,10 +2731,16 @@ where
         observed_pid: None,
         observed_lease_id: None,
         observed_token: None,
+        observed_running: None,
+        observed_fresh: None,
+        observed_reachable: None,
     };
     for attempt in 0..=observations {
         let status = read_status()?;
         let admits_work = status.admits_work();
+        observed.observed_running = Some(status.running);
+        observed.observed_fresh = Some(status.fresh);
+        observed.observed_reachable = Some(status.reachable);
         if let Some(state) = status.state {
             if admits_work && state.startup_token == startup_token {
                 return Ok(Ok(DaemonStartResult {
@@ -2848,18 +2857,74 @@ where
     }
 }
 
+/// Build the timeout report from what startup observation actually saw.
+///
+/// `observe_startup_lease` admits on token only because the `supervise`
+/// launcher and its `serve` child have distinct PIDs, so the common cause of a
+/// timeout is the daemon never becoming work-admitting (`running && fresh &&
+/// reachable`) — usually because the process exited. A token or PID mismatch is
+/// asserted only when one was actually observed.
 fn startup_timeout_error(
     pid: u32,
     startup_token: &str,
     observation: StartupLeaseObservation,
     cleanup: Vec<String>,
 ) -> Error {
+    let token_mismatch = observation
+        .observed_token
+        .as_deref()
+        .is_some_and(|token| token != startup_token);
+    let mut failed = Vec::new();
+    if observation.observed_running == Some(false) {
+        failed.push("the daemon process was not running");
+    }
+    if observation.observed_fresh == Some(false) {
+        failed.push("the daemon binary was stale (did not match this Homeboy build)");
+    }
+    if observation.observed_reachable == Some(false) {
+        failed.push("the daemon API was not reachable");
+    }
+    if token_mismatch {
+        failed.push("the lease was held under a different startup token");
+    }
+    let breakdown = if failed.is_empty() {
+        "the live daemon lease never matched this startup attempt".to_string()
+    } else {
+        failed.join("; ")
+    };
+    // The `supervise` launcher durably records the serve child's exit status and
+    // a bounded, redacted output tail. Residual evidence from an unrelated
+    // daemon is filtered out by its recorded PID.
+    let child_exit = super::read_termination_evidence()
+        .ok()
+        .flatten()
+        .filter(|evidence| {
+            let Some(recorded) = evidence.pid else {
+                return false;
+            };
+            Some(recorded) == observation.observed_pid
+                && observation.observed_running == Some(false)
+        })
+        .map(|evidence| {
+            serde_json::json!({
+                "exit_code": evidence.exit_code,
+                "signal": evidence.signal,
+                "stderr": evidence.stderr,
+            })
+        });
     let mut error = Error::internal_unexpected(format!(
-        "daemon process {pid} did not publish its isolated startup token before timeout"
+        "daemon startup did not reach a work-admitting lease before timeout: {breakdown}"
     ))
-    .with_hint("The daemon startup was not accepted because the expected token and PID did not match. Retry the Lab Cook; provider budget was not consumed.".to_string());
+    .with_hint("The daemon startup never reached the live, fresh, and reachable state required to accept work. Retry the Lab Cook; provider budget was not consumed.".to_string());
     error.details = serde_json::json!({
         "classification": "terminal_pre_provider_startup",
+        "admission": {
+            "running": observation.observed_running,
+            "fresh": observation.observed_fresh,
+            "reachable": observation.observed_reachable,
+            "startup_token_mismatch": token_mismatch,
+        },
+        "child_exit": child_exit,
         "expected": { "pid": pid, "startup_token": startup_token },
         "observed": {
             "pid": observation.observed_pid,
@@ -2933,7 +2998,27 @@ fn spawn_and_wait_for_lease_attempt(
         read_status,
         || thread::sleep(STARTUP_LEASE_POLL),
     )? {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            let validation = super::validate_lease_file(Path::new(&result.state_path))?;
+            let state = validation
+                .state
+                .filter(|state| {
+                    validation.fresh
+                        && validation.running
+                        && validation.reachable
+                        && state.lease_id == result.lease_id
+                        && state.startup_token == startup_token
+                })
+                .ok_or_else(|| {
+                    Error::internal_unexpected(
+                        "daemon startup lease changed before generation activation",
+                    )
+                })?;
+            // A restart can leave a registry naming the dead generation. Publish
+            // the verified replacement before accepting controller submissions.
+            generation_store::activate(&state)?;
+            Ok(result)
+        }
         Err(observation) => {
             let cleanup = cleanup_startup_attempt(pid, startup_token)?;
             cleanup_evidence.extend(cleanup);

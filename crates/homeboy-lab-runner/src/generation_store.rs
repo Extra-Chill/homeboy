@@ -18,6 +18,10 @@ use crate::{
     RollingGenerations, RunnerDaemonGenerationStatus, RunnerGenerationJobOwners, RunnerSession,
 };
 
+#[cfg(all(test, unix))]
+#[path = "generation_retirement_tests.rs"]
+mod retirement_tests;
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdmissionFence {
     pub generation: String,
@@ -484,6 +488,7 @@ fn validate_registry_shape(value: &serde_json::Value) -> Result<()> {
                 | "job_owners"
                 | "run_owners"
                 | "artifact_owners"
+                | "retired_evidence"
         )
     }) {
         return Err(Error::config_invalid_value(
@@ -650,10 +655,10 @@ pub(crate) fn with_admission_fence<T>(
             generations
                 .generations
                 .iter()
-                .find(|(_, entry)| entry.active_jobs > 0)
+                .find(|(_, entry)| entry.observed_active_jobs.unwrap_or(entry.active_jobs) > 0)
                 .map(|(generation, entry)| AdmissionFence {
                     generation: generation.clone(),
-                    active_job_count: entry.active_jobs,
+                    active_job_count: entry.observed_active_jobs.unwrap_or(entry.active_jobs),
                 })
         });
         Ok((reservation, fence))
@@ -1116,7 +1121,7 @@ pub(crate) fn reconcile_admission_session(runner_id: &str, session: &RunnerSessi
         if !generations.generations.contains_key(&generation) {
             generations.begin(generation.clone(), session.clone());
         }
-        generations.activate(&generation);
+        generations.activate_preserving_drained(&generation);
         generations
             .generations
             .get_mut(&generation)
@@ -1151,6 +1156,25 @@ fn owner_session(
             })
         })
         .map(|generation| generation.endpoint.clone())
+}
+
+pub(crate) fn has_retired_evidence_owner(
+    runner_id: &str,
+    run_id: Option<&str>,
+    artifact_id: Option<&str>,
+) -> Result<bool> {
+    Ok(read(runner_id, None)?.is_some_and(|registry| {
+        registry
+            .endpoint_owner(None, run_id, artifact_id)
+            .is_some_and(|owner| {
+                registry
+                    .retired_evidence
+                    .iter()
+                    .any(|(generation, endpoint)| {
+                        owner_matches_generation(owner, generation, endpoint)
+                    })
+            })
+    }))
 }
 
 /// Resolve every generation-aware endpoint through one persisted ownership
@@ -1261,8 +1285,10 @@ pub(crate) fn requires_generation_preserving_refresh(
             .values()
             .any(|generation| generation.active_jobs > 0)
             || !generations.job_owners.is_empty()
-            || !generations.run_owners.is_empty()
-            || !generations.artifact_owners.is_empty()
+            || generations
+                .generations
+                .iter()
+                .any(|(id, entry)| has_result_owners_for(&generations, id, &entry.endpoint))
     }))
 }
 
@@ -1376,6 +1402,16 @@ pub(crate) fn tombstone_dead_direct_generations(
 }
 
 trait GenerationEndpointOperations {
+    fn evidence(&self, _session: &RunnerSession, _path: &str) -> Option<serde_json::Value> {
+        None
+    }
+    /// The endpoint's own record for one job it owns, used to release ledger
+    /// ownership for work that already finished. Unlike [`Self::evidence`], this
+    /// is readable while the generation still reports active jobs, because a
+    /// stale owner is exactly why that count has not reached zero.
+    fn job_record(&self, _session: &RunnerSession, _job_id: &str) -> Option<serde_json::Value> {
+        None
+    }
     /// Terminal linked handoffs can survive a controller restart in a daemon's
     /// job store. Settle them before treating its active count as ownership.
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
@@ -1399,7 +1435,41 @@ struct FallbackGenerationEndpointOperations<'a, Primary, Fallback> {
 }
 
 impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        self.client
+            .get(format!(
+                "{}/jobs/{encoded}",
+                session.local_url.as_deref()?.trim_end_matches('/')
+            ))
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .ok()
+    }
+
+    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+        if self.active_jobs(session) != Some(0) {
+            return None;
+        }
+        self.client
+            .get(format!(
+                "{}{path}",
+                session.local_url.as_deref()?.trim_end_matches('/')
+            ))
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .ok()
+    }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
+        if self.active_jobs(session).is_none() {
+            return false;
+        }
         let Some(local_url) = session.local_url.as_deref() else {
             return false;
         };
@@ -1420,6 +1490,12 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .send()
             .ok()?;
         let health = health.json::<serde_json::Value>().ok()?;
+        if !SshGenerationEndpointOperations::health_matches_session(
+            session,
+            daemon_health_data(&health),
+        ) {
+            return None;
+        }
         daemon_health_data(&health)
             .pointer("/freshness/active_jobs")
             .and_then(serde_json::Value::as_u64)
@@ -1431,20 +1507,43 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
     }
 
     fn stop(&self, session: &RunnerSession) -> bool {
+        if self.active_jobs(session) != Some(0) {
+            return false;
+        }
         let (Some(local_url), Some(lease_id)) = (
             session.local_url.as_deref(),
             session.remote_daemon_lease_id.as_deref(),
         ) else {
             return false;
         };
-        self.client
+        let accepted = self
+            .client
             .post(format!(
                 "{}/lifecycle/stop",
                 local_url.trim_end_matches('/')
             ))
             .json(&serde_json::json!({ "lease_id": lease_id, "force": false }))
             .send()
-            .is_ok_and(|response| response.status().is_success())
+            .is_ok_and(|response| response.status().is_success());
+        if !accepted {
+            return false;
+        }
+        // The HTTP response acknowledges a request before the daemon's final
+        // token/idle gate. A still-serving endpoint is not a retired process.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if self
+                .client
+                .get(format!("{}/health", local_url.trim_end_matches('/')))
+                .timeout(Duration::from_millis(500))
+                .send()
+                .is_err()
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
     }
 
     fn terminate_tunnel(&self, session: &RunnerSession) {
@@ -1584,6 +1683,17 @@ mod projection_tests {
 }
 
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        let encoded = homeboy_core::execution_contract::encode_uri_component(job_id);
+        serde_json::from_str(&self.request("GET", session, &format!("/jobs/{encoded}"), None)?).ok()
+    }
+
+    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+        if self.active_jobs(session) != Some(0) {
+            return None;
+        }
+        serde_json::from_str(&self.request("GET", session, path, None)?).ok()
+    }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         self.authenticated_health(session).is_some()
             && self
@@ -1619,8 +1729,13 @@ impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
             return false;
         }
         let body = serde_json::json!({ "lease_id": lease_id, "force": false }).to_string();
-        self.request("POST", session, "/lifecycle/stop", Some(&body))
-            .is_some()
+        if self
+            .request("POST", session, "/lifecycle/stop", Some(&body))
+            .is_none()
+        {
+            return false;
+        }
+        self.proven_stopped(session)
     }
 
     fn terminate_tunnel(&self, session: &RunnerSession) {
@@ -1634,6 +1749,17 @@ where
     Primary: GenerationEndpointOperations,
     Fallback: GenerationEndpointOperations,
 {
+    fn evidence(&self, session: &RunnerSession, path: &str) -> Option<serde_json::Value> {
+        self.primary
+            .evidence(session, path)
+            .or_else(|| self.fallback.evidence(session, path))
+    }
+
+    fn job_record(&self, session: &RunnerSession, job_id: &str) -> Option<serde_json::Value> {
+        self.primary
+            .job_record(session, job_id)
+            .or_else(|| self.fallback.job_record(session, job_id))
+    }
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         self.primary.reconcile_terminal_jobs(session)
             || self.fallback.reconcile_terminal_jobs(session)
@@ -1665,6 +1791,186 @@ where
 #[derive(Debug, Default)]
 pub(crate) struct GenerationReconcileResult {
     pub retired_generation_ids: Vec<String>,
+    pub retirement_blockers: std::collections::BTreeMap<String, String>,
+    pub retained_evidence_generation_count: usize,
+}
+
+/// Result references are provenance, not a reason to keep a process alive.
+/// Only controller-owned, terminal records with verified bytes discharge the
+/// evidence obligation. Unknown/legacy references remain fail-closed.
+fn verify_retained_evidence(
+    runner_id: &str,
+    generations: &RollingGenerations<RunnerSession>,
+    generation: &str,
+    endpoint: &RunnerSession,
+    operations: &impl GenerationEndpointOperations,
+) -> Result<()> {
+    use homeboy_core::observation::ObservationStore;
+    let runs = generations
+        .run_owners
+        .iter()
+        .filter(|(_, owner)| owner_matches_generation(owner, generation, endpoint))
+        .map(|(id, _)| id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let artifacts = generations
+        .artifact_owners
+        .iter()
+        .filter(|(_, owner)| owner_matches_generation(owner, generation, endpoint))
+        .map(|(id, _)| id.as_str())
+        .collect::<Vec<_>>();
+    if runs.is_empty() && artifacts.is_empty() {
+        return Ok(());
+    }
+    let store = ObservationStore::open_initialized()?;
+    let invalid = |id: &str, reason: &str| {
+        Error::internal_unexpected(format!("retained evidence {id}: {reason}"))
+    };
+    for id in &runs {
+        let run = store
+            .get_run(id)?
+            .ok_or_else(|| invalid(id, "controller run is missing"))?;
+        let owner = run
+            .metadata_json
+            .pointer("/lab/runner/id")
+            .or_else(|| run.metadata_json.pointer("/lab_offload/runner_id"))
+            .and_then(serde_json::Value::as_str);
+        if owner != Some(runner_id) {
+            return Err(invalid(
+                id,
+                "controller run runner identity is missing or inconsistent",
+            ));
+        }
+        if !homeboy_core::observation::RunStatus::from_label(&run.status)
+            .is_some_and(|status| status.is_terminal() && !status.defers_outcome_to_a_remote_run())
+        {
+            return Err(invalid(id, "controller run is not terminal"));
+        }
+        let local_artifacts = store.list_artifacts(id)?;
+        for artifact in &local_artifacts {
+            crate::evidence::validate_controller_artifact_bytes(&artifact)?;
+        }
+        // A valid local file does not prove the whole remote result was copied.
+        // Compare exhaustive source inventories before releasing its daemon.
+        let encoded = homeboy_core::execution_contract::encode_uri_component(id);
+        let remote = operations
+            .evidence(endpoint, &format!("/runs/{encoded}/artifacts"))
+            .ok_or_else(|| invalid(id, "source artifact inventory unavailable"))?;
+        let remote_artifacts = remote
+            .pointer("/data/body/artifacts")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| invalid(id, "source artifact inventory invalid"))?;
+        for source in remote_artifacts {
+            let source: homeboy_core::observation::ArtifactRecord =
+                serde_json::from_value(source.clone())
+                    .map_err(|_| invalid(id, "source artifact metadata invalid"))?;
+            let copied = local_artifacts
+                .iter()
+                .find(|artifact| artifact.id == source.id)
+                .ok_or_else(|| invalid(id, "source artifact has not been copied"))?;
+            if copied.sha256 != source.sha256 || copied.size_bytes != source.size_bytes {
+                return Err(invalid(id, "source artifact differs from controller copy"));
+            }
+        }
+        let remote = operations
+            .evidence(endpoint, &format!("/runs/{encoded}/findings"))
+            .ok_or_else(|| invalid(id, "source findings unavailable"))?;
+        let remote_findings = remote
+            .pointer("/data/body/findings")
+            .ok_or_else(|| invalid(id, "source findings invalid"))?;
+        let local_findings = store.list_findings(homeboy_core::observation::FindingListFilter {
+            run_id: Some((*id).to_string()),
+            ..Default::default()
+        })?;
+        if serde_json::to_value(local_findings).ok().as_ref() != Some(remote_findings) {
+            return Err(invalid(id, "source findings have not been fully copied"));
+        }
+    }
+    for id in artifacts {
+        let artifact = store
+            .get_artifact(id)?
+            .ok_or_else(|| invalid(id, "controller artifact is missing"))?;
+        if !runs.contains(artifact.run_id.as_str()) {
+            return Err(invalid(
+                id,
+                "artifact has no retained run owned by this generation",
+            ));
+        }
+        crate::evidence::validate_controller_artifact_bytes(&artifact)?;
+    }
+    Ok(())
+}
+
+/// Read a daemon job record and report whether it is in a terminal state.
+///
+/// The status must be present and recognized. An unreachable endpoint, an
+/// unparsable record, or an unknown status is never treated as terminal, so a
+/// job whose fate is unknown keeps its generation.
+fn job_record_is_terminal(record: &serde_json::Value) -> bool {
+    record
+        .pointer("/data/body/job/status")
+        .or_else(|| record.pointer("/body/job/status"))
+        .or_else(|| record.pointer("/job/status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| {
+            serde_json::from_value::<homeboy_core::api_jobs::JobStatus>(serde_json::Value::String(
+                status.to_string(),
+            ))
+            .is_ok_and(homeboy_core::api_jobs::JobStatus::is_terminal)
+        })
+}
+
+/// Ownership consistency measured before any endpoint is stopped.
+#[derive(Debug, Default)]
+struct OwnershipAudit {
+    retirement_blockers: std::collections::BTreeMap<String, String>,
+    fences_retirement: bool,
+}
+
+/// Classify every persisted owner against the endpoints this registry knows.
+///
+/// Ambiguous ownership is unsafe to act on, because one identity would resolve
+/// to more than one endpoint. A job owner without a live generation is unsafe
+/// too: that endpoint is the inspection and cancellation authority for work
+/// which may still exist. Both fence retirement for the whole runner.
+///
+/// A run/artifact owner that resolves to nothing is already unroutable and
+/// names a generation this registry no longer knows. Retiring an unrelated,
+/// verified-idle generation cannot make that record worse, so it is reported as
+/// a diagnostic rather than fencing every other generation behind it.
+fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> OwnershipAudit {
+    let mut audit = OwnershipAudit::default();
+    for (id, owner) in generations
+        .job_owners
+        .iter()
+        .chain(generations.run_owners.iter())
+        .chain(generations.artifact_owners.iter())
+    {
+        let live = generations
+            .generations
+            .iter()
+            .filter(|(generation, entry)| {
+                owner_matches_generation(owner, generation, &entry.endpoint)
+            })
+            .count();
+        let retired = generations
+            .retired_evidence
+            .iter()
+            .filter(|(generation, endpoint)| owner_matches_generation(owner, generation, endpoint))
+            .count();
+        let owns_job = generations.job_owners.contains_key(id);
+        let ambiguous = live + retired > 1;
+        let unresolved_job_owner = owns_job && live != 1;
+        let dangling_result_owner = !owns_job && live + retired == 0;
+        if !(ambiguous || unresolved_job_owner || dangling_result_owner) {
+            continue;
+        }
+        audit.fences_retirement |= ambiguous || unresolved_job_owner;
+        audit.retirement_blockers.insert(
+            owner.clone(),
+            format!("ownership for {id} resolves to {live} live and {retired} retired generations"),
+        );
+    }
+    audit
 }
 
 pub(crate) fn reconcile(
@@ -1721,6 +2027,22 @@ fn reconcile_with(
     let Some(generations) = read(runner_id, legacy)? else {
         return Ok(GenerationReconcileResult::default());
     };
+    let OwnershipAudit {
+        mut retirement_blockers,
+        fences_retirement,
+    } = audit_ownership(&generations);
+    if fences_retirement {
+        return Ok(GenerationReconcileResult {
+            retired_generation_ids: Vec::new(),
+            retirement_blockers,
+            retained_evidence_generation_count: generations.retired_evidence.len(),
+        });
+    }
+    let live_idle = generations
+        .generations
+        .get(&generations.admission_owner)
+        .and_then(|entry| operations.active_jobs(&entry.endpoint))
+        == Some(0);
     let observations = generations
         .generations
         .iter()
@@ -1735,27 +2057,52 @@ fn reconcile_with(
         })
         .map(
             |(generation, session, active_jobs, job_owner_ids, draining)| {
-                let observed_active_jobs =
-                    if draining && !operations.reconcile_terminal_jobs(&session) {
-                        None
-                    } else {
-                        operations.active_jobs(&session)
-                    };
+                // A job whose submitting client disappeared keeps its ledger
+                // ownership until something observes the finished job. Ask the
+                // owning endpoint directly so a completed job cannot pin its
+                // generation forever, and settle only what it proves terminal.
+                let settled_job_ids = draining
+                    .then(|| {
+                        job_owner_ids
+                            .iter()
+                            .filter(|job_id| {
+                                operations
+                                    .job_record(&session, job_id)
+                                    .is_some_and(|record| job_record_is_terminal(&record))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let terminal_settled = !draining || operations.reconcile_terminal_jobs(&session);
+                let raw_observed = operations.active_jobs(&session);
+                let unclaimed = draining && raw_observed.is_none() && live_idle;
+                let observed_active_jobs = if unclaimed {
+                    Some(0)
+                } else if terminal_settled {
+                    raw_observed
+                } else {
+                    None
+                };
                 let proven_stopped = draining
                     && observed_active_jobs.is_none()
                     && operations.proven_stopped(&session);
                 (
                     generation,
+                    session,
                     active_jobs,
                     job_owner_ids,
                     observed_active_jobs,
                     proven_stopped,
+                    unclaimed,
+                    settled_job_ids,
                 )
             },
         )
         .collect::<Vec<_>>();
-    // Persist every bounded remote observation under the registry lock. The
-    // endpoint stop remains outside this lock because it is remote I/O.
+    // Observe outside the lock; recheck the exact endpoint and ownership before
+    // committing an observation. The bounded stop/retirement transaction below
+    // fences concurrent registry writers.
     let stoppable = with_registry_lock(runner_id, || {
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
             return Ok((Vec::new(), Vec::new()));
@@ -1764,17 +2111,25 @@ fn reconcile_with(
         let mut already_stopped = Vec::new();
         for (
             generation,
+            prior_session,
             prior_active_jobs,
             prior_job_owner_ids,
             observed_active_jobs,
             proven_stopped,
+            unclaimed,
+            settled_job_ids,
         ) in &observations
         {
             if let Some(entry) = generations.generations.get(generation) {
-                let state_unchanged = entry.active_jobs == *prior_active_jobs
+                let state_unchanged = entry.endpoint == *prior_session
+                    && entry.active_jobs == *prior_active_jobs
                     && job_owner_ids_for(&generations, generation, &entry.endpoint)
                         == *prior_job_owner_ids;
                 if !state_unchanged {
+                    retirement_blockers.insert(
+                        generation.clone(),
+                        "ownership changed during observation".to_string(),
+                    );
                     generations
                         .generations
                         .get_mut(generation)
@@ -1783,31 +2138,72 @@ fn reconcile_with(
                     continue;
                 }
             }
-            let has_result_owners = generations
-                .generations
-                .get(generation)
-                .is_some_and(|entry| {
-                    has_result_owners_for(&generations, generation, &entry.endpoint)
-                });
+            // Release ownership the endpoint proved finished, under the same
+            // lock that guards retirement. This only removes owners for jobs
+            // that were observed terminal on their own generation's endpoint.
+            for job_id in settled_job_ids {
+                generations.complete_job_preserving_drained(job_id);
+            }
+            let evidence_error = if observed_active_jobs == &Some(0) || *proven_stopped {
+                verify_retained_evidence(
+                    runner_id,
+                    &generations,
+                    generation,
+                    prior_session,
+                    operations,
+                )
+                .err()
+            } else {
+                None
+            };
             if let Some(entry) = generations.generations.get_mut(generation) {
                 entry.observed_active_jobs = *observed_active_jobs;
                 if let Some(active_jobs) = observed_active_jobs {
                     entry.active_jobs = *active_jobs;
                 }
-                if entry.drain_state == crate::RollingDrainState::Draining
-                    && observed_active_jobs == &Some(0)
-                {
+                if observed_active_jobs == &Some(0) {
                     generations.job_owners.retain(|_, owner| {
                         !owner_matches_generation(owner, generation, &entry.endpoint)
                     });
-                    authoritative_zero.push(generation.clone());
+                }
+                if entry.drain_state == crate::RollingDrainState::Draining
+                    && observed_active_jobs == &Some(0)
+                {
+                    if evidence_error.is_none() {
+                        if *unclaimed {
+                            already_stopped.push(generation.clone());
+                        } else {
+                            authoritative_zero.push(generation.clone());
+                        }
+                    }
                 }
                 if *proven_stopped
+                    && !*unclaimed
                     && entry.drain_state == crate::RollingDrainState::Draining
                     && entry.active_jobs == 0
-                    && !has_result_owners
+                    && prior_job_owner_ids.is_empty()
+                    && evidence_error.is_none()
                 {
                     already_stopped.push(generation.clone());
+                }
+                if entry.drain_state == crate::RollingDrainState::Draining {
+                    let reason = if let Some(error) = evidence_error {
+                        Some(error.to_string())
+                    } else if observed_active_jobs.is_some_and(|count| count > 0) {
+                        Some(format!("{} active jobs", observed_active_jobs.unwrap()))
+                    } else if observed_active_jobs.is_none()
+                        && !already_stopped.contains(generation)
+                    {
+                        Some(
+                            "endpoint identity/active work unavailable; stop is not authorized"
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = reason {
+                        retirement_blockers.insert(generation.clone(), reason);
+                    }
                 }
             }
         }
@@ -1816,9 +2212,8 @@ fn reconcile_with(
             .filter_map(|generation| {
                 generations.generations.get(generation).and_then(|entry| {
                     (entry.drain_state == crate::RollingDrainState::Draining
-                        && entry.active_jobs == 0
-                        && !has_result_owners_for(&generations, generation, &entry.endpoint))
-                    .then_some((generation.clone(), entry.endpoint.clone()))
+                        && entry.active_jobs == 0)
+                        .then_some((generation.clone(), entry.endpoint.clone()))
                 })
             })
             .collect::<Vec<_>>();
@@ -1827,35 +2222,50 @@ fn reconcile_with(
     })?;
 
     let (stoppable, already_stopped) = stoppable;
-    let mut stopped = already_stopped;
-    stopped.extend(
-        stoppable
-            .into_iter()
-            .filter_map(|(generation, session)| {
-                if operations.stop(&session) {
-                    operations.terminate_tunnel(&session);
-                    Some(generation)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>(),
-    );
+    let mut candidates = stoppable;
+    candidates.extend(already_stopped.iter().filter_map(|generation| {
+        generations
+            .generations
+            .get(generation)
+            .map(|entry| (generation.clone(), entry.endpoint.clone()))
+    }));
     let retired_generation_ids = with_registry_lock(runner_id, || {
         let Some(mut generations) = read_locked(runner_id, legacy)? else {
             return Ok(Vec::new());
         };
         let mut retired = Vec::new();
-        for generation in &stopped {
+        for (generation, session) in &candidates {
             let should_remove = generations
                 .generations
                 .get(generation)
                 .is_some_and(|entry| {
                     entry.drain_state == crate::RollingDrainState::Draining
+                        && entry.endpoint == *session
                         && entry.active_jobs == 0
-                        && !has_result_owners_for(&generations, generation, &entry.endpoint)
+                        && job_owner_ids_for(&generations, generation, &entry.endpoint).is_empty()
                 });
             if should_remove {
+                if let Err(error) = verify_retained_evidence(
+                    runner_id,
+                    &generations,
+                    generation,
+                    session,
+                    operations,
+                ) {
+                    retirement_blockers.insert(generation.clone(), error.to_string());
+                    continue;
+                }
+                if !already_stopped.contains(generation) && !operations.stop(session) {
+                    retirement_blockers.insert(
+                        generation.clone(),
+                        "authenticated idle stop or endpoint shutdown was not confirmed"
+                            .to_string(),
+                    );
+                    continue;
+                }
+                if !already_stopped.contains(generation) {
+                    operations.terminate_tunnel(session);
+                }
                 let endpoint = generations
                     .generations
                     .remove(generation)
@@ -1864,7 +2274,17 @@ fn reconcile_with(
                 generations
                     .job_owners
                     .retain(|_, owner| !owner_matches_generation(owner, generation, &endpoint));
+                if has_result_owners_for(&generations, generation, &endpoint) {
+                    generations
+                        .retired_evidence
+                        .insert(generation.clone(), endpoint);
+                }
                 retired.push(generation.clone());
+            } else {
+                retirement_blockers.insert(
+                    generation.clone(),
+                    "ownership changed before stop".to_string(),
+                );
             }
         }
         write(runner_id, &generations)?;
@@ -1872,6 +2292,9 @@ fn reconcile_with(
     })?;
     Ok(GenerationReconcileResult {
         retired_generation_ids,
+        retirement_blockers,
+        retained_evidence_generation_count: read(runner_id, None)?
+            .map_or(0, |registry| registry.retired_evidence.len()),
     })
 }
 
@@ -2047,7 +2470,7 @@ fn record_authenticated_admission_locked(
     } else {
         generations.begin(generation, session.clone());
     }
-    generations.activate(generation);
+    generations.activate_preserving_drained(generation);
     write(runner_id, &generations)
 }
 
@@ -2095,15 +2518,14 @@ pub(crate) fn settle_observed_terminal_job(runner_id: &str, job_id: &str) -> Res
         if generations.job_owner(job_id).is_none() {
             return Ok(false);
         }
-        generations.complete_job(job_id);
+        generations.complete_job_preserving_drained(job_id);
         write(runner_id, &generations)?;
         Ok(true)
     })
 }
 
-/// Release a durable run's generation routing claim after terminal retention
-/// removes the run record. Reconciliation remains fail-closed and only stops a
-/// drained, zero-job endpoint after its final owner is gone.
+/// Release a durable run's provenance claim after retention removes the record.
+/// Process retirement belongs exclusively to generation reconciliation.
 pub(crate) fn retire_run_owner(
     runner_id: &str,
     legacy: Option<&RunnerSession>,
@@ -2136,11 +2558,18 @@ fn retire_result_owner(
             return Ok(());
         };
         generations.retire_result_owner(retirement);
-        // Persist before network reconciliation; a restart can retry an unreachable
-        // endpoint without restoring an owner whose lifecycle was already removed.
+        let owners = generations
+            .run_owners
+            .values()
+            .chain(generations.artifact_owners.values());
+        let owners = owners.collect::<Vec<_>>();
+        generations.retired_evidence.retain(|generation, endpoint| {
+            owners
+                .iter()
+                .any(|owner| owner_matches_generation(owner, generation, endpoint))
+        });
         write(runner_id, &generations)
-    })?;
-    reconcile(runner_id, legacy).map(|_| ())
+    })
 }
 
 pub(crate) fn activate(
@@ -2192,7 +2621,7 @@ pub(crate) fn activate(
             }
         }
         generations.begin(generation.clone(), candidate);
-        generations.activate(&generation);
+        generations.activate_preserving_drained(&generation);
         write(runner_id, &generations)
     })
 }
@@ -2269,7 +2698,7 @@ mod tests {
         );
     }
 
-    fn session(lease: &str, endpoint: &str, tunnel_pid: Option<u32>) -> RunnerSession {
+    pub(super) fn session(lease: &str, endpoint: &str, tunnel_pid: Option<u32>) -> RunnerSession {
         RunnerSession {
             runner_id: "runner-a".to_string(),
             mode: RunnerTunnelMode::DirectSsh,
@@ -2565,6 +2994,73 @@ mod tests {
         });
     }
 
+    /// A job whose submitting client disappeared must not pin its generation
+    /// forever once its own endpoint reports the job finished.
+    #[test]
+    fn a_daemon_proven_terminal_job_releases_its_generation_ownership() {
+        for status in ["succeeded", "failed", "cancelled"] {
+            let record = serde_json::json!({"data": {"body": {"job": {"status": status}}}});
+            assert!(job_record_is_terminal(&record), "{status} is terminal");
+        }
+    }
+
+    /// Unknown fate is never settled: an unreachable endpoint, an unparsable
+    /// record, or live work all keep the generation's ownership intact.
+    #[test]
+    fn a_job_without_proven_terminality_keeps_its_generation_ownership() {
+        for record in [
+            serde_json::json!({"data": {"body": {"job": {"status": "running"}}}}),
+            serde_json::json!({"data": {"body": {"job": {"status": "queued"}}}}),
+            serde_json::json!({"data": {"body": {"job": {"status": "not-a-status"}}}}),
+            serde_json::json!({"data": {"body": {"job": {}}}}),
+            serde_json::json!({}),
+        ] {
+            assert!(!job_record_is_terminal(&record), "{record} is not terminal");
+        }
+    }
+
+    /// A result owner naming a generation this registry no longer knows is
+    /// already unroutable. It must be reported, but it must not fence the
+    /// retirement of unrelated generations whose ownership is consistent.
+    #[test]
+    fn a_dangling_result_owner_is_reported_without_fencing_consistent_generations() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations
+            .run_owners
+            .insert("run-dangling".to_string(), "lease-removed".to_string());
+
+        let audit = audit_ownership(&generations);
+
+        assert!(
+            !audit.fences_retirement,
+            "an unroutable historical record must not block other retirements: {audit:?}"
+        );
+        assert_eq!(
+            audit
+                .retirement_blockers
+                .get("lease-removed")
+                .map(String::as_str),
+            Some("ownership for run-dangling resolves to 0 live and 0 retired generations"),
+        );
+    }
+
+    /// A job owner is the cancellation and inspection authority for work that
+    /// may still exist, so losing its live endpoint fences retirement.
+    #[test]
+    fn a_job_owner_without_a_live_generation_fences_retirement() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations
+            .job_owners
+            .insert("job-orphan".to_string(), "lease-removed".to_string());
+
+        let audit = audit_ownership(&generations);
+
+        assert!(audit.fences_retirement, "{audit:?}");
+        assert!(audit.retirement_blockers.contains_key("lease-removed"));
+    }
+
     #[derive(Default)]
     struct FakeEndpointOperations {
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
@@ -2715,7 +3211,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciled_zero_for_admission_owner_releases_fence_but_retains_job_identities() {
+    fn reconciled_zero_for_admission_owner_retires_unclaimed_jobs() {
         test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
             record_job("runner-a", &current, "job-a").expect("record first job");
@@ -2732,16 +3228,42 @@ mod tests {
             let projection = status_projection("runner-a", Some(&current)).expect("projection");
             assert_eq!(projection[0].active_job_count, 0);
             assert_eq!(projection[0].observed_active_job_count, Some(0));
-            assert_eq!(
-                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
-                ["job-a", "job-b"],
-                "zero live work settles the active count without discarding durable ownership"
+            assert!(
+                status_job_owners("runner-a", Some(&current)).expect("owners")[0]
+                    .job_ids
+                    .is_empty(),
+                "durable jobs with no live daemon owner are residue"
             );
             with_admission_fence("runner-a", Some(&current), "connect", |fence| {
                 assert!(fence.is_none(), "authoritative zero must permit reconnect");
                 Ok(())
             })
             .expect("released fence");
+        });
+    }
+
+    #[test]
+    fn live_daemon_owner_keeps_its_durable_job() {
+        test_support::with_isolated_home(|_| {
+            let current = session("lease-current", "daemon-current", Some(202));
+            record_job("runner-a", &current, "job-live").expect("record live job");
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-current".to_string(), 1);
+
+            reconcile_with("runner-a", Some(&current), &operations).expect("reconcile live owner");
+
+            assert_eq!(
+                status_job_owners("runner-a", Some(&current)).expect("owners")[0].job_ids,
+                ["job-live"]
+            );
+            with_admission_fence("runner-a", Some(&current), "connect", |fence| {
+                assert!(fence.is_some(), "a live job remains a placement fence");
+                Ok(())
+            })
+            .expect("live fence");
         });
     }
 
@@ -3455,6 +3977,108 @@ mod tests {
                 job_session("runner-a", "job-stale", Some(&fresh)).expect("route persisted job"),
                 Some(session("lease-stale", "daemon-stale", Some(101)))
             );
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn unclaimed_draining_projection_retires_when_live_daemon_is_idle() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate live generation");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-fresh".to_string(), 0);
+            let result = reconcile_with("runner-a", Some(&fresh), &operations)
+                .expect("resolve unclaimed draining projection");
+
+            assert_eq!(result.retired_generation_ids, ["lease-stale"]);
+            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            assert_eq!(projection.len(), 1);
+            assert_eq!(projection[0].generation, "lease-fresh");
+            assert_eq!(projection[0].active_job_count, 0);
+            assert_eq!(projection[0].observed_active_job_count, Some(0));
+            assert!(status_job_owners("runner-a", Some(&fresh))
+                .expect("owners")
+                .iter()
+                .all(|owner| owner.job_ids.is_empty()));
+            let report = RunnerStatusReport {
+                runner_id: "runner-a".to_string(),
+                connected: true,
+                state: RunnerSessionState::Connected,
+                session: Some(fresh.clone()),
+                stale_daemon: None,
+                configured_job_binary_build_identity: None,
+                daemon_freshness: None,
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                stale_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::Available,
+                active_job_source: None,
+                active_job_error: None,
+                active_job_recovery_evidence: None,
+                session_path: "test".to_string(),
+            };
+            let owners = status_job_owners("runner-a", Some(&fresh)).expect("owners");
+            let summary = report.admission_summary_with_generations(&projection, &owners, 0);
+            assert!(summary.accepting_jobs);
+            assert!(summary.unresolved_generation_ids.is_empty());
+            assert_eq!(summary.unresolved_retained_projection_count, 0);
+            assert!(operations.stopped_leases.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn reachable_terminal_settlement_failure_is_not_overridden_by_an_idle_live_daemon() {
+        test_support::with_isolated_home(|_| {
+            let stale = session("lease-stale", "daemon-stale", Some(101));
+            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
+            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            activate(
+                "runner-a",
+                &stale,
+                "lease-fresh".to_string(),
+                fresh.clone(),
+                &["job-stale".to_string()],
+            )
+            .expect("activate live generation");
+
+            let operations = FakeEndpointOperations::default();
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-fresh".to_string(), 0);
+            operations
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-stale".to_string(), 0);
+            operations
+                .terminal_reconcile_failures
+                .borrow_mut()
+                .insert("lease-stale".to_string());
+            reconcile_with("runner-a", Some(&fresh), &operations)
+                .expect("reachable settlement failure stays fail-closed");
+
+            let projection = status_projection("runner-a", Some(&fresh)).expect("projection");
+            assert!(projection.iter().any(|entry| {
+                entry.generation == "lease-stale"
+                    && entry.active_job_count == 1
+                    && entry.observed_active_job_count.is_none()
+            }));
             assert!(operations.stopped_leases.borrow().is_empty());
         });
     }

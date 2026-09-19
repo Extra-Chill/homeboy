@@ -124,6 +124,11 @@ pub struct LogsArgs {
     pub cursor: Option<String>,
 }
 #[derive(Args, Debug)]
+pub struct MigrateEventHistoryArgs {
+    /// Exact durable run ID whose recoverable historical event history should be migrated.
+    pub run_id: String,
+}
+#[derive(Args, Debug)]
 pub struct EvidenceArgs {
     /// Durable run or Cook ID whose evidence to retrieve.
     pub run_id: String,
@@ -878,9 +883,21 @@ pub struct FinalizePrArgs {
     /// Related issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
     #[arg(long = "relates-to", value_name = "ISSUE_REF")]
     pub relates_to: Vec<String>,
-    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form.
+    /// Explicit reviewer override in `TARGET=VALUE@PROVENANCE` form. Overrides require a recorded review form; use `--review-form` with `--recover` to supply one when it is absent.
     #[arg(long = "review-override", value_name = "TARGET=VALUE@PROVENANCE")]
     pub review_overrides: Vec<String>,
+    /// Complete typed AI review form to supply for a recovered Cook whose historical provider outcome did not record one: inline JSON, `@FILE`, or `-`.
+    #[arg(long, value_name = "JSON|@FILE|-", requires = "recover")]
+    pub review_form: Option<String>,
+    /// Tool that authored the supplied review form.
+    #[arg(long, value_name = "TOOL", requires = "review_form")]
+    pub review_form_tool: Option<String>,
+    /// Concrete model that authored the supplied review form.
+    #[arg(long, value_name = "MODEL", requires = "review_form")]
+    pub review_form_model: Option<String>,
+    /// Operator or agent identity submitting the supplied review form.
+    #[arg(long, value_name = "IDENTITY", requires = "review_form")]
+    pub review_form_author: Option<String>,
     /// Validate the complete hydrated dossier and candidate without publishing.
     #[arg(long)]
     pub preflight: bool,

@@ -210,12 +210,97 @@ pub const TRANSIENT_SSH_STDERR_PATTERNS: [&str; 10] = [
     "connection closed by remote host",
 ];
 
+/// Why a host refused an SSH authentication attempt.
+///
+/// OpenSSH reports both cases as exit 255 with `Permission denied`, but they
+/// need opposite responses: one is waiting for a human, and the other is a
+/// credential that will never be accepted as offered. Neither is transient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshAuthFailure {
+    /// The offered credential was accepted and the host then asked for a
+    /// further factor it can only collect interactively. A command client
+    /// cannot answer that prompt; a session established interactively can, and
+    /// later commands attach to it.
+    SecondFactorRequired,
+    /// No offered credential was accepted.
+    CredentialRejected,
+}
+
+/// Classify an OpenSSH `Permission denied (...)` denial from stderr.
+///
+/// The parenthesised list is the methods the server would still accept. When
+/// `publickey` is absent from it, the key already succeeded and what remains is
+/// an interactive factor — the "partial success" flow behind
+/// `Permission denied (keyboard-interactive)`.
+pub fn ssh_auth_failure(stderr: &str) -> Option<SshAuthFailure> {
+    let lowercased = stderr.to_lowercase();
+    let denial = lowercased
+        .match_indices("permission denied")
+        .find_map(|(at, _)| {
+            let rest = &lowercased[at..];
+            let open = rest.find('(')?;
+            let close = rest[open..].find(')')? + open;
+            Some(rest[open + 1..close].to_string())
+        })?;
+
+    let methods: Vec<&str> = denial
+        .split(',')
+        .map(|method| method.trim())
+        .filter(|method| !method.is_empty())
+        .collect();
+    if methods.is_empty() {
+        return Some(SshAuthFailure::CredentialRejected);
+    }
+    if methods.contains(&"publickey") {
+        return Some(SshAuthFailure::CredentialRejected);
+    }
+    if methods
+        .iter()
+        .any(|method| matches!(*method, "keyboard-interactive" | "password"))
+    {
+        return Some(SshAuthFailure::SecondFactorRequired);
+    }
+
+    Some(SshAuthFailure::CredentialRejected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         server_host_resolves_only_to_loopback_with, server_uses_loopback_transport_from_ssh_config,
+        ssh_auth_failure, SshAuthFailure,
     };
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn a_remaining_interactive_factor_is_not_a_rejected_credential() {
+        // The shape a host with a second factor produces: publickey already
+        // succeeded, so it is absent from what the server will still accept.
+        assert_eq!(
+            ssh_auth_failure("user@host: Permission denied (keyboard-interactive)."),
+            Some(SshAuthFailure::SecondFactorRequired)
+        );
+    }
+
+    #[test]
+    fn an_unaccepted_key_is_reported_as_a_rejected_credential() {
+        assert_eq!(
+            ssh_auth_failure("user@host: Permission denied (publickey,keyboard-interactive)."),
+            Some(SshAuthFailure::CredentialRejected)
+        );
+        assert_eq!(
+            ssh_auth_failure("git@example: Permission denied (publickey)."),
+            Some(SshAuthFailure::CredentialRejected)
+        );
+    }
+
+    #[test]
+    fn output_without_a_denial_is_not_classified_as_an_auth_failure() {
+        assert_eq!(ssh_auth_failure("kex_exchange_identification: reset"), None);
+        // A remote command printing the phrase is not the SSH client's denial:
+        // OpenSSH always names the methods it would still accept.
+        assert_eq!(ssh_auth_failure("find: '/srv': Permission denied"), None);
+    }
 
     #[test]
     fn loopback_only_hostname_alias_is_local_transport() {
@@ -282,6 +367,13 @@ mod tests {
 
 /// Check if an SSH failure is a transient connection error worth retrying.
 pub fn is_transient_ssh_error(output: &CommandOutput) -> bool {
+    // An authentication denial also exits 255, and no amount of retrying
+    // changes it: the host is waiting for an operator, not for another
+    // connection attempt.
+    if ssh_auth_failure(&output.stderr).is_some() {
+        return false;
+    }
+
     let stderr = output.stderr.to_lowercase();
     // SSH exit code 255 = connection error (not a remote command failure)
     let is_connection_exit = output.exit_code == 255;

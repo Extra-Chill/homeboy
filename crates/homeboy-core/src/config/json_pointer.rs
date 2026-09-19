@@ -141,7 +141,16 @@ fn remove_child(parent: &mut Value, token: &str) -> Result<()> {
     }
 }
 
+/// Canonical JSON pointer for a config selector.
+///
+/// Operators address config as dotted paths (`retention.limit`) or JSON
+/// pointers (`/retention/limit`). Both spellings resolve to the same pointer.
+pub fn config_pointer(selector: &str) -> Result<String> {
+    normalize_pointer(selector)
+}
+
 fn normalize_pointer(pointer: &str) -> Result<String> {
+    let pointer = pointer.trim();
     if pointer.is_empty() {
         return Ok(String::new());
     }
@@ -155,16 +164,33 @@ fn normalize_pointer(pointer: &str) -> Result<String> {
         ));
     }
 
-    if !pointer.starts_with('/') {
+    if pointer.starts_with('/') {
+        return Ok(pointer.to_string());
+    }
+
+    dotted_path_to_pointer(pointer)
+}
+
+fn dotted_path_to_pointer(path: &str) -> Result<String> {
+    if path.starts_with('.') || path.ends_with('.') || path.contains("..") {
         return Err(Error::validation_invalid_argument(
             "pointer",
-            format!("JSON pointer must start with '/': {}", pointer),
-            None,
-            None,
+            "Dotted config path must be a non-empty sequence of keys, such as retention.limit",
+            Some(path.to_string()),
+            Some(vec![
+                "Use a dotted path such as retention, or a JSON pointer such as /retention."
+                    .to_string(),
+            ]),
         ));
     }
 
-    Ok(pointer.to_string())
+    Ok(format!(
+        "/{}",
+        path.split('.')
+            .map(|segment| segment.replace('~', "~0").replace('/', "~1"))
+            .collect::<Vec<_>>()
+            .join("/")
+    ))
 }
 
 fn split_parent_pointer(pointer: &str) -> Option<(String, String)> {
@@ -283,5 +309,52 @@ pub fn value_type_name(value: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn dotted_paths_select_the_same_subtree_as_json_pointers() {
+        let config = json!({
+            "retention": {
+                "reconstructable_artifact_reserve_bytes": 20
+            }
+        });
+
+        let dotted = get_json_pointer(&config, "retention").expect("dotted path");
+        let pointer = get_json_pointer(&config, "/retention").expect("json pointer");
+        assert_eq!(dotted, pointer);
+        assert_eq!(
+            get_json_pointer(&config, "retention.reconstructable_artifact_reserve_bytes")
+                .expect("nested dotted path"),
+            Some(&json!(20))
+        );
+    }
+
+    #[test]
+    fn dotted_paths_canonicalize_to_json_pointers() {
+        assert_eq!(
+            config_pointer("retention").expect("top-level path"),
+            "/retention"
+        );
+        assert_eq!(
+            config_pointer("retention.limit").expect("nested path"),
+            "/retention/limit"
+        );
+        assert_eq!(
+            config_pointer("/retention/limit").expect("pointer is unchanged"),
+            "/retention/limit"
+        );
+    }
+
+    #[test]
+    fn empty_dotted_segments_are_rejected() {
+        assert!(config_pointer("retention.").is_err());
+        assert!(config_pointer(".retention").is_err());
+        assert!(config_pointer("retention..limit").is_err());
     }
 }

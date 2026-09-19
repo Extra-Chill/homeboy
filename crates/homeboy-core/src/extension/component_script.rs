@@ -336,14 +336,21 @@ impl homeboy_core::component_script_provider::ComponentScriptRunner
         passthrough: bool,
         extra_env: &[(String, String)],
         script_args: &[String],
+        control: &homeboy_core::cooperative_control::CooperativeControl,
     ) -> homeboy_core::Result<ComponentScriptOutput> {
-        run_component_scripts_with_env(
+        let timeout = control.remaining().ok_or_else(|| {
+            homeboy_core::Error::internal_unexpected(
+                "component-script provider cancelled before execution",
+            )
+        })?;
+        run_component_scripts_with_env_and_timeout(
             component,
             capability,
             source_path,
             passthrough,
             extra_env,
             script_args,
+            Some(timeout),
         )
     }
 
@@ -353,11 +360,18 @@ impl homeboy_core::component_script_provider::ComponentScriptRunner
         component: &homeboy_core::component::Component,
         path_override: Option<String>,
         script_args: &[String],
+        control: &homeboy_core::cooperative_control::CooperativeControl,
     ) -> homeboy_core::Result<ComponentScriptOutput> {
         let mut runner = ExtensionRunner::for_context(context.clone())
             .component(component.clone())
             .passthrough(false)
             .script_args(script_args);
+        let timeout = control.remaining().ok_or_else(|| {
+            homeboy_core::Error::internal_unexpected(
+                "component-script provider cancelled before execution",
+            )
+        })?;
+        runner = runner.timeout(Some(timeout));
         if let Some(path) = path_override {
             runner = runner.path_override(Some(path.clone())).working_dir(&path);
         }

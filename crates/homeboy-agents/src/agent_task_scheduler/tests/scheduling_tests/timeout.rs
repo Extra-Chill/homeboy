@@ -210,6 +210,106 @@ mod timeout_tests {
     }
 
     #[test]
+    fn timeout_after_dirty_worktree_fingerprints_the_producing_run_patch() {
+        struct EditThenTimeout;
+
+        impl AgentTaskExecutorAdapter for EditThenTimeout {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                let workspace = request.workspace.root.expect("attempt workspace");
+                fs::write(
+                    std::path::Path::new(&workspace).join("provider-change.txt"),
+                    "partial work survives timeout\n",
+                )
+                .expect("write attempt workspace change");
+                thread::sleep(Duration::from_millis(25));
+                outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+            }
+        }
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let source = temp.path().join("source");
+            init_git_workspace(&source);
+            let mut plan = plan_with_tasks(1);
+            plan.tasks[0].workspace.root = Some(source.display().to_string());
+            plan.tasks[0].executor.config = json!({
+                "workspace": { "root": source.display().to_string() },
+                "workspace_root": source.display().to_string(),
+            });
+            plan.tasks[0].limits.timeout_ms = Some(1);
+            crate::agent_task_lifecycle::submit_plan(&plan, Some("timeout-dirty-fingerprint"))
+                .expect("submit run");
+            crate::agent_task_service::run_submitted(
+                "timeout-dirty-fingerprint".to_string(),
+                Arc::new(EditThenTimeout),
+            )
+            .expect("run timed-out provider");
+            let aggregate =
+                crate::agent_task_lifecycle::read_aggregate("timeout-dirty-fingerprint")
+                    .expect("persisted aggregate");
+            let outcome = &aggregate.outcomes[0];
+            assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+            let patch = outcome
+                .artifacts
+                .iter()
+                .find(|artifact| {
+                    artifact.metadata["change_source"] == "uncommitted_attempt_workspace"
+                })
+                .expect("harvested attempt-workspace diff");
+            for key in [
+                "run_id",
+                "task_id",
+                "producer_attempt",
+                "base_ref",
+                "provider_backend",
+                "repository_identity",
+                "workspace_identity",
+            ] {
+                assert!(
+                    patch.metadata.get(key).is_some_and(|value| {
+                        value.as_str().is_some_and(|value| !value.is_empty()) || value.is_u64()
+                    }),
+                    "timeout uncommitted patch is missing {key}: {:#?}",
+                    patch.metadata
+                );
+            }
+            assert_eq!(patch.metadata["run_id"], "timeout-dirty-fingerprint");
+            let lifecycle_store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+            let source = serde_json::to_string(&aggregate).expect("serialize aggregate");
+            let admitted = crate::agent_task_promotion::preflight_recoverable_candidate_promotion_in_observation_store(
+                &crate::agent_task_promotion::AgentTaskPromotionRequest {
+                    source,
+                    source_run_id: Some("timeout-dirty-fingerprint".to_string()),
+                    source_path: Some(lifecycle_store.aggregate_path("timeout-dirty-fingerprint")),
+                    source_worktree_path: None,
+                    base_ref: None,
+                    task_base_sha: patch.metadata["base_ref"].as_str().map(str::to_string),
+                    candidate_ref: None,
+                    to_worktree: "timeout-dirty-fingerprint-target".to_string(),
+                    task_id: Some(outcome.task_id.clone()),
+                    artifact_id: Some(patch.id.clone()),
+                    dry_run: false,
+                    gates: crate::agent_task_gate::VerifyGateOptions::default(),
+                    provider_command: None,
+                    provider_invocation: None,
+                    repository_integrity_evidence: None,
+                },
+                &lifecycle_store
+                    .open_observation_initialized()
+                    .expect("observation store"),
+            )
+            .expect("cook-continue --artifact-id admits the fingerprinted timeout patch");
+            assert_eq!(admitted.id, patch.id);
+        });
+    }
+
+    #[test]
     fn expired_execution_deadline_skips_materialization_and_provider_dispatch() {
         let executor = RecordingExecutor::new(HashMap::new(), Duration::ZERO);
         let started = Arc::clone(&executor.max_seen);

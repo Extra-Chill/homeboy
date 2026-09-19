@@ -76,6 +76,7 @@ Runbooks for operators and agents:
 - [Release-gate proof path](operations/release-gate-proof-path.md)
 - [Controller to runner reverse-runner setup](operations/controller-runner-reverse-runner.md)
 - [Artifact loop for runner and matrix workflows](operations/artifact-loop-runner-matrix.md)
+- [Applying reviewed edge config from an agent host](operations/edge-config-apply.md)
 
 ## Historical Reference
 

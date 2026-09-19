@@ -1197,7 +1197,7 @@ fn pending_handoff_rejects_acceptance_from_a_different_runner_without_mutation()
         })
         .expect_err("different runner cannot accept pending handoff");
         assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-        let stored = reconcile_status("pending-runner-identity").expect("pending handoff retained");
+        let stored = status("pending-runner-identity").expect("pending handoff retained");
         assert_eq!(stored, planned);
     });
 }
@@ -2123,10 +2123,9 @@ fn running_child_snapshot_persists_provider_handle_and_live_log_progress() {
         "provider-run-live"
     );
     let log = logs_in_store(&lifecycle_store, &record.run_id).expect("live logs");
-    assert_eq!(log.events.len(), 1);
-    assert!(log.events[0].data["message"]
+    assert!(log.events.iter().any(|event| event.data["message"]
         .as_str()
-        .is_some_and(|message| message.contains("provider dispatch accepted")));
+        .is_some_and(|message| message.contains("provider dispatch accepted"))));
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
@@ -2622,9 +2621,10 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
             loaded.metadata["remote_workspace"],
             "/runner/workspace/repo"
         );
-        assert_eq!(
-            log.events[0].data["message"].as_str(),
-            Some("Remote provider agent task failed.")
+        assert!(
+            log.events.iter().any(|event| event.data["message"].as_str()
+                == Some("Remote provider agent task failed.")),
+            "canonical logs retain the remote dispatch failure"
         );
         assert_eq!(artifacts.evidence_refs[0].kind, "logs");
         assert!(raw_aggregate.contains("fixture.agent-task-executor"));

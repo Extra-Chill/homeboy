@@ -32,7 +32,10 @@ use super::args::{
     ValidatePlanArgs,
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
-use super::gate_contract::{validate_gate_contracts, GateContractValidation};
+use super::gate_contract::{
+    reject_gates_unexecutable_under_resolved_placement, validate_gate_contracts,
+    GateContractValidation,
+};
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Provider evidence is streamed into an immutable, digest-addressed projection.
@@ -41,6 +44,7 @@ const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
+const PREVIEW_ADMISSION_UNCHECKED: &str = "static inputs only; admission not checked";
 
 fn run_cook_explicit(
     request: agent_task_service::CookRequest,
@@ -88,6 +92,63 @@ pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -
 /// interrupted Lab Cook ended up with no reported task identity at all (#10419).
 pub(crate) fn announce_durable_cook_identity(cook_id: Option<&str>, run_id: &str) {
     for line in durable_cook_identity_lines(cook_id, run_id) {
+        eprintln!("{line}");
+    }
+}
+
+/// Render the resolved execution placement this process already computed
+/// before dispatch, the same way preview does (#14729).
+///
+/// `None` when no preflight decision was captured for this process (e.g. a
+/// unit test that never ran the CLI's normal preflight path).
+fn resolved_execution_placement_line() -> Option<String> {
+    let directive = homeboy::core::parsed_command_preflight::captured_result()?.placement;
+    Some(format_resolved_execution_placement_line(&directive))
+}
+
+/// Pure formatter kept separate from its process-global-reading caller so it
+/// can be tested deterministically against a directly constructed directive,
+/// rather than through the shared `parsed_command_preflight` capture slot
+/// (which is process-wide and not safe to mutate from parallel tests).
+fn format_resolved_execution_placement_line(
+    directive: &homeboy::core::parsed_command_preflight::PlacementDirective,
+) -> String {
+    let requested = cli_placement_str(directive.requested);
+    let selected = match directive.selected {
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+    };
+    if selected == requested {
+        format!("cook: placement: {selected}")
+    } else {
+        let reason = directive
+            .fallback
+            .reason
+            .as_deref()
+            .map(|reason| format!(" — {reason}"))
+            .unwrap_or_default();
+        format!("cook: placement: {selected}  (requested: {requested}{reason})")
+    }
+}
+
+fn cli_placement_str(placement: homeboy_lab_runner_contract::Placement) -> &'static str {
+    match placement {
+        homeboy_lab_runner_contract::Placement::Auto => "auto",
+        homeboy_lab_runner_contract::Placement::Local => "local",
+        homeboy_lab_runner_contract::Placement::Lab => "lab",
+        homeboy_lab_runner_contract::Placement::LabOrLocal => "lab-or-local",
+    }
+}
+
+/// Report the resolved execution placement once identity is known.
+///
+/// Non-preview dispatch previously never reported this at all: an operator
+/// backgrounding a Cook (the common case, since durable identity is reported
+/// before materialization can even start) never saw preview's output and had
+/// no other line telling them a requested Lab placement had silently degraded
+/// to local execution (#14729).
+pub(crate) fn announce_resolved_execution_placement() {
+    if let Some(line) = resolved_execution_placement_line() {
         eprintln!("{line}");
     }
 }
@@ -395,6 +456,13 @@ pub(crate) fn preview_cook(
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
     )?;
+    reject_gates_unexecutable_under_resolved_placement(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+    )?;
     record_preview_phase(&mut progress, "provider_preflight");
     preflight_cook_provider_credentials(&args)?;
 
@@ -491,8 +559,23 @@ fn cook_preview_result(
     }
     if let Some(failure) = failure {
         result["failure"] = failure;
+    } else if let Some(failure) = cook_preview_blocked_admission_failure(&result["resolved"]) {
+        result["failure"] = failure;
     }
     result
+}
+
+fn cook_preview_blocked_admission_failure(resolved: &Value) -> Option<Value> {
+    let admission = resolved.get("placement")?.get("admission")?;
+    if admission.get("state").and_then(Value::as_str) != Some("blocked") {
+        return None;
+    }
+    let blocker = admission.get("remaining_blocker").and_then(Value::as_str)?;
+    let mut failure = serde_json::json!({ "message": blocker });
+    if let Some(next_action) = admission.get("next_action").cloned() {
+        failure["next_action"] = next_action;
+    }
+    Some(failure)
 }
 
 fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> Value {
@@ -752,12 +835,6 @@ fn finalize_cook_preview_replay(
             "replay requires the original non-empty prompt on stdin for `--prompt -`".to_string(),
         );
     }
-    if args.prepared_base_sha.is_none() {
-        replay.requires.push(
-            "base admission is indeterminate; materialize an origin-backed workspace and rerun `homeboy agent-task cook --preview` before execution"
-                .to_string(),
-        );
-    }
     if preview_placement_policy_from_argv(&replay.argv)["requested"] != "local" {
         replay.requires.push(
             "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
@@ -914,8 +991,10 @@ pub(crate) fn rewrite_cook_identity_replay_argv(
 }
 
 pub(super) fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
-    let requested_cook_id = args.dispatch.run_id.clone();
-    let owner_run_ref = args.attempt_run_id.clone().unwrap_or_else(|| {
+    args.requested_run_id = args.dispatch.run_id.clone();
+    args.requested_attempt_run_id = args.attempt_run_id.clone();
+    let requested_cook_id = args.requested_run_id.clone();
+    let owner_run_ref = args.requested_attempt_run_id.clone().unwrap_or_else(|| {
         requested_cook_id.as_deref().map_or_else(
             || format!("agent-task-{}", uuid::Uuid::new_v4()),
             |cook_id| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1),
@@ -925,20 +1004,23 @@ pub(super) fn bind_cook_preview_lifecycle(args: &mut AgentTaskCookArgs) {
     args.attempt_run_id = Some(owner_run_ref);
 }
 
+fn preview_replay_has_flag(argv: &[String], flag: &str) -> bool {
+    argv.iter()
+        .any(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
+}
+
 fn append_preview_lifecycle_replay_argv(argv: &mut Vec<String>, args: &AgentTaskCookArgs) {
     for (flag, value) in [
-        ("--run-id", args.dispatch.run_id.as_ref()),
-        ("--attempt-run-id", args.attempt_run_id.as_ref()),
+        ("--run-id", args.requested_run_id.as_ref()),
+        ("--attempt-run-id", args.requested_attempt_run_id.as_ref()),
     ] {
-        if !argv
-            .iter()
-            .any(|argument| argument == flag || argument.starts_with(&format!("{flag}=")))
-        {
-            argv.extend([
-                flag.to_string(),
-                value.expect("preview lifecycle is bound").clone(),
-            ]);
+        let Some(value) = value else {
+            continue;
+        };
+        if preview_replay_has_flag(argv, flag) {
+            continue;
         }
+        argv.extend([flag.to_string(), value.clone()]);
     }
 }
 
@@ -1059,21 +1141,131 @@ fn redact_replay_unit(unit: Vec<String>) -> (Vec<String>, Option<String>) {
 
 fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     let mut policy = preview_placement_policy_from_argv(replay_args);
-    // Resource and Lab inventory are live execution inputs. Reading either here
-    // made a read-only preview wait on the same unavailable control plane it was
-    // intended to diagnose. Execution revalidates this admission after preview.
+    apply_resolved_placement(&mut policy);
     if policy["requested"] == "local" {
         return policy;
     }
-    policy["admission"] = serde_json::json!({
+    policy["admission"] = preview_placement_admission(&policy);
+    policy
+}
+
+fn preview_placement_admission(policy: &Value) -> Value {
+    let Some(runner_id) = policy.get("selected_runner").and_then(Value::as_str) else {
+        return indeterminate_preview_admission();
+    };
+    let snapshot = homeboy::runner::runners::persisted_status(runner_id)
+        .and_then(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .ok();
+    if let Some(snapshot) = snapshot.as_ref() {
+        let unresolved = snapshot.summary.unresolved_retained_projection_count > 0
+            || !snapshot.summary.unresolved_generation_ids.is_empty();
+        if unresolved {
+            let outcome = crate::commands::runner::reconciliation_outcome(
+                runner_id,
+                Vec::new(),
+                &snapshot.status,
+                &snapshot.summary,
+            );
+            return blocked_preview_admission(
+                outcome
+                    .remaining_blocker
+                    .unwrap_or_else(|| "unresolved_generation_projection".to_string()),
+                outcome.next_action,
+            );
+        }
+    }
+    if captured_selected_runner_is_connected_ready(runner_id) {
+        return admissible_preview_admission();
+    }
+    if let Some(snapshot) = snapshot {
+        let outcome = crate::commands::runner::reconciliation_outcome(
+            runner_id,
+            Vec::new(),
+            &snapshot.status,
+            &snapshot.summary,
+        );
+        if let Some(blocker) = outcome.remaining_blocker {
+            return blocked_preview_admission(blocker, outcome.next_action);
+        }
+        return admissible_preview_admission();
+    }
+    indeterminate_preview_admission()
+}
+
+fn captured_selected_runner_is_connected_ready(runner_id: &str) -> bool {
+    homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+        result.lab_readiness.as_ref().is_some_and(|readiness| {
+            readiness.state == "connected_ready"
+                && readiness.selected_runner_id.as_deref() == Some(runner_id)
+                && readiness
+                    .available_runner_ids
+                    .iter()
+                    .any(|available| available == runner_id)
+        })
+    })
+}
+
+fn indeterminate_preview_admission() -> Value {
+    serde_json::json!({
         "schema": "homeboy/cook-preview-placement-admission/v1",
         "state": "indeterminate",
         "revalidate_before_execution": true,
         "blockers": [],
         "deferred_to": "execution_placement_admission",
-        "replay_prerequisite": "connected runner readiness is revalidated before execution",
+        "reason": PREVIEW_ADMISSION_UNCHECKED,
+        "replay_prerequisite": PREVIEW_ADMISSION_UNCHECKED,
+    })
+}
+
+fn admissible_preview_admission() -> Value {
+    serde_json::json!({
+        "schema": "homeboy/cook-preview-placement-admission/v1",
+        "state": "admissible",
+        "revalidate_before_execution": true,
+        "blockers": [],
+    })
+}
+
+fn blocked_preview_admission(blocker: String, next_action: Option<String>) -> Value {
+    let mut admission = serde_json::json!({
+        "schema": "homeboy/cook-preview-placement-admission/v1",
+        "state": "blocked",
+        "revalidate_before_execution": true,
+        "blockers": [blocker],
+        "remaining_blocker": blocker,
+        "replay_prerequisite": blocker,
     });
-    policy
+    if let Some(next_action) = next_action {
+        admission["next_action"] = serde_json::json!(next_action);
+    }
+    admission
+}
+
+/// Merge the already-resolved placement decision into preview's placement
+/// projection.
+///
+/// This process already ran the same Lab-readiness resolution that a real
+/// dispatch would use — `parsed_command_preflight::capture_result` completes
+/// once, before any command (preview included) executes — so surfacing it
+/// here costs no additional live I/O. Preview otherwise reported only the
+/// *requested* placement, which silently diverged from what actually ran
+/// whenever `auto`/`lab-or-local` degraded to local execution (#14729).
+fn apply_resolved_placement(policy: &mut Value) {
+    let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
+        return;
+    };
+    let directive = result.placement;
+    let selected = match directive.selected {
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local => "local",
+        homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab => "lab",
+    };
+    policy["selected"] = serde_json::json!(selected);
+    if let Some(runner) = directive.runner.as_ref() {
+        policy["selected_runner"] = serde_json::json!(runner.runner_id);
+    }
+    if let Some(reason) = directive.fallback.reason.as_deref() {
+        policy["fallback_reason"] = serde_json::json!(reason);
+    }
 }
 
 fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
@@ -1115,6 +1307,27 @@ mod preview_tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+    use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
+    use homeboy::agents::agent_tasks::{
+        AgentTaskExecutionContext, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
+    };
+
+    struct UnmaterializedPreviewExecutor;
+
+    impl AgentTaskExecutorAdapter for UnmaterializedPreviewExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            AgentTaskOutcome {
+                task_id: request.task_id,
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("ok".to_string()),
+                ..Default::default()
+            }
+        }
+    }
 
     fn cook(argv: &[&str]) -> AgentTaskCookArgs {
         let cli = Cli::try_parse_from(argv).expect("parse Cook preview");
@@ -1125,6 +1338,24 @@ mod preview_tests {
             panic!("Cook command");
         };
         *cook
+    }
+
+    fn linked_preview_workspace() -> (tempfile::TempDir, std::path::PathBuf) {
+        let (repository, primary) =
+            crate::test_support::shared_committed_git_repo_fixture("primary");
+        let workspace = repository.path().join("task-worktree");
+        crate::test_support::run_git_command(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                workspace.to_str().expect("UTF-8 workspace"),
+            ],
+        );
+        (repository, workspace)
     }
 
     #[test]
@@ -1227,6 +1458,92 @@ mod preview_tests {
             .iter()
             .any(|requirement| requirement.contains("runner placement admission is deferred")));
         Cli::try_parse_from(&replay.argv).expect("replay argv parses as Cook");
+    }
+
+    #[test]
+    fn preview_replay_omits_generated_lifecycle_ids() {
+        let mut args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+        ]);
+        bind_cook_preview_lifecycle(&mut args);
+        assert!(args.dispatch.run_id.is_some());
+        assert!(args.attempt_run_id.is_some());
+
+        let mut argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+        ];
+        append_preview_lifecycle_replay_argv(&mut argv, &args);
+        assert!(!preview_replay_has_flag(&argv, "--run-id"), "{argv:?}");
+        assert!(
+            !preview_replay_has_flag(&argv, "--attempt-run-id"),
+            "{argv:?}"
+        );
+
+        let replay = finalize_cook_preview_replay(argv, &args);
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--run-id"),
+            "{replay:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
+            "{replay:?}"
+        );
+    }
+
+    #[test]
+    fn preview_replay_echoes_explicit_run_id() {
+        let mut args = cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--prompt",
+            "implement the issue",
+            "--run-id",
+            "cook-42",
+        ]);
+        bind_cook_preview_lifecycle(&mut args);
+        assert_eq!(args.dispatch.run_id.as_deref(), Some("cook-42"));
+
+        let mut argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "implement the issue".to_string(),
+        ];
+        append_preview_lifecycle_replay_argv(&mut argv, &args);
+        assert!(
+            argv.windows(2)
+                .any(|parts| parts == ["--run-id", "cook-42"]),
+            "{argv:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&argv, "--attempt-run-id"),
+            "{argv:?}"
+        );
+
+        let replay = finalize_cook_preview_replay(argv, &args);
+        assert!(
+            replay
+                .argv
+                .windows(2)
+                .any(|parts| parts == ["--run-id", "cook-42"]),
+            "{replay:?}"
+        );
+        assert!(
+            !preview_replay_has_flag(&replay.argv, "--attempt-run-id"),
+            "{replay:?}"
+        );
     }
 
     #[test]
@@ -1789,12 +2106,7 @@ mod preview_tests {
     #[test]
     fn compiled_plan_preview_emits_placement_admission_schema() {
         crate::test_support::with_isolated_home(|_| {
-            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .canonicalize()
-                .expect("workspace root")
-                .display()
-                .to_string();
+            let (_repository, workspace) = linked_preview_workspace();
             let cli = Cli::try_parse_from([
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -1802,10 +2114,12 @@ mod preview_tests {
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
                 "--prompt".to_string(),
                 "-".to_string(),
                 "--to-worktree".to_string(),
-                workspace,
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
                 "--no-finalize".to_string(),
                 "--verify".to_string(),
                 "true".to_string(),
@@ -1834,6 +2148,7 @@ mod preview_tests {
                     { "event": "cook_preview_progress", "phase": "prompt_input" },
                     { "event": "cook_preview_progress", "phase": "input_validation" },
                     { "event": "cook_preview_progress", "phase": "destination_resolution" },
+                    { "event": "cook_preview_progress", "phase": "base_preparation" },
                     { "event": "cook_preview_progress", "phase": "placement_projection" },
                     { "event": "cook_preview_progress", "phase": "gate_contract_validation" },
                     { "event": "cook_preview_progress", "phase": "provider_preflight" },
@@ -1858,6 +2173,317 @@ mod preview_tests {
                 "execution_placement_admission"
             );
         });
+    }
+
+    /// #14729: with no ready Lab runner, `--placement auto` preview must
+    /// report the *resolved* placement (local) rather than the request, and
+    /// must name why — not just that a substitution happened somewhere.
+    #[test]
+    fn preview_with_no_lab_runner_reports_local_placement_and_names_the_reason() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("prompt source");
+            std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
+            let repository = tempfile::tempdir().expect("repository");
+            let primary = repository.path().join("primary");
+            let workspace = repository.path().join("task-worktree");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+                .status()
+                .expect("initialize primary")
+                .success());
+            for (key, value) in [
+                ("user.email", "fixture@example.test"),
+                ("user.name", "Fixture"),
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        primary.to_str().expect("UTF-8 primary"),
+                        "config",
+                        key,
+                        value
+                    ])
+                    .status()
+                    .expect("configure fixture repository")
+                    .success());
+            }
+            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+            assert!(std::process::Command::new("git")
+                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .expect("commit fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "task",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                ])
+                .status()
+                .expect("create linked workspace")
+                .success());
+
+            let cli = Cli::try_parse_from([
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
+                "--prompt".to_string(),
+                format!("@{}", source.path().display()),
+                "--to-worktree".to_string(),
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
+                "--no-finalize".to_string(),
+                "--verify".to_string(),
+                "true".to_string(),
+            ])
+            .expect("parse preview");
+
+            // No lab runner is registered at all: the readiness snapshot a real
+            // dispatch would compute is `absent`, with no available runners.
+            crate::cli_runtime::capture_preflight_result_for_test(
+                &cli,
+                Some(
+                    crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                        state: "absent".to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: Vec::new(),
+                        remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
+                        repair_admitted_runner_ids: Vec::new(),
+                    },
+                ),
+            );
+
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook command");
+            };
+
+            let (preview, exit_code) = preview_cook(*args, None).expect("compile preview");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["placement"]["requested"], "auto");
+            assert_eq!(preview["resolved"]["placement"]["selected"], "local");
+            assert_eq!(
+                preview["resolved"]["placement"]["fallback_reason"],
+                "no Lab runner is configured"
+            );
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                summary
+                    .contains("Placement: local  (requested: auto — no Lab runner is configured)"),
+                "summary did not name the resolved placement and reason: {summary}"
+            );
+        });
+    }
+
+    /// #14731: preview must resolve `homeboy review test` — the exact gate
+    /// documented in Cook's own `--help` quick start — against the resolved
+    /// placement and refuse admission before a provider is dispatched, since
+    /// that gate is a portable Lab route that defers without a ready runner.
+    #[test]
+    fn preview_rejects_admission_for_a_lab_routed_gate_with_no_ready_lab_runner() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("prompt source");
+            std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
+            let repository = tempfile::tempdir().expect("repository");
+            let primary = repository.path().join("primary");
+            let workspace = repository.path().join("task-worktree");
+            assert!(std::process::Command::new("git")
+                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+                .status()
+                .expect("initialize primary")
+                .success());
+            for (key, value) in [
+                ("user.email", "fixture@example.test"),
+                ("user.name", "Fixture"),
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        primary.to_str().expect("UTF-8 primary"),
+                        "config",
+                        key,
+                        value
+                    ])
+                    .status()
+                    .expect("configure fixture repository")
+                    .success());
+            }
+            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+            assert!(std::process::Command::new("git")
+                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture"
+                ])
+                .status()
+                .expect("commit fixture")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "task",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                ])
+                .status()
+                .expect("create linked workspace")
+                .success());
+
+            let cli = Cli::try_parse_from([
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--preview".to_string(),
+                "--backend".to_string(),
+                "fixture".to_string(),
+                "--repo".to_string(),
+                "fixture-repository".to_string(),
+                "--prompt".to_string(),
+                format!("@{}", source.path().display()),
+                "--to-worktree".to_string(),
+                workspace.to_str().expect("UTF-8 workspace").to_string(),
+                "--no-finalize".to_string(),
+                "--verify".to_string(),
+                "homeboy review test fixture-repository".to_string(),
+            ])
+            .expect("parse preview");
+
+            // No lab runner is registered at all: the readiness snapshot a
+            // real dispatch would compute is `absent`, with no available
+            // runners — the exact condition that made `homeboy review test`
+            // defer at execution time in the reported session.
+            crate::cli_runtime::capture_preflight_result_for_test(
+                &cli,
+                Some(
+                    crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                        state: "absent".to_string(),
+                        selected_runner_id: None,
+                        available_runner_ids: Vec::new(),
+                        reasons: Vec::new(),
+                        remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
+                        repair_admitted_runner_ids: Vec::new(),
+                    },
+                ),
+            );
+
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook command");
+            };
+
+            let error =
+                preview_cook(*args, None).expect_err("an unexecutable gate must block preview");
+            assert!(
+                error
+                    .message
+                    .contains("homeboy review test fixture-repository"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error
+                    .message
+                    .contains("cannot execute under the resolved local placement"),
+                "{}",
+                error.message
+            );
+        });
+    }
+
+    /// #14729: backgrounded/detached dispatches never see preview output, so
+    /// the non-preview path must report the same resolved-vs-requested
+    /// substitution independently. Exercised against a directly constructed
+    /// directive (not the shared process-global capture slot) so this stays
+    /// deterministic under parallel test execution.
+    #[test]
+    fn resolved_execution_placement_line_names_a_local_fallback() {
+        let directive = crate::core::parsed_command_preflight::PlacementDirective {
+            requested: homeboy_lab_runner_contract::Placement::Auto,
+            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            runner: None,
+            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: true,
+                reason: Some("the configured Lab runner is disconnected".to_string()),
+            },
+            override_authorization:
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: false,
+                    authority: None,
+                },
+        };
+
+        assert_eq!(
+            format_resolved_execution_placement_line(&directive),
+            "cook: placement: local  (requested: auto — the configured Lab runner is disconnected)"
+        );
+    }
+
+    #[test]
+    fn resolved_execution_placement_line_is_silent_when_nothing_diverged() {
+        let directive = crate::core::parsed_command_preflight::PlacementDirective {
+            requested: homeboy_lab_runner_contract::Placement::Local,
+            required: homeboy_lab_runner_contract::ExecutionPlacementRequirement::Either,
+            selected: homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local,
+            runner: None,
+            fallback: homeboy_lab_runner_contract::ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            override_authorization:
+                homeboy_lab_runner_contract::ExecutionPlacementOverrideAuthorization {
+                    authorized: true,
+                    authority: Some("operator --placement local".to_string()),
+                },
+        };
+
+        assert_eq!(
+            format_resolved_execution_placement_line(&directive),
+            "cook: placement: local"
+        );
     }
 
     #[test]
@@ -1961,6 +2587,8 @@ mod preview_tests {
                 "--preview",
                 "--backend",
                 "fixture",
+                "--repo",
+                "fixture-repository",
                 "--prompt",
                 &format!("@{}", source.path().display()),
                 "--to-worktree",
@@ -2040,6 +2668,7 @@ mod preview_tests {
 
     #[test]
     fn preview_defers_lab_placement_admission_with_a_structured_phase() {
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
         let policy = preview_placement_policy_with_admission(&[
             "homeboy".to_string(),
             "--placement".to_string(),
@@ -2053,6 +2682,249 @@ mod preview_tests {
             policy["admission"]["deferred_to"],
             "execution_placement_admission"
         );
+        assert_eq!(
+            policy["admission"]["reason"],
+            "static inputs only; admission not checked"
+        );
+    }
+
+    struct ResetCapturedPreflight;
+
+    impl Drop for ResetCapturedPreflight {
+        fn drop(&mut self) {
+            homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        }
+    }
+
+    fn preview_fixture_worktree() -> (tempfile::TempDir, String) {
+        let repository = tempfile::tempdir().expect("repository");
+        let primary = repository.path().join("primary");
+        let workspace = repository.path().join("task-worktree");
+        assert!(Command::new("git")
+            .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+            .status()
+            .expect("initialize primary")
+            .success());
+        for (key, value) in [
+            ("user.email", "fixture@example.test"),
+            ("user.name", "Fixture"),
+        ] {
+            assert!(Command::new("git")
+                .args([
+                    "-C",
+                    primary.to_str().expect("UTF-8 primary"),
+                    "config",
+                    key,
+                    value
+                ])
+                .status()
+                .expect("configure fixture repository")
+                .success());
+        }
+        std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+        assert!(Command::new("git")
+            .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+            .status()
+            .expect("stage fixture")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture"
+            ])
+            .status()
+            .expect("commit fixture")
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                workspace.to_str().expect("UTF-8 workspace"),
+            ])
+            .status()
+            .expect("create linked workspace")
+            .success());
+        (
+            repository,
+            workspace.to_str().expect("UTF-8 workspace").to_string(),
+        )
+    }
+
+    fn persist_unresolved_generation_runner(runner_id: &str) {
+        homeboy::runner::runners::create(
+            &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
+            false,
+        )
+        .expect("create runner");
+        let dir = homeboy::core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join(runner_id);
+        std::fs::create_dir_all(&dir).expect("runner session dir");
+        let endpoint = |lease: &str| {
+            serde_json::json!({
+                "runner_id": runner_id,
+                "server_id": null,
+                "tunnel_pid": null,
+                "remote_daemon_pid": null,
+                "homeboy_version": "1.0.0",
+                "connected_at": "2026-09-17T00:00:00Z",
+                "remote_daemon_lease_id": lease,
+            })
+        };
+        std::fs::write(
+            dir.join("generations.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "runner_id": runner_id,
+                "admission_owner": "lease-new",
+                "generations": {
+                    "lease-old": {
+                        "endpoint": endpoint("lease-old"),
+                        "active_jobs": 1,
+                        "drain_state": "draining"
+                    },
+                    "lease-new": {
+                        "endpoint": endpoint("lease-new"),
+                        "active_jobs": 0,
+                        "drain_state": "admitting"
+                    }
+                }
+            }))
+            .expect("serialize generations"),
+        )
+        .expect("write generations");
+    }
+
+    fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
+        let (_repository, workspace) = preview_fixture_worktree();
+        let cli = Cli::try_parse_from([
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--preview".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--repo".to_string(),
+            "fixture-repository".to_string(),
+            "--prompt".to_string(),
+            "Inspect the task workspace.".to_string(),
+            "--to-worktree".to_string(),
+            workspace,
+            "--no-finalize".to_string(),
+            "--verify".to_string(),
+            "true".to_string(),
+        ])
+        .expect("parse preview");
+        if let Some(runner_id) = runner_id {
+            crate::cli_runtime::capture_admitted_runner_preflight_for_test(&cli, runner_id);
+        }
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+            panic!("Cook command");
+        };
+        preview_cook(*args, None).expect("compile preview")
+    }
+
+    #[test]
+    fn preview_reports_unresolved_generation_blocker_instead_of_an_unqualified_ready_plan() {
+        crate::test_support::with_isolated_home(|_| {
+            let _reset = ResetCapturedPreflight;
+            persist_unresolved_generation_runner("homeboy-lab");
+            let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                preview["resolved"]["placement"]["selected_runner"],
+                "homeboy-lab"
+            );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "blocked"
+            );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["remaining_blocker"],
+                "unresolved_generation_projection"
+            );
+            assert_eq!(
+                preview["failure"]["message"],
+                "unresolved_generation_projection"
+            );
+            let next_action = preview["resolved"]["placement"]["admission"]["next_action"]
+                .as_str()
+                .expect("recovery action");
+            assert!(
+                next_action.contains("homeboy-lab"),
+                "recovery action must target the resolved runner: {next_action}"
+            );
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                summary.contains("Blocked: unresolved_generation_projection"),
+                "preview must not present an unqualified ready plan: {summary}"
+            );
+            assert!(
+                summary.contains("Next:") && summary.contains("homeboy-lab"),
+                "preview must surface the runner-status recovery action: {summary}"
+            );
+        });
+    }
+
+    #[test]
+    fn preview_that_passes_admission_uses_the_same_connected_ready_evidence_execution_requires() {
+        crate::test_support::with_isolated_home(|_| {
+            let _reset = ResetCapturedPreflight;
+            let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
+
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                preview["resolved"]["placement"]["selected_runner"],
+                "homeboy-lab"
+            );
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "admissible"
+            );
+            assert!(preview.get("failure").is_none(), "{preview}");
+
+            let captured = homeboy::core::parsed_command_preflight::captured_result()
+                .expect("admitted runner preflight remains captured");
+            assert_eq!(captured.selected_runner_id.as_deref(), Some("homeboy-lab"));
+            let readiness = captured.lab_readiness.as_ref().expect("lab readiness");
+            assert_eq!(readiness.state, "connected_ready");
+            assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
+            assert!(readiness
+                .available_runner_ids
+                .iter()
+                .any(|id| id == "homeboy-lab"));
+
+            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+                &preview,
+            )
+            .expect("cook preview summary renders");
+            assert!(
+                !summary.contains("Blocked:"),
+                "admissible preview must not report a blocker: {summary}"
+            );
+            assert!(
+                !summary.contains("static inputs only; admission not checked"),
+                "admissible preview must not claim admission was skipped: {summary}"
+            );
+        });
     }
 
     #[test]
@@ -2088,6 +2960,164 @@ mod preview_tests {
             .requires
             .iter()
             .any(|requirement| requirement.contains("runner placement admission")));
+        assert!(
+            !replay
+                .requires
+                .iter()
+                .any(|requirement| { requirement.contains("base admission is indeterminate") }),
+            "unmaterialized preview must not require a second preview: {replay:?}"
+        );
+    }
+
+    #[test]
+    fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("repository root");
+            let remote = tempfile::tempdir().expect("bare origin");
+            assert!(Command::new("git")
+                .args(["init", "--bare", "--quiet"])
+                .current_dir(remote.path())
+                .status()
+                .expect("initialize bare origin")
+                .success());
+            let checkout = root.path().join("fixture");
+            std::fs::create_dir(&checkout).expect("repository checkout");
+            for args in [
+                ["init", "--quiet", "-b", "main"].as_slice(),
+                ["config", "user.email", "fixture@example.test"].as_slice(),
+                ["config", "user.name", "Fixture"].as_slice(),
+            ] {
+                assert!(Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .expect("configure source")
+                    .success());
+            }
+            std::fs::write(checkout.join("README.md"), "fixture\n").expect("write fixture");
+            assert!(Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&checkout)
+                .status()
+                .expect("stage fixture")
+                .success());
+            assert!(Command::new("git")
+                .args(["commit", "--quiet", "-m", "fixture"])
+                .current_dir(&checkout)
+                .status()
+                .expect("commit fixture")
+                .success());
+            let origin = remote.path().to_str().expect("origin path");
+            assert!(Command::new("git")
+                .args(["remote", "add", "origin", origin])
+                .current_dir(&checkout)
+                .status()
+                .expect("add origin")
+                .success());
+            assert!(Command::new("git")
+                .args(["push", "--quiet", "-u", "origin", "main"])
+                .current_dir(&checkout)
+                .status()
+                .expect("push origin main")
+                .success());
+            let origin_sha = String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&checkout)
+                    .output()
+                    .expect("resolve origin SHA")
+                    .stdout,
+            )
+            .expect("origin SHA is UTF-8")
+            .trim()
+            .to_string();
+            let repository = checkout.display().to_string();
+            let handle = "fixture@fix-issue-14714";
+            let args = cook(&[
+                "homeboy",
+                "--placement",
+                "local",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                &repository,
+                "--task-url",
+                "https://github.com/example/fixture/issues/14714",
+                "--head",
+                "fix/issue-14714",
+                "--base",
+                "main",
+                "--to-worktree",
+                handle,
+                "--no-finalize",
+            ]);
+
+            let (preview, exit_code) = preview_cook(args.clone(), None).expect("preview");
+            assert_eq!(exit_code, 0);
+            assert_eq!(preview["resolved"]["workspace"]["action"], "planned_create");
+            assert_eq!(
+                preview["resolved"]["base_preparation"]["provenance"],
+                "workspace_unmaterialized"
+            );
+            let requires = preview["replay_requires"]
+                .as_array()
+                .expect("preview replay requirements");
+            assert!(
+                !requires.iter().any(|requirement| {
+                    requirement
+                        .as_str()
+                        .is_some_and(|value| value.contains("base admission is indeterminate"))
+                }),
+                "unmaterialized preview must admit replay: {preview}"
+            );
+            assert!(
+                !Path::new(
+                    preview["resolved"]["workspace"]["path"]
+                        .as_str()
+                        .expect("planned path")
+                )
+                .exists(),
+                "preview must not materialize the planned worktree"
+            );
+
+            let provision =
+                provision_cook_destination(&args).expect("execution admits planned create");
+            assert_eq!(provision["action"], "lookup_pending");
+
+            let executor = Arc::new(UnmaterializedPreviewExecutor);
+            let (report, _) = run_cook_with_executor(args, executor).expect("cook replay");
+            assert_eq!(
+                report["failure_context"]["provider_executions_consumed"], 1,
+                "{report}"
+            );
+            let destination = PathBuf::from(
+                preview["resolved"]["workspace"]["path"]
+                    .as_str()
+                    .expect("planned path"),
+            );
+            assert!(
+                destination.is_dir(),
+                "cook must materialize the planned worktree: {}",
+                destination.display()
+            );
+            let destination_sha = String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&destination)
+                    .output()
+                    .expect("resolve destination SHA")
+                    .stdout,
+            )
+            .expect("destination SHA is UTF-8")
+            .trim()
+            .to_string();
+            assert_eq!(destination_sha, origin_sha);
+        });
     }
 
     #[test]
@@ -2209,6 +3239,8 @@ mod preview_tests {
                     "--preview",
                     "--backend",
                     "fixture",
+                    "--repo",
+                    "fixture-repository",
                     "--prompt",
                     "implement the issue",
                     "--to-worktree",
@@ -4207,6 +5239,9 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
                 .into_iter()
                 .flatten()
                 .any(|path| homeboy::core::git::repo_root(&path).is_some());
+            if args.dispatch.repo.is_some() {
+                return bind_cook_repository_identity_from_config(args);
+            }
             return require_explicit_cook_repo(
                 args,
                 if supplied_git_checkout {
@@ -4539,6 +5574,14 @@ fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
     let repository_name = normalize_repository_name(repository_name);
+    // An exact component ID is the common Cook path. Do not hydrate every
+    // registered primary checkout before selecting it: portable enrichment of
+    // one stale checkout can otherwise block destination resolution.
+    if let Some(component) =
+        homeboy::core::component::inventory::registered_primary_by_id(&repository_name)?
+    {
+        return Ok(vec![component]);
+    }
     let primary_matches = cook_components_matching_repository_name(
         homeboy::core::component::inventory::registered_primary()?,
         &repository_name,
@@ -4550,7 +5593,10 @@ fn cook_components_for_repository_name(
                 &primary_matches,
             ));
         }
-        return Ok(primary_matches);
+        let selected = &primary_matches[0];
+        return Ok(cook_registered_component_by_id(&selected.id)?
+            .into_iter()
+            .collect());
     }
     let components = homeboy::core::component::inventory::registered_base()?;
     let matches = cook_components_matching_repository_name(components, &repository_name);
@@ -5177,6 +6223,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
     preflight_cook_execution_request(&mut args, provenance)?;
+    if !args.no_progress {
+        if let Some(progress) = progress {
+            progress(
+                "destination_resolution",
+                None,
+                None,
+                Some("resolving default base and worktree"),
+                None,
+            )?;
+        }
+    }
     let args = resolve_cook_destination(args)?;
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
@@ -5193,6 +6250,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
     )?;
+    reject_gates_unexecutable_under_resolved_placement(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+    )?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
@@ -5203,6 +6267,17 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
+    if !no_progress {
+        if let Some(progress) = progress {
+            progress(
+                "destination_provisioning",
+                None,
+                None,
+                Some("checking managed worktree availability"),
+                None,
+            )?;
+        }
+    }
     let provision = provision_cook_destination(&args)?;
 
     run_preflight_cook_execution(
@@ -5227,6 +6302,106 @@ pub(crate) fn preflight_cook_execution_request(
     args.gates.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(&args, provenance)?;
     Ok(())
+}
+
+/// Wall-clock ceiling on how long a queued local Cook dispatch waits for
+/// capacity before giving up with an actionable error, rather than queueing
+/// silently forever (#14732).
+const LOCAL_DISPATCH_QUEUE_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+/// How often a queued local Cook dispatch re-checks capacity.
+const LOCAL_DISPATCH_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Admit, queue, or refuse a local Cook provider dispatch against the
+/// resource-policy snapshot the controller already captured at preflight
+/// (`captured_pressure_severity` in `homeboy-core::lab_routing`, consulted
+/// today for pressure-driven Lab promotion but never for local dispatch).
+///
+/// Returns `Ok(None)` when preflight captured no snapshot at all — a command
+/// resource policy never evaluated for this invocation — so the ceiling fails
+/// open rather than guessing at evidence it does not have.
+fn admit_local_cook_dispatch(
+    run_id: &str,
+) -> homeboy::core::Result<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>
+{
+    let Some(context) = homeboy::core::resource_policy_context::captured_context() else {
+        return Ok(None);
+    };
+    let data_root = homeboy::core::paths::homeboy_data()?;
+    let run_id_for_notice = run_id.to_string();
+    admit_local_cook_dispatch_with_clock(
+        run_id,
+        &data_root,
+        &context,
+        LOCAL_DISPATCH_QUEUE_MAX_WAIT,
+        LOCAL_DISPATCH_QUEUE_POLL_INTERVAL,
+        std::thread::sleep,
+        move |active, ceiling| {
+            eprintln!(
+                "Local dispatch queued: {active} of {ceiling} local Cook provider slot(s) already in use on this machine; waiting for capacity before dispatching {run_id_for_notice}."
+            );
+        },
+    )
+    .map(Some)
+}
+
+/// The testable core of [`admit_local_cook_dispatch`]: the clock and the queue
+/// notice are injected so the queue path — dispatch beyond the ceiling waits
+/// instead of running — is exercised deterministically, without a real wait.
+fn admit_local_cook_dispatch_with_clock(
+    run_id: &str,
+    data_root: &Path,
+    context: &homeboy::core::resource_policy_context::ResourcePolicyContext,
+    max_wait: Duration,
+    poll_interval: Duration,
+    mut sleep: impl FnMut(Duration),
+    mut on_queue: impl FnMut(usize, usize),
+) -> homeboy::core::Result<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease> {
+    use homeboy::core::local_dispatch_admission::{
+        acquire_local_dispatch_lease, active_local_dispatch_count,
+        evaluate_local_dispatch_admission, LocalDispatchAdmission,
+    };
+
+    let mut waited = Duration::ZERO;
+    loop {
+        let active = active_local_dispatch_count(data_root)?;
+        match evaluate_local_dispatch_admission(
+            active,
+            &context.severity,
+            context.host.load_one,
+            context.host.cpu_count,
+            context.local_override,
+        ) {
+            LocalDispatchAdmission::Admit => {
+                return acquire_local_dispatch_lease(data_root, run_id);
+            }
+            LocalDispatchAdmission::Refuse { reason } => {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "resource-policy",
+                    format!("Refusing local Cook dispatch: {reason}."),
+                    None,
+                    Some(vec![
+                        "Wait for pressure to fall (`homeboy self doctor`), route this cook through Lab, or pass --placement local only once you have independently confirmed the machine can take the load.".to_string(),
+                    ]),
+                ));
+            }
+            LocalDispatchAdmission::Queue { active, ceiling } => {
+                if waited >= max_wait {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "resource-policy",
+                        format!(
+                            "Timed out after {}s waiting for local Cook dispatch capacity ({active} of {ceiling} slot(s) in use).",
+                            max_wait.as_secs()
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+                on_queue(active, ceiling);
+                sleep(poll_interval);
+                waited += poll_interval;
+            }
+        }
+    }
 }
 
 fn run_preflight_cook_execution(
@@ -5388,6 +6563,15 @@ fn run_preflight_cook_execution(
     let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    // A local provider dispatch — not a Lab-routed one — is the workload that
+    // saturates this machine, so only local dispatch consults the concurrency
+    // ceiling. The lease is held for this whole cook (provider, promotion, and
+    // gates all run on this host) and released when the function returns,
+    // whether by success or by an early `?` (#14732).
+    let _local_dispatch_lease = (!args.preview && attempt_dispatcher.is_none())
+        .then(|| admit_local_cook_dispatch(&run_id))
+        .transpose()?
+        .flatten();
     let result = agent_task_service::CookService::run(
             agent_task_service::CookRequest {
             identity: homeboy::agents::agent_task_service::CookIdentity {
@@ -8978,5 +10162,187 @@ mod tests {
                 "preflight must not materialize a run"
             );
         });
+    }
+
+    mod local_dispatch_admission {
+        use super::super::admit_local_cook_dispatch_with_clock;
+        use homeboy::core::local_dispatch_admission::{
+            acquire_local_dispatch_lease, active_local_dispatch_count,
+        };
+        use homeboy::core::resource_policy_context::{
+            ResourcePolicyContext, ResourcePolicyHostSnapshot, ResourcePolicyRunnerSelection,
+        };
+        use std::time::Duration;
+
+        fn context(
+            severity: &str,
+            load_one: Option<f64>,
+            cpu_count: usize,
+        ) -> ResourcePolicyContext {
+            ResourcePolicyContext {
+                command: "agent-task cook".to_string(),
+                severity: severity.to_string(),
+                local_override: false,
+                warned: severity != "ok",
+                message: None,
+                runner_selection: ResourcePolicyRunnerSelection {
+                    runner_id: None,
+                    available_runner_ids: Vec::new(),
+                    readiness_state: "absent".to_string(),
+                    readiness_reasons: Vec::new(),
+                    remediation_commands: Vec::new(),
+                    reason: "local_no_default_runner".to_string(),
+                },
+                host: ResourcePolicyHostSnapshot {
+                    load_severity: severity.to_string(),
+                    load_one,
+                    load_five: load_one,
+                    load_fifteen: load_one,
+                    cpu_count,
+                    memory_severity: None,
+                    memory_used_percent: None,
+                    memory_available_mb: None,
+                    memory_total_mb: None,
+                    relevant_process_count: 0,
+                    process_severity: "ok".to_string(),
+                    active_rig_lease_count: 0,
+                    rig_lease_severity: "ok".to_string(),
+                    rig_lease_concurrency_limit: None,
+                },
+                // This fixture models local dispatch under load, where no lab
+                // reconnect is attempted; #14730 records its outcome here.
+                auto_placement_reconnect: None,
+            }
+        }
+
+        /// The user-facing behavior #14732 exists to fix: dispatching beyond
+        /// the concurrency ceiling queues instead of running immediately. Here
+        /// the ceiling (18 CPUs / 4 = 4) is already fully held by four other
+        /// leases; admission must queue rather than dispatch, and once a slot
+        /// frees — simulated deterministically inside the injected `sleep`,
+        /// never a real wait — it admits.
+        #[test]
+        fn dispatch_beyond_the_ceiling_queues_then_admits_once_a_slot_frees() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let data_root = temp.path();
+            let holders: Vec<_> = (0..4)
+                .map(|index| {
+                    acquire_local_dispatch_lease(data_root, &format!("holder-{index}"))
+                        .expect("acquire holder lease")
+                })
+                .collect();
+            assert_eq!(active_local_dispatch_count(data_root).unwrap(), 4);
+
+            let mut holders = Some(holders);
+            let mut queue_calls = Vec::new();
+            let result = admit_local_cook_dispatch_with_clock(
+                "queued-run",
+                data_root,
+                &context("warm", Some(10.0), 18),
+                Duration::from_secs(60),
+                Duration::from_secs(1),
+                |_interval| {
+                    // Deterministic stand-in for "time passes and capacity
+                    // frees up": release every held slot on the first queued
+                    // wait instead of actually sleeping.
+                    holders.take();
+                },
+                |active, ceiling| queue_calls.push((active, ceiling)),
+            );
+
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(
+                queue_calls,
+                vec![(4, 4)],
+                "must report the exact active/ceiling pair it queued behind"
+            );
+            // The newly admitted dispatch now holds the one and only freed slot.
+            assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
+        }
+
+        /// The other user-facing behavior #14732 exists to fix: once pressure
+        /// severity is already hot, Homeboy refuses admission — naming the
+        /// observed load — instead of warning and dispatching into it anyway.
+        /// A refusal is immediate: it never queues or sleeps first.
+        #[test]
+        fn admission_is_refused_when_pressure_is_hot_and_names_the_load() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let data_root = temp.path();
+            let mut slept = false;
+
+            let result = admit_local_cook_dispatch_with_clock(
+                "refused-run",
+                data_root,
+                &context("hot", Some(30.4), 18),
+                Duration::from_secs(60),
+                Duration::from_secs(1),
+                |_interval| slept = true,
+                |_active, _ceiling| panic!("a hot refusal must not queue"),
+            );
+
+            let error = result.expect_err("hot pressure must refuse admission");
+            assert!(error.message.contains("hot"), "{}", error.message);
+            assert!(error.message.contains("30.4"), "{}", error.message);
+            assert!(error.message.contains("18 CPU"), "{}", error.message);
+            assert!(!slept, "a refusal must not wait first");
+            assert_eq!(
+                active_local_dispatch_count(data_root).unwrap(),
+                0,
+                "a refused dispatch must not acquire a lease"
+            );
+        }
+
+        /// A queue that never clears gives up with an actionable timeout
+        /// instead of hanging the operator's terminal forever.
+        #[test]
+        fn queue_that_never_clears_times_out_instead_of_hanging_forever() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let data_root = temp.path();
+            let _holder = acquire_local_dispatch_lease(data_root, "permanent-holder")
+                .expect("acquire holder lease");
+            let mut sleeps = 0;
+
+            let result = admit_local_cook_dispatch_with_clock(
+                "never-admitted-run",
+                data_root,
+                &context("ok", Some(1.0), 4),
+                Duration::from_secs(3),
+                Duration::from_secs(1),
+                |_interval| sleeps += 1,
+                |_active, _ceiling| {},
+            );
+
+            let error = result.expect_err("a queue that never clears must time out");
+            assert!(error.message.contains("Timed out"), "{}", error.message);
+            assert!(sleeps > 0, "must have waited before timing out");
+        }
+
+        /// `--placement local` is the one documented, operator-authorized
+        /// escape hatch from a hot-machine refusal elsewhere in resource
+        /// policy ("Local execution requires an explicit, authorized
+        /// `--placement local` override"). This admission gate honors that
+        /// same override instead of adding a second, stricter refusal the
+        /// documented override cannot get past. It still queues behind the
+        /// concurrency ceiling: an override authorizes running locally, not
+        /// skipping every other concurrent local dispatch.
+        #[test]
+        fn explicit_local_override_bypasses_the_hot_refusal_but_still_queues() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let data_root = temp.path();
+            let mut hot_context = context("hot", Some(30.4), 18);
+            hot_context.local_override = true;
+
+            let result = admit_local_cook_dispatch_with_clock(
+                "override-run",
+                data_root,
+                &hot_context,
+                Duration::from_secs(60),
+                Duration::from_secs(1),
+                |_interval| panic!("capacity is free; must not queue"),
+                |_active, _ceiling| panic!("capacity is free; must not queue"),
+            );
+            assert!(result.is_ok(), "{:?}", result.err());
+            assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
+        }
     }
 }
