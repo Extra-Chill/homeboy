@@ -1,53 +1,188 @@
-# Continuous release pipeline for Homeboy Action.
+# Reusable continuous release pipeline for Homeboy consumers (#472).
 #
-# Triggers on push to main (immediate release) and manual dispatch.
-# Checks for releasable conventional commits since the last tag. If found:
-#   1. Version bump + changelog generation
-#   2. Tag + push + GitHub Release creation
-#   3. Post-release hook moves the floating v2 tag
+# Consumers call this workflow instead of hand-rolling the release DAG
+# (compare Extra-Chill/data-machine's former ~200-line release.yml). Owned
+# here, not by the caller:
+#   1. Releasable-commit detection via a `commands: release` dry-run
+#   2. The failed-SHA marker, keyed by ref + SHA + tooling identity so a
+#      CI-side fix self-heals a previously-blocked SHA (homeboy-action#257),
+#      bypassed on manual dispatch (an explicit human "retry this now")
+#   3. GitHub App token generation with fallback to the automatic token
+#   4. `persist-credentials: false` checkout
+#   5. record-failure / clear-failure bookkeeping
+#   6. Skipping pushes whose head commit is itself a `release:` commit
 #
-# No binary builds, no extensions needed — homeboy reads homeboy.json
-# directly for version targets and hooks.
+# Caller shape (canonical minimal caller:
+# fixtures/reusable-release-minimal-consumer.yml):
 #
-# No human input needed — version is computed from commit types:
-#   fix: → patch, feat: → minor, BREAKING CHANGE → major
-#   chore:/ci:/docs:/test: → no release
+#   name: Release
+#   on:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#       inputs:
+#         dry-run: { type: boolean, default: false }
+#   permissions:
+#     contents: write
+#     issues: write
+#     pull-requests: write
+#   jobs:
+#     release:
+#       uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+#       with:
+#         dry-run: ${{ inputs.dry-run || false }}
+#         args: '--setting database_type=mysql'   # optional, passed through
+#       secrets: inherit
+#
+# Action revision: inside a reusable workflow, a caller-relative action path
+# resolves to the CALLER's checkout, not this repository. The composite action
+# is therefore invoked as Extra-Chill/homeboy-action@<action-ref>, following
+# the same
+# contract as the reusable CI workflow: action-ref is resolved to one
+# immutable revision in the check job and reused by the release job, so the
+# dry-run that computed tooling-identity and the release gated on it run the
+# same tooling even if the floating tag moves mid-run.
 
-name: Release
+name: Homeboy Release
 
+on:
+  workflow_call:
+    inputs:
+      dry-run:
+        description: 'Preview the release without making changes.'
+        type: boolean
+        default: false
+      args:
+        description: 'Additional arguments passed to the Homeboy release command.'
+        type: string
+        default: ''
+      extension:
+        description: 'Single extension ID override.'
+        type: string
+        default: ''
+      extension-ref:
+        description: 'Optional git revision to install from the extension source.'
+        type: string
+        default: ''
+      php-version:
+        description: 'PHP version override.'
+        type: string
+        default: ''
+      node-version:
+        description: 'Node.js version override.'
+        type: string
+        default: ''
+      release-skip-publish:
+        description: 'Skip the package and publish.<target> pipeline steps.'
+        type: boolean
+        default: false
+      release-skip-github-release:
+        description: 'Skip the github.release step that runs gh release create.'
+        type: boolean
+        default: false
+      release-branch:
+        description: 'Branch that releases are allowed from.'
+        type: string
+        default: ''
+      execution-timeout-seconds:
+        description: 'Maximum wall-clock time for the Homeboy command phase.'
+        type: string
+        default: ''
+      action-ref:
+        description: 'homeboy-action ref used by this workflow.'
+        type: string
+        default: 'v2'
+    secrets:
+      HOMEBOY_APP_ID:
+        description: 'GitHub App client ID for release credentials. Optional; falls back to the automatic token.'
+        required: false
+      HOMEBOY_APP_PRIVATE_KEY:
+        description: 'GitHub App private key for release credentials. Optional; falls back to the automatic token.'
+        required: false
+    outputs:
+      released:
+        description: 'Whether a release was created (true/false).'
+        value: ${{ jobs.release.outputs.released }}
+      release-version:
+        description: 'The released version number (e.g. 1.2.3).'
+        value: ${{ jobs.release.outputs.release-version }}
+      release-tag:
+        description: 'The release git tag (e.g. v1.2.3).'
+        value: ${{ jobs.release.outputs.release-tag }}
+      release-bump-type:
+        description: 'The bump type used (patch, minor, major).'
+        value: ${{ jobs.release.outputs.release-bump-type }}
+      skipped-reason:
+        description: 'Why release was skipped when released is false.'
+        value: ${{ jobs.release.outputs.skipped-reason }}
+      tooling-identity:
+        description: 'Cache-key-safe token identifying the resolved release tooling (homeboy CLI version + extension revision).'
+        value: ${{ jobs.check.outputs.tooling-identity }}
+
+# A called workflow cannot request a permission the CALLER has not granted —
+# GitHub fails the whole run at startup, before any job, with no usable error
+# in the API. Callers must grant exactly these scopes; see
+# fixtures/reusable-release-minimal-consumer.yml for the canonical minimal
+# caller.
 permissions:
   contents: write
   issues: write
   pull-requests: write
 
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      dry-run:
-        description: 'Preview the release without making changes'
-        type: boolean
-        default: false
-
 jobs:
   # ── Step 1: Check for releasable commits ──
   check:
     name: Check for releasable commits
+    # A push whose head commit is itself a release commit has nothing left to
+    # release — the tag already moved. Manual dispatch is never filtered.
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release:') }}
     runs-on: ubuntu-latest
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       tooling-identity: ${{ steps.release-check.outputs.tooling-identity }}
+      action-sha: ${{ steps.action-sha.outputs.sha }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # Resolve the action ref to one immutable revision for every phase,
+      # matching the reusable CI workflow's plan job contract.
+      - name: Resolve action revision
+        id: action-sha
+        shell: bash
+        env:
+          ACTION_REF: ${{ inputs.action-ref }}
+          ACTION_REPO: Extra-Chill/homeboy-action
+        run: |
+          set -euo pipefail
+          if [[ "${ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="${ACTION_REF}"
+          else
+            refs="$(git ls-remote "https://github.com/${ACTION_REPO}" \
+              "refs/tags/${ACTION_REF}^{}" "refs/tags/${ACTION_REF}" "refs/heads/${ACTION_REF}")"
+            sha="$(printf '%s\n' "${refs}" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+            [ -n "${sha:-}" ] || sha="$(printf '%s\n' "${refs}" | awk 'NR==1{print $1}')"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::error::Could not resolve action-ref '${ACTION_REF}' in ${ACTION_REPO} to a commit."
+            exit 1
+          fi
+          echo "Resolved ${ACTION_REF} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Dry-run release check
         id: release-check
-        uses: ./
+        uses: Extra-Chill/homeboy-action@${{ steps.action-sha.outputs.sha }}
         with:
           commands: release
+          args: ${{ inputs.args }}
+          extension: ${{ inputs.extension }}
+          extension-ref: ${{ inputs.extension-ref }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          release-branch: ${{ inputs.release-branch }}
           release-dry-run: 'true'
           release-skip-publish: 'true'
           release-skip-github-release: 'true'
@@ -93,31 +228,18 @@ jobs:
             echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
           fi
 
-  # ── Step 2: Shell tests ──
-  # Release-blocking. Publishing moves the floating v2 tag, so a regression
-  # here breaks every consumer at once — gate the tag move on the action's
-  # own tests passing.
-  self-test:
-    name: Self test
-    needs: check
-    if: needs.check.outputs.should-release == 'true'
-    uses: ./.github/workflows/self-test.yml
-
-  consumer-contract:
-    name: Consumer contract
-    needs: check
-    if: needs.check.outputs.should-release == 'true'
-    uses: ./.github/workflows/consumer-contract.yml
-
-  # ── Step 3: Release ──
+  # ── Step 2: Release ──
   release:
     name: Release
-    needs:
-      - check
-      - self-test
-      - consumer-contract
+    needs: check
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      release-version: ${{ steps.release.outputs.release-version }}
+      release-tag: ${{ steps.release.outputs.release-tag }}
+      release-bump-type: ${{ steps.release.outputs.release-bump-type }}
+      skipped-reason: ${{ steps.release.outputs.skipped-reason }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -131,14 +253,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
-      - uses: ./
+      - uses: Extra-Chill/homeboy-action@${{ needs.check.outputs.action-sha }}
         id: release
         with:
           commands: release
-          release-dry-run: ${{ inputs.dry-run || 'false' }}
-          release-skip-publish: 'true'
+          args: ${{ inputs.args }}
+          extension: ${{ inputs.extension }}
+          extension-ref: ${{ inputs.extension-ref }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          release-branch: ${{ inputs.release-branch }}
+          release-dry-run: ${{ inputs.dry-run }}
+          release-skip-publish: ${{ inputs.release-skip-publish }}
+          release-skip-github-release: ${{ inputs.release-skip-github-release }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Record failed SHA to prevent retry loops ──
@@ -172,7 +302,7 @@ jobs:
     steps:
       - name: Clear failure cache
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
             gh cache delete "$id" 2>/dev/null || true

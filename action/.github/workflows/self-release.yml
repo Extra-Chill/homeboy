@@ -1,0 +1,187 @@
+# Continuous release pipeline for Homeboy Action.
+#
+# This is the action's OWN self-release, kept separate from the reusable
+# consumer workflow (.github/workflows/release.yml). It deliberately does NOT
+# consume that workflow: a reusable workflow can only reach the composite
+# action via Extra-Chill/homeboy-action@<ref>, which resolves to the
+# already-published channel — the release would run the OLD action instead of
+# validating the promotion candidate. `uses: ./` here pins every phase to the
+# checked-out revision, which is the entire point of self-release.
+#
+# Triggers on push to main (immediate release) and manual dispatch.
+# Checks for releasable conventional commits since the last tag. If found:
+#   1. Version bump + changelog generation
+#   2. Tag + push + GitHub Release creation
+#   3. Post-release hook moves the floating v2 tag
+#
+# No binary builds, no extensions needed — homeboy reads homeboy.json
+# directly for version targets and hooks.
+#
+# No human input needed — version is computed from commit types:
+#   fix: → patch, feat: → minor, BREAKING CHANGE → major
+#   chore:/ci:/docs:/test: → no release
+
+name: Release
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Preview the release without making changes'
+        type: boolean
+        default: false
+
+jobs:
+  # ── Step 1: Check for releasable commits ──
+  check:
+    name: Check for releasable commits
+    runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.check.outputs.should-release }}
+      tooling-identity: ${{ steps.release-check.outputs.tooling-identity }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Dry-run release check
+        id: release-check
+        uses: ./
+        with:
+          commands: release
+          release-dry-run: 'true'
+          release-skip-publish: 'true'
+          release-skip-github-release: 'true'
+
+      # The failed-SHA marker is keyed by the resolved tooling identity, not
+      # just the SHA, so a CI-side fix (new homeboy binary / extension) that
+      # changes the resolved tooling produces a fresh key and self-heals a
+      # previously-blocked SHA. See homeboy-action#257.
+      - name: Restore failure cache
+        id: failure-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/homeboy-release-last-failed
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}
+
+      - name: Decide whether to release
+        id: check
+        env:
+          # A manual dispatch is an explicit human "retry this now" — it must
+          # never be silently skipped by a stale failed-SHA marker. The marker
+          # only guards the unattended push path against retry loops.
+          IS_MANUAL_DISPATCH: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          FAILURE_MARKER="${RUNNER_TEMP}/homeboy-release-last-failed"
+          if [ "${IS_MANUAL_DISPATCH}" != "true" ] && [ -f "${FAILURE_MARKER}" ]; then
+            LAST_FAILED="$(tr -d '[:space:]' < "${FAILURE_MARKER}")"
+            if [ "${HEAD_SHA}" = "${LAST_FAILED}" ]; then
+              echo "::notice::HEAD ${HEAD_SHA:0:8} matches last failed release attempt with the same tooling — skipping until new commits or new tooling (dispatch manually to force)"
+              echo "should-release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          RELEASE_VERSION="${{ steps.release-check.outputs.release-version }}"
+          BUMP_TYPE="${{ steps.release-check.outputs.release-bump-type }}"
+
+          if [ -z "${RELEASE_VERSION}" ]; then
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No releasable commits at HEAD ${HEAD_SHA:0:8}"
+          else
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
+          fi
+
+  # ── Step 2: Shell tests ──
+  # Release-blocking. Publishing moves the floating v2 tag, so a regression
+  # here breaks every consumer at once — gate the tag move on the action's
+  # own tests passing.
+  self-test:
+    name: Self test
+    needs: check
+    if: needs.check.outputs.should-release == 'true'
+    uses: ./.github/workflows/self-test.yml
+
+  consumer-contract:
+    name: Consumer contract
+    needs: check
+    if: needs.check.outputs.should-release == 'true'
+    uses: ./.github/workflows/consumer-contract.yml
+
+  # ── Step 3: Release ──
+  release:
+    name: Release
+    needs:
+      - check
+      - self-test
+      - consumer-contract
+    if: needs.check.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+
+      - uses: ./
+        id: release
+        with:
+          commands: release
+          release-dry-run: ${{ inputs.dry-run || 'false' }}
+          release-skip-publish: 'true'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+  # ── Record failed SHA to prevent retry loops ──
+  record-failure:
+    name: Record failure
+    needs:
+      - check
+      - release
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.release.result == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Save failed SHA
+        run: git rev-parse HEAD > "${RUNNER_TEMP}/homeboy-release-last-failed"
+
+      - name: Cache failed SHA
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/homeboy-release-last-failed
+          # Keyed by tooling identity so a later tooling fix produces a new
+          # key and the prior failure no longer matches (homeboy-action#257).
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}
+
+  # ── Clear failure cache on success ──
+  clear-failure:
+    name: Clear failure cache
+    needs: release
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clear failure cache
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
+            gh cache delete "$id" 2>/dev/null || true
+          done

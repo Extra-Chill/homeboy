@@ -135,6 +135,75 @@ jobs:
 
 Fully automated releases — no human input needed. Triggers on every push to main, checks for releasable conventional commits since the last tag, computes the version, generates changelog, bumps version targets, tags, creates a GitHub Release, and publishes.
 
+Prefer the reusable release workflow so Homeboy Action owns the whole pipeline. The caller is ~15 lines:
+
+```yaml
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Preview the release without making changes'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+      args: '--setting database_type=mysql'   # optional, passed through
+    secrets: inherit
+```
+
+The caller must grant `contents: write`, `issues: write`, and
+`pull-requests: write` — GitHub fails a called workflow that requests a scope
+the caller did not grant before it schedules any jobs. The canonical minimal
+caller is maintained in
+[`fixtures/reusable-release-minimal-consumer.yml`](fixtures/reusable-release-minimal-consumer.yml).
+
+Available inputs: `dry-run`, `args`, `extension`, `extension-ref`,
+`php-version`, `node-version`, `release-skip-publish`,
+`release-skip-github-release`, `release-branch`, `execution-timeout-seconds`.
+Workflow outputs mirror the composite action (`released`, `release-version`,
+`release-tag`, `release-bump-type`, `skipped-reason`, `tooling-identity`) so a
+post-release job can chain on the result.
+
+#### Release credentials
+
+Set `HOMEBOY_APP_ID` and `HOMEBOY_APP_PRIVATE_KEY` as repository secrets to
+release with a GitHub App token (enables auto-issue filing and workflow
+re-triggers). Both are optional: without them the workflow falls back to the
+automatic `GITHUB_TOKEN`, which is sufficient for tag and GitHub Release
+creation in the same repository. Pass `secrets: inherit` from the caller.
+
+#### Failed-release retry protection
+
+A failed release records its SHA in an Actions cache keyed by
+`release-last-failed-<branch>-<sha>-<tooling-identity>`. Unattended pushes of
+the same SHA with the same resolved tooling are then skipped — without this,
+every push retriggers a doomed release in a loop. Because the key includes the
+resolved tooling identity, a fixed homeboy binary or extension revision
+produces a fresh key and a previously-blocked SHA self-heals
+(homeboy-action#257). Dispatching the caller workflow manually always
+bypasses the marker: a human dispatch is an explicit "retry this now". Pushes
+whose head commit is itself a `release:` commit skip the pipeline entirely.
+
+Inside a reusable workflow `uses: ./` would resolve to the caller's checkout,
+so the workflow pins `Extra-Chill/homeboy-action` via an `action-ref` input
+(default `v2`) resolved to one immutable revision per run — the same contract
+as the reusable CI workflow.
+
+#### Direct composite action
+
+Components that need the release inside a larger job can still call the action directly:
+
 ```yaml
 name: Release
 on:

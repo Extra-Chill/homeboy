@@ -3,7 +3,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORKFLOW="${ROOT_DIR}/.github/workflows/release.yml"
+WORKFLOW="${ROOT_DIR}/.github/workflows/self-release.yml"
+REUSABLE_RELEASE="${ROOT_DIR}/.github/workflows/release.yml"
+RELEASE_CONSUMER_FIXTURE="${ROOT_DIR}/fixtures/reusable-release-minimal-consumer.yml"
 CI_WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
 SELF_TEST_WORKFLOW="${ROOT_DIR}/.github/workflows/self-test.yml"
 RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
@@ -147,5 +149,34 @@ assert_not_contains 'Extra-Chill/homeboy-action@v1' "${README}" "README examples
 assert_contains 'Extra-Chill/homeboy-action@v2' "${README}" "README documents the v2 action channel"
 assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v1' "${COMMENT_SECTIONS}" "PR comment footer does not advertise v1"
 assert_not_contains 'Homeboy Action](https://github.com/Extra-Chill/homeboy-action) v2' "${COMMENT_SECTIONS}" "PR comment footer does not duplicate action metadata"
+
+# Reusable consumer release workflow (#472). It runs in the CALLER's context,
+# where `./` would resolve to the caller checkout, so it must invoke the
+# published action by ref — resolved once to an immutable revision in the
+# check job and reused by the release job, so the dry-run that computed
+# tooling-identity and the release gated on it share one tooling revision.
+assert_contains 'workflow_call:' "${REUSABLE_RELEASE}" "reusable release workflow is callable"
+assert_contains 'action-ref:' "${REUSABLE_RELEASE}" "reusable release workflow exposes action-ref revision pinning"
+assert_contains 'uses: Extra-Chill/homeboy-action@${{ steps.action-sha.outputs.sha }}' "${REUSABLE_RELEASE}" "reusable release check runs the resolved action revision"
+assert_contains 'uses: Extra-Chill/homeboy-action@${{ needs.check.outputs.action-sha }}' "${REUSABLE_RELEASE}" "reusable release job runs the same resolved action revision as the check"
+assert_not_contains 'uses: ./' "${REUSABLE_RELEASE}" "reusable release workflow never uses the caller-relative ./ path"
+assert_contains 'startsWith(github.event.head_commit.message' "${REUSABLE_RELEASE}" "reusable release workflow skips pushes of release commits"
+assert_contains "github.event_name == 'workflow_dispatch'" "${REUSABLE_RELEASE}" "reusable release workflow detects manual dispatch for the marker bypass"
+assert_contains 'IS_MANUAL_DISPATCH' "${REUSABLE_RELEASE}" "reusable release workflow gates the failed-SHA skip on non-dispatch runs"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache restore key includes tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache save key includes tooling identity"
+assert_not_contains 'restore-keys:' "${REUSABLE_RELEASE}" "reusable release failure cache never falls back to a stale-tooling marker via restore-keys"
+assert_contains 'persist-credentials: false' "${REUSABLE_RELEASE}" "reusable release checkout does not persist credentials"
+assert_contains 'value: ${{ jobs.release.outputs.release-version }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports the action release-version output"
+assert_contains 'value: ${{ jobs.check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports tooling-identity"
+
+# The canonical minimal release caller is release-gated with the workflow it
+# documents: this script runs in self-test, which gates every release.
+assert_contains 'uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture calls the published reusable release workflow"
+assert_contains 'secrets: inherit' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture inherits secrets"
+assert_contains 'dry-run: true' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture defaults to dry-run"
+assert_contains '  contents: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture grants contents write"
+assert_contains '  pull-requests: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture grants pull-requests write"
+assert_contains '  issues: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture grants issues write"
 
 printf 'All release workflow checks passed.\n'
