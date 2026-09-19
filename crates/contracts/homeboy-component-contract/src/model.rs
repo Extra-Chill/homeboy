@@ -364,6 +364,18 @@ impl Component {
                 && self.deploy_strategy().is_none())
     }
 
+    /// Whether `local_path` names an existing directory on this host.
+    ///
+    /// A component resolved without a source checkout — materialized from a
+    /// GitHub Release when no local checkout is available (#14782) — has a
+    /// `local_path` that does not exist. Every checkout-touching operation
+    /// (sync, uncommitted-changes checks, local git tag lookups, `--head`,
+    /// `--tagged`, `--ref`) must consult this first and either skip or refuse
+    /// with an actionable message instead of reading a path that isn't there.
+    pub fn has_local_checkout(&self) -> bool {
+        !self.local_path.trim().is_empty() && std::path::Path::new(&self.local_path).is_dir()
+    }
+
     pub fn deploy_config(&self) -> ComponentDeployConfig<'_> {
         ComponentDeployConfig {
             local_path: &self.local_path,
@@ -659,5 +671,26 @@ mod tests {
             serialized.get("harvest_excludes").is_none(),
             "an undeclared exclude set must not be materialized into the serialized config"
         );
+    }
+
+    #[test]
+    fn has_local_checkout_requires_an_existing_directory() {
+        let existing = Component {
+            local_path: std::env::temp_dir().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+        assert!(existing.has_local_checkout());
+
+        let missing = Component {
+            local_path: "/this/path/does/not/exist/homeboy-14782".to_string(),
+            ..Component::default()
+        };
+        assert!(!missing.has_local_checkout());
+
+        let blank = Component {
+            local_path: String::new(),
+            ..Component::default()
+        };
+        assert!(!blank.has_local_checkout());
     }
 }

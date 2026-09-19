@@ -11,10 +11,10 @@
 //! See: https://github.com/Extra-Chill/homeboy/issues/784
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::component::{Component, GithubConfig};
 use crate::error::{Error, Result};
@@ -196,6 +196,57 @@ impl GitHubRepo {
         } else {
             format!(
                 "https://{}/api/v3/repos/{}/{}/releases/tags/{}",
+                self.host, self.owner, self.repo, tag
+            )
+        }
+    }
+
+    /// The GitHub Releases API URL for the repository's latest release.
+    fn latest_release_api_url(&self) -> String {
+        if self.host == "github.com" {
+            format!(
+                "https://api.github.com/repos/{}/{}/releases/latest",
+                self.owner, self.repo
+            )
+        } else {
+            format!(
+                "https://{}/api/v3/repos/{}/{}/releases/latest",
+                self.host, self.owner, self.repo
+            )
+        }
+    }
+
+    /// Raw-content URL for a repo-relative file at a tag. Used to resolve a
+    /// component's portable config (`homeboy.json`) without a local checkout
+    /// (#14782).
+    fn raw_content_url(&self, tag: &str, path: &str) -> String {
+        if self.host == "github.com" {
+            format!(
+                "https://raw.githubusercontent.com/{}/{}/{}/{}",
+                self.owner, self.repo, tag, path
+            )
+        } else {
+            // GitHub Enterprise serves raw blobs from the web host, not the API host.
+            format!(
+                "https://{}/{}/{}/raw/{}/{}",
+                self.host, self.owner, self.repo, tag, path
+            )
+        }
+    }
+
+    /// The GitHub API URL for a source zipball at a tag. Every tag/release has
+    /// one regardless of uploaded release assets, so this is the fallback used
+    /// to read `homeboy.json` when the raw-content fetch 404s (e.g. a private
+    /// repository host that does not serve raw content the same way).
+    fn zipball_api_url(&self, tag: &str) -> String {
+        if self.host == "github.com" {
+            format!(
+                "https://api.github.com/repos/{}/{}/zipball/{}",
+                self.owner, self.repo, tag
+            )
+        } else {
+            format!(
+                "https://{}/api/v3/repos/{}/{}/zipball/{}",
                 self.host, self.owner, self.repo, tag
             )
         }
@@ -595,6 +646,472 @@ fn resolve_release_asset_metadata(
             .and_then(Value::as_str)
             .map(ToString::to_string),
     })
+}
+
+// =============================================================================
+// Checkout-less resolution (#14782)
+// =============================================================================
+//
+// A project-attached component whose deploy source resolves to a release
+// asset does not need a source checkout to be resolved or deployed: its
+// portable config (`homeboy.json`) and its "current" version are both
+// answerable from the component's GitHub repository alone. This section adds
+// the two GitHub reads that make that possible:
+//
+//   - `fetch_portable_config_at_tag` — the component's `homeboy.json` at a
+//     tag, read from the repository rather than a working tree.
+//   - `latest_release_tag_for_repo` — the repository's latest GitHub Release
+//     tag, used in place of a local `git tag` read when no checkout exists.
+//
+// Both results are cached per (repo, tag) / per repo for the process, since a
+// project can attach the same component many times and a single `--outdated`
+// pass resolves every attached component.
+
+/// Outcome of a raw HTTP GET distinguishing "not found" from "found", so
+/// callers can treat a 404 as a legitimate negative result (no release yet,
+/// no `homeboy.json` at this path) rather than a transport failure.
+enum FetchOutcome {
+    Found(Vec<u8>),
+    NotFound,
+}
+
+type PortableConfigCacheKey = (String, String, String, String);
+
+fn portable_config_cache() -> &'static Mutex<HashMap<PortableConfigCacheKey, Component>> {
+    static CACHE: OnceLock<Mutex<HashMap<PortableConfigCacheKey, Component>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn portable_config_cache_key(github: &GitHubRepo, tag: &str) -> PortableConfigCacheKey {
+    (
+        github.host.clone(),
+        github.owner.clone(),
+        github.repo.clone(),
+        tag.to_string(),
+    )
+}
+
+type LatestReleaseTagCacheKey = (String, String, String);
+
+fn latest_release_tag_cache() -> &'static Mutex<HashMap<LatestReleaseTagCacheKey, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<LatestReleaseTagCacheKey, Option<String>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn latest_release_tag_cache_key(github: &GitHubRepo) -> LatestReleaseTagCacheKey {
+    (
+        github.host.clone(),
+        github.owner.clone(),
+        github.repo.clone(),
+    )
+}
+
+/// Resolve a component's portable config (`homeboy.json`) at a tag directly
+/// from its GitHub repository, without requiring a local checkout.
+///
+/// Tries the raw-content URL first (cheap, no archive download). If that 404s
+/// — some GitHub Enterprise hosts don't serve raw content the same way, or the
+/// file genuinely is not at the repo root — falls back to the tag's source
+/// zipball, which every tag has regardless of uploaded release assets, and
+/// reads `homeboy.json` from its root or exactly one level of nesting (GitHub
+/// zipballs root at a generated `<owner>-<repo>-<sha>/` directory).
+///
+/// Cached per (host, owner, repo, tag) for the process.
+pub fn fetch_portable_config_at_tag(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    tag: &str,
+) -> Result<Component> {
+    let key = portable_config_cache_key(github, tag);
+    if let Some(cached) = portable_config_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&key)
+    {
+        return Ok(cached.clone());
+    }
+
+    let component = fetch_portable_config_at_tag_uncached(github, github_config, tag)?;
+    portable_config_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(key, component.clone());
+    Ok(component)
+}
+
+fn fetch_portable_config_at_tag_uncached(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    tag: &str,
+) -> Result<Component> {
+    let auth_token = github_auth_token(github, github_config);
+    let context_label = format!("{}/{}/{} @ {}", github.host, github.owner, github.repo, tag);
+    let context = Path::new(&context_label);
+
+    let raw_url = github.raw_content_url(tag, "homeboy.json");
+    match fetch_raw_content(
+        &raw_url,
+        auth_token.as_deref(),
+        github_command_env(github, github_config),
+    )? {
+        FetchOutcome::Found(bytes) => {
+            return crate::component::portable::component_from_portable_bytes(&bytes, context);
+        }
+        FetchOutcome::NotFound => {}
+    }
+
+    let zip_bytes = download_release_zipball(github, github_config, tag)?;
+    let Some(json_bytes) = extract_homeboy_json_from_zip_bytes(&zip_bytes)? else {
+        return Err(Error::validation_invalid_argument(
+            "homeboy.json",
+            format!(
+                "GitHub repository '{}/{}' has no homeboy.json at tag '{}' (checked the repo root and its source archive)",
+                github.owner, github.repo, tag
+            ),
+            Some(context_label),
+            Some(vec![
+                "Add homeboy.json to the repository root so it is resolvable without a local checkout".to_string(),
+            ]),
+        ));
+    };
+    crate::component::portable::component_from_portable_bytes(&json_bytes, context)
+}
+
+/// Resolve the latest GitHub Release tag for a repository, in place of a local
+/// `git tag` read when no checkout exists.
+///
+/// Returns `Ok(None)` when the repository has no releases yet — a legitimate
+/// negative result, not a failure. Cached per (host, owner, repo) for the
+/// process.
+pub fn latest_release_tag_for_repo(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+) -> Result<Option<String>> {
+    let key = latest_release_tag_cache_key(github);
+    if let Some(cached) = latest_release_tag_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&key)
+    {
+        return Ok(cached.clone());
+    }
+
+    let auth_token = github_auth_token(github, github_config).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "github",
+            format!(
+                "No GitHub authentication token is available for {}",
+                github.host
+            ),
+            None,
+            Some(vec![
+                "Authenticate gh for the configured GitHub host before resolving a release without a local checkout."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let url = github.latest_release_api_url();
+    let tag = match fetch_raw_content(
+        &url,
+        Some(&auth_token),
+        github_command_env(github, github_config),
+    )? {
+        FetchOutcome::NotFound => None,
+        FetchOutcome::Found(bytes) => parse_latest_release_tag(&bytes)?,
+    };
+
+    latest_release_tag_cache()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(key, tag.clone());
+    Ok(tag)
+}
+
+fn parse_latest_release_tag(bytes: &[u8]) -> Result<Option<String>> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        Error::internal_json(
+            format!("Failed to parse latest release metadata: {error}"),
+            None,
+        )
+    })?;
+    Ok(value
+        .get("tag_name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string))
+}
+
+fn download_release_zipball(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    tag: &str,
+) -> Result<Vec<u8>> {
+    let auth_token = github_auth_token(github, github_config).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "github",
+            format!(
+                "No GitHub authentication token is available for {}",
+                github.host
+            ),
+            None,
+            Some(vec![
+                "Authenticate gh for the configured GitHub host before resolving a release without a local checkout."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    let url = github.zipball_api_url(tag);
+
+    let tmp_dir = crate::engine::temp::runtime_temp_dir("deploy-portable-config")?;
+    let dest_path = tmp_dir.join(format!("{}-{}.zip", github.repo, tag));
+
+    let curl_command = curl_release_artifact_command(
+        &url,
+        dest_path.to_str().unwrap_or("archive.zip"),
+        Some(&auth_token),
+        github_command_env(github, github_config),
+    );
+
+    let mut command = std::process::Command::new("curl");
+    command.args(&curl_command.args);
+    apply_command_env(&mut command, &curl_command.env);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    if curl_command.config_stdin.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+
+    let mut child = command.spawn().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("download release source archive".to_string()),
+        )
+    })?;
+    if let Some(config_stdin) = curl_command.config_stdin {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            Error::internal_io(
+                "Failed to open curl stdin".to_string(),
+                Some("download release source archive".to_string()),
+            )
+        })?;
+        stdin.write_all(config_stdin.as_bytes()).map_err(|e| {
+            Error::internal_io(
+                format!("Failed to write curl config: {}", e),
+                Some("download release source archive".to_string()),
+            )
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("download release source archive".to_string()),
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::internal_io(
+            format!(
+                "Failed to download release source archive from {}: {}",
+                url,
+                stderr.trim()
+            ),
+            Some("download release source archive".to_string()),
+        ));
+    }
+
+    std::fs::read(&dest_path).map_err(|e| {
+        Error::internal_io(
+            format!("Failed to read downloaded source archive: {}", e),
+            Some(dest_path.display().to_string()),
+        )
+    })
+}
+
+/// Read `homeboy.json` from a zip archive's root, or from exactly one level of
+/// nesting (`<dir>/homeboy.json`) — the shape of a GitHub-generated source
+/// zipball, which roots at `<owner>-<repo>-<sha>/`.
+///
+/// Returns `Ok(None)` when no unambiguous candidate exists: no match, or more
+/// than one nested match (an archive this function has no basis to choose
+/// between).
+fn extract_homeboy_json_from_zip_bytes(bytes: &[u8]) -> Result<Option<Vec<u8>>> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to read release source archive: {error}"),
+            None,
+        )
+    })?;
+
+    let mut root_index = None;
+    let mut nested_indices = Vec::new();
+    for i in 0..archive.len() {
+        let file = archive.by_index(i).map_err(|error| {
+            Error::internal_io(
+                format!("Failed to read release source archive entry: {error}"),
+                None,
+            )
+        })?;
+        let name = file.name();
+        if name == "homeboy.json" {
+            root_index = Some(i);
+            continue;
+        }
+        if let Some(prefix) = name.strip_suffix("/homeboy.json") {
+            if !prefix.is_empty() && !prefix.contains('/') {
+                nested_indices.push(i);
+            }
+        }
+    }
+
+    let index = match root_index {
+        Some(index) => index,
+        None => match nested_indices.as_slice() {
+            [single] => *single,
+            _ => return Ok(None),
+        },
+    };
+
+    let mut file = archive.by_index(index).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to read release source archive entry: {error}"),
+            None,
+        )
+    })?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to read homeboy.json from release source archive: {error}"),
+            None,
+        )
+    })?;
+    Ok(Some(buf))
+}
+
+/// Fetch a URL's body, distinguishing a 404 from any other outcome so callers
+/// can treat "not found" as a legitimate negative result.
+fn fetch_raw_content(
+    url: &str,
+    auth_token: Option<&str>,
+    env: Vec<(String, String)>,
+) -> Result<FetchOutcome> {
+    let command = curl_body_with_status_command(url, auth_token, env);
+    let (body, status) = run_curl_body_with_status(command)?;
+    match status {
+        Some(404) => Ok(FetchOutcome::NotFound),
+        Some(code) if (200..300).contains(&code) => Ok(FetchOutcome::Found(body)),
+        Some(code) => Err(Error::internal_io(
+            format!("Request to {} failed with HTTP {}", url, code),
+            Some(url.to_string()),
+        )),
+        None => Err(Error::internal_io(
+            format!(
+                "Request to {} returned a response with no readable HTTP status",
+                url
+            ),
+            Some(url.to_string()),
+        )),
+    }
+}
+
+struct CurlBodyWithStatusCommand {
+    args: Vec<String>,
+    config_stdin: Option<String>,
+    env: Vec<(String, String)>,
+}
+
+/// Build a curl invocation that writes the HTTP status code after the
+/// response body, separated by a newline, so both are recoverable from one
+/// process's stdout without a second request. Deliberately omits `-f`
+/// (`--fail`): a non-2xx status must still be readable to distinguish "not
+/// found" from every other failure.
+fn curl_body_with_status_command(
+    url: &str,
+    auth_token: Option<&str>,
+    env: Vec<(String, String)>,
+) -> CurlBodyWithStatusCommand {
+    let mut args = vec!["-sSL".to_string(), "--retry".to_string(), "3".to_string()];
+
+    let config_stdin = auth_token.map(github_api_config);
+    if config_stdin.is_some() {
+        args.extend(["--config".to_string(), "-".to_string()]);
+    }
+
+    args.extend([
+        "-w".to_string(),
+        "\n%{http_code}".to_string(),
+        url.to_string(),
+    ]);
+
+    CurlBodyWithStatusCommand {
+        args,
+        config_stdin,
+        env,
+    }
+}
+
+fn run_curl_body_with_status(command: CurlBodyWithStatusCommand) -> Result<(Vec<u8>, Option<u16>)> {
+    let mut process = std::process::Command::new("curl");
+    process.args(&command.args);
+    apply_command_env(&mut process, &command.env);
+    process.stdout(std::process::Stdio::piped());
+    process.stderr(std::process::Stdio::piped());
+    if command.config_stdin.is_some() {
+        process.stdin(std::process::Stdio::piped());
+    }
+
+    let mut child = process.spawn().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("fetch release metadata".to_string()),
+        )
+    })?;
+    if let Some(config_stdin) = command.config_stdin {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            Error::internal_io(
+                "Failed to open curl stdin".to_string(),
+                Some("fetch release metadata".to_string()),
+            )
+        })?;
+        stdin.write_all(config_stdin.as_bytes()).map_err(|e| {
+            Error::internal_io(
+                format!("Failed to write curl config: {}", e),
+                Some("fetch release metadata".to_string()),
+            )
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|e| {
+        Error::internal_io(
+            format!("Failed to run curl: {}", e),
+            Some("fetch release metadata".to_string()),
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::internal_io(
+            format!("curl failed: {}", stderr.trim()),
+            Some("fetch release metadata".to_string()),
+        ));
+    }
+
+    Ok(split_curl_body_and_status(&output.stdout))
+}
+
+/// Split a curl response built with `-w '\n%{http_code}'` into its body and
+/// status code. The status is the text after the last newline when it parses
+/// as a plain integer; anything else (no trailing status line at all, a body
+/// whose own last line happens not to parse) yields `None` and the whole
+/// output as the body, so a malformed response degrades to "status unknown"
+/// rather than silently truncating real content.
+fn split_curl_body_and_status(output: &[u8]) -> (Vec<u8>, Option<u16>) {
+    let Some(newline_index) = output.iter().rposition(|&byte| byte == b'\n') else {
+        return (output.to_vec(), None);
+    };
+    let status_str = String::from_utf8_lossy(&output[newline_index + 1..]);
+    match status_str.trim().parse::<u16>() {
+        Ok(status) => (output[..newline_index].to_vec(), Some(status)),
+        Err(_) => (output.to_vec(), None),
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1533,5 +2050,507 @@ mod tests {
         );
 
         assert!(!has_mutable_package_dependencies(&comp));
+    }
+
+    // =========================================================================
+    // Checkout-less resolution (#14782)
+    // =========================================================================
+
+    fn github_repo() -> GitHubRepo {
+        GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill".to_string(),
+            repo: "data-machine".to_string(),
+        }
+    }
+
+    fn enterprise_repo() -> GitHubRepo {
+        GitHubRepo {
+            host: "github.example.com".to_string(),
+            owner: "example-org".to_string(),
+            repo: "theme".to_string(),
+        }
+    }
+
+    #[test]
+    fn raw_content_url_uses_raw_githubusercontent_for_github_com() {
+        assert_eq!(
+            github_repo().raw_content_url("v1.2.3", "homeboy.json"),
+            "https://raw.githubusercontent.com/Extra-Chill/data-machine/v1.2.3/homeboy.json"
+        );
+    }
+
+    #[test]
+    fn raw_content_url_uses_enterprise_web_host() {
+        assert_eq!(
+            enterprise_repo().raw_content_url("v1.2.3", "homeboy.json"),
+            "https://github.example.com/example-org/theme/raw/v1.2.3/homeboy.json"
+        );
+    }
+
+    #[test]
+    fn latest_release_api_url_uses_public_api_host() {
+        assert_eq!(
+            github_repo().latest_release_api_url(),
+            "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest"
+        );
+    }
+
+    #[test]
+    fn latest_release_api_url_uses_enterprise_api_path() {
+        assert_eq!(
+            enterprise_repo().latest_release_api_url(),
+            "https://github.example.com/api/v3/repos/example-org/theme/releases/latest"
+        );
+    }
+
+    #[test]
+    fn zipball_api_url_uses_public_api_host() {
+        assert_eq!(
+            github_repo().zipball_api_url("v1.2.3"),
+            "https://api.github.com/repos/Extra-Chill/data-machine/zipball/v1.2.3"
+        );
+    }
+
+    #[test]
+    fn zipball_api_url_uses_enterprise_api_path() {
+        assert_eq!(
+            enterprise_repo().zipball_api_url("v1.2.3"),
+            "https://github.example.com/api/v3/repos/example-org/theme/zipball/v1.2.3"
+        );
+    }
+
+    #[test]
+    fn split_curl_body_and_status_separates_body_from_trailing_status() {
+        let output = b"{\"tag_name\":\"v1.2.3\"}\n200".to_vec();
+        let (body, status) = split_curl_body_and_status(&output);
+        assert_eq!(body, b"{\"tag_name\":\"v1.2.3\"}");
+        assert_eq!(status, Some(200));
+    }
+
+    #[test]
+    fn split_curl_body_and_status_reports_404() {
+        let output = b"Not Found\n404".to_vec();
+        let (body, status) = split_curl_body_and_status(&output);
+        assert_eq!(body, b"Not Found");
+        assert_eq!(status, Some(404));
+    }
+
+    #[test]
+    fn split_curl_body_and_status_handles_a_multiline_body() {
+        let output = b"line one\nline two\n204".to_vec();
+        let (body, status) = split_curl_body_and_status(&output);
+        assert_eq!(body, b"line one\nline two");
+        assert_eq!(status, Some(204));
+    }
+
+    #[test]
+    fn split_curl_body_and_status_degrades_when_no_status_line_is_present() {
+        let output = b"just a body, no trailing status".to_vec();
+        let (body, status) = split_curl_body_and_status(&output);
+        assert_eq!(body, output);
+        assert_eq!(status, None);
+    }
+
+    #[test]
+    fn curl_body_with_status_command_sends_auth_header_and_no_fail_flag() {
+        let command = curl_body_with_status_command(
+            "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest",
+            Some("secret-token"),
+            Vec::new(),
+        );
+
+        assert!(!command.args.contains(&"-f".to_string()));
+        assert!(!command.args.contains(&"-fsSL".to_string()));
+        assert!(command.args.contains(&"--config".to_string()));
+        let config = command.config_stdin.as_deref().expect("curl config");
+        assert!(config.contains("Authorization: Bearer secret-token"));
+        assert!(command.args.contains(&"-w".to_string()));
+        assert!(command.args.contains(&"\n%{http_code}".to_string()));
+    }
+
+    #[test]
+    fn curl_body_with_status_command_omits_auth_without_a_token() {
+        let command = curl_body_with_status_command(
+            "https://api.github.com/repos/Extra-Chill/data-machine/releases/latest",
+            None,
+            Vec::new(),
+        );
+
+        assert!(!command.args.contains(&"--config".to_string()));
+        assert_eq!(command.config_stdin, None);
+    }
+
+    #[test]
+    fn parse_latest_release_tag_reads_tag_name() {
+        let body = br#"{"tag_name": "v0.176.17", "id": 1}"#;
+        assert_eq!(
+            parse_latest_release_tag(body).expect("parses"),
+            Some("v0.176.17".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_latest_release_tag_rejects_invalid_json() {
+        assert!(parse_latest_release_tag(b"not json").is_err());
+    }
+
+    fn build_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::FileOptions::default();
+        for (name, content) in entries {
+            writer.start_file(*name, options).expect("start zip entry");
+            writer.write_all(content).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_reads_the_root_entry() {
+        let bytes = build_zip(&[
+            ("homeboy.json", br#"{"id":"data-machine"}"#),
+            ("README.md", b"hello"),
+        ]);
+
+        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .expect("homeboy.json found");
+        assert_eq!(extracted, br#"{"id":"data-machine"}"#);
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_reads_one_level_of_nesting() {
+        // GitHub source zipballs root at a generated `<owner>-<repo>-<sha>/` dir.
+        let bytes = build_zip(&[
+            (
+                "Extra-Chill-data-machine-abc1234/homeboy.json",
+                br#"{"id":"data-machine"}"#,
+            ),
+            ("Extra-Chill-data-machine-abc1234/README.md", b"hello"),
+        ]);
+
+        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .expect("nested homeboy.json found");
+        assert_eq!(extracted, br#"{"id":"data-machine"}"#);
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_prefers_root_over_nested() {
+        let bytes = build_zip(&[
+            ("homeboy.json", br#"{"id":"root"}"#),
+            ("nested-dir/homeboy.json", br#"{"id":"nested"}"#),
+        ]);
+
+        let extracted = extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .expect("root homeboy.json found");
+        assert_eq!(extracted, br#"{"id":"root"}"#);
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_returns_none_when_absent() {
+        let bytes = build_zip(&[("README.md", b"hello")]);
+
+        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .is_none());
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_returns_none_for_ambiguous_nesting() {
+        // More than one nested candidate — this function has no basis to pick.
+        let bytes = build_zip(&[
+            ("dir-a/homeboy.json", br#"{"id":"a"}"#),
+            ("dir-b/homeboy.json", br#"{"id":"b"}"#),
+        ]);
+
+        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .is_none());
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_ignores_deeply_nested_entries() {
+        // Two levels of nesting is not the GitHub zipball shape this function
+        // targets, and must not be mistaken for it.
+        let bytes = build_zip(&[("a/b/homeboy.json", br#"{"id":"deep"}"#)]);
+
+        assert!(extract_homeboy_json_from_zip_bytes(&bytes)
+            .expect("extraction succeeds")
+            .is_none());
+    }
+
+    #[test]
+    fn extract_homeboy_json_from_zip_bytes_rejects_a_non_zip_payload() {
+        assert!(extract_homeboy_json_from_zip_bytes(b"not a zip").is_err());
+    }
+
+    // =========================================================================
+    // End-to-end checkout-less resolution against a fake `curl`/`gh` on PATH.
+    //
+    // These functions shell out to `curl` and `gh` exactly like the rest of
+    // this module (see `remote_detection_times_out_with_typed_evidence` above
+    // for the same fake-binary-on-PATH technique already used in this file).
+    // A real HTTP mock is not available here, so the fake binaries stand in
+    // for GitHub: they read the request shape from argv and answer
+    // deterministically, which is enough to exercise the real parsing,
+    // caching, and fallback code paths without a network call.
+    // =========================================================================
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, script: &str) {
+        std::fs::write(path, script).expect("write fake binary");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make fake binary executable");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh_with_token(bin_dir: &Path) {
+        write_executable(
+            &bin_dir.join("gh"),
+            "#!/bin/sh\necho fake-test-token\nexit 0\n",
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh_without_token(bin_dir: &Path) {
+        write_executable(&bin_dir.join("gh"), "#!/bin/sh\nexit 1\n");
+    }
+
+    #[cfg(unix)]
+    fn prefixed_path(bin_dir: &Path) -> std::ffi::OsString {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = bin_dir.as_os_str().to_os_string();
+        new_path.push(":");
+        new_path.push(existing);
+        new_path
+    }
+
+    /// A fake `curl` that answers the body+status request shape
+    /// (`curl_body_with_status_command`): drains any piped `--config` stdin so
+    /// the parent's write cannot block, then matches the request URL (the
+    /// final argument) against `matchers` in order and prints `body\nstatus`
+    /// for the first match, or `\n404` when nothing matches.
+    #[cfg(unix)]
+    fn write_fake_curl_body_status(bin_dir: &Path, matchers: &[(&str, &str, u16)]) {
+        let mut script = String::from("#!/bin/sh\ncat > /dev/null 2>&1\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n");
+        for (pattern, body, status) in matchers {
+            script.push_str(&format!(
+                "  *{pattern}*) printf '%s' '{body}'; printf '\\n{status}' ;;\n"
+            ));
+        }
+        script.push_str("  *) printf '\\n404' ;;\nesac\n");
+        write_executable(&bin_dir.join("curl"), &script);
+    }
+
+    /// A fake `curl` that answers the body+status shape with `\n404` for
+    /// everything, and the `-o <dest>` file-download shape (used by the
+    /// zipball fallback) by copying `fixture_zip` to the requested
+    /// destination.
+    #[cfg(unix)]
+    fn write_fake_curl_zip_fallback(bin_dir: &Path, fixture_zip: &Path) {
+        let script = format!(
+            "#!/bin/sh\n\
+             has_o=0\n\
+             dest=\"\"\n\
+             prev=\"\"\n\
+             for arg in \"$@\"; do\n\
+             \x20\x20if [ \"$prev\" = \"-o\" ]; then dest=\"$arg\"; has_o=1; fi\n\
+             \x20\x20prev=\"$arg\"\n\
+             \x20\x20last=\"$arg\"\n\
+             done\n\
+             cat > /dev/null 2>&1\n\
+             if [ \"$has_o\" = \"1\" ]; then cp '{fixture}' \"$dest\"; exit 0; fi\n\
+             printf '\\n404'\n",
+            fixture = fixture_zip.display(),
+        );
+        write_executable(&bin_dir.join("curl"), &script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_portable_config_at_tag_reads_raw_content_when_available() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_body_status(
+            bin_dir.path(),
+            &[(
+                "homeboy.json",
+                r#"{"id":"data-machine","remote_path":"wp-content/plugins/data-machine","build_artifact":"dist/data-machine.zip"}"#,
+                200,
+            )],
+        );
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "raw-content-fixture".to_string(),
+        };
+        let component =
+            fetch_portable_config_at_tag(&github, &GithubConfig::default(), "v9.9.9-raw")
+                .expect("resolves from raw content");
+
+        assert_eq!(component.id, "data-machine");
+        assert_eq!(component.remote_path, "wp-content/plugins/data-machine");
+        assert_eq!(
+            component.build_artifact.as_deref(),
+            Some("dist/data-machine.zip")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_portable_config_at_tag_caches_per_repo_and_tag() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_body_status(
+            bin_dir.path(),
+            &[("homeboy.json", r#"{"id":"cached-component"}"#, 200)],
+        );
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "cache-fixture".to_string(),
+        };
+        let first = fetch_portable_config_at_tag(&github, &GithubConfig::default(), "v1.0.0-cache")
+            .expect("first resolve reads from the fake curl");
+        assert_eq!(first.id, "cached-component");
+
+        // Replace curl with one that only knows how to fail, so a second call
+        // that still succeeds proves it was answered from the cache rather
+        // than a second network round trip.
+        write_executable(
+            &bin_dir.path().join("curl"),
+            "#!/bin/sh\ncat > /dev/null 2>&1\nprintf '\\n500'\n",
+        );
+        let second =
+            fetch_portable_config_at_tag(&github, &GithubConfig::default(), "v1.0.0-cache")
+                .expect("second resolve is served from the process cache");
+        assert_eq!(second.id, "cached-component");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_portable_config_at_tag_falls_back_to_zip_when_raw_content_404s() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        let zip_bytes = build_zip(&[(
+            "Extra-Chill-Test-zip-fixture-abc1234/homeboy.json",
+            br#"{"id":"data-machine","remote_path":"wp-content/plugins/data-machine"}"#,
+        )]);
+        let fixture_zip = bin_dir.path().join("fixture.zip");
+        std::fs::write(&fixture_zip, &zip_bytes).expect("write fixture zip");
+
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_zip_fallback(bin_dir.path(), &fixture_zip);
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "zip-fixture".to_string(),
+        };
+        let component =
+            fetch_portable_config_at_tag(&github, &GithubConfig::default(), "v2.0.0-zip")
+                .expect("resolves from the zip fallback when raw content 404s");
+
+        assert_eq!(component.id, "data-machine");
+        assert_eq!(component.remote_path, "wp-content/plugins/data-machine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_portable_config_at_tag_errors_when_neither_source_has_homeboy_json() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        let zip_bytes = build_zip(&[("Extra-Chill-Test-empty-fixture-abc/README.md", b"hello")]);
+        let fixture_zip = bin_dir.path().join("fixture.zip");
+        std::fs::write(&fixture_zip, &zip_bytes).expect("write fixture zip");
+
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_zip_fallback(bin_dir.path(), &fixture_zip);
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "empty-fixture".to_string(),
+        };
+        let error = fetch_portable_config_at_tag(&github, &GithubConfig::default(), "v3.0.0-empty")
+            .expect_err("no homeboy.json anywhere must fail");
+
+        assert!(error.message.contains("has no homeboy.json at tag"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn latest_release_tag_for_repo_parses_the_latest_release_tag() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_body_status(
+            bin_dir.path(),
+            &[("releases/latest", r#"{"tag_name":"v0.176.17"}"#, 200)],
+        );
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "latest-release-fixture".to_string(),
+        };
+        let tag = latest_release_tag_for_repo(&github, &GithubConfig::default())
+            .expect("resolves the latest release tag");
+
+        assert_eq!(tag, Some("v0.176.17".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn latest_release_tag_for_repo_returns_none_on_404() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_gh_with_token(bin_dir.path());
+        write_fake_curl_body_status(bin_dir.path(), &[]);
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "no-releases-fixture".to_string(),
+        };
+        let tag = latest_release_tag_for_repo(&github, &GithubConfig::default())
+            .expect("a repo with no releases is Ok(None), not an error");
+
+        assert_eq!(tag, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn latest_release_tag_for_repo_fails_closed_without_a_github_token() {
+        let _lock = crate::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_gh_without_token(bin_dir.path());
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin_dir.path()));
+
+        let github = GitHubRepo {
+            host: "github.com".to_string(),
+            owner: "Extra-Chill-Test".to_string(),
+            repo: "no-token-fixture".to_string(),
+        };
+        let error = latest_release_tag_for_repo(&github, &GithubConfig::default())
+            .expect_err("no GitHub token must fail rather than silently resolve nothing");
+
+        assert!(error
+            .message
+            .contains("No GitHub authentication token is available"));
     }
 }

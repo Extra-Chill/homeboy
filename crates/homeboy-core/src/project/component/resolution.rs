@@ -77,24 +77,53 @@ fn resolve_project_component_core(
             .iter()
             .find(|component| component.id == component_id)
         {
-            super::super::validate_component_local_path(project, component_id)?;
             crate::component::resolution::validate_duplicate_portable_component_ids(
                 component_id,
                 Path::new(&attachment.local_path),
                 None,
             )?;
+
+            // A missing/absent local_path is fatal for an ordinary component —
+            // `resolve_project_component` fails closed so a real deploy never
+            // reads from a path that does not exist. But a component whose
+            // deploy source is a GitHub Release asset does not need a checkout
+            // at all: its portable config is readable directly from the
+            // repository (#14782). Try the local_path validation first so every
+            // existing message and code path is unchanged for the common case;
+            // only on that failure do we attempt the checkout-less fallback, and
+            // only a `remote_url` resolvable to a GitHub repo with at least one
+            // release makes that fallback succeed. Anything else re-raises the
+            // original local_path error verbatim.
+            let local_path_error =
+                match super::super::validate_component_local_path(project, component_id) {
+                    Ok(()) => None,
+                    Err(error) => Some(error),
+                };
+
+            let component = match local_path_error {
+                None => discover_from_portable(Path::new(&attachment.local_path)).ok_or_else(
+                    || {
+                        Error::validation_invalid_argument(
+                            "components.local_path",
+                            format!(
+                                "Project component '{}' points to '{}' but no homeboy.json was found",
+                                component_id, attachment.local_path
+                            ),
+                            Some(project.id.clone()),
+                            None,
+                        )
+                    },
+                )?,
+                Some(local_path_error) => resolve_checkout_less_release_component(
+                    config_root,
+                    component_id,
+                    standalone_snapshot,
+                )?
+                .ok_or(local_path_error)?,
+            };
+
             (
-                discover_from_portable(Path::new(&attachment.local_path)).ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "components.local_path",
-                        format!(
-                            "Project component '{}' points to '{}' but no homeboy.json was found",
-                            component_id, attachment.local_path
-                        ),
-                        Some(project.id.clone()),
-                        None,
-                    )
-                })?,
+                component,
                 attachment.local_path.clone(),
                 attachment.remote_path.clone(),
                 attachment.deployment_provider.clone(),
@@ -151,6 +180,69 @@ fn resolve_project_component_core(
     resolve_remote_path_core(config_root, &mut resolved);
 
     Ok(resolved)
+}
+
+/// Materialize a project-attached component's portable config from its GitHub
+/// repository's latest release, for a component whose local checkout is
+/// unavailable (#14782).
+///
+/// Returns `Ok(None)` when this component cannot be resolved this way — no
+/// standalone registry entry, no `remote_url`, a non-GitHub `remote_url`, or a
+/// repository with no releases yet — so the caller falls back to the original
+/// local_path error. A GitHub API/network failure still surfaces as `Err`: the
+/// remote is reachable in principle (the repo is GitHub-backed) but something
+/// went wrong resolving it, which is a different, actionable failure from "no
+/// checkout and nothing else to try".
+///
+/// The `remote_url` is read from the standalone component registry rather
+/// than the project attachment — `ProjectComponentAttachment` deliberately has
+/// no `remote_url` field of its own (it is portable, repo-owned config), and a
+/// component with an absent checkout has no `homeboy.json` to read one from
+/// either. This mirrors the existing standalone `remote_url` fallback that
+/// [`apply_standalone_component_fallbacks_core`] already applies for resolved
+/// components; here it is the *only* source, since there is no discovered
+/// component to fall back onto in the first place.
+///
+/// The tag used to fetch `homeboy.json` is always the repository's latest
+/// GitHub Release, regardless of a deploy's `--version`. The portable shape
+/// this reads (`remote_path`, `build_artifact` naming, `version_targets`,
+/// `deploy_strategy`) is structural project config that does not vary between
+/// tags in practice; the concrete tag/version *deployed* is decided
+/// independently and later, from the same "latest release" authority when no
+/// `--version` is given (see `homeboy-deploy`'s release tag resolution). This
+/// keeps resolution itself free of a `DeployConfig` dependency.
+fn resolve_checkout_less_release_component(
+    config_root: Option<&Path>,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> Result<Option<crate::component::Component>> {
+    let standalone = match standalone_snapshot {
+        Some(snapshot) => snapshot.get(component_id).cloned(),
+        None => load_standalone_component_config_core(config_root, component_id),
+    };
+    let Some(standalone) = standalone else {
+        return Ok(None);
+    };
+    let Some(remote_url) = standalone.remote_url.as_deref() else {
+        return Ok(None);
+    };
+    let Some(github) = crate::git::release_download::parse_github_url(remote_url) else {
+        return Ok(None);
+    };
+
+    let Some(tag) =
+        crate::git::release_download::latest_release_tag_for_repo(&github, &standalone.github)?
+    else {
+        return Ok(None);
+    };
+
+    let mut component = crate::git::release_download::fetch_portable_config_at_tag(
+        &github,
+        &standalone.github,
+        &tag,
+    )?;
+    component.id = component_id.to_string();
+    Ok(Some(component))
 }
 
 /// `remote_path` auto-resolution at the boundary this resolution is running on.
@@ -460,7 +552,7 @@ mod tests {
     use super::*;
     use crate::component::Component;
     use crate::project::{ProjectComponentAttachment, ProjectComponentOverrides};
-    use crate::test_support::with_isolated_home;
+    use crate::test_support::{with_isolated_home, EnvVarGuard};
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -748,5 +840,122 @@ mod tests {
                 .expect("canonical resolved path"),
             repo_path
         );
+    }
+
+    // =========================================================================
+    // Checkout-less resolution from a GitHub Release (#14782)
+    // =========================================================================
+
+    fn write_standalone_component(home: &TempDir, component_id: &str, extra: serde_json::Value) {
+        let components_dir = home
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("components");
+        std::fs::create_dir_all(&components_dir).expect("components dir");
+        std::fs::write(
+            components_dir.join(format!("{component_id}.json")),
+            extra.to_string(),
+        )
+        .expect("write standalone component config");
+    }
+
+    #[test]
+    fn checkout_less_resolution_keeps_the_original_error_without_a_standalone_entry() {
+        with_isolated_home(|_home| {
+            let project = project_with_attachment(
+                Some("wp-content/plugins/fixture"),
+                "/tmp/homeboy-14782-missing-no-standalone".to_string(),
+            );
+
+            let err = resolve_project_component(&project, "fixture")
+                .expect_err("no fallback is possible");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("missing local_path"));
+        });
+    }
+
+    #[test]
+    fn checkout_less_resolution_keeps_the_original_error_for_a_non_github_remote_url() {
+        with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "fixture",
+                serde_json::json!({ "remote_url": "https://gitlab.com/example/fixture.git" }),
+            );
+            let project = project_with_attachment(
+                Some("wp-content/plugins/fixture"),
+                "/tmp/homeboy-14782-missing-non-github".to_string(),
+            );
+
+            let err = resolve_project_component(&project, "fixture")
+                .expect_err("a non-GitHub remote_url cannot resolve without a checkout");
+
+            assert_eq!(err.code.as_str(), "validation.invalid_argument");
+            assert!(err.message.contains("missing local_path"));
+        });
+    }
+
+    #[cfg(unix)]
+    fn write_fake_binary(path: &std::path::Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("write fake binary");
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake binary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_less_resolution_resolves_via_release_when_remote_url_is_github() {
+        with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "fixture",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill-Test/checkout-less-fixture.git"
+                }),
+            );
+            let project =
+                project_with_attachment(None, "/tmp/homeboy-14782-checkout-less".to_string());
+
+            let bin_dir = home.path().join("fake-bin");
+            std::fs::create_dir_all(&bin_dir).expect("bin dir");
+            write_fake_binary(
+                &bin_dir.join("gh"),
+                "#!/bin/sh\necho fake-test-token\nexit 0\n",
+            );
+            write_fake_binary(
+                &bin_dir.join("curl"),
+                "#!/bin/sh\n\
+                 cat > /dev/null 2>&1\n\
+                 for arg in \"$@\"; do last=\"$arg\"; done\n\
+                 case \"$last\" in\n\
+                 \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.2.3\"}'; printf '\\n200' ;;\n\
+                 \x20\x20*homeboy.json*) printf '%s' '{\"id\":\"fixture\",\"remote_path\":\"wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
+                 \x20\x20*) printf '\\n404' ;;\n\
+                 esac\n",
+            );
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut new_path = bin_dir.as_os_str().to_os_string();
+            new_path.push(":");
+            new_path.push(existing);
+            let _path = EnvVarGuard::set("PATH", new_path);
+
+            let component = resolve_project_component(&project, "fixture")
+                .expect("resolves via the release fallback without a checkout");
+
+            assert_eq!(component.id, "fixture");
+            assert_eq!(component.remote_path, "wp-content/plugins/fixture");
+            assert_eq!(
+                component.build_artifact.as_deref(),
+                Some("dist/fixture.zip")
+            );
+            // The attachment's declared (nonexistent) local_path is preserved,
+            // not overwritten by anything discovered from the release — every
+            // checkout-touching guard downstream keys off this being absent.
+            assert_eq!(component.local_path, "/tmp/homeboy-14782-checkout-less");
+        });
     }
 }

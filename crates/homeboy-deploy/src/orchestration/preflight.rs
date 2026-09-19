@@ -194,6 +194,51 @@ fn provenance_policy_error(project: &Project, reason: &str) -> Error {
     )
 }
 
+/// Refuse `--head`, `--tagged`, or `--ref` against a component that has no
+/// local checkout, with a clear, specific message instead of letting the
+/// selector fall through to whatever a checkout-touching git probe against a
+/// nonexistent path happens to degrade to (#14782).
+///
+/// A resolved component only ever has an absent `local_path` when it was
+/// materialized from a GitHub Release because no checkout was available (see
+/// `homeboy-core`'s project-component resolution); an ordinary component
+/// fails to resolve at all in that case. So every component reaching this
+/// point without a checkout is, by construction, one of those — and none of
+/// `--head`/`--tagged`/`--ref` has anything to select from without a tree to
+/// read.
+pub(super) fn guard_checkout_required_selectors(
+    components: &[Component],
+    config: &DeployConfig,
+) -> Result<()> {
+    if !config.head && !config.tagged && !config.has_requested_refs() {
+        return Ok(());
+    }
+
+    let missing: Vec<&str> = components
+        .iter()
+        .filter(|component| !component.is_file_component() && !component.has_local_checkout())
+        .map(|component| component.id.as_str())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(Error::validation_invalid_argument(
+        "components",
+        format!(
+            "component(s) {} have no local checkout; --head, --tagged, and --ref require one",
+            missing.join(", ")
+        ),
+        None,
+        Some(vec![
+            "Attach a local checkout: homeboy project components attach-path <project> <id> <path>"
+                .to_string(),
+            "Or deploy without --head/--tagged/--ref to use the resolved GitHub Release asset"
+                .to_string(),
+        ]),
+    ))
+}
+
 /// Return the components whose payload depends on local source or a local artifact.
 /// Downloaded release assets are immutable remote inputs and intentionally bypass
 /// local-checkout safety guards.
@@ -763,9 +808,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        guard_deployment_provenance, guard_head_matches_invocation_checkout,
-        guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
-        warn_non_default_branch,
+        guard_checkout_required_selectors, guard_deployment_provenance,
+        guard_head_matches_invocation_checkout, guard_local_build_downgrades,
+        guard_local_build_source_freshness, local_build_components, warn_non_default_branch,
     };
     use crate::DeployConfig;
     use homeboy_core::component::Component;
@@ -1027,6 +1072,65 @@ mod tests {
         config.expected_version = Some("1.2.3".to_string());
 
         assert!(local_build_components(&[component], &config).is_empty());
+    }
+
+    fn checkout_less_component() -> Component {
+        Component {
+            id: "example".to_string(),
+            local_path: "/not/a/checkout".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("example.zip".to_string()),
+            ..Component::default()
+        }
+    }
+
+    #[test]
+    fn checkout_required_selectors_pass_without_head_tagged_or_ref() {
+        guard_checkout_required_selectors(&[checkout_less_component()], &config())
+            .expect("no selector requiring a checkout was used");
+    }
+
+    #[test]
+    fn checkout_required_selectors_refuse_head_without_a_checkout() {
+        let mut cfg = config();
+        cfg.head = true;
+
+        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
+            .expect_err("--head with no checkout must fail closed");
+        assert!(error.message.contains("example"));
+        assert!(error.message.contains("no local checkout"));
+        assert!(error.message.contains("--head"));
+    }
+
+    #[test]
+    fn checkout_required_selectors_refuse_tagged_without_a_checkout() {
+        let mut cfg = config();
+        cfg.tagged = true;
+
+        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
+            .expect_err("--tagged with no checkout must fail closed");
+        assert!(error.message.contains("--tagged"));
+    }
+
+    #[test]
+    fn checkout_required_selectors_refuse_ref_without_a_checkout() {
+        let mut cfg = config();
+        cfg.requested_refs
+            .insert("example".to_string(), "v1.2.3".to_string());
+
+        let error = guard_checkout_required_selectors(&[checkout_less_component()], &cfg)
+            .expect_err("--ref with no checkout must fail closed");
+        assert!(error.message.contains("--ref"));
+    }
+
+    #[test]
+    fn checkout_required_selectors_pass_when_a_checkout_exists() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut cfg = config();
+        cfg.head = true;
+
+        guard_checkout_required_selectors(&[component(temp.path())], &cfg)
+            .expect("a real checkout satisfies --head");
     }
 
     #[test]

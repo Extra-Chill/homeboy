@@ -183,7 +183,19 @@ fn prepare_project_deployment(
     // this fail-closed gate protects nothing there — it only aborts the status
     // pass and hides every other component (#12214). Check mode reports each
     // absent checkout as a scoped skipped result instead.
+    //
+    // `--outdated` is exempt for the same reason as a version-pinned deploy:
+    // component-by-component resolution (not this project-wide pre-check) is
+    // what actually knows whether a missing local_path is fatal or
+    // release-materializable (#14782). This gate's own
+    // `validate_deploy_component_local_paths` has no such per-component
+    // fallback — deferring to resolution lets a project mixing local-build
+    // and checkout-less GitHub-backed components run `--outdated` without
+    // every component needing a clone up front. A component that genuinely
+    // cannot resolve still fails, just at resolution instead of here, with
+    // the same underlying message.
     if !config.check
+        && !config.outdated
         && config.expected_version.is_none()
         && config.prepared_projection.is_none()
         && config.prepared_artifact.is_none()

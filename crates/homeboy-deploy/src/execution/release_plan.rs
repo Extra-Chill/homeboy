@@ -164,6 +164,23 @@ fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<St
         return Some(deploy_tag_for_version(component, version));
     }
 
+    // A component with no local checkout has no `git tag` to read. Ask its
+    // GitHub repository for its latest release instead — the same authority
+    // `--outdated` compares against for a component resolved this way
+    // (#14782). A component with a checkout keeps the existing local-tag
+    // read; that stays the ground truth when it's available.
+    if !component.has_local_checkout() {
+        let Some(remote_url) = component.remote_url.as_deref() else {
+            return None;
+        };
+        let Some(github) = release_download::parse_github_url(remote_url) else {
+            return None;
+        };
+        return release_download::latest_release_tag_for_repo(&github, &component.github)
+            .ok()
+            .flatten();
+    }
+
     release::latest_component_tag(component).ok().flatten()
 }
 

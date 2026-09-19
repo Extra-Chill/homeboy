@@ -328,6 +328,45 @@ pub fn try_discover_from_portable(dir: &Path) -> Result<Option<Component>> {
         })
 }
 
+/// Parse a component from a raw `homeboy.json` payload that is not backed by a
+/// local checkout on this host — for example, fetched directly from a GitHub
+/// repository at a release tag when no `local_path` is available (#14782).
+///
+/// This is [`try_discover_from_portable`]'s JSON-to-`Component` conversion
+/// without the directory-specific steps that assume a checkout exists:
+/// `local_path` is left at its default (empty) and `remote_url` is not
+/// auto-detected via `git remote get-url`, since there is no working tree to
+/// read it from. Callers that have an alternate `remote_url` source (e.g. the
+/// standalone component registry) apply it through the existing standalone
+/// fallback layer, same as any other portable config missing that field.
+///
+/// `context` is used only to describe the source in error messages — it need
+/// not be a real filesystem path.
+pub(crate) fn component_from_portable_bytes(bytes: &[u8], context: &Path) -> Result<Component> {
+    let mut json: Value = serde_json::from_slice(bytes).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some(format!("parse homeboy.json from {}", context.display())),
+            Some(String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).to_string()),
+        )
+    })?;
+
+    let id = portable_component_id_from_value(&json, context)?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("id".to_string(), Value::String(id));
+        obj.entry("remote_path".to_string())
+            .or_insert(Value::String(String::new()));
+    }
+
+    serde_json::from_value::<Component>(json).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some(format!("parse component config from {}", context.display())),
+            None,
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,5 +754,60 @@ mod tests {
 
         write_portable_config(dir.path(), &component)
             .expect("GitHub Enterprise remotes should be valid");
+    }
+
+    #[test]
+    fn component_from_portable_bytes_parses_a_checkout_less_payload() {
+        let bytes = serde_json::json!({
+            "id": "data-machine",
+            "remote_path": "wp-content/plugins/data-machine",
+            "build_artifact": "dist/data-machine.zip"
+        })
+        .to_string();
+
+        let component =
+            component_from_portable_bytes(bytes.as_bytes(), Path::new("owner/repo @ v1.2.3"))
+                .expect("checkout-less payload parses");
+
+        assert_eq!(component.id, "data-machine");
+        assert_eq!(component.remote_path, "wp-content/plugins/data-machine");
+        assert_eq!(
+            component.build_artifact.as_deref(),
+            Some("dist/data-machine.zip")
+        );
+        // No checkout exists to read `local_path` from, and no git tree exists
+        // to auto-detect `remote_url` from — both stay unset here so the caller's
+        // standalone-registry fallback (or attachment normalization) supplies them.
+        assert_eq!(component.local_path, "");
+        assert!(component.remote_url.is_none());
+    }
+
+    #[test]
+    fn component_from_portable_bytes_defaults_a_missing_remote_path() {
+        let bytes = serde_json::json!({ "id": "data-machine" }).to_string();
+
+        let component =
+            component_from_portable_bytes(bytes.as_bytes(), Path::new("owner/repo @ v1.2.3"))
+                .expect("payload without remote_path parses");
+
+        assert_eq!(component.remote_path, "");
+    }
+
+    #[test]
+    fn component_from_portable_bytes_requires_a_non_blank_id() {
+        let bytes = serde_json::json!({ "remote_path": "wp-content/plugins/x" }).to_string();
+
+        let error = component_from_portable_bytes(bytes.as_bytes(), Path::new("owner/repo @ v1"))
+            .expect_err("missing id must fail");
+
+        assert!(error.message.contains("missing required 'id' field"));
+    }
+
+    #[test]
+    fn component_from_portable_bytes_rejects_invalid_json() {
+        let error = component_from_portable_bytes(b"not json", Path::new("owner/repo @ v1"))
+            .expect_err("invalid JSON must fail");
+
+        assert!(error.message.contains("parse homeboy.json"));
     }
 }

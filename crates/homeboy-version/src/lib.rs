@@ -65,6 +65,40 @@ pub fn component_release_tag_version(
     Ok(release_tag_version_for_prefix(git_ref, scope.tag_prefix()))
 }
 
+/// The version to treat as this component's "local" configured version when it
+/// has no local checkout but declares a GitHub `remote_url` — the version
+/// implied by that repository's latest GitHub Release tag, which is the only
+/// version authority available without reading a source tree (#14782).
+///
+/// Returns `Ok(None)` when the ordinary [`version::get_component_version`]
+/// path applies instead (the component has a checkout), when it has no
+/// GitHub `remote_url`, or when the repository has no release yet. Callers
+/// use this as a fallback after `version::get_component_version` returns
+/// `None`, not as a replacement for it — a component with a checkout keeps
+/// reading its actual configured version, not "whatever GitHub last shipped".
+pub fn checkout_less_release_version(
+    component: &Component,
+) -> homeboy_core::Result<Option<String>> {
+    if component.has_local_checkout() {
+        return Ok(None);
+    }
+    let Some(remote_url) = component.remote_url.as_deref() else {
+        return Ok(None);
+    };
+    let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url) else {
+        return Ok(None);
+    };
+    let Some(tag) = homeboy_core::git::release_download::latest_release_tag_for_repo(
+        &github,
+        &component.github,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    component_release_tag_version(component, &tag)
+}
+
 /// Strip the namespace a component tags under and keep what remains only when
 /// it is a real version.
 ///
@@ -137,6 +171,106 @@ mod release_tag_version_tests {
         assert_eq!(
             release_tag_version_for_prefix("v1.2.3-rc.1", None),
             Some("1.2.3-rc.1".to_string())
+        );
+    }
+}
+
+#[cfg(test)]
+mod checkout_less_release_version_tests {
+    use super::checkout_less_release_version;
+    use homeboy_core::component::Component;
+
+    #[cfg(unix)]
+    fn write_fake_binary(path: &std::path::Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("write fake binary");
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake binary");
+    }
+
+    #[test]
+    fn is_none_when_a_local_checkout_exists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            remote_url: Some(
+                "https://github.com/Extra-Chill-Test/checkout-exists-fixture".to_string(),
+            ),
+            ..Component::default()
+        };
+
+        // A component with a real checkout uses `version::get_component_version`;
+        // this fallback only ever applies when that path has nothing to read.
+        assert_eq!(
+            checkout_less_release_version(&component).expect("resolves"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_none_without_a_remote_url() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/homeboy-14782-no-remote-url".to_string(),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            checkout_less_release_version(&component).expect("resolves"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_none_for_a_non_github_remote_url() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/homeboy-14782-non-github-remote".to_string(),
+            remote_url: Some("https://gitlab.com/example/fixture.git".to_string()),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            checkout_less_release_version(&component).expect("resolves"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_the_version_implied_by_the_latest_release_tag() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_binary(
+            &bin_dir.path().join("gh"),
+            "#!/bin/sh\necho fake-test-token\nexit 0\n",
+        );
+        write_fake_binary(
+            &bin_dir.path().join("curl"),
+            "#!/bin/sh\ncat > /dev/null 2>&1\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  \
+             *releases/latest*) printf '%s' '{\"tag_name\":\"v1.4.2\"}'; printf '\\n200' ;;\n  \
+             *) printf '\\n404' ;;\nesac\n",
+        );
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = bin_dir.path().as_os_str().to_os_string();
+        new_path.push(":");
+        new_path.push(existing);
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", new_path);
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/homeboy-14782-checkout-less-version".to_string(),
+            remote_url: Some(
+                "https://github.com/Extra-Chill-Test/checkout-less-version-fixture".to_string(),
+            ),
+            ..Component::default()
+        };
+
+        assert_eq!(
+            checkout_less_release_version(&component).expect("resolves"),
+            Some("1.4.2".to_string())
         );
     }
 }

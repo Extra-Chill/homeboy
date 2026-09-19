@@ -436,6 +436,64 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn write_fake_binary(path: &std::path::Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, script).expect("write fake binary");
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake binary");
+    }
+
+    /// #14782: a component resolved without a local checkout has no `git tag`
+    /// to read. Without `--version`, the plan must fall back to the
+    /// repository's latest GitHub Release instead of silently downgrading to
+    /// a local build (which it cannot do anyway — there is no checkout).
+    #[cfg(unix)]
+    #[test]
+    fn release_artifact_plan_without_expected_version_uses_latest_github_release_when_checkout_less(
+    ) {
+        let _lock = homeboy_core::test_support::env_lock();
+        let bin_dir = tempfile::tempdir().expect("bin dir");
+        write_fake_binary(
+            &bin_dir.path().join("gh"),
+            "#!/bin/sh\necho fake-test-token\nexit 0\n",
+        );
+        write_fake_binary(
+            &bin_dir.path().join("curl"),
+            "#!/bin/sh\ncat > /dev/null 2>&1\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  \
+             *releases/latest*) printf '%s' '{\"tag_name\":\"v0.176.17\"}'; printf '\\n200' ;;\n  \
+             *) printf '\\n404' ;;\nesac\n",
+        );
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut new_path = bin_dir.path().as_os_str().to_os_string();
+        new_path.push(":");
+        new_path.push(existing);
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", new_path);
+
+        let component = Component {
+            id: "data-machine".to_string(),
+            local_path: "/tmp/homeboy-14782-no-checkout".to_string(),
+            remote_url: Some("https://github.com/Extra-Chill/data-machine".to_string()),
+            build_artifact: Some("data-machine.zip".to_string()),
+            ..Component::default()
+        };
+        let config = DeployConfig::default();
+
+        match release_artifact_plan(&component, &config, false, false) {
+            ReleaseArtifactPlan::Reuse { url, tag } => {
+                assert_eq!(tag, "v0.176.17");
+                assert_eq!(
+                    url,
+                    "https://github.com/Extra-Chill/data-machine/releases/download/v0.176.17/data-machine.zip"
+                );
+            }
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                panic!("expected release reuse plan from the latest GitHub release, got local build: {reason}");
+            }
+        }
+    }
+
     #[test]
     fn artifact_inputs_still_try_release_artifact_download() {
         let component = Component {

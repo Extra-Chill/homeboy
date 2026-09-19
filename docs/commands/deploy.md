@@ -311,6 +311,31 @@ homeboy deploy --project myproject --component my-component --target provider
 
 Without `--target`, the route is inferred from project target configuration and reported on the result. A dual-deliverable component always carries a `deployment route:` warning naming the deliverable it deployed and the provider it did not, so the choice is visible in `--dry-run`, `--check`, and real deploy output alike.
 
+## Checkout-less asset deploy
+
+A component whose deploy source resolves to a GitHub Release asset does not need a local source checkout at all — resolution, artifact lookup, and `--outdated` comparison are all answerable from the component's GitHub repository.
+
+**When it applies:**
+
+- The project attachment's `local_path` is missing or does not point at an existing directory.
+- The standalone component registry entry for that component ID has a GitHub `remote_url` (`homeboy component set <id> --remote-url https://github.com/<owner>/<repo>`).
+- The repository has at least one GitHub Release.
+
+When those hold, `homeboy deploy` reads `homeboy.json` directly from the repository (the raw file at the latest release tag, falling back to the tag's source archive if that 404s) instead of requiring `discover_from_portable` to find it on disk. This is enough to resolve `remote_path`, `build_artifact`, `version_targets`, and every other portable field a checkout would otherwise supply — the component is deployed exactly like an ordinary release-asset deploy from there, and nothing about the deploy touches a working tree:
+
+```sh
+homeboy deploy myproject my-plugin --version 1.2.3 --dry-run
+```
+
+**`--outdated` compares against the latest GitHub Release.** For a checkout-less component there is no local `version_targets` file to read a "current" version from, so `--outdated` (and any other local-vs-remote version comparison) uses the version implied by the repository's latest release tag instead — the same authority a version-pinned deploy falls back to when `--version` is omitted. This makes a project-wide `--outdated` catch-up deploy cheap on a host with no workspace: it costs one GitHub API call per checkout-less component, not one clone.
+
+**What still requires a checkout:**
+
+- `--head`, `--tagged`, and `--ref` all name a specific source ref, and there is no working tree to resolve one from. Homeboy refuses these early with an actionable message (`component X has no local checkout; --head, --tagged, and --ref require one`) rather than degrading into a vaguer git error.
+- A non-GitHub `remote_url` (or none at all). Resolution keeps its original "no homeboy.json was found" error unchanged in that case.
+- `deploy_strategy: "git"` and `deploy_strategy: "file"` components, which deploy from the checkout itself by design.
+- Every local-build safety guard (uncommitted changes, source freshness, unreleased-commit gaps) still applies to any component that *does* build locally — checkout-less resolution only ever exempts a component that already resolves to a release asset.
+
 ## Post-Deploy Hooks
 
 After a successful deploy, Homeboy runs `post:deploy` hooks remotely via SSH on the deployment target. Hooks are resolved from extensions and components (see [hooks](../architecture/hooks.md)).
