@@ -3213,7 +3213,16 @@ fn cook_finalization_options_with_stores_and_review_form(
             promotion.deterministic_gates.len()
         )
     };
-    let review_profile = resolve_review_profile(None, &path)?;
+    // A shared repository can register more than one component against the
+    // same checkout; Cook resolves and durably records the exact component it
+    // admitted the run against, so finalization must reuse that identity
+    // rather than re-deriving it ambiguously from the bare worktree path
+    // (#14725).
+    let review_profile = resolve_review_profile(
+        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
+            .as_deref(),
+        &path,
+    )?;
     review_dossier.validate(&review_profile)?;
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
@@ -3548,7 +3557,7 @@ pub fn recover_cook_pr(
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
 ) -> Result<Value> {
-    recover_cook_pr_with_review_form(run_or_cook_id, None, overrides, preflight)
+    recover_cook_pr_with_review_form(run_or_cook_id, None, None, overrides, preflight)
 }
 
 /// Auditable authorship for a review form supplied outside provider execution.
@@ -3593,15 +3602,22 @@ impl AgentTaskSuppliedReviewForm {
 
 /// Recover publication using an operator-supplied form only when the immutable
 /// candidate's historical provider outcome did not retain one.
+///
+/// `component` disambiguates a shared-repository worktree only when the
+/// durable Cook recipe recorded no usable component identity at admission
+/// (e.g. a pre-existing durable record predating #14725); a recovered Cook
+/// with a recorded identity reuses it and ignores this fallback.
 pub fn recover_cook_pr_with_review_form(
     run_or_cook_id: &str,
     review_form: Option<AgentTaskSuppliedReviewForm>,
+    component: Option<&str>,
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
 ) -> Result<Value> {
     recover_cook_pr_with_backend_and_review_form(
         run_or_cook_id,
         review_form,
+        component,
         overrides,
         preflight,
         &mut RealAgentTaskPrFinalizationBackend,
@@ -3617,6 +3633,7 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     recover_cook_pr_with_backend_and_review_form(
         run_or_cook_id,
         None,
+        None,
         overrides,
         preflight,
         backend,
@@ -3626,6 +3643,7 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinalizationBackend>(
     run_or_cook_id: &str,
     review_form: Option<AgentTaskSuppliedReviewForm>,
+    component: Option<&str>,
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
     backend: &mut B,
@@ -3640,7 +3658,13 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     } else if let Some(recipe) = cook_recipe_for_retry_lineage(run_or_cook_id)? {
         (recipe, true)
     } else {
-        return recover_manual_finalization_pr(run_or_cook_id, overrides, preflight, backend);
+        return recover_manual_finalization_pr(
+            run_or_cook_id,
+            component,
+            overrides,
+            preflight,
+            backend,
+        );
     };
     let completed = if recovered_retry {
         completed_finalization_receipt_for_run(run_or_cook_id)?
@@ -3673,7 +3697,10 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
                 &report.path,
             )?;
         }
-        let mut finalization = manual_finalization_options(report, retryable)?;
+        let recovery_component_id =
+            recovered_manual_finalization_component_id(&recipe, &report.run_id, component);
+        let mut finalization =
+            manual_finalization_options(report, retryable, recovery_component_id.as_deref())?;
         if retryable {
             finalization.expected_candidate_sha = None;
         }
@@ -4211,9 +4238,12 @@ fn is_empty_verified_remediation(promotion: &AgentTaskPromotionReport) -> bool {
 
 /// Recover a standalone manual-finalization record. Unlike Cook attempts, a
 /// manual identity can be reserved without a recipe, so it is its own durable
-/// recovery root.
+/// recovery root; there is no Cook-recorded component identity to reuse, so
+/// `component` (`--component` supplied alongside `--recover`) is this route's
+/// only disambiguation for a shared-repository worktree (#14725).
 fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
     run_id: &str,
+    component: Option<&str>,
     overrides: Vec<AgentTaskReviewOverride>,
     preflight: bool,
     backend: &mut B,
@@ -4242,7 +4272,7 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
     if retryable {
         require_manual_retry_candidate(&record, &report.path)?;
     }
-    let mut finalization = manual_finalization_options(report, retryable)?;
+    let mut finalization = manual_finalization_options(report, retryable, component)?;
     if retryable {
         // Direct publication first persisted this dossier before it attempted a
         // mutation. It is safe to retry that original mutation after failure.
@@ -4270,6 +4300,26 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         }
     }
     Ok(value)
+}
+
+/// The component identity to resolve a recovered manual finalization's review
+/// profile against. The durable Cook recipe recorded this identity at
+/// admission and is authoritative when available; `operator_component`
+/// (`--component` supplied alongside `--recover`) is only a fallback for a
+/// pre-existing durable record with no recorded identity (#14725).
+fn recovered_manual_finalization_component_id(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+    operator_component: Option<&str>,
+) -> Option<String> {
+    let plan = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .or_else(|| recipe.attempts.first())
+        .map(|attempt| &attempt.plan);
+    plan.and_then(super::cook::cook_repository_identity_component_id)
+        .or_else(|| operator_component.map(str::to_string))
 }
 
 fn manual_finalization_run_ids(recipe: &super::cook_recipe::AgentTaskCookRecipe) -> Vec<&str> {
@@ -4760,6 +4810,7 @@ fn same_preflight_publication_target(
 fn manual_finalization_options(
     report: AgentTaskPrFinalizationReport,
     allow_uncommitted_candidate: bool,
+    component_id: Option<&str>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
     validate_manual_preflight_report(&report, &report.run_id, allow_uncommitted_candidate)?;
     let target = &report.publication_intent.target;
@@ -4802,7 +4853,13 @@ fn manual_finalization_options(
         ai_used_for: report.review_dossier.ai_assistance.used_for.clone(),
         review_dossier: report.review_dossier,
         composed_ai_model_disclosure: false,
-        review_profile: resolve_review_profile(None, &path)?,
+        // A shared repository can register more than one component against
+        // the same checkout. Prefer the component identity Cook durably
+        // recorded at admission over asking the operator to re-supply one on
+        // every `--recover` (#14725); an operator-supplied `--component`
+        // remains available when no recorded identity exists (pre-existing
+        // durable records, or a manual finalization with no Cook lineage).
+        review_profile: resolve_review_profile(component_id, &path)?,
         manual_finalization: true,
         expected_candidate_sha,
         verified_candidate_sha: None,

@@ -9189,18 +9189,20 @@ fn materialize_pending_cook_workspace(
     )
 }
 
-fn bind_materialized_cook_component_workspace(
-    plan: &mut AgentTaskPlan,
-    repository_root: &Path,
-) -> Result<()> {
-    let Some(component_id) = plan
+/// The registered component identity Cook resolved and durably recorded at
+/// admission (`cook_repository_identity`), when the checkout maps to a real
+/// registered component rather than an ad-hoc/synthetic repository target.
+///
+/// This is the same identity a shared-repository worktree's ambiguous
+/// checkout otherwise cannot disambiguate on its own (#14725): callers that
+/// need to resolve a review profile or component-scoped path for an
+/// already-admitted Cook should prefer this over re-deriving from the bare
+/// checkout path.
+pub(crate) fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
+    let component_id = plan
         .metadata
         .pointer("/cook_repository_identity/component_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    else {
-        return Ok(());
-    };
+        .and_then(Value::as_str)?;
     let requested_repository = plan
         .metadata
         .pointer("/cook_repository_identity/provenance")
@@ -9212,8 +9214,18 @@ fn bind_materialized_cook_component_workspace(
         .and_then(Value::as_bool)
         .unwrap_or(true);
     if requested_repository || !component_registered {
-        return Ok(());
+        return None;
     }
+    Some(component_id.to_string())
+}
+
+fn bind_materialized_cook_component_workspace(
+    plan: &mut AgentTaskPlan,
+    repository_root: &Path,
+) -> Result<()> {
+    let Some(component_id) = cook_repository_identity_component_id(plan) else {
+        return Ok(());
+    };
     let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {
         return Err(Error::validation_invalid_argument(
             "component workspace",
