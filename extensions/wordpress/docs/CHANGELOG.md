@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.4] - 2026-09-19
+
+### Fixed
+- keep the WordPress environment when a component sets its level
+
 ## [3.48.3] - 2026-09-17
 
 ### Fixed
