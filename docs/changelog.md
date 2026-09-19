@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.377.1] - 2026-09-19
+
+### Fixed
+- cook homeboy
+
 ## [0.377.0] - 2026-09-19
 
 ### Added
