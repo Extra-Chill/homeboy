@@ -182,9 +182,28 @@ assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "par
 printf '%s\n' 'parameters:' '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
 run_phpstan
 assert_not_contains "--level=7" "component PHPStan config controls level when env override is absent"
-assert_file_not_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "component-config run does not duplicate the extension default config"
+# Declaring a level no longer costs the component the WordPress environment.
+# It previously did, which is why components started carrying their own
+# `includes: vendor/szepeviktor/...` and, wherever that vendor tree was
+# missing, analysed with no WordPress signatures at all.
+assert_file_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "component-config run still receives the extension default config"
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "component-config run includes the component config"
 assert_file_contains "${COMPONENT_DIR}/phpstan.neon.dist" "level: max" "component-config fixture preserves the component ruleset"
+
+# A component that supplies phpstan-wordpress itself must not also get the
+# extension's copy: PHPStan aborts on a repeated include of the same neon
+# ("This file is included multiple times"). Those components keep working
+# untouched and migrate by deleting their own include.
+printf '%s\n' \
+    'includes:' \
+    '    - vendor/szepeviktor/phpstan-wordpress/extension.neon' \
+    'parameters:' \
+    '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
+run_phpstan
+assert_file_not_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "a component supplying phpstan-wordpress does not also receive the extension default"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "a component supplying phpstan-wordpress still has its own config included"
+
+printf '%s\n' 'parameters:' '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
 
 HOMEBOY_PHPSTAN_LEVEL=5 run_phpstan
 assert_contains "--level=5" "HOMEBOY_PHPSTAN_LEVEL explicitly overrides component PHPStan config level"

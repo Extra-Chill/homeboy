@@ -88,3 +88,28 @@ function wp_json_encode( $value, int $flags = 0, int $depth = 512 ) {}
  * @return WP_Post|array<string|int, mixed>|null
  */
 function get_post( $post = null, $output = OBJECT, $filter = 'raw' ) {}
+
+/**
+ * Stateful reads that PHPStan otherwise treats as pure.
+ *
+ * Each of these consults the database or the current request, so a repeated
+ * call can legitimately return a different value. Without the marker PHPStan
+ * folds the second call into the first and reports the guard around it as
+ * always-true or always-false — a false positive on correct code.
+ *
+ * Carried here rather than per component: the annotation is a property of the
+ * core function, so every consumer needs it. extrachill-users had declared
+ * these three in its own stub file, which is the duplication this replaces.
+ */
+
+/** @phpstan-impure */
+function metadata_exists( string $meta_type, int $object_id, string $meta_key ): bool {}
+
+/**
+ * @phpstan-impure
+ * @return WP_User|false
+ */
+function get_userdata( int $user_id ) {}
+
+/** @phpstan-impure */
+function is_user_member_of_blog( int $user_id = 0, int $blog_id = 0 ): bool {}
