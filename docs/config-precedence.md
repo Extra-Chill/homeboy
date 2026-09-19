@@ -17,6 +17,12 @@ Investigation for Extra-Chill/homeboy#7519. This document maps configuration con
 
 ## Overlapping Concepts
 
+### Config Root
+
+| Locations | Effective precedence | Resolving code path |
+| --- | --- | --- |
+| `HOMEBOY_CONFIG_ROOT` env var; the process-local home-root override (`set_home_root_override`); `XDG_CONFIG_HOME` env var; `$HOME`/`APPDATA`. | First match wins, non-Windows: (1) `HOMEBOY_CONFIG_ROOT`, if set to a non-empty value, is used *verbatim as the complete config directory* -- it replaces `~/.config/homeboy` entirely, not just `~`. This is the explicit lever for CI and multi-config operators, and it does not require swapping `HOME`. (2) The process-local home-root override, when set -- `<override>/.config/homeboy`. Outranks `XDG_CONFIG_HOME` so the hermetic test harness (which repoints `HOME` and the override together) keeps resolving through the override it asserts on. (3) `XDG_CONFIG_HOME`, when set to a non-empty *absolute* path -- `<XDG_CONFIG_HOME>/homeboy`. Per the XDG Base Directory spec, a relative value is invalid and is ignored rather than resolved against an implicit base. (4) `$HOME/.config/homeboy` -- the historical default. On Windows, `HOMEBOY_CONFIG_ROOT` is still honored first for parity, then `APPDATA/homeboy`. | All four tiers are implemented in `homeboy()` in `crates/homeboy-paths/src/lib.rs`; every other config path (`homeboy_json()`, `extension()`, `key()`, rig/runner state, etc.) derives from it, so this is the single place the precedence is enforced. |
+
 ### Component Source Path
 
 | Locations | Effective precedence | Resolving code path |
