@@ -1929,12 +1929,13 @@ struct OwnershipAudit {
 /// Classify every persisted owner against the endpoints this registry knows.
 ///
 /// Ambiguous ownership is unsafe to act on, because one identity would resolve
-/// to more than one endpoint. A job owner without a live generation is unsafe
-/// too: that endpoint is the inspection and cancellation authority for work
-/// which may still exist. Both fence retirement for the whole runner.
+/// to more than one endpoint. A job owner whose generation is known only as
+/// retained evidence is unsafe too: that endpoint is the inspection and
+/// cancellation authority for work which may still exist. Both fence
+/// retirement for the whole runner.
 ///
-/// A run/artifact owner that resolves to nothing is already unroutable and
-/// names a generation this registry no longer knows. Retiring an unrelated,
+/// An owner that resolves to nothing is already unroutable and names a
+/// generation this registry no longer knows. Retiring an unrelated,
 /// verified-idle generation cannot make that record worse, so it is reported as
 /// a diagnostic rather than fencing every other generation behind it.
 fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> OwnershipAudit {
@@ -1959,9 +1960,9 @@ fn audit_ownership(generations: &RollingGenerations<RunnerSession>) -> Ownership
             .count();
         let owns_job = generations.job_owners.contains_key(id);
         let ambiguous = live + retired > 1;
-        let unresolved_job_owner = owns_job && live != 1;
-        let dangling_result_owner = !owns_job && live + retired == 0;
-        if !(ambiguous || unresolved_job_owner || dangling_result_owner) {
+        let dangling_owner = live + retired == 0;
+        let unresolved_job_owner = owns_job && live == 0 && retired >= 1;
+        if !(ambiguous || unresolved_job_owner || dangling_owner) {
             continue;
         }
         audit.fences_retirement |= ambiguous || unresolved_job_owner;
@@ -3045,10 +3046,11 @@ mod tests {
         );
     }
 
-    /// A job owner is the cancellation and inspection authority for work that
-    /// may still exist, so losing its live endpoint fences retirement.
+    /// A job owner naming a generation this registry no longer knows is
+    /// already unroutable. It must be reported, but it must not fence the
+    /// retirement of unrelated generations whose ownership is consistent.
     #[test]
-    fn a_job_owner_without_a_live_generation_fences_retirement() {
+    fn a_dangling_job_owner_is_reported_without_fencing_consistent_generations() {
         let a = session("lease-a", "daemon-a", Some(101));
         let mut generations = RollingGenerations::new("lease-a".to_string(), a);
         generations
@@ -3057,8 +3059,64 @@ mod tests {
 
         let audit = audit_ownership(&generations);
 
+        assert!(
+            !audit.fences_retirement,
+            "an unroutable historical record must not block other retirements: {audit:?}"
+        );
+        assert_eq!(
+            audit
+                .retirement_blockers
+                .get("lease-removed")
+                .map(String::as_str),
+            Some("ownership for job-orphan resolves to 0 live and 0 retired generations"),
+        );
+    }
+
+    /// A job owner whose generation survives only as retained evidence is still
+    /// the inspection and cancellation authority for work that may exist, so it
+    /// fences retirement.
+    #[test]
+    fn a_job_owner_with_retired_evidence_and_no_live_generation_fences_retirement() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations.retired_evidence.insert(
+            "lease-removed".to_string(),
+            session("lease-removed", "daemon-removed", Some(99)),
+        );
+        generations
+            .job_owners
+            .insert("job-orphan".to_string(), "lease-removed".to_string());
+
+        let audit = audit_ownership(&generations);
+
         assert!(audit.fences_retirement, "{audit:?}");
-        assert!(audit.retirement_blockers.contains_key("lease-removed"));
+        assert_eq!(
+            audit
+                .retirement_blockers
+                .get("lease-removed")
+                .map(String::as_str),
+            Some("ownership for job-orphan resolves to 0 live and 1 retired generations"),
+        );
+    }
+
+    /// An owner that resolves to more than one generation is unsafe to act on,
+    /// because one identity would map to more than one endpoint.
+    #[test]
+    fn an_ambiguous_owner_fences_retirement() {
+        let a = session("lease-a", "daemon-a", Some(101));
+        let mut generations = RollingGenerations::new("lease-a".to_string(), a);
+        generations.begin("lease-alias", session("lease-a", "daemon-alias", Some(102)));
+        generations
+            .job_owners
+            .insert("job-ambiguous".to_string(), "lease-a".to_string());
+
+        let audit = audit_ownership(&generations);
+
+        assert!(audit.fences_retirement, "{audit:?}");
+        assert_eq!(
+            audit.retirement_blockers.get("lease-a").map(String::as_str),
+            Some("ownership for job-ambiguous resolves to 2 live and 0 retired generations"),
+        );
     }
 
     #[derive(Default)]
@@ -3108,6 +3166,75 @@ mod tests {
                 self.terminated_pids.borrow_mut().push(pid);
             }
         }
+    }
+
+    /// Relaxing the global fence for a dangling job owner must still retire only
+    /// generations that pass the per-generation idle, stop, and evidence gates.
+    /// A verified-idle draining generation may retire; a generation with live or
+    /// unproven work must be retained.
+    #[test]
+    fn a_dangling_job_owner_lets_verified_idle_generations_retire_without_bypassing_per_generation_gates(
+    ) {
+        test_support::with_isolated_home(|_| {
+            let idle = session("lease-idle", "daemon-idle", Some(101));
+            let busy = session("lease-busy", "daemon-busy", Some(202));
+            let current = session("lease-current", "daemon-current", Some(303));
+            let mut generations =
+                RollingGenerations::new("lease-current".to_string(), current.clone());
+            generations.begin("lease-idle", idle);
+            generations.begin("lease-busy", busy);
+            generations
+                .job_owners
+                .insert("job-orphan".to_string(), "lease-removed".to_string());
+            write("runner-a", &generations).expect("persist generations");
+
+            let operations = FakeEndpointOperations::default();
+            operations.active_jobs.borrow_mut().extend([
+                ("lease-idle".to_string(), 0),
+                ("lease-busy".to_string(), 1),
+                ("lease-current".to_string(), 0),
+            ]);
+
+            let result = reconcile_with("runner-a", Some(&current), &operations)
+                .expect("reconcile with dangling job owner");
+
+            assert!(
+                !result.retired_generation_ids.is_empty(),
+                "verified-idle draining generations must still retire: {result:?}"
+            );
+            assert_eq!(result.retired_generation_ids, ["lease-idle"]);
+            assert_eq!(
+                result
+                    .retirement_blockers
+                    .get("lease-removed")
+                    .map(String::as_str),
+                Some("ownership for job-orphan resolves to 0 live and 0 retired generations"),
+            );
+            assert_eq!(
+                result
+                    .retirement_blockers
+                    .get("lease-busy")
+                    .map(String::as_str),
+                Some("1 active jobs"),
+            );
+            assert_eq!(
+                operations.stopped_leases.borrow().as_slice(),
+                ["lease-idle"]
+            );
+
+            let registry = read("runner-a", Some(&current))
+                .expect("read registry")
+                .expect("registry");
+            assert!(
+                !registry.generations.contains_key("lease-idle"),
+                "verified-idle draining generation must retire"
+            );
+            assert!(
+                registry.generations.contains_key("lease-busy"),
+                "a generation with live work must be retained"
+            );
+            assert!(registry.generations.contains_key("lease-current"));
+        });
     }
 
     #[test]
