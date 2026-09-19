@@ -531,6 +531,34 @@ pub fn resolve_native_worktree_mutation_target_by_path(
     NativeWorktreeProvider.resolve_for_mutation_by_path(path)
 }
 
+/// Require Git's registered linked-worktree identity before Homeboy can mutate
+/// a path. This excludes primary, separate-git-dir, submodule, and forged
+/// gitfile checkouts.
+pub fn require_linked_worktree_mutation_path(path: &Path, reference: &str) -> Result<PathBuf> {
+    let reason = match worktree::verify_linked_worktree_root(path) {
+        Ok(path) => return Ok(path),
+        Err(error) => error,
+    };
+
+    let mut error = Error::validation_invalid_argument(
+        "to_worktree",
+        "Homeboy refuses to mutate a primary or non-linked checkout; use a dedicated linked worktree",
+        Some(reference.to_string()),
+        Some(vec![
+            "Create a dedicated linked worktree with `git worktree add <path> -b <branch>`, then rerun the task with that path as its workspace.".to_string(),
+        ]),
+    );
+    error.details["workspace_admission"] = serde_json::json!({
+        "schema": "homeboy/linked-worktree-mutation-admission/v1",
+        "workspace": reference,
+        "classification": "primary_or_non_linked_checkout",
+        "admission": "rejected",
+        "next_action": "use_dedicated_linked_worktree",
+        "reason": reason.message,
+    });
+    Err(error)
+}
+
 pub fn list_worktree_inventory() -> Result<Vec<WorktreeWorkspace>> {
     let (workspaces, _) =
         NativeWorktreeProvider::workspaces_from_records(worktree::list_workspace_refs()?);

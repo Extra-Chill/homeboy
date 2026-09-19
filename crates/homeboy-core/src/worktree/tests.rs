@@ -61,6 +61,80 @@ fn registry_read_lease_blocks_active_worktree_publication() {
 
 use crate::test_support::run_git_command as run_git;
 
+fn initialize_git_repository(path: &Path) {
+    std::fs::create_dir_all(path).expect("create repository");
+    run_git(path, &["init", "-q", "-b", "main"]);
+    run_git(path, &["config", "user.email", "homeboy@example.test"]);
+    run_git(path, &["config", "user.name", "Homeboy Test"]);
+    std::fs::write(path.join("tracked"), "base\n").expect("write tracked file");
+    run_git(path, &["add", "tracked"]);
+    run_git(path, &["commit", "-q", "-m", "base"]);
+}
+
+#[test]
+fn linked_worktree_root_proof_rejects_untrusted_git_metadata() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let primary = temporary.path().join("primary");
+    initialize_git_repository(&primary);
+
+    let linked = temporary.path().join("linked");
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().expect("linked path"),
+            "HEAD",
+        ],
+    );
+    assert_eq!(
+        verify_linked_worktree_root(&linked).expect("registered detached worktree"),
+        linked.canonicalize().expect("canonical linked worktree")
+    );
+
+    let forged = temporary.path().join("forged");
+    std::fs::create_dir(&forged).expect("create forged checkout");
+    std::fs::write(forged.join(".git"), "gitdir: ../missing\n").expect("write forged gitfile");
+    assert!(verify_linked_worktree_root(&forged).is_err());
+
+    let submodule_source = temporary.path().join("submodule-source");
+    initialize_git_repository(&submodule_source);
+    run_git(
+        &primary,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            submodule_source.to_str().expect("submodule source path"),
+            "submodule",
+        ],
+    );
+    assert!(verify_linked_worktree_root(&primary.join("submodule")).is_err());
+
+    let separate = temporary.path().join("separate-primary");
+    let separate_git_dir = temporary.path().join("separate-git-dir");
+    let output = std::process::Command::new("git")
+        .args([
+            "init",
+            "-q",
+            "--separate-git-dir",
+            separate_git_dir.to_str().expect("separate git directory"),
+            separate.to_str().expect("separate primary path"),
+        ])
+        .current_dir(temporary.path())
+        .output()
+        .expect("initialize separate-git-dir primary");
+    assert!(
+        output.status.success(),
+        "initialize separate-git-dir primary failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(verify_linked_worktree_root(&separate).is_err());
+}
+
 fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
     TaskWorktreeRecord {
         id: "fixture@task".to_string(),

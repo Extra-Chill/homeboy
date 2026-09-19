@@ -74,6 +74,12 @@ pub fn list() -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(list_unlocked)
 }
 
+/// Verify that a path is Git's registered linked-worktree root, rather than a
+/// primary checkout or a directory containing an untrusted `.git` file.
+pub fn verify_linked_worktree_root(path: &Path) -> Result<PathBuf> {
+    store_ops::verify_linked_worktree_root(path)
+}
+
 /// Retire residue records from the native task-worktree registry.
 ///
 /// A tombstone whose path is gone and that no live process claims is residue.

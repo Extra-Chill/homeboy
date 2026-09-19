@@ -933,23 +933,54 @@ fn branch_exists(source: &Path, branch: &str) -> Result<bool> {
     .is_ok())
 }
 
-fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str) -> Result<()> {
-    let common_dir = git_common_dir(source)?;
+pub(super) fn verify_linked_worktree_root(worktree: &Path) -> Result<PathBuf> {
+    let worktree = worktree
+        .canonicalize()
+        .map_err(|_| linked_worktree_identity_error(worktree, "worktree root is unavailable"))?;
+    let root = git::run_git(
+        &worktree,
+        &["rev-parse", "--show-toplevel"],
+        "git worktree root",
+    )?;
+    let root = Path::new(root.trim()).canonicalize().map_err(|_| {
+        linked_worktree_identity_error(&worktree, "Git did not resolve a canonical worktree root")
+    })?;
+    if root != worktree {
+        return Err(linked_worktree_identity_error(
+            &worktree,
+            "path is not the Git worktree root",
+        ));
+    }
+    let git_dir = git::run_git(
+        &worktree,
+        &["rev-parse", "--absolute-git-dir"],
+        "git worktree directory",
+    )?;
+    let git_dir = Path::new(git_dir.trim()).canonicalize().map_err(|_| {
+        linked_worktree_identity_error(&worktree, "Git worktree directory is unavailable")
+    })?;
+    let common_dir = git_common_dir(&worktree)?;
+    let registrations = common_dir.join("worktrees");
+    if git_dir == common_dir || git_dir.parent() != Some(registrations.as_path()) {
+        return Err(linked_worktree_identity_error(
+            &worktree,
+            "Git metadata is not a registered linked-worktree directory",
+        ));
+    }
     let pointer = fs::read_to_string(worktree.join(".git")).map_err(|_| {
-        linked_worktree_identity_error(worktree, "worktree .git pointer is unavailable")
+        linked_worktree_identity_error(&worktree, "worktree .git pointer is unavailable")
     })?;
     let registration = pointer
         .trim()
         .strip_prefix("gitdir:")
         .map(str::trim)
-        .and_then(|pointer| resolve_gitdir_pointer(worktree, pointer))
+        .and_then(|pointer| resolve_gitdir_pointer(&worktree, pointer))
         .ok_or_else(|| {
             linked_worktree_identity_error(
-                worktree,
+                &worktree,
                 "worktree .git is not a linked-worktree pointer",
             )
         })?;
-    let registrations = common_dir.join("worktrees");
     if registration.parent() != Some(registrations.as_path())
         || !registration.is_dir()
         || fs::read_to_string(registration.join("gitdir"))
@@ -960,12 +991,23 @@ fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str)
             })
     {
         return Err(linked_worktree_identity_error(
-            worktree,
+            &worktree,
             "linked-worktree registration does not point back to the declared path",
         ));
     }
-    let current_branch = git::run_git(worktree, &["branch", "--show-current"], "git branch")?;
-    let head = git::run_git(worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
+    Ok(worktree)
+}
+
+fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str) -> Result<()> {
+    let worktree = verify_linked_worktree_root(worktree)?;
+    if git_common_dir(source)? != git_common_dir(&worktree)? {
+        return Err(linked_worktree_identity_error(
+            &worktree,
+            "linked-worktree registration belongs to a different repository",
+        ));
+    }
+    let current_branch = git::run_git(&worktree, &["branch", "--show-current"], "git branch")?;
+    let head = git::run_git(&worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
     let branch_head = git::run_git(
         source,
         &["rev-parse", &format!("refs/heads/{branch}")],
@@ -973,7 +1015,7 @@ fn verify_linked_worktree_identity(source: &Path, worktree: &Path, branch: &str)
     )?;
     if current_branch.trim() != branch || head.trim() != branch_head.trim() {
         return Err(linked_worktree_identity_error(
-            worktree,
+            &worktree,
             "linked-worktree branch or HEAD does not match the declared branch",
         ));
     }
