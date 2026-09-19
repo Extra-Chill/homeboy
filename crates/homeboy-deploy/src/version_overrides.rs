@@ -426,12 +426,25 @@ pub(super) fn find_deploy_override(
     None
 }
 
+/// `renameat2(AT_FDCWD, a, AT_FDCWD, b, RENAME_EXCHANGE)` via python3/ctypes.
+///
+/// Embedded in the generated archive-install command as the second
+/// atomic-exchange mechanism (after `mv --exchange`, which only exists in GNU
+/// coreutils >= 9.5). Kept to a single line with no single quotes and no
+/// braces so it survives `shell::quote_arg` single-quote embedding and the
+/// Rust `format!` template. It exits 0 only when the kernel swapped the two
+/// paths in one syscall; every other outcome (python3 missing, pre-2.28 glibc
+/// without the `renameat2` symbol, filesystem without RENAME_EXCHANGE support)
+/// exits non-zero so the generated script falls back to the two-rename flow.
+const RENAMEAT2_EXCHANGE_PY: &str = "import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); f = libc.renameat2; f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]; f.restype = ctypes.c_int; sys.exit(0 if f(-100, sys.argv[1].encode(), -100, sys.argv[2].encode(), 2) == 0 else 1)";
+
 fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverride {
     let root_check = if policy.root_must_match_target_basename {
         " && target_slug=$(basename \"$target\") && if [ \"$zip_root\" != \"$target_slug\" ]; then echo \"ERROR: archive root $zip_root does not match target basename $target_slug\" && exit 1; fi"
     } else {
         ""
     };
+    let exchange_py = shell::quote_arg(RENAMEAT2_EXCHANGE_PY);
 
     // Robust, filesystem-portable install/replace flow.
     //
@@ -446,18 +459,36 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
     //
     // Instead we stage extraction into a temp dir that sits *adjacent* to the
     // target (same parent directory => same filesystem). Every subsequent
-    // `mv` (extracted tree -> target, existing target -> backup, restore on
-    // failure) is then a single intra-filesystem rename(2): O(1), no recursion,
-    // no per-file metadata copies, regardless of how deep the directory tree is.
+    // `mv` / exchange (staged tree <-> target, existing target -> backup,
+    // restore on failure) is then a single intra-filesystem rename(2): O(1),
+    // no recursion, no per-file metadata copies, regardless of how deep the
+    // directory tree is.
+    //
+    // When the target already exists, the swap itself is atomic where the
+    // platform allows it (issue #13569): `renameat2(RENAME_EXCHANGE)` swaps
+    // the staged tree and the live target in one syscall, so concurrent
+    // readers always observe either the complete old tree or the complete new
+    // tree — never an absent or mixed target. Capability is probed at install
+    // time, in the generated script, because the deploy host's toolchain —
+    // not homeboy's build host — decides what is available:
+    //   1. `mv --exchange` (GNU coreutils >= 9.5)
+    //   2. python3 ctypes call to `renameat2` (glibc >= 2.28 / musl)
+    //   3. Fallback: the two-rename flow (target -> backup, staged -> target).
+    //      The backup renames stay same-filesystem, O(1), and restorable, but
+    //      the target path is briefly absent between them — this is the
+    //      pre-#13569 behavior, kept only for hosts with neither mechanism.
+    // After a successful exchange the staged path *is* the backup (it holds
+    // the old tree), so cleanup removes it in place.
     //
     // Flow:
     //   1. Resolve + validate the archive root directory name.
     //   2. Create an adjacent temp dir and extract the artifact into it.
     //   3. Locate the extracted root inside the temp dir.
-    //   4. Back up the existing target via same-filesystem rename.
-    //   5. Atomically rename the extracted tree into place.
-    //   6. On any failure, restore the backup; always clean up the temp dir.
-    //   7. On success, remove the backup.
+    //   4. If the target exists: atomic exchange (with two-rename fallback).
+    //      If it does not (first install): plain same-filesystem rename.
+    //   5. On fallback-install failure, restore the backup; always clean up
+    //      the temp dir (EXIT trap).
+    //   6. On success, remove the backup / exchanged-out old tree.
     DeployOverride {
         path_pattern: policy.path_pattern.clone(),
         staging_path: policy.staging_path.clone(),
@@ -474,14 +505,31 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
 && extracted=\"$staged/$zip_root\" \
 && if [ ! -d \"$extracted\" ]; then echo \"ERROR: expected directory $zip_root not found in archive\" && exit 1; fi \
 && rm -rf \"$backup\" \
-&& if [ -e \"$target\" ]; then echo \"Backing up existing target to $backup\" && mv \"$target\" \"$backup\" || {{ echo 'ERROR: could not back up existing target' && exit 1; }}; fi \
-&& if ! mv \"$extracted\" \"$target\"; then \
+&& if [ -e \"$target\" ]; then \
+echo \"Target exists; installing replacement (atomic exchange with backup-rename fallback)\" \
+&& if mv --exchange \"$extracted\" \"$target\" 2>/dev/null; then \
+echo 'Installed via atomic mv --exchange' \
+&& rm -rf \"$extracted\"; \
+elif python3 -c {exchange_py} \"$extracted\" \"$target\" 2>/dev/null; then \
+echo 'Installed via atomic renameat2 RENAME_EXCHANGE' \
+&& rm -rf \"$extracted\"; \
+else \
+echo 'Atomic exchange unavailable; installing via backup rename' \
+&& if mv \"$target\" \"$backup\"; then \
+if ! mv \"$extracted\" \"$target\"; then \
 echo 'ERROR: archive install failed — restoring backup' \
 && rm -rf \"$target\" \
 && if [ -e \"$backup\" ]; then mv \"$backup\" \"$target\" || true; fi \
 && exit 1; \
 fi \
-&& rm -rf \"$backup\" \
+&& rm -rf \"$backup\"; \
+else \
+echo 'ERROR: could not back up existing target' && exit 1; \
+fi; \
+fi; \
+else \
+if ! mv \"$extracted\" \"$target\"; then echo 'ERROR: archive install failed' && exit 1; fi; \
+fi \
 && test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}"
         ),
         cleanup_command: Some(
@@ -1448,9 +1496,12 @@ mod tests {
     }
 
     // The generated archive-install command must stage extraction into an
-    // adjacent temp dir and swap the target into place with same-filesystem
-    // renames. It must never `rm -rf` the live target before the new tree is
-    // staged (that opens a window where the target does not exist).
+    // adjacent temp dir and swap the target into place without ever exposing
+    // a missing target to concurrent readers where the platform allows an
+    // atomic exchange (issue #13569). It must never `rm -rf` the live target
+    // before the new tree is staged, the exchange must only be attempted when
+    // the target exists, and a two-rename fallback must remain for hosts
+    // without exchange support.
     #[test]
     fn archive_install_command_stages_adjacent_and_swaps_atomically() {
         let policy = package_archive_policy("/tmp/staging".to_string());
@@ -1465,13 +1516,290 @@ mod tests {
             "install must unpack into the adjacent temp dir, not over the target: {cmd}"
         );
         assert!(
-            cmd.contains("mv \"$extracted\" \"$target\""),
-            "install must rename the staged tree into place: {cmd}"
+            cmd.contains("mv --exchange \"$extracted\" \"$target\""),
+            "install must attempt an atomic exchange when the target exists: {cmd}"
         );
+        assert!(
+            cmd.contains("python3 -c"),
+            "install must offer the renameat2 exchange when mv --exchange is unavailable: {cmd}"
+        );
+        assert!(
+            cmd.contains(RENAMEAT2_EXCHANGE_PY),
+            "the renameat2 exchange snippet must be embedded verbatim: {cmd}"
+        );
+        assert!(
+            cmd.contains("mv \"$target\" \"$backup\""),
+            "install must keep the two-rename fallback for hosts without exchange support: {cmd}"
+        );
+        assert!(
+            cmd.contains("restoring backup"),
+            "fallback install failure must restore the backup: {cmd}"
+        );
+        assert!(
+            cmd.contains("else if ! mv \"$extracted\" \"$target\""),
+            "first install (no existing target) must rename the staged tree into place: {cmd}"
+        );
+
+        // The exchange may only run when the target already exists; a first
+        // install has nothing to exchange with.
+        assert!(
+            cmd.contains("if [ -e \"$target\" ]; then"),
+            "target-existence guard must gate the swap: {cmd}"
+        );
+        let exists_guard = cmd
+            .find("if [ -e \"$target\" ]; then")
+            .expect("target-existence guard");
+        let exchange = cmd.find("mv --exchange").expect("exchange branch");
+        let fallback_backup = cmd
+            .find("mv \"$target\" \"$backup\"")
+            .expect("fallback backup rename");
+        assert!(
+            exists_guard < exchange && exists_guard < fallback_backup,
+            "exchange and backup-rename swaps must be gated on an existing target: {cmd}"
+        );
+
         assert!(
             !cmd.contains("rm -rf \"{{targetDir}}\""),
             "install must not rm -rf the live target before staging the new tree: {cmd}"
         );
+    }
+
+    // Mirror of the generated script's ordered exchange attempts, used to
+    // decide whether the never-missing regression can run on this host.
+    #[cfg(unix)]
+    fn host_supports_atomic_exchange() -> bool {
+        let temp = match tempfile::tempdir() {
+            Ok(temp) => temp,
+            Err(_) => return false,
+        };
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        if fs::create_dir(&a).is_err() || fs::create_dir(&b).is_err() {
+            return false;
+        }
+        if fs::write(a.join("marker"), "a").is_err() || fs::write(b.join("marker"), "b").is_err() {
+            return false;
+        }
+
+        let attempt = format!(
+            "mv --exchange {a} {b} 2>/dev/null || python3 -c {py} {a} {b} 2>/dev/null",
+            a = shell::quote_path(a.to_str().expect("probe path a")),
+            b = shell::quote_path(b.to_str().expect("probe path b")),
+            py = shell::quote_arg(RENAMEAT2_EXCHANGE_PY),
+        );
+        let swapped = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&attempt)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        // A successful exchange puts b's contents at a.
+        swapped && fs::read_to_string(a.join("marker")).is_ok_and(|content| content == "b")
+    }
+
+    // Issue #13569 concurrency regression: while the install runs, a reader
+    // polling the target path must never observe it missing — it must only
+    // ever see the complete old tree or the complete new tree. Only meaningful
+    // on hosts where an atomic exchange mechanism exists; fallback-only hosts
+    // are covered by the deterministic restricted-PATH tests below.
+    #[cfg(unix)]
+    #[test]
+    fn archive_install_exchange_never_exposes_missing_target() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        if !host_supports_atomic_exchange() {
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact = temp.path().join("component.zip");
+        let staging = temp.path().join("staging");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
+
+        fs::create_dir_all(&target).expect("existing install");
+        fs::write(target.join("old.txt"), "old").expect("old marker");
+        write_zip(&artifact, &[("component/manifest.txt", "fresh\n")]);
+
+        let policy = nested_tree_archive_policy(staging.to_string_lossy().to_string());
+        let override_config = archive_install_override(&policy);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let missing = Arc::new(AtomicUsize::new(0));
+        let reader = {
+            let stop = Arc::clone(&stop);
+            let missing = Arc::clone(&missing);
+            let polled = target.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if !polled.exists() {
+                        missing.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+
+        let result = deploy_with_override(
+            &local_client(),
+            &artifact,
+            target.to_str().expect("target path"),
+            &override_config,
+            &extension(),
+            None,
+            Some(temp.path().to_str().expect("site root")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("deploy result");
+
+        stop.store(true, Ordering::Relaxed);
+        reader.join().expect("reader thread");
+
+        assert!(result.success, "deploy failed: {:?}", result.error);
+        assert_eq!(
+            missing.load(Ordering::Relaxed),
+            0,
+            "reader observed the target path missing during install"
+        );
+        assert!(target.join("manifest.txt").exists());
+        assert!(!target.join("old.txt").exists());
+        assert!(list_adjacent_install_temp_dirs(&parent, "component").is_empty());
+    }
+
+    // Build a restricted bin dir that forces the generated install command
+    // down the two-rename fallback branch regardless of host capabilities:
+    // the `mv` stub rejects `--exchange` (simulating coreutils < 9.5),
+    // `python3` is absent from PATH (disabling the renameat2 branch), and,
+    // when `fail_install_rename` is set, the install rename-into-place fails
+    // (source path inside the adjacent `.homeboy-install.*` staging dir) to
+    // exercise the restore-on-failure path.
+    #[cfg(unix)]
+    fn build_fallback_stub_bin(dir: &Path, fail_install_rename: bool) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).expect("stub bin dir");
+        for tool in ["unzip", "awk", "mktemp", "rm", "mkdir", "basename"] {
+            let resolved = ["/usr/bin", "/bin", "/usr/local/bin"]
+                .iter()
+                .map(|prefix| std::path::PathBuf::from(prefix).join(tool))
+                .find(|candidate| candidate.exists());
+            let Some(resolved) = resolved else {
+                panic!("cannot resolve {tool} for the restricted PATH stub");
+            };
+            std::os::unix::fs::symlink(resolved, bin.join(tool)).expect("symlink tool");
+        }
+
+        let mv_stub = if fail_install_rename {
+            "#!/bin/sh\ncase $1 in --exchange*) exit 64;; esac\ncase $1 in *.homeboy-install.*) exit 1;; esac\nexec /bin/mv \"$@\"\n"
+        } else {
+            "#!/bin/sh\ncase $1 in --exchange*) exit 64;; esac\nexec /bin/mv \"$@\"\n"
+        };
+        fs::write(bin.join("mv"), mv_stub).expect("mv stub");
+        fs::set_permissions(bin.join("mv"), fs::Permissions::from_mode(0o755)).expect("mv mode");
+        bin
+    }
+
+    #[cfg(unix)]
+    fn run_install_with_restricted_path(cmd: &str, bin: &Path) -> std::process::ExitStatus {
+        // Absolute shell path: the overridden PATH must not affect how the
+        // shell itself is resolved.
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("PATH", bin)
+            .status()
+            .expect("run install command")
+    }
+
+    #[cfg(unix)]
+    fn render_install_for(target: &Path, staging: &Path, artifact_name: &str) -> String {
+        let policy = nested_tree_archive_policy(staging.to_string_lossy().to_string());
+        let vars = deploy_override_template_vars(
+            artifact_name,
+            &staging.join(artifact_name).to_string_lossy(),
+            target.to_str().expect("target path"),
+            None,
+            "wp",
+            None,
+        );
+        render_map(&archive_install_override(&policy).install_command, &vars)
+    }
+
+    // Hosts with neither `mv --exchange` nor python3 must still install
+    // correctly through the two-rename fallback branch.
+    #[cfg(unix)]
+    #[test]
+    fn archive_install_fallback_two_rename_path_installs_without_exchange() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let staging = temp.path().join("staging");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
+
+        fs::create_dir_all(&target).expect("existing install");
+        fs::create_dir_all(&staging).expect("staging dir");
+        fs::write(target.join("old.txt"), "old").expect("old marker");
+        // This test bypasses deploy_with_override, so the artifact must be
+        // placed at the rendered staging path directly.
+        write_zip(
+            &staging.join("component.zip"),
+            &[("component/manifest.txt", "fresh\n")],
+        );
+
+        let bin = build_fallback_stub_bin(temp.path(), false);
+        let cmd = render_install_for(&target, &staging, "component.zip");
+
+        let status = run_install_with_restricted_path(&cmd, &bin);
+        assert!(status.success(), "fallback install failed: {status}");
+
+        assert!(target.join("manifest.txt").exists());
+        assert!(!target.join("old.txt").exists());
+        assert!(list_adjacent_install_temp_dirs(&parent, "component").is_empty());
+    }
+
+    // When the fallback's install rename fails after the backup rename
+    // succeeded, the original tree must be restored and nothing may leak.
+    #[cfg(unix)]
+    #[test]
+    fn archive_install_fallback_restores_backup_when_install_rename_fails() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let staging = temp.path().join("staging");
+        let parent = temp.path().join("components");
+        let target = parent.join("component");
+
+        fs::create_dir_all(target.join("vendor/dep")).expect("existing install");
+        fs::create_dir_all(&staging).expect("staging dir");
+        fs::write(target.join("old.txt"), "old").expect("old marker");
+        fs::write(target.join("vendor/dep/keep.js"), "keep").expect("nested file");
+        write_zip(
+            &staging.join("component.zip"),
+            &[("component/manifest.txt", "fresh\n")],
+        );
+
+        let bin = build_fallback_stub_bin(temp.path(), true);
+        let cmd = render_install_for(&target, &staging, "component.zip");
+
+        let status = run_install_with_restricted_path(&cmd, &bin);
+        assert!(
+            !status.success(),
+            "install must fail after the forced rename failure: {status}"
+        );
+
+        // Original install fully restored, nested tree intact.
+        assert!(
+            target.join("old.txt").exists(),
+            "original tree not restored"
+        );
+        assert!(
+            target.join("vendor/dep/keep.js").exists(),
+            "nested tree not restored"
+        );
+        assert!(!target.join("manifest.txt").exists());
+        assert!(list_adjacent_install_temp_dirs(&parent, "component").is_empty());
     }
 
     #[cfg(unix)]
