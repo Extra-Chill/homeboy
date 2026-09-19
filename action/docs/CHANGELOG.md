@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.16.1] - 2026-09-19
+
+### Fixed
+- invoke the resolved action revision by local checkout, not an expression in uses
+
 ## [2.16.0] - 2026-09-19
 
 ### Added
