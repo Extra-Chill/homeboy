@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.5] - 2026-09-19
+
+### Fixed
+- scope changed test files to the suites that declare them
+
 ## [3.48.4] - 2026-09-19
 
 ### Fixed
