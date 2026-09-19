@@ -85,3 +85,42 @@ else
     echo "Extension '${EXTENSION_ID}' installed successfully"
   fi
 fi
+
+# Publish where the toolchain landed.
+#
+# The action installs the CLI and its extensions — phpunit, phpcs, wpcs,
+# phpstan and the WordPress stubs all live inside an extension — but until
+# now it never told the surrounding workflow where any of it was. A `run:`
+# step could not invoke `homeboy` or locate an extension's `vendor/bin`, so
+# every consumer needing a custom test or lint step had to keep a private
+# copy of the same tools, with pins free to drift from the ones CI actually
+# runs.
+#
+# These are facts this script already knows rather than new configuration.
+publish_toolchain_location() {
+    local extensions_root="${HOME}/.config/homeboy/extensions"
+    local homeboy_bin
+    local primary_extension="${EXTENSION_INPUT:-${EXTENSION_ID:-}}"
+
+    if [ -z "${GITHUB_ENV:-}" ]; then
+        return 0
+    fi
+
+    printf '%s\n' "HOMEBOY_EXTENSIONS_ROOT=${extensions_root}" >> "${GITHUB_ENV}"
+
+    # HOMEBOY_EXTENSION_PATH is singular while homeboy.json may declare several
+    # extensions, so it names the primary one this invocation resolved. Consumers
+    # needing another append its id to HOMEBOY_EXTENSIONS_ROOT.
+    if [ -n "${primary_extension}" ] && [ -d "${extensions_root}/${primary_extension}" ]; then
+        printf '%s\n' "HOMEBOY_EXTENSION_PATH=${extensions_root}/${primary_extension}" >> "${GITHUB_ENV}"
+    fi
+
+    if [ -n "${GITHUB_PATH:-}" ]; then
+        homeboy_bin="$(command -v homeboy 2>/dev/null || true)"
+        if [ -n "${homeboy_bin}" ]; then
+            printf '%s\n' "$(dirname "${homeboy_bin}")" >> "${GITHUB_PATH}"
+        fi
+    fi
+}
+
+publish_toolchain_location

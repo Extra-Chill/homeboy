@@ -366,6 +366,35 @@ Quality command inputs `audit`, `lint`, `test`, `build`, and `audit-baseline` ar
 | `pr-policy-merged` | Whether the PR policy gate merged the PR (`true`/`false`) |
 | `pr-policy-report` | Markdown summary from the PR policy gate |
 
+### Using the installed toolchain in your own steps
+
+The action installs the Homeboy CLI and its extensions, and phpunit, phpcs,
+wpcs, phpstan and the WordPress stubs all live inside an extension rather than
+in your repository. After the action runs, it publishes where they are:
+
+| Variable | Meaning |
+|----------|---------|
+| `HOMEBOY_EXTENSIONS_ROOT` | Directory containing every installed extension |
+| `HOMEBOY_EXTENSION_PATH` | The extension this invocation resolved (singular; `homeboy.json` may declare several) |
+| `PATH` | Extended to include the resolved `homeboy` binary |
+
+So a custom step can use the same tools CI uses, instead of your repository
+declaring its own copies with pins free to drift:
+
+```yaml
+- uses: Extra-Chill/homeboy-action@v2
+  with:
+    commands: review test
+
+- name: Run a bespoke suite with the shared phpunit
+  run: |
+    "$HOMEBOY_EXTENSION_PATH/vendor/bin/phpunit" \
+      --configuration phpunit.xml.dist tests/MyCoordinatedTest.php
+```
+
+These are set by the action, so a step that needs them must run **after** it.
+A step that must run earlier still needs its own tooling.
+
 ## Examples
 
 ### Review Lint Only (Fast PR Check)
