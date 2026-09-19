@@ -57,7 +57,8 @@ pub use heartbeat::{
 };
 pub use lifecycle::{RunnerJobLifecycleMetadata, RunnerLifecycleOwner};
 pub use resource::{
-    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+    RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
+    RunnerResourceMetrics,
 };
 pub use session::{
     RunnerProxyForward, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,

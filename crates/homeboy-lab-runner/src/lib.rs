@@ -437,7 +437,8 @@ pub use offload_metadata::{
 };
 pub(crate) use resource_metrics::RunnerCommandProgressSink;
 pub use resource_metrics::{
-    RunnerResourceGuardLimits, RunnerResourceGuardViolation, RunnerResourceMetrics,
+    RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
+    RunnerResourceMetrics,
 };
 pub use rolling_generation::{
     RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
