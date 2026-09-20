@@ -77,6 +77,19 @@ pub struct ExtensionApiRuntimeRequirement {
 pub struct ExtensionApiExecutionRequirements {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtimes: Vec<ExtensionApiRuntimeRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ExtensionApiToolRequirement>,
+}
+
+/// A runner-neutral executable requirement owned by an extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionApiToolRequirement {
+    pub id: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 /// The stable catalog projection of one installed extension.
@@ -180,6 +193,7 @@ mod tests {
                     id: "php".to_string(),
                     version: ">=8.0".to_string(),
                 }],
+                tools: Vec::new(),
             },
             requires_homeboy: Some(">=0.1.0".to_string()),
         };

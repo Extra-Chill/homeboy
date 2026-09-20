@@ -14,14 +14,14 @@ use homeboy_extension_contract::api::v1::{
     ExtensionApiReadinessDescriptor, ExtensionApiReadinessMode, ExtensionApiReadinessRequest,
     ExtensionApiReadinessResponse, ExtensionApiReadinessState, ExtensionApiReadinessStatus,
     ExtensionApiResolveRequest, ExtensionApiResolveResponse, ExtensionApiRuntimeRequirement,
-    ExtensionApiVersion, ACTION_CAPABILITY_PREFIX, AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX,
-    COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNINGS_INPUT_SCHEMA,
-    COMPILER_WARNINGS_OUTPUT_SCHEMA, COMPILER_WARNING_FIXES_CAPABILITY_ID,
-    COMPILER_WARNING_FIXES_INPUT_SCHEMA, COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
-    DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID, EXECUTE_CAPABILITY_ID,
-    EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA, EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
-    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
-    EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
+    ExtensionApiToolRequirement, ExtensionApiVersion, ACTION_CAPABILITY_PREFIX,
+    AGENT_TASK_EXECUTOR_CAPABILITY_PREFIX, COMPILER_WARNINGS_CAPABILITY_ID,
+    COMPILER_WARNINGS_INPUT_SCHEMA, COMPILER_WARNINGS_OUTPUT_SCHEMA,
+    COMPILER_WARNING_FIXES_CAPABILITY_ID, COMPILER_WARNING_FIXES_INPUT_SCHEMA,
+    COMPILER_WARNING_FIXES_OUTPUT_SCHEMA, DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX,
+    ENVIRONMENT_CAPABILITY_ID, EXECUTE_CAPABILITY_ID, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+    EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA, EXTENSION_API_EXECUTE_REQUEST_SCHEMA,
@@ -192,6 +192,34 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
         .collect::<Vec<_>>();
     runtimes.sort_by(|left, right| left.id.cmp(&right.id));
 
+    let mut tools = extension
+        .diagnostics
+        .tools
+        .iter()
+        .filter_map(|tool| {
+            let id = tool.id.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some(ExtensionApiToolRequirement {
+                id: id.to_string(),
+                command: tool
+                    .command
+                    .as_deref()
+                    .filter(|command| !command.trim().is_empty())
+                    .unwrap_or(id)
+                    .to_string(),
+                version_args: if tool.version_args.is_empty() {
+                    vec!["--version".to_string()]
+                } else {
+                    tool.version_args.clone()
+                },
+                remediation: tool.remediation.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.id.cmp(&right.id));
+
     ExtensionApiDescriptor {
         schema: EXTENSION_API_DESCRIPTOR_SCHEMA.to_string(),
         api_version: EXTENSION_API_V1,
@@ -209,7 +237,7 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
                 .is_some(),
             toolchain_probe_ids,
         },
-        execution_requirements: ExtensionApiExecutionRequirements { runtimes },
+        execution_requirements: ExtensionApiExecutionRequirements { runtimes, tools },
         requires_homeboy: extension
             .requires
             .as_ref()
@@ -832,6 +860,14 @@ mod tests {
                         { "id": "zeta", "program": "zeta" },
                         { "id": "alpha", "program": "alpha" }
                     ],
+                    "diagnostics": {
+                        "tools": [{
+                            "id": "php",
+                            "command": "php8",
+                            "version_args": ["-v"],
+                            "remediation": "Install PHP 8"
+                        }]
+                    },
                     "requires": { "homeboy": ">=0.1.0" }
                 }),
             );
@@ -950,6 +986,19 @@ mod tests {
                     .map(|runtime| runtime.id.as_str())
                     .collect::<Vec<_>>(),
                 vec!["node", "php"]
+            );
+            assert_eq!(descriptor.execution_requirements.tools.len(), 1);
+            assert_eq!(descriptor.execution_requirements.tools[0].id, "php");
+            assert_eq!(descriptor.execution_requirements.tools[0].command, "php8");
+            assert_eq!(
+                descriptor.execution_requirements.tools[0].version_args,
+                ["-v"]
+            );
+            assert_eq!(
+                descriptor.execution_requirements.tools[0]
+                    .remediation
+                    .as_deref(),
+                Some("Install PHP 8")
             );
         });
     }
