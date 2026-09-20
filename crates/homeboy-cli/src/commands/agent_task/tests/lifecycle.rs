@@ -1403,6 +1403,7 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Readiness rearm".to_string(),
@@ -1593,6 +1594,7 @@ fn status_and_cook_continue_materialize_recipe_only_attempt_without_provider_wor
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Recipe-only Cook".to_string(),
@@ -1691,6 +1693,7 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Legacy candidate".to_string(),
@@ -1861,6 +1864,7 @@ fn cook_continue_preflight_bypasses_model_provenance_for_retryable_pre_execution
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Pre-execution retry".to_string(),
@@ -2049,6 +2053,7 @@ fn cook_retry_run_recovers_a_historical_transport_runtime_after_zero_provider_ex
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Pre-execution runtime recovery".to_string(),
@@ -2229,6 +2234,7 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Diagnose current gate".to_string(),
@@ -3466,6 +3472,7 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Review form continuation".to_string(),
@@ -5433,6 +5440,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Cook retry run".to_string(),
@@ -5519,6 +5527,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Competing Cook retry run".to_string(),

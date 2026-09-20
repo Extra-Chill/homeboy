@@ -1312,11 +1312,21 @@ pub struct CookFinalization {
     pub no_finalize: bool,
     /// Publish a newly created PR as a draft while retaining normal finalization.
     pub draft_pr: bool,
+    /// Publish a draft PR and await provider-owned authoritative CI.
+    pub provider_ci: Option<CookProviderCi>,
     pub base: String,
     pub head: Option<String>,
     pub title: String,
     pub commit_message: String,
     pub protected_branches: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CookProviderCi {
+    pub loop_id: String,
+    pub gate_id: String,
+    pub check_id: String,
+    pub environment_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -5266,7 +5276,7 @@ impl CookService {
 }
 
 fn run_cook_with_runtime(
-    options: CookRequest,
+    mut options: CookRequest,
     executor: SharedAgentTaskExecutor,
     store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5274,7 +5284,19 @@ fn run_cook_with_runtime(
     durable_observer: &CookProgressObserver<'_>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    if options.finalization.provider_ci.is_some() {
+        // Provider CI mode is never allowed to publish an unverified ready PR,
+        // including when a durable request was assembled outside the CLI.
+        options.finalization.draft_pr = true;
+    }
     let notification_options = options.clone();
+    if let Some(result) = resume_provider_ci_if_ready(
+        &mut options,
+        lifecycle_store,
+        side_effects,
+    )? {
+        return Ok(result);
+    }
     let mut result = run_cook_reported(
         store,
         lifecycle_store,
@@ -5300,6 +5322,115 @@ fn run_cook_with_runtime(
         }
     }
     result
+}
+
+/// Reconnect a draft-published Cook without dispatching the agent or replaying
+/// local gates. The provider adapter has already authenticated and applied the
+/// generic controller publication; this path only consumes its durable result.
+fn resume_provider_ci_if_ready(
+    options: &mut CookRequest,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    side_effects: &mut CookSideEffects<'_>,
+) -> Result<Option<AgentTaskRunResult<AgentTaskCookReport>>> {
+    let record = match lifecycle_store.read_record(&options.identity.initial_run_id) {
+        Ok(record) => record,
+        Err(error) if error.message.contains("run record not found") => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(handoff) = record.metadata.get("provider_ci_handoff") else {
+        return Ok(None);
+    };
+    let provider_ci = options.finalization.provider_ci.as_ref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_ci",
+            "durable provider CI handoff exists but the Cook recipe has no provider CI policy",
+            None,
+            None,
+        )
+    })?;
+    let controller = crate::agent_task_controller_service::status(&provider_ci.loop_id)?;
+    let failed = controller.gate_results.iter().any(|result| {
+        result.bundle_id == provider_ci.gate_id
+            && result.checks.iter().any(|check| {
+                check.check_id == provider_ci.check_id
+                    && check.status
+                        == crate::agent_task_loop_controller::AgentTaskLoopGateStatus::Failed
+            })
+    });
+    let satisfied = controller.gate_results.iter().any(|result| {
+        result.bundle_id == provider_ci.gate_id
+            && result.checks.iter().any(|check| {
+                check.check_id == provider_ci.check_id
+                    && check.status
+                        == crate::agent_task_loop_controller::AgentTaskLoopGateStatus::Satisfied
+            })
+    });
+    if !satisfied {
+        return Ok(Some(cook_report(CookReportInput {
+            cook_id: options.identity.cook_id.clone(),
+            status: if failed {
+                "provider_ci_actionable_failure"
+            } else {
+                "awaiting_provider_ci"
+            },
+            disposition: CookDisposition::InFlight,
+            attempts: Vec::new(),
+            finalization: Some(handoff["publication"].clone()),
+            stop_reason: Some(
+                if failed {
+                    "provider CI reported an actionable failure; reconnect through the Cook continuation for agent reentry"
+                } else {
+                    "provider CI publication is pending; reconnect after the adapter applies a terminal result"
+                }
+                .to_string(),
+            ),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&options.identity.initial_run_id),
+        })));
+    }
+    let promotion = record
+        .metadata
+        .get("latest_promotion")
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_ci_handoff",
+                "provider CI success cannot resume without the durable candidate promotion",
+                None,
+                None,
+            )
+        })?;
+    let promotion: AgentTaskPromotionReport = serde_json::from_value(promotion).map_err(|error| {
+        Error::internal_json(format!("invalid durable Cook promotion: {error}"), None)
+    })?;
+    options.finalization.draft_pr = false;
+    options.finalization.provider_ci = None;
+    let finalization = side_effects.finalize(
+        lifecycle_store,
+        options,
+        &options.identity.initial_run_id,
+        &promotion,
+    )?;
+    lifecycle_store.record_metadata_value(
+        &options.identity.initial_run_id,
+        "provider_ci_handoff",
+        serde_json::json!({
+            "schema": "homeboy/cook-provider-ci-handoff/v1",
+            "status": "completed",
+            "publication": finalization,
+            "source": handoff,
+        }),
+    )?;
+    Ok(Some(cook_report(CookReportInput {
+        cook_id: options.identity.cook_id.clone(),
+        status: "review_ready",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: Some(finalization),
+        stop_reason: Some("provider-owned CI passed; draft candidate transitioned to ready".to_string()),
+        exit_code: 0,
+        invocation_latest_run_id: Some(&options.identity.initial_run_id),
+    })))
 }
 
 /// The component a cook is working on, for notification attribution.
@@ -7896,6 +8027,43 @@ fn run_cook_spine(
                         }
                         Err(error) => return Err(error),
                     };
+                if let Some(provider_ci) = options.finalization.provider_ci.as_ref() {
+                    let handoff = serde_json::json!({
+                        "schema": "homeboy/cook-provider-ci-handoff/v1",
+                        "status": "awaiting_provider_ci",
+                        "cook_id": cook_id,
+                        "run_id": run_id,
+                        "loop_id": provider_ci.loop_id,
+                        "gate_id": provider_ci.gate_id,
+                        "check_id": provider_ci.check_id,
+                        "environment_digest": provider_ci.environment_digest,
+                        "publication": finalization.clone(),
+                        "candidate_sha": promotion
+                            .provenance
+                            .pointer("/candidate/fingerprint/sha256")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "base_sha": promotion
+                            .verified_base
+                            .as_ref()
+                            .map(|base| base.sha.clone())
+                            .unwrap_or_default(),
+                    });
+                    lifecycle_store.record_metadata_value(&run_id, "provider_ci_handoff", handoff)?;
+                    return Ok(cook_report(CookReportInput {
+                        cook_id,
+                        status: "awaiting_provider_ci",
+                        disposition: CookDisposition::InFlight,
+                        attempts,
+                        finalization: Some(finalization),
+                        stop_reason: Some(
+                            "draft review candidate published; waiting for provider-owned authoritative CI evidence"
+                                .to_string(),
+                        ),
+                        exit_code: 1,
+                        invocation_latest_run_id: Some(&run_id),
+                    }));
+                }
                 let final_status = finalization["status"]
                     .as_str()
                     .unwrap_or("unknown")

@@ -730,6 +730,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         finalization: serde_json::json!({
             "no_finalize": options.finalization.no_finalize,
             "draft_pr": options.finalization.draft_pr,
+            "provider_ci": options.finalization.provider_ci,
             "base": options.finalization.base,
             "head": options.finalization.head,
             "title": options.finalization.title,
@@ -2809,6 +2810,13 @@ fn reconstruct_recipe_options(
                 .transpose()
                 .map_err(recipe_value_error("draft_pr"))?
                 .unwrap_or(false),
+            provider_ci: recipe
+                .finalization
+                .get("provider_ci")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(recipe_value_error("provider_ci"))?,
             base: serde_json::from_value(field("base")?).map_err(recipe_value_error("base"))?,
             head: serde_json::from_value(field("head")?).map_err(recipe_value_error("head"))?,
             title: serde_json::from_value(field("title")?).map_err(recipe_value_error("title"))?,

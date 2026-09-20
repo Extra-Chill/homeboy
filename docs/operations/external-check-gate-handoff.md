@@ -5,6 +5,43 @@ primitive. A provider adapter owns API authentication, pagination, status
 normalization, and hydration; the controller does not call GitHub or another
 provider.
 
+## Cook CI Mode
+
+Opt into the two-phase Cook lifecycle with `--ci-mode` and the exact controller
+identity fields:
+
+```text
+homeboy agent-task cook ... --ci-mode \
+  --ci-loop-id LOOP_ID --ci-gate-id GATE_ID --ci-check-id CHECK_ID \
+  --ci-environment-digest sha256:ENVIRONMENT
+```
+
+Cook first runs its normal local promotion gates, commits and pushes the exact
+candidate, and creates or reuses a draft PR. It then returns
+`awaiting_provider_ci` and persists `homeboy/cook-provider-ci-handoff/v1` with
+the PR publication and candidate identity. The provider adapter hydrates the
+exact PR head checks and applies `external.checks_changed` through the
+controller. Re-run the durable Cook continuation after the event is applied.
+
+The built-in GitHub adapter is invoked with the exact binding:
+
+```text
+homeboy review ci handoff --repo OWNER/REPO --pr PR_NUMBER \
+  --loop-id LOOP_ID --gate-id GATE_ID --check-id CHECK_ID \
+  --base-sha BASE_SHA --head-sha HEAD_SHA \
+  --environment-digest sha256:ENVIRONMENT
+```
+
+It authenticates through `gh`, verifies the live PR base and head SHAs, fetches
+the requested check run for that head, and publishes only hydrated GitHub
+evidence. Pending results are safe to repeat; the controller rejects stale,
+duplicate, out-of-order, and mismatched publications.
+
+Pending or mismatched evidence keeps the Cook in flight. A matching terminal
+success transitions the same draft PR to ready-for-review. A failed terminal
+publication remains actionable and must re-enter through the normal Cook
+continuation path; no local gate is replayed merely to consume provider CI.
+
 Publish an `external.checks_changed` event with a `publication` object using
 `homeboy/external-check-publication/v1`. The publication must be authoritative
 and hydrated and must include the repository, base and head commits, gate and

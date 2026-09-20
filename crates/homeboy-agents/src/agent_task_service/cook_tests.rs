@@ -5159,6 +5159,7 @@ fn batch_cook_options(
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Batch cook".to_string(),
@@ -13251,6 +13252,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 finalization: CookFinalization {
                     no_finalize: true,
                     draft_pr: false,
+                    provider_ci: None,
                     base: "main".to_string(),
                     head: None,
                     title: "Detached cook".to_string(),
@@ -17380,6 +17382,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Cook".to_string(),
@@ -18057,6 +18060,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             finalization: CookFinalization {
                 no_finalize: false,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: Some("fix/8058".to_string()),
                 title: "Close #8058".to_string(),
@@ -20928,6 +20932,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
         finalization: CookFinalization {
             no_finalize: false,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: Some("fix/8058".to_string()),
             title: "Close #8058".to_string(),

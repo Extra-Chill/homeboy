@@ -377,6 +377,42 @@ fn external_ci_publication_requires_identity_and_completes_the_controller_cycle(
             report.controller.gate_results[0].status,
             AgentTaskLoopGateStatus::Satisfied
         );
+        for (event_id, sequence, conclusion) in [
+            ("publication-duplicate", 3, "failure"),
+            ("publication-old", 2, "failure"),
+        ] {
+            let replay = apply_event(ControllerApplyEventRequest {
+                loop_id: "loop-ci-handoff".to_string(),
+                event_type: "external.checks_changed".to_string(),
+                event_id: Some(event_id.to_string()),
+                event_key: Some("pr:1".to_string()),
+                entity_id: None,
+                payload: json!({
+                    "publication": {
+                        "schema": "homeboy/external-check-publication/v1",
+                        "provider": "github",
+                        "repository": "Extra-Chill/homeboy",
+                        "base_sha": "base-sha",
+                        "head_sha": "candidate-sha",
+                        "gate_id": "ci",
+                        "check_id": "homeboy-test",
+                        "environment_digest": "sha256:env",
+                        "status": "completed",
+                        "conclusion": conclusion,
+                        "observed_at": "2026-09-20T19:03:00Z",
+                        "sequence": sequence,
+                        "evidence_id": event_id,
+                        "authoritative": true,
+                        "hydrated": true
+                    }
+                }),
+            })
+            .expect("replayed publication is idempotent");
+            assert_eq!(
+                replay.controller.gate_results[0].status,
+                AgentTaskLoopGateStatus::Satisfied
+            );
+        }
         assert!(report.controller.next_actions.iter().any(|action| {
             matches!(action.action, AgentTaskLoopPolicyAction::RunGates { ref bundle_id, .. } if bundle_id == "ci")
                 && action.status == AgentTaskLoopActionStatus::Pending

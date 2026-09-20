@@ -1,4 +1,5 @@
 mod external_check_detail_resolver;
+mod handoff;
 mod failure_log_triage;
 mod gate;
 mod pins;
@@ -18,6 +19,7 @@ pub fn test_external_check_detail_resolver_pipe_holder_cleanup() {
 }
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -73,6 +75,8 @@ pub enum CiCommand {
     DifferentialGate(CiDifferentialGateArgs),
     /// Summarize failed GitHub Actions runs for a pull request without dumping raw logs.
     Triage(CiTriageArgs),
+    /// Hydrate one exact GitHub PR check and publish the generic controller event.
+    Handoff(CiHandoffArgs),
     /// Report how far this repository's workflow action pins have drifted from
     /// their upstream releases.
     ///
@@ -81,6 +85,26 @@ pub enum CiCommand {
     /// silent: a fix exists, is released, is believed to be running, and is
     /// not. See #13437.
     Pins(CiPinsArgs),
+}
+
+#[derive(Args)]
+pub struct CiHandoffArgs {
+    #[arg(long)]
+    pub repo: String,
+    #[arg(long)]
+    pub pr: u64,
+    #[arg(long)]
+    pub loop_id: String,
+    #[arg(long)]
+    pub gate_id: String,
+    #[arg(long)]
+    pub check_id: String,
+    #[arg(long)]
+    pub base_sha: String,
+    #[arg(long)]
+    pub head_sha: String,
+    #[arg(long)]
+    pub environment_digest: String,
 }
 
 #[derive(Args)]
@@ -303,6 +327,7 @@ pub enum CiOutput {
     Scope(CiScopeCommandOutput),
     DifferentialGate(CiDifferentialGateCommandOutput),
     Triage(CiFailureTriageOutput),
+    Handoff(Value),
     Pins(CiPinsCommandOutput),
 }
 
@@ -351,8 +376,23 @@ pub fn run(args: CiArgs) -> CmdResult<CiOutput> {
         CiCommand::Scope(args) => run_scope(args),
         CiCommand::DifferentialGate(args) => run_differential_gate(args),
         CiCommand::Triage(args) => run_triage(args),
+        CiCommand::Handoff(args) => run_handoff(args),
         CiCommand::Pins(args) => run_pins(args),
     }
+}
+
+fn run_handoff(args: CiHandoffArgs) -> CmdResult<CiOutput> {
+    let report = handoff::publish(handoff::HandoffArgs {
+        repo: args.repo,
+        pr: args.pr,
+        loop_id: args.loop_id,
+        gate_id: args.gate_id,
+        check_id: args.check_id,
+        base_sha: args.base_sha,
+        head_sha: args.head_sha,
+        environment_digest: args.environment_digest,
+    })?;
+    Ok((CiOutput::Handoff(report), 0))
 }
 
 fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
