@@ -5292,7 +5292,9 @@ fn run_cook_with_runtime(
     let notification_options = options.clone();
     if let Some(result) = resume_provider_ci_if_ready(
         &mut options,
+        store,
         lifecycle_store,
+        executor.clone(),
         side_effects,
     )? {
         return Ok(result);
@@ -5329,14 +5331,15 @@ fn run_cook_with_runtime(
 /// generic controller publication; this path only consumes its durable result.
 fn resume_provider_ci_if_ready(
     options: &mut CookRequest,
+    store: &CookRecipeStore,
     lifecycle_store: &AgentTaskLifecycleStore,
+    executor: SharedAgentTaskExecutor,
     side_effects: &mut CookSideEffects<'_>,
 ) -> Result<Option<AgentTaskRunResult<AgentTaskCookReport>>> {
-    let record = match lifecycle_store.read_record(&options.identity.initial_run_id) {
-        Ok(record) => record,
-        Err(error) if error.message.contains("run record not found") => return Ok(None),
-        Err(error) => return Err(error),
-    };
+    if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
+        return Ok(None);
+    }
+    let record = lifecycle_store.read_record(&options.identity.initial_run_id)?;
     let Some(handoff) = record.metadata.get("provider_ci_handoff") else {
         return Ok(None);
     };
@@ -5349,14 +5352,25 @@ fn resume_provider_ci_if_ready(
         )
     })?;
     let controller = crate::agent_task_controller_service::status(&provider_ci.loop_id)?;
-    let failed = controller.gate_results.iter().any(|result| {
-        result.bundle_id == provider_ci.gate_id
-            && result.checks.iter().any(|check| {
-                check.check_id == provider_ci.check_id
-                    && check.status
-                        == crate::agent_task_loop_controller::AgentTaskLoopGateStatus::Failed
-            })
+    let failure_details = controller.gate_results.iter().find_map(|result| {
+        result.checks.iter().find_map(|check| {
+            (result.bundle_id == provider_ci.gate_id
+                && check.check_id == provider_ci.check_id
+                && check.status
+                    == crate::agent_task_loop_controller::AgentTaskLoopGateStatus::Failed)
+                .then(|| check.details.clone())
+        })
     });
+    if let Some(failure_details) = failure_details {
+        return Ok(Some(dispatch_provider_ci_remediation(
+            options,
+            store,
+            lifecycle_store,
+            executor,
+            side_effects,
+            failure_details,
+        )?));
+    }
     let satisfied = controller.gate_results.iter().any(|result| {
         result.bundle_id == provider_ci.gate_id
             && result.checks.iter().any(|check| {
@@ -5368,21 +5382,13 @@ fn resume_provider_ci_if_ready(
     if !satisfied {
         return Ok(Some(cook_report(CookReportInput {
             cook_id: options.identity.cook_id.clone(),
-            status: if failed {
-                "provider_ci_actionable_failure"
-            } else {
-                "awaiting_provider_ci"
-            },
+            status: "awaiting_provider_ci",
             disposition: CookDisposition::InFlight,
             attempts: Vec::new(),
             finalization: Some(handoff["publication"].clone()),
             stop_reason: Some(
-                if failed {
-                    "provider CI reported an actionable failure; reconnect through the Cook continuation for agent reentry"
-                } else {
-                    "provider CI publication is pending; reconnect after the adapter applies a terminal result"
-                }
-                .to_string(),
+                "provider CI publication is pending; reconnect after the adapter applies a terminal result"
+                    .to_string(),
             ),
             exit_code: 1,
             invocation_latest_run_id: Some(&options.identity.initial_run_id),
@@ -5400,9 +5406,10 @@ fn resume_provider_ci_if_ready(
                 None,
             )
         })?;
-    let promotion: AgentTaskPromotionReport = serde_json::from_value(promotion).map_err(|error| {
-        Error::internal_json(format!("invalid durable Cook promotion: {error}"), None)
-    })?;
+    let promotion: AgentTaskPromotionReport =
+        serde_json::from_value(promotion).map_err(|error| {
+            Error::internal_json(format!("invalid durable Cook promotion: {error}"), None)
+        })?;
     options.finalization.draft_pr = false;
     options.finalization.provider_ci = None;
     let finalization = side_effects.finalize(
@@ -5427,10 +5434,199 @@ fn resume_provider_ci_if_ready(
         disposition: CookDisposition::Terminal,
         attempts: Vec::new(),
         finalization: Some(finalization),
-        stop_reason: Some("provider-owned CI passed; draft candidate transitioned to ready".to_string()),
+        stop_reason: Some(
+            "provider-owned CI passed; draft candidate transitioned to ready".to_string(),
+        ),
         exit_code: 0,
         invocation_latest_run_id: Some(&options.identity.initial_run_id),
     })))
+}
+
+fn dispatch_provider_ci_remediation(
+    options: &CookRequest,
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    executor: SharedAgentTaskExecutor,
+    _side_effects: &mut CookSideEffects<'_>,
+    failure_details: Value,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let run_id = &options.identity.initial_run_id;
+    let evidence_id = failure_details["evidence_id"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_ci.failure",
+                "authoritative provider failure has no evidence identity",
+                None,
+                None,
+            )
+        })?;
+    let operation_key = format!("provider-ci-remediation:{run_id}:{evidence_id}");
+    match lifecycle_store.claim_cook_operation(run_id, &operation_key, FINALIZATION_CLAIM_LEASE)? {
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            if result["status"] == "not_dispatched" {
+                return Ok(cook_report(CookReportInput {
+                    cook_id: options.identity.cook_id.clone(),
+                    status: "provider_ci_remediation_blocked",
+                    disposition: CookDisposition::Terminal,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: result["reason"].as_str().map(ToOwned::to_owned),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(run_id),
+                }));
+            }
+            let next_run_id = result["run_id"].as_str().unwrap_or("unknown");
+            return Ok(cook_report(CookReportInput {
+                cook_id: options.identity.cook_id.clone(),
+                status: "provider_ci_remediation_dispatched",
+                disposition: CookDisposition::InFlight,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(format!(
+                    "authoritative provider CI failure already dispatched remediation attempt {next_run_id}"
+                )),
+                exit_code: 1,
+                invocation_latest_run_id: Some(run_id),
+            }));
+        }
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            return Ok(cook_report(CookReportInput {
+                cook_id: options.identity.cook_id.clone(),
+                status: "provider_ci_remediation_in_flight",
+                disposition: CookDisposition::InFlight,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(
+                    "another Cook controller owns the provider CI remediation claim; reconnect after it records the child attempt"
+                        .to_string(),
+                ),
+                exit_code: 1,
+                invocation_latest_run_id: Some(run_id),
+            }));
+        }
+        agent_task_lifecycle::ClaimOutcome::Acquired => {}
+    }
+
+    let result: Result<AgentTaskRunResult<AgentTaskCookReport>> = (|| {
+        let record = lifecycle_store.read_record(run_id)?;
+        let plan = lifecycle_store.read_controller_plan_for_execution(run_id)?;
+        let aggregate = lifecycle_store.read_aggregate(run_id)?;
+        let promotion: AgentTaskPromotionReport = serde_json::from_value(
+            record.metadata["latest_promotion"].clone(),
+        )
+        .map_err(|error| {
+            Error::internal_json(format!("invalid durable Cook promotion: {error}"), None)
+        })?;
+        let source_request = plan.tasks.first().cloned().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_ci.failure",
+                "provider CI remediation requires the original Cook task",
+                Some(run_id.clone()),
+                None,
+            )
+        })?;
+        let attempt = store
+            .load_recipe(&options.identity.cook_id)?
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == *run_id)
+            .map(|attempt| attempt.attempt)
+            .unwrap_or(1);
+        let next_attempt = attempt.saturating_add(1);
+        let mut follow_up_request = source_request.clone();
+        follow_up_request.task_id =
+            format!("{}-provider-ci-fix-{next_attempt}", source_request.task_id);
+        follow_up_request.parent_plan_id = Some(run_id.clone());
+        follow_up_request.instructions = format!(
+            "The published candidate failed authoritative provider CI. Fix the actionable failure and produce a replacement candidate. Provider evidence: {}",
+            serde_json::to_string(&failure_details).unwrap_or_else(|_| "unserializable evidence".to_string())
+        );
+        follow_up_request.inputs["cook_loop"]["provider_ci_failure"] = failure_details.clone();
+        follow_up_request.inputs["cook_loop"]["attempt"] = serde_json::json!(attempt);
+        follow_up_request.inputs["cook_loop"]["next_attempt"] = serde_json::json!(next_attempt);
+        follow_up_request.inputs["cook_loop"]["review_form_required"] = Value::Bool(false);
+        follow_up_request.policy.grant_workspace_read_tool();
+        let mut remediation_usage = ExecutionBudgetUsage::default();
+        let dispatch = dispatch_cook_follow_up(
+            (store, lifecycle_store),
+            options,
+            executor,
+            &options.identity.cook_id,
+            attempt,
+            run_id,
+            &plan,
+            &aggregate,
+            &promotion,
+            follow_up_request,
+            true,
+            CookFollowUpBudgetScope::Cook,
+            &plan.options.execution_budget,
+            execution_budget_usage(&aggregate),
+            &mut remediation_usage,
+        )?;
+        let child_run_id = match dispatch {
+            CookFollowUpDispatch::Dispatched { run_id } => run_id,
+            CookFollowUpDispatch::BudgetExhausted { reason }
+            | CookFollowUpDispatch::PolicyFailure { reason } => {
+                lifecycle_store.complete_cook_operation(
+                    run_id,
+                    &operation_key,
+                    serde_json::json!({ "status": "not_dispatched", "reason": reason }),
+                )?;
+                return Ok(cook_report(CookReportInput {
+                    cook_id: options.identity.cook_id.clone(),
+                    status: "provider_ci_remediation_blocked",
+                    disposition: CookDisposition::Terminal,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(reason),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(run_id),
+                }));
+            }
+        };
+        lifecycle_store.complete_cook_operation(
+            run_id,
+            &operation_key,
+            serde_json::json!({
+                "status": "dispatched",
+                "run_id": child_run_id,
+                "evidence_id": evidence_id,
+            }),
+        )?;
+        lifecycle_store.record_metadata_value(
+            run_id,
+            "provider_ci_remediation",
+            serde_json::json!({
+                "schema": "homeboy/cook-provider-ci-remediation/v1",
+                "status": "dispatched",
+                "evidence_id": evidence_id,
+                "run_id": child_run_id,
+            }),
+        )?;
+        Ok(cook_report(CookReportInput {
+            cook_id: options.identity.cook_id.clone(),
+            status: "provider_ci_remediation_dispatched",
+            disposition: CookDisposition::InFlight,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(format!(
+                "authoritative provider CI failure dispatched one budgeted remediation attempt {child_run_id}"
+            )),
+            exit_code: 1,
+            invocation_latest_run_id: Some(run_id),
+        }))
+    })();
+    if let Err(error) = &result {
+        let _ = lifecycle_store.fail_cook_operation(
+            run_id,
+            &operation_key,
+            serde_json::json!({ "error": error.to_string() }),
+        );
+    }
+    result
 }
 
 /// The component a cook is working on, for notification attribution.
@@ -8043,13 +8239,22 @@ fn run_cook_spine(
                             .pointer("/candidate/fingerprint/sha256")
                             .cloned()
                             .unwrap_or(Value::Null),
+                        "head_sha": promotion
+                            .provenance
+                            .pointer("/candidate/fingerprint/head")
+                            .cloned()
+                            .unwrap_or(Value::Null),
                         "base_sha": promotion
                             .verified_base
                             .as_ref()
                             .map(|base| base.sha.clone())
                             .unwrap_or_default(),
                     });
-                    lifecycle_store.record_metadata_value(&run_id, "provider_ci_handoff", handoff)?;
+                    lifecycle_store.record_metadata_value(
+                        &run_id,
+                        "provider_ci_handoff",
+                        handoff,
+                    )?;
                     return Ok(cook_report(CookReportInput {
                         cook_id,
                         status: "awaiting_provider_ci",

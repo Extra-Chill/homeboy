@@ -32,15 +32,20 @@ homeboy review ci handoff --repo OWNER/REPO --pr PR_NUMBER \
   --environment-digest sha256:ENVIRONMENT
 ```
 
-It authenticates through `gh`, verifies the live PR base and head SHAs, fetches
-the requested check run for that head, and publishes only hydrated GitHub
-evidence. Pending results are safe to repeat; the controller rejects stale,
-duplicate, out-of-order, and mismatched publications.
+It authenticates through `gh`, resolves the repository, PR, gate, check,
+environment, base, and head identity from the durable Cook handoff, and rejects
+caller arguments that do not match that authority. It verifies the live PR base
+and head SHAs, paginates check runs for that exact head, and selects the newest
+matching rerun before publishing only hydrated GitHub evidence. Pending results
+are safe to repeat; the controller rejects stale, duplicate, out-of-order, and
+mismatched publications.
 
 Pending or mismatched evidence keeps the Cook in flight. A matching terminal
 success transitions the same draft PR to ready-for-review. A failed terminal
-publication remains actionable and must re-enter through the normal Cook
-continuation path; no local gate is replayed merely to consume provider CI.
+publication dispatches one budgeted Cook remediation attempt keyed by the
+candidate and evidence identity. Replays do not spend another provider
+execution, and the replacement candidate receives a fresh CI identity; no
+local gate is replayed merely to consume provider CI.
 
 Publish an `external.checks_changed` event with a `publication` object using
 `homeboy/external-check-publication/v1`. The publication must be authoritative
