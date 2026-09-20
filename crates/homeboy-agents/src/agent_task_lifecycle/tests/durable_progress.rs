@@ -223,6 +223,7 @@ fn live_promotion_progress_is_available_to_status_and_logs_before_completion() {
         "gate",
         Some("gate-2"),
         Some("gate elapsed=12s last-progress=5s"),
+        None,
     )
     .expect("persisted live promotion progress");
 
