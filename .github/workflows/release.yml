@@ -393,7 +393,9 @@ jobs:
           client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v2
+      # Keep release quality gates on the same reviewed action revision as PR
+      # CI; a floating tag would invalidate cross-workflow gate equivalence.
+      - uses: Extra-Chill/homeboy-action@f1805406709252e4ab25f983b3c72cdba113f2cf
         with:
           binary-path: .homeboy-bin/homeboy
           commands: review lint
@@ -440,7 +442,7 @@ jobs:
           client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      - uses: Extra-Chill/homeboy-action@v2
+      - uses: Extra-Chill/homeboy-action@f1805406709252e4ab25f983b3c72cdba113f2cf
         with:
           binary-path: .homeboy-bin/homeboy
           commands: review test
