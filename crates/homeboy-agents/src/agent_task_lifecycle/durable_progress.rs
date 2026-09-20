@@ -273,12 +273,34 @@ pub fn record_promotion_progress_in_store(
     let record = lifecycle_store
         .mutate_record(&run_id, |record| {
             let now = now_timestamp();
+            let previous = record.metadata.get("promotion_progress").cloned();
+            let started_at = previous
+                .as_ref()
+                .and_then(|progress| progress.get("started_at"))
+                .and_then(Value::as_str)
+                .unwrap_or(&now)
+                .to_string();
+            let elapsed_seconds = chrono::DateTime::parse_from_rfc3339(&started_at)
+                .ok()
+                .map(|started| {
+                    chrono::Utc::now()
+                        .signed_duration_since(started.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0) as u64
+                })
+                .unwrap_or(0);
             let progress = json!({
+                "schema": "homeboy/agent-task-promotion-progress/v1",
+                "active": phase != "terminal",
                 "phase": phase,
                 "gate": gate,
-            "detail": detail,
-            "output_tail": output_tail,
+                "last_progress": detail,
+                "detail": detail,
+                "output_tail": output_tail,
+                "started_at": started_at,
                 "updated_at": now,
+                "elapsed_seconds": elapsed_seconds,
+                "owner_pid": std::process::id(),
             });
             record.metadata["promotion_progress"] = progress;
             record.updated_at = Some(now);
