@@ -537,7 +537,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
         Some(existing) => {
-            let updated = backend.update_pr(&options.path, existing.number, &options.title, &body)?;
+            let updated =
+                backend.update_pr(&options.path, existing.number, &options.title, &body)?;
             if existing.is_draft && !options.draft_pr {
                 ready_transitioned = true;
                 ("ready", backend.mark_pr_ready(&options.path, &updated)?)

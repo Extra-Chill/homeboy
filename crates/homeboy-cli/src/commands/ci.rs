@@ -1,7 +1,7 @@
 mod external_check_detail_resolver;
-mod handoff;
 mod failure_log_triage;
 mod gate;
+mod handoff;
 mod pins;
 mod plan;
 mod scope;
