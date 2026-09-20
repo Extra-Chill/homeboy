@@ -6553,6 +6553,7 @@ mod tests {
                 finalization: crate::agents::agent_task_service::CookFinalization {
                     no_finalize: true,
                     draft_pr: false,
+                    provider_ci: None,
                     base: "main".to_string(),
                     head: None,
                     title: "runtime continuation fixture".to_string(),
@@ -6678,6 +6679,7 @@ mod tests {
                 finalization: crate::agents::agent_task_service::CookFinalization {
                     no_finalize: true,
                     draft_pr: false,
+                    provider_ci: None,
                     base: "main".to_string(),
                     head: None,
                     title: "legacy terminal continuation fixture".to_string(),

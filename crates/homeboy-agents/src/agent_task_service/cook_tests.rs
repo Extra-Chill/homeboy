@@ -43,6 +43,7 @@ use crate::agent_task_finalization::{
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
+use crate::agent_task_loop_controller::AgentTaskLoopGateStatus;
 use crate::agent_task_scheduler::{
     AgentTaskAggregateStatus, AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskScheduler, AgentTaskState,
@@ -5159,6 +5160,7 @@ fn batch_cook_options(
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Batch cook".to_string(),
@@ -13251,6 +13253,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 finalization: CookFinalization {
                     no_finalize: true,
                     draft_pr: false,
+                    provider_ci: None,
                     base: "main".to_string(),
                     head: None,
                     title: "Detached cook".to_string(),
@@ -17380,6 +17383,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Cook".to_string(),
@@ -17394,6 +17398,399 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
         gates: VerifyGateOptions::default(),
         harvest_context: Default::default(),
     }
+}
+
+fn provider_ci_options(cook_id: &str, run_id: &str, loop_id: &str) -> CookRequest {
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.to_string();
+    options.finalization.no_finalize = false;
+    options.finalization.provider_ci = Some(CookProviderCi {
+        loop_id: loop_id.to_string(),
+        gate_id: "ci".to_string(),
+        check_id: "homeboy-test".to_string(),
+        environment_digest: "sha256:environment".to_string(),
+    });
+    options.identity.initial_plan.options.execution_budget = AgentTaskExecutionBudget::new(2, 1, 1);
+    options
+}
+
+fn seed_provider_ci_cook(
+    options: &CookRequest,
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    patch_path: &std::path::Path,
+    gate_status: AgentTaskLoopGateStatus,
+    publication: Value,
+) {
+    store
+        .persist_initial_recipe(options)
+        .expect("persist provider CI recipe");
+    submit_plan_in_test_store(
+        lifecycle_store,
+        &options.identity.initial_plan,
+        Some(&options.identity.initial_run_id),
+    )
+    .expect("persist provider CI plan");
+    lifecycle_store
+        .record_cook_attempt(
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+        )
+        .expect("index provider CI attempt");
+    let mut candidate = promotion(&options.identity.initial_run_id);
+    candidate.patch_artifact.path = patch_path.display().to_string();
+    candidate.patch_artifact.sha256 = Some(
+        homeboy_engine_primitives::content_hash::sha256_hex(
+            b"diff --git a/base.txt b/base.txt\nindex df967b9..c3e6c0f 100644\n--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-base\n+candidate\n",
+        ),
+    );
+    let target = patch_path
+        .parent()
+        .expect("provider CI target")
+        .join("target");
+    std::fs::create_dir_all(&target).expect("create provider CI target");
+    for args in [
+        vec!["init", "--quiet", "-b", "main"],
+        vec!["config", "user.email", "test@example.com"],
+        vec!["config", "user.name", "Homeboy Test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&target)
+            .status()
+            .expect("initialize provider CI target")
+            .success());
+    }
+    std::fs::write(target.join("base.txt"), "base\n").expect("seed provider CI target");
+    assert!(Command::new("git")
+        .args(["add", "base.txt"])
+        .current_dir(&target)
+        .status()
+        .expect("stage provider CI target")
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "--quiet", "-m", "base"])
+        .current_dir(&target)
+        .status()
+        .expect("commit provider CI target")
+        .success());
+    let head = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&target)
+            .output()
+            .expect("read provider CI target HEAD")
+            .stdout,
+    )
+    .expect("provider CI target HEAD is UTF-8")
+    .trim()
+    .to_string();
+    candidate.target.path = Some(target.display().to_string());
+    candidate.target.head = Some(head.clone());
+    candidate.provenance["worktree_path"] = target.display().to_string().into();
+    candidate.provenance["candidate"]["fingerprint"]["head"] = head.into();
+    lifecycle_store
+        .record_promotion(
+            &options.identity.initial_run_id,
+            serde_json::to_value(candidate).expect("serialize provider CI promotion"),
+        )
+        .expect("persist provider CI promotion");
+    seed_substantive_candidate_aggregate(
+        &options.identity.initial_run_id,
+        &options.identity.initial_plan,
+        patch_path,
+        "diff --git a/base.txt b/base.txt\nindex df967b9..c3e6c0f 100644\n--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-base\n+candidate\n",
+    );
+    assert!(Command::new("git")
+        .args([
+            "apply",
+            patch_path.to_str().expect("provider CI patch path"),
+        ])
+        .current_dir(&target)
+        .status()
+        .expect("apply provider CI candidate patch")
+        .success());
+    lifecycle_store
+        .mutate_record(&options.identity.initial_run_id, |record| {
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "task_id": options.identity.initial_plan.tasks[0].task_id,
+                "attempt": 1,
+                "state": "succeeded",
+                "backend": "fixture",
+                "model": null
+            }]);
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            record.metadata["provider_ci_handoff"] = serde_json::json!({
+                "schema": "homeboy/cook-provider-ci-handoff/v1",
+                "status": "awaiting_provider_ci",
+                "cook_id": options.identity.cook_id,
+                "run_id": options.identity.initial_run_id,
+                "loop_id": options.finalization.provider_ci.as_ref().unwrap().loop_id,
+                "gate_id": "ci",
+                "check_id": "homeboy-test",
+                "environment_digest": "sha256:environment",
+                "publication": { "status": "draft_published", "pr_number": 42 },
+                "base_sha": "verified-base",
+                "head_sha": "candidate"
+            });
+            true
+        })
+        .expect("persist provider CI handoff");
+
+    let mut controller = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
+        options
+            .finalization
+            .provider_ci
+            .as_ref()
+            .unwrap()
+            .loop_id
+            .clone(),
+        "verify",
+        "v1",
+    );
+    controller.gate_bundles = vec![crate::agent_task_loop_controller::AgentTaskGateBundle {
+        bundle_id: "ci".to_string(),
+        description: "provider CI".to_string(),
+        checks: vec![
+            crate::agent_task_loop_controller::AgentTaskGateBundleCheck {
+                check_id: "homeboy-test".to_string(),
+                kind: crate::agent_task_loop_controller::AgentTaskGateBundleCheckKind::Manual,
+                input: serde_json::json!({
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "verified-base",
+                    "head_sha": "candidate",
+                    "environment_digest": "sha256:environment"
+                }),
+                retryable: false,
+            },
+        ],
+    }];
+    controller.gate_results = vec![
+        crate::agent_task_loop_controller::AgentTaskGateBundleResult {
+            result_id: "ci-result".to_string(),
+            bundle_id: "ci".to_string(),
+            entity_id: None,
+            run_id: None,
+            status: gate_status,
+            checks: vec![
+                crate::agent_task_loop_controller::AgentTaskGateCheckResult {
+                    check_id: "homeboy-test".to_string(),
+                    status: gate_status,
+                    retryable: false,
+                    classification: Some("external_check_result".to_string()),
+                    evidence: Vec::new(),
+                    details: publication,
+                },
+            ],
+            recorded_at: "2026-09-20T19:00:00Z".to_string(),
+        },
+    ];
+    crate::agent_task_controller_service::write_test_record(&controller)
+        .expect("persist provider CI controller");
+}
+
+#[test]
+fn cook_provider_ci_pending_resume_success_and_failed_remediation_are_durable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let lifecycle_store = test_lifecycle_store();
+        let patch_root = tempfile::tempdir().expect("provider CI patch root");
+        let options = provider_ci_options(
+            "cook-provider-ci",
+            "cook-provider-ci-run",
+            "loop-provider-ci",
+        );
+        let pending = serde_json::json!({
+            "schema": "homeboy/external-check-publication/v1",
+            "provider": "github",
+            "repository": "Extra-Chill/homeboy",
+            "base_sha": "verified-base",
+            "head_sha": "candidate",
+            "gate_id": "ci",
+            "check_id": "homeboy-test",
+            "environment_digest": "sha256:environment",
+            "status": "pending",
+            "conclusion": null,
+            "observed_at": "2026-09-20T19:00:00Z",
+            "sequence": 1,
+            "evidence_id": "check-pending",
+            "authoritative": true,
+            "hydrated": true
+        });
+        seed_provider_ci_cook(
+            &options,
+            &store,
+            &lifecycle_store,
+            &patch_root.path().join("candidate.patch"),
+            AgentTaskLoopGateStatus::Pending,
+            pending,
+        );
+        let pending_result = CookService::run(
+            options.clone(),
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("pending provider CI resumes");
+        assert_eq!(pending_result.value.status, "awaiting_provider_ci");
+        assert_eq!(pending_result.exit_code, 1);
+
+        let success = serde_json::json!({
+            "schema": "homeboy/external-check-publication/v1",
+            "provider": "github",
+            "repository": "Extra-Chill/homeboy",
+            "base_sha": "verified-base",
+            "head_sha": "candidate",
+            "gate_id": "ci",
+            "check_id": "homeboy-test",
+            "environment_digest": "sha256:environment",
+            "status": "completed",
+            "conclusion": "success",
+            "observed_at": "2026-09-20T19:01:00Z",
+            "sequence": 2,
+            "evidence_id": "check-success",
+            "authoritative": true,
+            "hydrated": true
+        });
+        let mut controller = crate::agent_task_controller_service::status("loop-provider-ci")
+            .expect("provider CI controller");
+        controller.gate_results[0].status = AgentTaskLoopGateStatus::Satisfied;
+        controller.gate_results[0].checks[0].status = AgentTaskLoopGateStatus::Satisfied;
+        controller.gate_results[0].checks[0].details = success;
+        crate::agent_task_controller_service::write_test_record(&controller)
+            .expect("persist successful provider CI");
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let finalized_count = finalized.clone();
+        let success_result = CookService::run(
+            options.clone(),
+            CookRuntime::with_finalizer(
+                Arc::new(UnusedExecutor),
+                &store,
+                &lifecycle_store,
+                move |_, _, _, _| {
+                    finalized_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({ "status": "review_ready", "pr_number": 42 }))
+                },
+                &noop_cook_progress_observer,
+            ),
+            CookMode::Resume,
+        )
+        .expect("successful provider CI finalizes");
+        assert_eq!(success_result.value.status, "review_ready");
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+
+        let failure = serde_json::json!({
+            "schema": "homeboy/external-check-publication/v1",
+            "provider": "github",
+            "repository": "Extra-Chill/homeboy",
+            "base_sha": "verified-base",
+            "head_sha": "candidate",
+            "gate_id": "ci",
+            "check_id": "homeboy-test",
+            "environment_digest": "sha256:environment",
+            "status": "completed",
+            "conclusion": "failure",
+            "observed_at": "2026-09-20T19:02:00Z",
+            "sequence": 3,
+            "evidence_id": "check-failure",
+            "authoritative": true,
+            "hydrated": true
+        });
+        controller.gate_results[0].status = AgentTaskLoopGateStatus::Failed;
+        controller.gate_results[0].checks[0].status = AgentTaskLoopGateStatus::Failed;
+        controller.gate_results[0].checks[0].details = failure;
+        crate::agent_task_controller_service::write_test_record(&controller)
+            .expect("persist failed provider CI");
+        let remediation = CookService::run(
+            options.clone(),
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("failed provider CI dispatches remediation");
+        assert_eq!(
+            remediation.value.status,
+            "provider_ci_remediation_dispatched"
+        );
+        let recipe = store
+            .load_recipe("cook-provider-ci")
+            .expect("updated recipe");
+        assert_eq!(recipe.attempts.len(), 2);
+        let replay = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("failed provider CI replay is idempotent");
+        assert_eq!(replay.value.status, "provider_ci_remediation_dispatched");
+        assert_eq!(
+            store
+                .load_recipe("cook-provider-ci")
+                .unwrap()
+                .attempts
+                .len(),
+            2
+        );
+    });
+}
+
+#[test]
+fn cook_provider_ci_budget_exhaustion_does_not_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = CookRecipeStore::from_current_data_root().expect("recipe store");
+        let lifecycle_store = test_lifecycle_store();
+        let patch_root = tempfile::tempdir().expect("provider CI patch root");
+        let mut options = provider_ci_options(
+            "cook-provider-ci-budget",
+            "cook-provider-ci-budget-run",
+            "loop-provider-ci-budget",
+        );
+        options
+            .identity
+            .initial_plan
+            .options
+            .execution_budget
+            .max_provider_executions = 0;
+        seed_provider_ci_cook(
+            &options,
+            &store,
+            &lifecycle_store,
+            &patch_root.path().join("candidate.patch"),
+            AgentTaskLoopGateStatus::Failed,
+            serde_json::json!({
+                "schema": "homeboy/external-check-publication/v1",
+                "provider": "github",
+                "repository": "Extra-Chill/homeboy",
+                "base_sha": "verified-base",
+                "head_sha": "candidate",
+                "gate_id": "ci",
+                "check_id": "homeboy-test",
+                "environment_digest": "sha256:environment",
+                "status": "completed",
+                "conclusion": "failure",
+                "observed_at": "2026-09-20T19:02:00Z",
+                "sequence": 3,
+                "evidence_id": "check-budget",
+                "authoritative": true,
+                "hydrated": true
+            }),
+        );
+        let result = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+            CookMode::Resume,
+        )
+        .expect("budget exhaustion is a Cook result");
+        assert_eq!(result.value.status, "provider_ci_remediation_blocked");
+        assert_eq!(
+            store
+                .load_recipe("cook-provider-ci-budget")
+                .unwrap()
+                .attempts
+                .len(),
+            1
+        );
+    });
 }
 
 #[test]
@@ -18057,6 +18454,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             finalization: CookFinalization {
                 no_finalize: false,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: Some("fix/8058".to_string()),
                 title: "Close #8058".to_string(),
@@ -20928,6 +21326,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
         finalization: CookFinalization {
             no_finalize: false,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: Some("fix/8058".to_string()),
             title: "Close #8058".to_string(),

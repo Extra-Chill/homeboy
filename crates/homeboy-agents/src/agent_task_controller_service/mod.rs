@@ -533,6 +533,11 @@ pub fn status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     controller::load_controller(loop_id)
 }
 
+#[cfg(test)]
+pub(crate) fn write_test_record(record: &AgentTaskLoopControllerRecord) -> Result<()> {
+    controller::write_controller(record)
+}
+
 /// List every durable controller record.
 pub fn list() -> Result<ControllerListReport> {
     Ok(ControllerListReport {
@@ -681,7 +686,9 @@ impl WaitReconcileOutcome {
 /// - Any other `event_type`. `github.pr.checks_changed`, `github.pr.merged`,
 ///   and every operator-authored type describe things Homeboy does not
 ///   observe locally; there is no durable evidence to read, so the wait stays
-///   open until something applies the event.
+///   open until something applies the event. Provider adapters hand off
+///   gate evidence separately through the generic `external.checks_changed`
+///   publication contract.
 /// - A wait with no `external_ref`. Its only remaining identity is an entity
 ///   id, which names what the wait is *about*, not what would satisfy it.
 ///   Matching on that alone is a guess.

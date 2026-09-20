@@ -534,11 +534,18 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
+    let mut ready_transitioned = false;
     let (action, pr) = match existing {
-        Some(existing) => (
-            "updated",
-            backend.update_pr(&options.path, existing.number, &options.title, &body)?,
-        ),
+        Some(existing) => {
+            let updated =
+                backend.update_pr(&options.path, existing.number, &options.title, &body)?;
+            if existing.is_draft && !options.draft_pr {
+                ready_transitioned = true;
+                ("ready", backend.mark_pr_ready(&options.path, &updated)?)
+            } else {
+                ("updated", updated)
+            }
+        }
         None => (
             "created",
             backend.create_pr(
@@ -551,7 +558,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             )?,
         ),
     };
-    let published_draft = if newly_created {
+    let published_draft = if ready_transitioned {
+        false
+    } else if newly_created {
         options.draft_pr
     } else {
         draft
