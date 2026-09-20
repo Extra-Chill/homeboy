@@ -94,6 +94,8 @@ const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 const OPENCODE_SESSION_EXPORT_TIMEOUT_MS = 2_000;
 const OPENCODE_SESSION_EXPORT_MAX_BYTES = 1024 * 1024;
 const OPENCODE_SESSION_EXPORT_ATTEMPTS = 2;
+const OPENCODE_USAGE_SCAN_MAX_BYTES = 16 * 1024 * 1024;
+const OPENCODE_USAGE_SCHEMA = 'homeboy/agent-task-usage/v1';
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -613,6 +615,7 @@ function opencodeSuccessOutcome(context) {
 			opencode_session: session,
 			...(session.model ? { model: session.model } : {}),
 			opencode_progress: progressMetadata(context),
+			...opencodeUsageMetadata(context),
 		},
 		...(structured.outputs || intentionalNoChange ? {
 			outputs: {
@@ -627,6 +630,96 @@ function opencodeSuccessOutcome(context) {
 		} : {}),
 		...evidence,
 	});
+}
+
+function opencodeUsageMetadata(context = {}) {
+	return { provider_usage: parseOpenCodeUsage(context.spawnResult?.stdout) };
+}
+
+/**
+ * Normalize only the usage vocabulary emitted by `opencode run --format json`.
+ * Do not infer totals: OpenCode's input/output/cache/reasoning semantics are
+ * provider-dependent, and an absent cost is not a provider-reported zero.
+ */
+function parseOpenCodeUsage(stdout = '') {
+	const usage = {
+		schema: OPENCODE_USAGE_SCHEMA,
+		source: 'opencode-jsonl',
+		execution_id: null,
+		events_seen: 0,
+		events_with_usage: 0,
+		duplicate_events: 0,
+		malformed_events: 0,
+		stream_truncated: false,
+		fields: {},
+	};
+	const seen = new Set();
+	const eventIds = new Set();
+	const values = {
+		input_tokens: [],
+		output_tokens: [],
+		reasoning_tokens: [],
+		cache_read_tokens: [],
+		cache_write_tokens: [],
+		total_tokens: [],
+		cost_usd: [],
+	};
+	const raw = String(stdout);
+	const scan = Buffer.byteLength(raw) > OPENCODE_USAGE_SCAN_MAX_BYTES
+		? Buffer.from(raw).subarray(0, OPENCODE_USAGE_SCAN_MAX_BYTES).toString()
+		: raw;
+	usage.stream_truncated = scan !== raw;
+	for (const line of scan.split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		let event;
+		try {
+			event = JSON.parse(line);
+		} catch {
+			usage.malformed_events += 1;
+			continue;
+		}
+		if (event?.type !== 'step_finish') continue;
+		usage.events_seen += 1;
+		const sessionID = stringValue(event.sessionID);
+		const part = event.part && typeof event.part === 'object' ? event.part : null;
+		const partID = stringValue(part?.id);
+		if (sessionID) eventIds.add(sessionID);
+		const identity = sessionID && partID ? `${sessionID}:${partID}` : `unidentified:${line}`;
+		if (seen.has(identity)) {
+			usage.duplicate_events += 1;
+			continue;
+		}
+		seen.add(identity);
+		const tokens = part?.tokens && typeof part.tokens === 'object' ? part.tokens : null;
+		if (!tokens) continue;
+		usage.events_with_usage += 1;
+		values.input_tokens.push(nonNegativeFinite(tokens.input));
+		values.output_tokens.push(nonNegativeFinite(tokens.output));
+		values.reasoning_tokens.push(nonNegativeFinite(tokens.reasoning));
+		values.cache_read_tokens.push(nonNegativeFinite(tokens.cache?.read));
+		values.cache_write_tokens.push(nonNegativeFinite(tokens.cache?.write));
+		values.total_tokens.push(nonNegativeFinite(tokens.total));
+		values.cost_usd.push(nonNegativeFinite(part.cost));
+	}
+	usage.execution_id = eventIds.size === 1 ? [...eventIds][0] : null;
+	for (const [name, fieldValues] of Object.entries(values)) {
+		const complete = usage.events_with_usage > 0
+			&& fieldValues.length === usage.events_with_usage
+			&& fieldValues.every((value) => value !== null)
+			&& !usage.stream_truncated
+			&& usage.malformed_events === 0
+			&& usage.events_seen - usage.duplicate_events === usage.events_with_usage;
+		const observed = fieldValues.some((value) => value !== null);
+		const status = complete ? 'complete' : observed ? 'partial' : 'unknown';
+		usage[name] = complete ? fieldValues.reduce((total, value) => total + value, 0) : null;
+		usage[`${name}_status`] = status;
+	}
+	delete usage.fields;
+	return usage;
+}
+
+function nonNegativeFinite(value) {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function structuredOpenCodeOutputs(context = {}) {
@@ -776,6 +869,7 @@ function opencodeFailureOutcome(context) {
 			...(context.spawnResult.signal ? { signal: context.spawnResult.signal } : {}),
 			opencode_session: sessionMetadata(context),
 			opencode_progress: progressMetadata(context),
+			...opencodeUsageMetadata(context),
 		},
 		...collectOpenCodeArtifacts(context),
 	});
@@ -1923,6 +2017,7 @@ module.exports = {
 	OPENCODE_WORKSPACE_TOOLS,
 	OPENCODE_WORKSPACE_MATERIALIZATION,
 	executeOpenCodeAgentTask,
+	parseOpenCodeUsage,
 	openCodeWorkspacePermissionPreflight,
 	outcome,
 	providerContract,

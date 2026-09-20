@@ -78,6 +78,16 @@ other absolute paths with `<private-path>`. Repeated frames are coalesced and th
 stream is capped at `max_progress_events` (default 200). The terminal result records
 the same event summary and exposes `progress_events` when events were emitted.
 
+## Usage Accounting
+
+The adapter emits `metadata.provider_usage` from verified `step_finish` JSONL
+frames. It sums only de-duplicated events identified by `sessionID` plus
+`part.id`; missing fields, malformed lines, and scan truncation set the
+corresponding `*_status` to `partial` or `unknown` and never become zero.
+`total_tokens` is reported only when OpenCode supplies it, and `cost_usd: 0`
+is known only when the event explicitly reports zero. Provider/model identity
+comes from the separate session metadata path rather than invented JSONL keys.
+
 This is the runtime-side producer for Homeboy #8282. Homeboy must ingest the JSONL
 file or callback as its single canonical structured event stream, preserving the
 cursor rather than serializing frames into log messages; that adoption is tracked by
