@@ -7936,6 +7936,62 @@ pub fn record_promotion_progress_frames(
     Ok(())
 }
 
+/// Persist the latest controller-owned promotion progress so status and logs
+/// can observe an in-flight gate without inspecting the owner process.
+pub fn record_promotion_progress_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    gate: Option<&str>,
+    last_progress: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    const MAX_PROGRESS_BYTES: usize = 512;
+    let run_id = sanitize_run_id(run_id);
+    let phase = homeboy_core::redaction::redact_string(phase);
+    let gate = gate.map(homeboy_core::redaction::redact_string);
+    let last_progress = last_progress
+        .map(homeboy_core::redaction::redact_string)
+        .map(|value| value.chars().take(MAX_PROGRESS_BYTES).collect::<String>());
+    let record = lifecycle_store.mutate_record(&run_id, |record| {
+        let now = now_timestamp();
+        let metadata = record.ensure_metadata_object();
+        let previous = metadata.get("promotion_progress").cloned();
+        let started_at = previous
+            .as_ref()
+            .and_then(|progress| progress.get("started_at"))
+            .and_then(Value::as_str)
+            .unwrap_or(&now)
+            .to_string();
+        let elapsed_seconds = chrono::DateTime::parse_from_rfc3339(&started_at)
+            .ok()
+            .map(|started| {
+                chrono::Utc::now()
+                    .signed_duration_since(started.with_timezone(&chrono::Utc))
+                    .num_seconds()
+                    .max(0) as u64
+            })
+            .unwrap_or(0);
+        metadata.insert(
+            "promotion_progress".to_string(),
+            json!({
+                "schema": "homeboy/agent-task-promotion-progress/v1",
+                "active": phase != "terminal",
+                "phase": phase,
+                "gate": gate,
+                "last_progress": last_progress,
+                "started_at": started_at,
+                "updated_at": now,
+                "elapsed_seconds": elapsed_seconds,
+                "owner_pid": std::process::id(),
+            }),
+        );
+        record.updated_at = Some(now);
+        update_lifecycle_heartbeat(record);
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("promotion progress record was unchanged"))
+}
+
 pub fn record_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
