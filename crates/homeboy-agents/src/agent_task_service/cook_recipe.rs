@@ -730,6 +730,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         finalization: serde_json::json!({
             "no_finalize": options.finalization.no_finalize,
             "draft_pr": options.finalization.draft_pr,
+            "provider_ci": options.finalization.provider_ci,
             "base": options.finalization.base,
             "head": options.finalization.head,
             "title": options.finalization.title,
@@ -2809,6 +2810,14 @@ fn reconstruct_recipe_options(
                 .transpose()
                 .map_err(recipe_value_error("draft_pr"))?
                 .unwrap_or(false),
+            provider_ci: recipe
+                .finalization
+                .get("provider_ci")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(recipe_value_error("provider_ci"))?,
             base: serde_json::from_value(field("base")?).map_err(recipe_value_error("base"))?,
             head: serde_json::from_value(field("head")?).map_err(recipe_value_error("head"))?,
             title: serde_json::from_value(field("title")?).map_err(recipe_value_error("title"))?,
@@ -3177,6 +3186,49 @@ mod tests {
             sensitive_mappings: vec!["TEST_TOKEN".to_string()],
             harvest_context: Default::default(),
         }
+    }
+
+    #[test]
+    fn provider_ci_recipe_field_accepts_legacy_absent_and_null_values() {
+        let mut legacy = recipe();
+        legacy
+            .finalization
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_ci");
+        assert!(reconstruct_options(&legacy)
+            .expect("legacy recipe reconstructs")
+            .finalization
+            .provider_ci
+            .is_none());
+
+        let mut explicit_null = recipe();
+        explicit_null.finalization["provider_ci"] = Value::Null;
+        assert!(reconstruct_options(&explicit_null)
+            .expect("null provider CI reconstructs")
+            .finalization
+            .provider_ci
+            .is_none());
+    }
+
+    #[test]
+    fn provider_ci_recipe_field_reconstructs_configured_identity() {
+        let mut configured = recipe();
+        configured.finalization["provider_ci"] = serde_json::json!({
+            "loop_id": "loop-ci",
+            "gate_id": "external-ci",
+            "check_id": "homeboy-test",
+            "environment_digest": "sha256:environment"
+        });
+        let provider_ci = reconstruct_options(&configured)
+            .expect("configured provider CI reconstructs")
+            .finalization
+            .provider_ci
+            .expect("provider CI policy");
+        assert_eq!(provider_ci.loop_id, "loop-ci");
+        assert_eq!(provider_ci.gate_id, "external-ci");
+        assert_eq!(provider_ci.check_id, "homeboy-test");
+        assert_eq!(provider_ci.environment_digest, "sha256:environment");
     }
 
     fn promotion_value(status: &str, gate_results: Value) -> Value {

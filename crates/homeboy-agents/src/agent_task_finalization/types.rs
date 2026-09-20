@@ -554,6 +554,17 @@ pub trait AgentTaskPrFinalizationBackend {
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef>;
+    /// Transition an already published draft candidate to ready-for-review.
+    /// The operation must be idempotent for an already-ready PR.
+    fn mark_pr_ready(&mut self, path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
+        let _ = (path, pr);
+        Err(Error::validation_invalid_argument(
+            "pr",
+            "finalization backend does not support draft-to-ready transition",
+            None,
+            None,
+        ))
+    }
     fn verify_publication_binding(
         &mut self,
         path: &str,

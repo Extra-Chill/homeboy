@@ -240,3 +240,195 @@ fn command_gate_check_caps_stored_stdout_and_records_truncation() {
         64 * 1024
     );
 }
+
+#[test]
+fn external_ci_publication_requires_identity_and_completes_the_controller_cycle() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            phase: "verify".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "ci".to_string(),
+            description: "authoritative CI".to_string(),
+            checks: vec![AgentTaskGateBundleCheck {
+                check_id: "homeboy-test".to_string(),
+                kind: AgentTaskGateBundleCheckKind::Manual,
+                input: json!({
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "environment_digest": "sha256:env"
+                }),
+                retryable: false,
+            }],
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunGates {
+                bundle_id: "ci".to_string(),
+                entity_id: None,
+            },
+            "wait for CI",
+        );
+        controller::write_controller(&record).expect("controller written");
+        let blocked = run_next(
+            "loop-ci-handoff",
+            Arc::new(CapturingExecutor::default()),
+            &NoopDispatchHook,
+        )
+        .expect("pending CI gate records a blocked result");
+        assert_eq!(blocked.exit_code, 1);
+
+        let stale = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-stale".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "wrong-base",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "observed_at": "2026-09-20T19:00:00Z",
+                    "sequence": 1,
+                    "evidence_id": "check-1",
+                    "authoritative": true,
+                    "hydrated": true
+                }
+            }),
+        })
+        .expect("stale publication recorded");
+        assert_eq!(
+            stale.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Pending
+        );
+
+        let report = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-failure".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "observed_at": "2026-09-20T19:01:00Z",
+                    "sequence": 2,
+                    "evidence_id": "check-2",
+                    "authoritative": true,
+                    "hydrated": true
+                }
+            }),
+        })
+        .expect("failure publication applied");
+        assert_eq!(
+            report.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Failed
+        );
+
+        let report = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-success".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "observed_at": "2026-09-20T19:02:00Z",
+                    "sequence": 3,
+                    "evidence_id": "check-3",
+                    "authoritative": true,
+                    "hydrated": true
+                }
+            }),
+        })
+        .expect("success publication applied");
+        assert_eq!(
+            report.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Satisfied
+        );
+        for (event_id, sequence, conclusion) in [
+            ("publication-duplicate", 3, "failure"),
+            ("publication-old", 2, "failure"),
+        ] {
+            let replay = apply_event(ControllerApplyEventRequest {
+                loop_id: "loop-ci-handoff".to_string(),
+                event_type: "external.checks_changed".to_string(),
+                event_id: Some(event_id.to_string()),
+                event_key: Some("pr:1".to_string()),
+                entity_id: None,
+                payload: json!({
+                    "publication": {
+                        "schema": "homeboy/external-check-publication/v1",
+                        "provider": "github",
+                        "repository": "Extra-Chill/homeboy",
+                        "base_sha": "base-sha",
+                        "head_sha": "candidate-sha",
+                        "gate_id": "ci",
+                        "check_id": "homeboy-test",
+                        "environment_digest": "sha256:env",
+                        "status": "completed",
+                        "conclusion": conclusion,
+                        "observed_at": "2026-09-20T19:03:00Z",
+                        "sequence": sequence,
+                        "evidence_id": event_id,
+                        "authoritative": true,
+                        "hydrated": true
+                    }
+                }),
+            })
+            .expect("replayed publication is idempotent");
+            assert_eq!(
+                replay.controller.gate_results[0].status,
+                AgentTaskLoopGateStatus::Satisfied
+            );
+        }
+        assert!(report.controller.next_actions.iter().any(|action| {
+            matches!(action.action, AgentTaskLoopPolicyAction::RunGates { ref bundle_id, .. } if bundle_id == "ci")
+                && action.status == AgentTaskLoopActionStatus::Pending
+        }));
+        let completed = run_next(
+            "loop-ci-handoff",
+            Arc::new(CapturingExecutor::default()),
+            &NoopDispatchHook,
+        )
+        .expect("controller consumed satisfied CI evidence");
+        assert_eq!(completed.exit_code, 0);
+        assert!(completed
+            .value
+            .controller
+            .terminal_outcomes
+            .iter()
+            .any(|outcome| outcome.status == AgentTaskLoopTerminalStatus::Passed));
+    });
+}

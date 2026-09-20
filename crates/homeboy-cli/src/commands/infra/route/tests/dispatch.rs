@@ -2019,6 +2019,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             finalization: crate::agents::agent_task_service::CookFinalization {
                 no_finalize: true,
                 draft_pr: false,
+                provider_ci: None,
                 base: "main".to_string(),
                 head: None,
                 title: "Lab Cook retry".to_string(),
