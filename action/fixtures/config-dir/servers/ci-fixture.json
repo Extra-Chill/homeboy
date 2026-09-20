@@ -1,0 +1,7 @@
+{
+  "id": "ci-fixture",
+  "host": "ci-fixture.test",
+  "user": "deploy",
+  "port": 22,
+  "identity_file": null
+}

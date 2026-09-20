@@ -69,3 +69,38 @@ echo "Config resolved from ${CONFIG_FILE}:"
 echo "  id:        ${PORTABLE_ID}"
 echo "  extension: ${PORTABLE_EXTENSION:-none}"
 echo "  dir:       ${CONFIG_DIR}"
+
+# ── Homeboy config dir (project/server/fleet config for operations commands) ──
+# Operations commands (deploy/fleet) need a Homeboy project and server, which
+# live in Homeboy's config root and are absent on a fresh runner. When the
+# caller sets `config-dir`, it names the repo-relative directory that IS the
+# config root — it contains projects/, servers/, and optionally components/
+# and fleets/ — and this step exports HOMEBOY_CONFIG_ROOT so every later
+# homeboy invocation in the run resolves from it (homeboy#14783). Nothing is
+# copied and the runner user's real config is never read or touched.
+
+HOMEBOY_CONFIG_DIR_INPUT="${HOMEBOY_CONFIG_DIR_INPUT:-}"
+if [ -n "${HOMEBOY_CONFIG_DIR_INPUT}" ]; then
+  WORKSPACE_ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
+  case "${HOMEBOY_CONFIG_DIR_INPUT}" in
+    /*) CONFIG_ROOT="${HOMEBOY_CONFIG_DIR_INPUT}" ;;
+    *)  CONFIG_ROOT="${WORKSPACE_ROOT}/${HOMEBOY_CONFIG_DIR_INPUT}" ;;
+  esac
+  CONFIG_ROOT="${CONFIG_ROOT%/}"
+
+  if [ ! -d "${CONFIG_ROOT}/projects" ]; then
+    echo "::error::config-dir '${HOMEBOY_CONFIG_DIR_INPUT}' must contain projects/ (resolved: ${CONFIG_ROOT})"
+    echo "::error::Expected layout: <config-dir>/projects/<project-id>/<project-id>.json and <config-dir>/servers/<server-id>.json"
+    exit 1
+  fi
+
+  PROJECT_IDS="$(find "${CONFIG_ROOT}/projects" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | paste -sd ' ' -)"
+  SERVER_IDS="$(find "${CONFIG_ROOT}/servers" -mindepth 1 -maxdepth 1 -type f -name '*.json' -printf '%f\n' 2>/dev/null | sed 's/\.json$//' | sort | paste -sd ' ' -)"
+
+  echo "HOMEBOY_CONFIG_ROOT=${CONFIG_ROOT}" >> "${GITHUB_ENV}"
+  echo "homeboy-config-root=${CONFIG_ROOT}" >> "${GITHUB_OUTPUT}"
+
+  echo "Homeboy config root: ${CONFIG_ROOT}"
+  echo "  projects: ${PROJECT_IDS:-none}"
+  echo "  servers:  ${SERVER_IDS:-none}"
+fi

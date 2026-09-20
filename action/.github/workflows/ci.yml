@@ -125,6 +125,10 @@ on:
         description: 'Maximum wall-clock time for each Homeboy command phase.'
         type: string
         default: '1800'
+      config-dir:
+        description: 'Repo-relative Homeboy config root (projects/, servers/, components/, fleets/) exported as HOMEBOY_CONFIG_ROOT so operations commands can resolve checked-in targets.'
+        type: string
+        default: ''
       test-timeout-seconds:
         description: 'Maximum wall-clock time for the Homeboy test child. Must leave cleanup margin below the command phase timeout.'
         type: string
@@ -522,6 +526,7 @@ jobs:
           HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
         uses: ./.homeboy-action
         with:
+          config-dir: ${{ inputs.config-dir }}
           version: ${{ inputs.version }}
           source: ${{ inputs.source }}
           setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
@@ -657,6 +662,7 @@ jobs:
           HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
         uses: ./.homeboy-action
         with:
+          config-dir: ${{ inputs.config-dir }}
           version: ${{ inputs.version }}
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
@@ -797,6 +803,7 @@ jobs:
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
+          config-dir: ${{ inputs.config-dir }}
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           extension: ${{ inputs.extension }}
@@ -951,6 +958,7 @@ jobs:
           NEXTEST_PROFILE: ci
         uses: ./.homeboy-action
         with:
+          config-dir: ${{ inputs.config-dir }}
           binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
           setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
           extension: ${{ inputs.extension }}

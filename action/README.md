@@ -358,6 +358,9 @@ Use these outputs to gate downstream jobs:
 | `expected-commands` | No | *(falls back to `commands`)* | Full set of command types expected to run across the workflow (e.g. `review audit,review lint,review test`). Set this on every invocation when a workflow splits review audit/lint/test across separate steps, otherwise each invocation will close sibling invocations' issues during reconciliation. |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
+| `ssh-key` | No | | SSH private key for `deploy`/`fleet` operations commands. Starts an agent and loads it; if empty, SSH is assumed pre-configured. |
+| `ssh-known-hosts` | No | | Extra `known_hosts` entries for the servers those commands reach. |
+| `config-dir` | No | | Repo-relative Homeboy config root (`projects/`, `servers/`, `components/`, `fleets/`), exported as `HOMEBOY_CONFIG_ROOT` so operations commands can resolve checked-in targets. See [Deploy from CI](#deploy-from-ci). |
 | `rig` | No | | Bench rig pair/list passed to `homeboy bench --rig` |
 | `scenario` | No | | Bench scenario ID passed to `homeboy bench --scenario` |
 | `runs` | No | | Bench run count passed to `homeboy bench --runs` |
@@ -660,6 +663,68 @@ jobs:
           release-head: 'true'
           release-from-artifacts: artifacts
 ```
+
+### Deploy from CI
+
+Operations commands (`deploy`, `fleet`) need a Homeboy **project** (server id,
+base path, component attachments) and a **server** (host, user, port), which a
+fresh runner does not have. Check a Homeboy config root into the repository
+and point `config-dir` at it; the action exports `HOMEBOY_CONFIG_ROOT`
+(homeboy#14783) so every homeboy invocation in the run resolves from it. Nothing
+is copied and the runner user's real config is never read.
+
+```
+deploy/homeboy/
+├── projects/
+│   └── my-site/
+│       └── my-site.json      # domain, server_id, base_path, path_roots, components[]
+├── servers/
+│   └── prod.json             # id, host, user, port, identity_file: null
+└── components/
+    └── my-plugin.json        # id, remote_url (GitHub), remote_path
+```
+
+Host, user, and port are not secrets. Leave `identity_file` as `null` and
+supply the key through `ssh-key`, which loads it into an agent for the run.
+
+Attachments in `components[]` need only `id` and `remote_path`; leave
+`local_path` empty. With a GitHub `remote_url` in the standalone registry
+entry, Homeboy resolves the component's `homeboy.json` and release asset from
+the repository at the tag — no source checkout on the runner
+(homeboy#14782). Homeboy needs a GitHub token for that; the runner's
+`GITHUB_TOKEN` covers public and org repositories.
+
+```yaml
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      component: { type: string, required: true }
+      version:   { type: string, required: true }
+
+concurrency:
+  group: deploy-my-site
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          config-dir: deploy/homeboy
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          ssh-known-hosts: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          commands: deploy my-site ${{ inputs.component }} --version ${{ inputs.version }}
+```
+
+`config-dir` fails the run before any command if `<config-dir>/projects` is
+missing, and prints the project and server ids it found. The reusable
+`ci.yml` and `release.yml` workflows forward the same input.
 
 ### Recommended CI Profile
 

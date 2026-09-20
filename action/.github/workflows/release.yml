@@ -89,6 +89,10 @@ on:
         description: 'Maximum wall-clock time for the Homeboy command phase.'
         type: string
         default: ''
+      config-dir:
+        description: 'Repo-relative Homeboy config root (projects/, servers/, components/, fleets/) exported as HOMEBOY_CONFIG_ROOT so operations commands can resolve checked-in targets.'
+        type: string
+        default: ''
       action-ref:
         description: 'homeboy-action ref used by this workflow.'
         type: string
@@ -212,6 +216,7 @@ jobs:
         uses: ./.homeboy-action
         with:
           commands: release
+          config-dir: ${{ inputs.config-dir }}
           args: ${{ inputs.args }}
           extension: ${{ inputs.extension }}
           extension-ref: ${{ inputs.extension-ref }}
@@ -311,6 +316,7 @@ jobs:
         id: release
         with:
           commands: release
+          config-dir: ${{ inputs.config-dir }}
           args: ${{ inputs.args }}
           extension: ${{ inputs.extension }}
           extension-ref: ${{ inputs.extension-ref }}

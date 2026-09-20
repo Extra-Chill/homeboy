@@ -199,6 +199,11 @@ inputs:
     required: false
     default: ''
 
+  config-dir:
+    description: 'Repo-relative directory that IS a Homeboy config root — it contains projects/, servers/, and optionally components/ and fleets/. When set, HOMEBOY_CONFIG_ROOT is exported for every homeboy invocation in the run (homeboy#14783) so operations commands (deploy/fleet) resolve their target from checked-in config. Nothing is copied; the runner user''s real config is never read. Leave identity_file null in servers/*.json and supply the key via ssh-key. If empty, no config is injected.'
+    required: false
+    default: ''
+
   # ── Release ──
   release-dry-run:
     description: 'Preview the release without making changes.'
@@ -302,6 +307,7 @@ runs:
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTENSION_INPUT: ${{ inputs.extension }}
+        HOMEBOY_CONFIG_DIR_INPUT: ${{ inputs.config-dir }}
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run preparation -- bash ${{ github.action_path }}/scripts/setup/read-portable-config.sh
 
     # ── Phase 2: Resolve execution context ──
