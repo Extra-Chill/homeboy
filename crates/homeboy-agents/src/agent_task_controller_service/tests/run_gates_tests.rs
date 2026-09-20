@@ -242,7 +242,7 @@ fn command_gate_check_caps_stored_stdout_and_records_truncation() {
 }
 
 #[test]
-fn github_ci_event_satisfies_a_pending_gate_without_rerunning_local_checks() {
+fn external_ci_publication_requires_identity_and_completes_the_controller_cycle() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {
             loop_id: "loop-ci-handoff".to_string(),
@@ -256,7 +256,13 @@ fn github_ci_event_satisfies_a_pending_gate_without_rerunning_local_checks() {
             checks: vec![AgentTaskGateBundleCheck {
                 check_id: "homeboy-test".to_string(),
                 kind: AgentTaskGateBundleCheckKind::Manual,
-                input: json!({ "provider": "github", "head_sha": "candidate-sha" }),
+                input: json!({
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "environment_digest": "sha256:env"
+                }),
                 retryable: false,
             }],
         });
@@ -276,18 +282,97 @@ fn github_ci_event_satisfies_a_pending_gate_without_rerunning_local_checks() {
         .expect("pending CI gate records a blocked result");
         assert_eq!(blocked.exit_code, 1);
 
-        let report = apply_event(ControllerApplyEventRequest {
+        let stale = apply_event(ControllerApplyEventRequest {
             loop_id: "loop-ci-handoff".to_string(),
-            event_type: "github.pr.checks_changed".to_string(),
-            event_id: Some("check-run-1".to_string()),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-stale".to_string()),
             event_key: Some("pr:1".to_string()),
             entity_id: None,
             payload: json!({
-                "head_sha": "candidate-sha",
-                "checks": [{"check_id": "homeboy-test", "status": "success", "url": "https://github.test/check/1"}]
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "wrong-base",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "observed_at": "2026-09-20T19:00:00Z",
+                    "sequence": 1,
+                    "evidence_id": "check-1",
+                    "authoritative": true,
+                    "hydrated": true
+                }
             }),
         })
-        .expect("CI result applied");
+        .expect("stale publication recorded");
+        assert_eq!(
+            stale.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Pending
+        );
+
+        let report = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-failure".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "observed_at": "2026-09-20T19:01:00Z",
+                    "sequence": 2,
+                    "evidence_id": "check-2",
+                    "authoritative": true,
+                    "hydrated": true
+                }
+            }),
+        })
+        .expect("failure publication applied");
+        assert_eq!(
+            report.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Failed
+        );
+
+        let report = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "external.checks_changed".to_string(),
+            event_id: Some("publication-success".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "publication": {
+                    "schema": "homeboy/external-check-publication/v1",
+                    "provider": "github",
+                    "repository": "Extra-Chill/homeboy",
+                    "base_sha": "base-sha",
+                    "head_sha": "candidate-sha",
+                    "gate_id": "ci",
+                    "check_id": "homeboy-test",
+                    "environment_digest": "sha256:env",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "observed_at": "2026-09-20T19:02:00Z",
+                    "sequence": 3,
+                    "evidence_id": "check-3",
+                    "authoritative": true,
+                    "hydrated": true
+                }
+            }),
+        })
+        .expect("success publication applied");
         assert_eq!(
             report.controller.gate_results[0].status,
             AgentTaskLoopGateStatus::Satisfied
@@ -296,5 +381,18 @@ fn github_ci_event_satisfies_a_pending_gate_without_rerunning_local_checks() {
             matches!(action.action, AgentTaskLoopPolicyAction::RunGates { ref bundle_id, .. } if bundle_id == "ci")
                 && action.status == AgentTaskLoopActionStatus::Pending
         }));
+        let completed = run_next(
+            "loop-ci-handoff",
+            Arc::new(CapturingExecutor::default()),
+            &NoopDispatchHook,
+        )
+        .expect("controller consumed satisfied CI evidence");
+        assert_eq!(completed.exit_code, 0);
+        assert!(completed
+            .value
+            .controller
+            .terminal_outcomes
+            .iter()
+            .any(|outcome| outcome.status == AgentTaskLoopTerminalStatus::Passed));
     });
 }

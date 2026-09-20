@@ -749,6 +749,7 @@ dependencies = [
  "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-extension-contract",
+ "homeboy-gate-contract",
  "homeboy-lab-contract",
  "homeboy-lab-runner-contract",
  "homeboy-runner-contract",

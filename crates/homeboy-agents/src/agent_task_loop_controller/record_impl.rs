@@ -98,8 +98,8 @@ impl AgentTaskLoopControllerRecord {
             payload: event.payload.clone(),
         });
 
-        if event.event_type == "github.pr.checks_changed" {
-            self.apply_github_check_results(&event.payload);
+        if event.event_type == "external.checks_changed" {
+            self.apply_external_check_publication(&event.payload);
         }
 
         for wait in &mut self.waits {
@@ -131,34 +131,43 @@ impl AgentTaskLoopControllerRecord {
         actions
     }
 
-    /// Project an authoritative CI publication onto the matching pending gate
-    /// without rerunning local verification. The publisher supplies stable
-    /// `check_id` values and the candidate identity; acceptance remains blocked
-    /// for missing, pending, or non-matching results.
-    fn apply_github_check_results(&mut self, payload: &serde_json::Value) {
-        let Some(checks) = payload.get("checks").and_then(serde_json::Value::as_array) else {
+    /// Project a provider-adapted, authoritative publication onto the matching
+    /// pending gate without rerunning local verification. Provider-specific
+    /// APIs are intentionally outside this generic controller boundary.
+    fn apply_external_check_publication(&mut self, payload: &serde_json::Value) {
+        let Some(publication_value) = payload.get("publication") else {
             return;
         };
+        let Ok(publication) = serde_json::from_value::<
+            homeboy_gate_contract::gate::ExternalCheckPublication,
+        >(publication_value.clone()) else {
+            return;
+        };
+        if publication.validate().is_err() {
+            return;
+        }
         let bundle_ids: Vec<String> = self
             .gate_bundles
             .iter()
             .map(|bundle| bundle.bundle_id.clone())
             .collect();
         for bundle_id in bundle_ids {
-            let expected_head_shas: std::collections::BTreeMap<String, String> = self
+            let declared_checks: std::collections::BTreeMap<String, serde_json::Value> = self
                 .gate_bundles
                 .iter()
                 .find(|bundle| bundle.bundle_id == bundle_id)
                 .into_iter()
                 .flat_map(|bundle| bundle.checks.iter())
-                .filter_map(|check| {
-                    check
-                        .input
-                        .get("head_sha")
-                        .and_then(serde_json::Value::as_str)
-                        .map(|sha| (check.check_id.clone(), sha.to_string()))
-                })
+                .map(|check| (check.check_id.clone(), check.input.clone()))
                 .collect();
+            let Some(declared) = declared_checks.get(&publication.check_id) else {
+                continue;
+            };
+            if publication.gate_id != bundle_id
+                || !Self::external_identity_matches(declared, &publication)
+            {
+                continue;
+            }
             let Some(result) = self
                 .gate_results
                 .iter_mut()
@@ -168,34 +177,29 @@ impl AgentTaskLoopControllerRecord {
                 continue;
             };
             for check in &mut result.checks {
-                let expected_head_sha = expected_head_shas.get(&check.check_id);
-                if expected_head_sha.is_none()
-                    || payload.get("head_sha").and_then(serde_json::Value::as_str)
-                        != expected_head_sha.map(String::as_str)
-                {
+                if check.check_id != publication.check_id {
                     continue;
                 }
-                let Some(publication) = checks.iter().find(|candidate| {
-                    candidate
-                        .get("check_id")
-                        .and_then(serde_json::Value::as_str)
-                        == Some(check.check_id.as_str())
-                }) else {
+                let previous_sequence = check
+                    .details
+                    .get("sequence")
+                    .and_then(|value| value.as_u64());
+                if previous_sequence.is_some_and(|sequence| publication.sequence <= sequence) {
                     continue;
-                };
-                let status = publication
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("pending");
-                check.status = match status {
-                    "passed" | "success" | "completed" => AgentTaskLoopGateStatus::Satisfied,
-                    "failed" | "failure" | "cancelled" | "timed_out" => {
+                }
+                check.status = match publication.outcome() {
+                    homeboy_gate_contract::gate::ExternalCheckOutcome::Succeeded => {
+                        AgentTaskLoopGateStatus::Satisfied
+                    }
+                    homeboy_gate_contract::gate::ExternalCheckOutcome::Failed => {
                         AgentTaskLoopGateStatus::Failed
                     }
-                    _ => AgentTaskLoopGateStatus::Pending,
+                    homeboy_gate_contract::gate::ExternalCheckOutcome::Pending => {
+                        AgentTaskLoopGateStatus::Pending
+                    }
                 };
-                check.classification = Some("github_ci_result".to_string());
-                check.details = publication.clone();
+                check.classification = Some("external_check_result".to_string());
+                check.details = publication_value.clone();
             }
             result.status = if result
                 .checks
@@ -235,6 +239,24 @@ impl AgentTaskLoopControllerRecord {
             }
         }
         self.touch();
+    }
+
+    fn external_identity_matches(
+        declared: &serde_json::Value,
+        publication: &homeboy_gate_contract::gate::ExternalCheckPublication,
+    ) -> bool {
+        [
+            ("provider", publication.provider.as_str()),
+            ("repository", publication.repository.as_str()),
+            ("base_sha", publication.base_sha.as_str()),
+            ("head_sha", publication.head_sha.as_str()),
+            (
+                "environment_digest",
+                publication.environment_digest.as_str(),
+            ),
+        ]
+        .into_iter()
+        .all(|(key, actual)| declared.get(key).and_then(serde_json::Value::as_str) == Some(actual))
     }
 
     pub fn evaluate_policy(
