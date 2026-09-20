@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.18.0] - 2026-09-20
+
+### Added
+- config-dir input so deploy/fleet commands resolve checked-in project and server config
+- optional post-release repository_dispatch to a central workflow
+
 ## [2.17.0] - 2026-09-19
 
 ### Added
