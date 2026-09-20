@@ -306,12 +306,10 @@ fn is_checkout_less_eligible_missing(
     diagnostic: &ComponentLocalPathDiagnostic,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) -> bool {
-    matches!(diagnostic.status, ComponentLocalPathDiagnosticStatus::Missing)
-        && is_checkout_less_release_candidate(
-            None,
-            &diagnostic.component_id,
-            standalone_snapshot,
-        )
+    matches!(
+        diagnostic.status,
+        ComponentLocalPathDiagnosticStatus::Missing
+    ) && is_checkout_less_release_candidate(None, &diagnostic.component_id, standalone_snapshot)
 }
 
 pub fn component_local_path_diagnostic(

@@ -106,9 +106,8 @@ mod attachment_construction_tests {
     /// entirely rather than round-tripping an empty string (#14795).
     #[test]
     fn an_attachment_with_no_local_path_key_deserializes() {
-        let attachment: ProjectComponentAttachment =
-            serde_json::from_str(r#"{"id":"plugin"}"#)
-                .expect("an attachment with no local_path key must still deserialize");
+        let attachment: ProjectComponentAttachment = serde_json::from_str(r#"{"id":"plugin"}"#)
+            .expect("an attachment with no local_path key must still deserialize");
 
         assert_eq!(attachment.id, "plugin");
         assert_eq!(attachment.local_path, "");
