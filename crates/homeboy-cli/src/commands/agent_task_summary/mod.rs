@@ -480,15 +480,25 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
         .pointer("/placement/selected")
         .and_then(Value::as_str)
         .unwrap_or(requested_placement);
+    let admission_state = resolved
+        .pointer("/placement/admission/state")
+        .and_then(Value::as_str);
+    let admission_suffix = match admission_state {
+        Some("blocked") => " (admission blocked)",
+        Some("indeterminate") => " (admission indeterminate)",
+        _ => "",
+    };
     let placement_line = if selected_placement == requested_placement {
-        format!("Placement: {selected_placement}")
+        format!("Placement: {selected_placement}{admission_suffix}")
     } else {
         let reason = resolved
             .pointer("/placement/fallback_reason")
             .and_then(Value::as_str)
             .map(|reason| format!(" — {reason}"))
             .unwrap_or_default();
-        format!("Placement: {selected_placement}  (requested: {requested_placement}{reason})")
+        format!(
+            "Placement: {selected_placement}{admission_suffix}  (requested: {requested_placement}{reason})"
+        )
     };
     let provider = resolved
         .get("provider")
