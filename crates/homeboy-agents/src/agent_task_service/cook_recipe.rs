@@ -2409,6 +2409,19 @@ pub fn preflight_continuation_claim_in_store(
 ) -> Result<CookContinuationState> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    let record = lifecycle_store.read_record_bounded(run_id)?;
+    if !rearm && record.has_live_pending_local_cook_supervisor(chrono::Utc::now()) {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.claim",
+            format!(
+                "Cook `{cook_id}` attempt `{run_id}` cannot be claimed while its controller supervisor is active"
+            ),
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Retry `homeboy agent-task cook-continue {cook_id} --preflight` after the active controller finishes."
+            )]),
+        ));
+    }
     let state = observe_continuation_state(store, &lifecycle_store, cook_id, run_id)?;
     let admitted = if rearm {
         state == CookContinuationState::Failed
@@ -4090,6 +4103,43 @@ mod tests {
         assert_eq!(
             continuation_state_in_store(&store, "cook", "run").unwrap(),
             CookContinuationState::Failed
+        );
+    }
+
+    #[test]
+    fn continuation_preflight_rejects_a_live_local_cook_supervisor() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store =
+            agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&recipe().attempts[0].plan, "run", |_| {
+                Ok(serde_json::json!({}))
+            })
+            .unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let now = chrono::Utc::now();
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.metadata["cook_id"] = serde_json::json!("cook");
+                record.metadata["local_cook_supervisor"] = serde_json::json!({
+                    "state": "supervising",
+                    "cook_id": "cook",
+                    "pinned_run_id": "run",
+                    "lease_started_at": now.to_rfc3339(),
+                    "lease_expires_at": (now + chrono::Duration::seconds(30)).to_rfc3339(),
+                });
+                true
+            })
+            .unwrap();
+
+        let error = preflight_continuation_claim_in_store(&store, "cook", "run", false)
+            .expect_err("active supervisor must retain continuation ownership");
+        assert!(error.message.contains("controller supervisor is active"));
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
         );
     }
 
