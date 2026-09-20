@@ -52,8 +52,8 @@ pub use executor::{
 };
 pub use outcome::{
     AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkflowStepSuggestion, AGENT_TASK_USAGE_METADATA_KEY,
+    AgentTaskUsageCompleteness, AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence,
+    AgentTaskWorkflowStepStatus, AgentTaskWorkflowStepSuggestion, AGENT_TASK_USAGE_METADATA_KEY,
 };
 pub use policy::{
     AgentTaskLimits, AgentTaskPolicy, AgentToolExecutionLocation, AgentToolPolicy,

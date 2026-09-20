@@ -8,24 +8,50 @@ use super::{
     AgentTaskTypedArtifact,
 };
 
+/// Completeness of one provider-reported usage field. `Partial` means some
+/// execution events supplied the field and others did not; it must not be
+/// rendered as a complete total.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskUsageCompleteness {
+    Complete,
+    Partial,
+    #[default]
+    Unknown,
+}
+
 /// Provider-neutral usage reported by one executor task. Missing values are
 /// deliberately omitted: an unavailable provider counter is not zero.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub input_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_usd_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

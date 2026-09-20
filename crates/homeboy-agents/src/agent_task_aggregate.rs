@@ -6,6 +6,7 @@ use std::fmt;
 use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
     AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
+    AgentTaskUsageCompleteness,
 };
 use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::markdown::escape_markdown_table_cell;
@@ -58,18 +59,32 @@ pub struct AgentTaskAggregateSummary {
 pub struct AgentTaskUsageSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub input_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub total_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_write_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens_status: AgentTaskUsageCompleteness,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub cost_usd_status: AgentTaskUsageCompleteness,
     #[serde(default)]
     pub executions_with_usage: usize,
     #[serde(default)]
@@ -83,21 +98,110 @@ impl AgentTaskUsageSummary {
             return;
         };
         self.executions_with_usage += 1;
-        add_counter(&mut self.input_tokens, usage.input_tokens);
-        add_counter(&mut self.output_tokens, usage.output_tokens);
-        add_counter(&mut self.total_tokens, usage.total_tokens);
-        add_counter(&mut self.cache_read_tokens, usage.cache_read_tokens);
-        add_counter(&mut self.cache_write_tokens, usage.cache_write_tokens);
-        add_counter(&mut self.reasoning_tokens, usage.reasoning_tokens);
-        if let Some(cost) = usage.cost_usd {
-            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+        merge_counter(
+            &mut self.input_tokens,
+            &mut self.input_tokens_status,
+            usage.input_tokens,
+            usage.input_tokens_status,
+        );
+        merge_counter(
+            &mut self.output_tokens,
+            &mut self.output_tokens_status,
+            usage.output_tokens,
+            usage.output_tokens_status,
+        );
+        merge_counter(
+            &mut self.total_tokens,
+            &mut self.total_tokens_status,
+            usage.total_tokens,
+            usage.total_tokens_status,
+        );
+        merge_counter(
+            &mut self.cache_read_tokens,
+            &mut self.cache_read_tokens_status,
+            usage.cache_read_tokens,
+            usage.cache_read_tokens_status,
+        );
+        merge_counter(
+            &mut self.cache_write_tokens,
+            &mut self.cache_write_tokens_status,
+            usage.cache_write_tokens,
+            usage.cache_write_tokens_status,
+        );
+        merge_counter(
+            &mut self.reasoning_tokens,
+            &mut self.reasoning_tokens_status,
+            usage.reasoning_tokens,
+            usage.reasoning_tokens_status,
+        );
+        merge_cost(
+            &mut self.cost_usd,
+            &mut self.cost_usd_status,
+            usage.cost_usd,
+            usage.cost_usd_status,
+        );
+    }
+}
+
+fn merge_counter(
+    total: &mut Option<u64>,
+    status: &mut AgentTaskUsageCompleteness,
+    value: Option<u64>,
+    value_status: AgentTaskUsageCompleteness,
+) {
+    match value_status {
+        AgentTaskUsageCompleteness::Complete => {
+            let Some(value) = value else {
+                *status = AgentTaskUsageCompleteness::Partial;
+                *total = None;
+                return;
+            };
+            if *status != AgentTaskUsageCompleteness::Partial {
+                *total = Some(total.unwrap_or(0).saturating_add(value));
+                *status = AgentTaskUsageCompleteness::Complete;
+            }
+        }
+        AgentTaskUsageCompleteness::Partial => {
+            *status = AgentTaskUsageCompleteness::Partial;
+            *total = None;
+        }
+        AgentTaskUsageCompleteness::Unknown => {
+            if *status == AgentTaskUsageCompleteness::Complete {
+                *status = AgentTaskUsageCompleteness::Partial;
+                *total = None;
+            }
         }
     }
 }
 
-fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
-    if let Some(value) = value {
-        *total = Some(total.unwrap_or(0).saturating_add(value));
+fn merge_cost(
+    total: &mut Option<f64>,
+    status: &mut AgentTaskUsageCompleteness,
+    value: Option<f64>,
+    value_status: AgentTaskUsageCompleteness,
+) {
+    match value_status {
+        AgentTaskUsageCompleteness::Complete => {
+            let Some(value) = value else {
+                *status = AgentTaskUsageCompleteness::Partial;
+                *total = None;
+                return;
+            };
+            if *status != AgentTaskUsageCompleteness::Partial {
+                *total = Some(total.unwrap_or(0.0) + value);
+                *status = AgentTaskUsageCompleteness::Complete;
+            }
+        }
+        AgentTaskUsageCompleteness::Partial => {
+            *status = AgentTaskUsageCompleteness::Partial;
+            *total = None;
+        }
+        AgentTaskUsageCompleteness::Unknown => {
+            if *status == AgentTaskUsageCompleteness::Complete {
+                *status = AgentTaskUsageCompleteness::Partial;
+                *total = None;
+            }
+        }
     }
 }
 
@@ -240,6 +344,29 @@ fn aggregate_agent_task_outcomes(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggr
             diagnostics: outcome.diagnostics.clone(),
             follow_up: outcome.follow_up.clone(),
         });
+    }
+
+    if report.summary.usage.executions_without_usage > 0 {
+        for status in [
+            &mut report.summary.usage.input_tokens_status,
+            &mut report.summary.usage.output_tokens_status,
+            &mut report.summary.usage.total_tokens_status,
+            &mut report.summary.usage.cache_read_tokens_status,
+            &mut report.summary.usage.cache_write_tokens_status,
+            &mut report.summary.usage.reasoning_tokens_status,
+            &mut report.summary.usage.cost_usd_status,
+        ] {
+            if *status == AgentTaskUsageCompleteness::Complete {
+                *status = AgentTaskUsageCompleteness::Partial;
+            }
+        }
+        report.summary.usage.input_tokens = None;
+        report.summary.usage.output_tokens = None;
+        report.summary.usage.total_tokens = None;
+        report.summary.usage.cache_read_tokens = None;
+        report.summary.usage.cache_write_tokens = None;
+        report.summary.usage.reasoning_tokens = None;
+        report.summary.usage.cost_usd = None;
     }
 
     report
@@ -992,9 +1119,13 @@ mod tests {
         first.metadata = json!({
             "provider_usage": {
                 "input_tokens": 100,
+                "input_tokens_status": "complete",
                 "output_tokens": 20,
+                "output_tokens_status": "complete",
                 "total_tokens": 120,
+                "total_tokens_status": "complete",
                 "cost_usd": 0.01,
+                "cost_usd_status": "complete",
                 "source": "opencode-jsonl"
             }
         });
@@ -1003,14 +1134,50 @@ mod tests {
             outcome("unknown", AgentTaskOutcomeStatus::Failed, Vec::new()),
         ]);
 
-        assert_eq!(report.summary.usage.input_tokens, Some(100));
-        assert_eq!(report.summary.usage.total_tokens, Some(120));
-        assert_eq!(report.summary.usage.cost_usd, Some(0.01));
+        assert_eq!(report.summary.usage.input_tokens, None);
+        assert_eq!(
+            report.summary.usage.input_tokens_status,
+            AgentTaskUsageCompleteness::Partial
+        );
+        assert_eq!(report.summary.usage.total_tokens, None);
+        assert_eq!(report.summary.usage.cost_usd, None);
         assert_eq!(report.summary.usage.executions_with_usage, 1);
         assert_eq!(report.summary.usage.executions_without_usage, 1);
         assert!(report
             .to_string()
             .contains("usage: 1 executions with provider data, 1 without"));
+    }
+
+    #[test]
+    fn aggregate_sums_complete_retry_and_review_executions() {
+        let usage = |input, output, cost| {
+            serde_json::json!({
+                "input_tokens": input,
+                "input_tokens_status": "complete",
+                "output_tokens": output,
+                "output_tokens_status": "complete",
+                "cost_usd": cost,
+                "cost_usd_status": "complete",
+                "source": "opencode-jsonl"
+            })
+        };
+        let mut retry = outcome("retry", AgentTaskOutcomeStatus::Failed, Vec::new());
+        retry.metadata = json!({ "provider_usage": usage(10, 2, 0.01) });
+        let mut review = outcome("review", AgentTaskOutcomeStatus::Succeeded, Vec::new());
+        review.metadata = json!({ "provider_usage": usage(20, 3, 0.0) });
+
+        let summary = aggregate_agent_task_outcomes(&[retry, review])
+            .summary
+            .usage;
+
+        assert_eq!(summary.input_tokens, Some(30));
+        assert_eq!(
+            summary.input_tokens_status,
+            AgentTaskUsageCompleteness::Complete
+        );
+        assert_eq!(summary.output_tokens, Some(5));
+        assert_eq!(summary.cost_usd, Some(0.01));
+        assert_eq!(summary.executions_with_usage, 2);
     }
 
     fn outcome(

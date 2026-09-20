@@ -60,7 +60,6 @@ mod secret_types;
 mod secrets;
 pub mod structured_error;
 mod types;
-mod usage;
 mod usage_cap;
 mod workspace_types;
 
@@ -135,7 +134,6 @@ pub use structured_error::{
 };
 pub(crate) use types::wildcard_match;
 pub use types::*;
-pub(crate) use usage::{merge_usage_metadata, usage_from_runtime_files};
 pub(crate) use usage_cap::provider_capacity_config;
 pub use usage_cap::{
     detect_usage_cap, provider_usage_cap_key, provider_usage_cap_key_for_model,
