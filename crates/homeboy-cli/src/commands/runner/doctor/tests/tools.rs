@@ -275,36 +275,55 @@ fn declared_runtime_diagnostic_tools_are_grouped_by_source() {
 
 #[test]
 fn declared_extension_diagnostic_tools_are_grouped_by_extension() {
-    let extension = serde_json::from_value(serde_json::json!({
-        "id": "wordpress",
-        "name": "WordPress",
-        "version": "1.0.0",
-        "diagnostics": {
-            "tools": [
-                {
-                    "id": "php",
-                    "version_args": ["--version"],
-                    "remediation": "Install PHP and ensure it is on PATH"
-                },
-                {
-                    "id": "composer",
-                    "version_args": ["--version"],
-                    "remediation": "Install Composer and ensure it is on PATH"
-                }
-            ]
-        }
-    }))
-    .expect("extension manifest");
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let extension = serde_json::json!({
+            "name": "WordPress",
+            "version": "1.0.0",
+            "diagnostics": {
+                "tools": [
+                    {
+                        "id": "php",
+                        "version_args": ["--version"],
+                        "remediation": "Install PHP and ensure it is on PATH"
+                    },
+                    {
+                        "id": "composer",
+                        "version_args": ["--version"],
+                        "remediation": "Install Composer and ensure it is on PATH"
+                    }
+                ]
+            }
+        });
+        let extension_dir = homeboy_core::paths::extensions()
+            .expect("extensions")
+            .join("wordpress");
+        fs::create_dir_all(&extension_dir).expect("extension directory");
+        fs::write(extension_dir.join("wordpress.json"), extension.to_string())
+            .expect("extension manifest");
 
-    let specs = probes::declared_extension_tool_specs_by_source(&[extension]);
-    let tools = specs.get("wordpress").expect("extension tools");
-    let ids = tools
-        .iter()
-        .map(|spec| spec.id.as_str())
-        .collect::<Vec<_>>();
+        let specs = probes::declared_extension_tool_specs_by_source();
+        let tools = specs.get("wordpress").expect("extension tools");
+        let ids = tools
+            .iter()
+            .map(|spec| spec.id.as_str())
+            .collect::<Vec<_>>();
 
-    assert_eq!(ids, vec!["composer", "php"]);
-    assert!(tools
-        .iter()
-        .all(|spec| spec.check_id.starts_with("tool.declared.wordpress.")));
+        assert_eq!(ids, vec!["composer", "php"]);
+        assert_eq!(tools[0].command, "composer");
+        assert_eq!(tools[0].version_args, ["--version"]);
+        assert_eq!(
+            tools[0].remediation,
+            "Install Composer and ensure it is on PATH"
+        );
+        assert!(tools
+            .iter()
+            .all(|spec| spec.check_id.starts_with("tool.declared.wordpress.")));
+    });
+}
+
+#[test]
+fn doctor_does_not_read_extension_manifest_diagnostics_directly() {
+    let source = include_str!("../probes.rs");
+    assert!(!source.contains("ExtensionManifest"));
+    assert!(!source.contains("diagnostics.tools"));
 }

@@ -1,7 +1,10 @@
 use super::*;
 use homeboy::core::agent_runtime_manifest::{self, AgentRuntimeManifest};
 use homeboy_core;
-use homeboy_extension_contract::ExtensionManifest;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
+    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_V1,
+};
 use types::{DiskProbe, HomeboyProbe, MemoryProbe, RunnerCapabilities, RunnerCheck, ToolProbe};
 
 pub(crate) fn tool_specs(runner: &Runner) -> Vec<RunnerToolSpec> {
@@ -25,29 +28,35 @@ pub(crate) fn capabilities_from(
 }
 
 pub(crate) fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
-    let mut by_source = declared_extension_tool_specs_by_source(
-        &homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
-    );
+    let mut by_source = declared_extension_tool_specs_by_source();
     by_source.extend(declared_tool_specs_by_source_from_manifests(
         &agent_runtime_manifest::discover_agent_runtime_tool_diagnostic_manifests(),
     ));
     by_source
 }
 
-pub(super) fn declared_extension_tool_specs_by_source(
-    extensions: &[ExtensionManifest],
-) -> BTreeMap<String, Vec<RunnerToolSpec>> {
+pub(super) fn declared_extension_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
+    let catalog = homeboy_core::extension::catalog::list_api(&ExtensionApiCatalogRequest {
+        schema: EXTENSION_API_CATALOG_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+    });
     let mut by_source = BTreeMap::new();
-    for extension in extensions {
-        let mut specs = extension
-            .diagnostics
+    for entry in catalog.entries {
+        let Some(descriptor) = (entry.status == ExtensionApiCatalogEntryStatus::Available)
+            .then_some(entry.descriptor)
+            .flatten()
+        else {
+            continue;
+        };
+        let mut specs = descriptor
+            .execution_requirements
             .tools
             .iter()
             .filter_map(|tool| {
                 declared_tool_spec_from_parts(
-                    &extension.id,
-                    tool.id.as_str(),
-                    tool.command.as_deref(),
+                    &descriptor.identity.id,
+                    &tool.id,
+                    Some(tool.command.as_str()),
                     &tool.version_args,
                     tool.remediation.as_deref(),
                 )
@@ -57,7 +66,7 @@ pub(super) fn declared_extension_tool_specs_by_source(
             continue;
         }
         specs.sort_by(|left, right| left.id.cmp(&right.id));
-        by_source.insert(extension.id.clone(), specs);
+        by_source.insert(descriptor.identity.id, specs);
     }
     by_source
 }
