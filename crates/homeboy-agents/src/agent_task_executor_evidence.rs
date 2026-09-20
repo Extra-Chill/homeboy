@@ -127,6 +127,12 @@ fn link_runtime_evidence(
         .unwrap_or_default();
     if request.request.executor.backend == "opencode" {
         hydrate_structured_runtime_evidence(outcome, &runtime_files, policy);
+        if let Some(stdout_paths) = runtime_files.get(RUNTIME_STDOUT_EVIDENCE_KIND) {
+            if let Some(usage) = crate::agent_task_provider::usage_from_runtime_files(stdout_paths)
+            {
+                crate::agent_task_provider::merge_usage_metadata(&mut outcome.metadata, usage);
+            }
+        }
     }
     let sessions = provider_session_metadata(outcome);
     let structured_error = runtime_files
@@ -880,6 +886,27 @@ mod tests {
                 outcome.metadata["opencode_session"]["id"],
                 "ses_sanitized_progress_fixture"
             );
+        });
+    }
+
+    #[test]
+    fn links_provider_reported_usage_without_treating_missing_fields_as_zero() {
+        with_artifact_root(|_| {
+            let mut request = executor_test_request();
+            request.request.executor.backend = "opencode".to_string();
+            fs::write(
+                request.artifacts_path.join("provider-runtime-stdout.log"),
+                r#"{"type":"step_finish","sessionID":"session-usage","part":{"id":"part-usage","providerID":"openai","modelID":"gpt-5","cost":0.02,"tokens":{"input":100,"output":20,"reasoning":4,"cache":{"read":30,"write":2}}}}"#,
+            )
+            .expect("write usage event");
+            let mut outcome = test_outcome();
+
+            link_latest_executor_evidence(&request, &mut outcome, Some("run-1"));
+
+            assert_eq!(outcome.usage().expect("usage").input_tokens, Some(100));
+            assert_eq!(outcome.usage().expect("usage").total_tokens, Some(120));
+            assert_eq!(outcome.usage().expect("usage").cost_usd, Some(0.02));
+            assert_eq!(outcome.usage().expect("usage").source, "opencode-jsonl");
         });
     }
 

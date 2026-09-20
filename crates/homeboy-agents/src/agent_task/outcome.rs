@@ -8,6 +8,33 @@ use super::{
     AgentTaskTypedArtifact,
 };
 
+/// Provider-neutral usage reported by one executor task. Missing values are
+/// deliberately omitted: an unavailable provider counter is not zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub source: String,
+}
+
+pub const AGENT_TASK_USAGE_METADATA_KEY: &str = "provider_usage";
+
 #[cfg(test)]
 use homeboy_core::redaction::RedactionPolicy;
 
@@ -67,6 +94,11 @@ impl Default for AgentTaskOutcome {
 }
 
 impl AgentTaskOutcome {
+    /// Read the normalized provider usage retained in outcome metadata.
+    pub fn usage(&self) -> Option<AgentTaskUsage> {
+        serde_json::from_value(self.metadata.get(AGENT_TASK_USAGE_METADATA_KEY)?.clone()).ok()
+    }
+
     /// The concrete provider model this outcome recorded, if any.
     ///
     /// This is the single authoritative reader for "what model did this run

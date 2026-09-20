@@ -5,7 +5,7 @@ use std::fmt;
 
 use super::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskFailureClassification,
-    AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskFollowUp, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
 };
 use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
 use homeboy_core::markdown::escape_markdown_table_cell;
@@ -33,7 +33,7 @@ pub struct AgentTaskAggregateReport {
     pub matrix: Vec<AgentTaskMatrixRow>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskAggregateSummary {
     pub total: usize,
     pub succeeded: usize,
@@ -50,6 +50,55 @@ pub struct AgentTaskAggregateSummary {
     pub issue_report_candidates: usize,
     pub retry_candidates: usize,
     pub review_candidates: usize,
+    #[serde(default)]
+    pub usage: AgentTaskUsageSummary,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskUsageSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub executions_with_usage: usize,
+    #[serde(default)]
+    pub executions_without_usage: usize,
+}
+
+impl AgentTaskUsageSummary {
+    fn add(&mut self, usage: Option<AgentTaskUsage>) {
+        let Some(usage) = usage else {
+            self.executions_without_usage += 1;
+            return;
+        };
+        self.executions_with_usage += 1;
+        add_counter(&mut self.input_tokens, usage.input_tokens);
+        add_counter(&mut self.output_tokens, usage.output_tokens);
+        add_counter(&mut self.total_tokens, usage.total_tokens);
+        add_counter(&mut self.cache_read_tokens, usage.cache_read_tokens);
+        add_counter(&mut self.cache_write_tokens, usage.cache_write_tokens);
+        add_counter(&mut self.reasoning_tokens, usage.reasoning_tokens);
+        if let Some(cost) = usage.cost_usd {
+            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+        }
+    }
+}
+
+fn add_counter(total: &mut Option<u64>, value: Option<u64>) {
+    if let Some(value) = value {
+        *total = Some(total.unwrap_or(0).saturating_add(value));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -139,6 +188,7 @@ fn aggregate_agent_task_outcomes(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggr
 
     for outcome in outcomes {
         count_status(&mut report.summary, outcome.status);
+        report.summary.usage.add(outcome.usage());
 
         let artifacts: Vec<_> = outcome
             .artifacts
@@ -212,7 +262,7 @@ impl fmt::Display for AgentTaskAggregateReport {
         let mut markdown = String::new();
         markdown.push_str("## Agent Task Outcomes\n\n");
         markdown.push_str(&format!(
-            "- total: {}\n- succeeded: {}\n- failed: {}\n- no-op: {}\n- timed out: {}\n- provider errors: {}\n- apply candidates: {}\n- issue report candidates: {}\n- retry candidates: {}\n- review candidates: {}\n\n",
+            "- total: {}\n- succeeded: {}\n- failed: {}\n- no-op: {}\n- timed out: {}\n- provider errors: {}\n- apply candidates: {}\n- issue report candidates: {}\n- retry candidates: {}\n- review candidates: {}\n- usage: {} executions with provider data, {} without\n\n",
             self.summary.total,
             self.summary.succeeded,
             self.summary.failed,
@@ -222,7 +272,9 @@ impl fmt::Display for AgentTaskAggregateReport {
             self.summary.apply_candidates,
             self.summary.issue_report_candidates,
             self.summary.retry_candidates,
-            self.summary.review_candidates
+            self.summary.review_candidates,
+            self.summary.usage.executions_with_usage,
+            self.summary.usage.executions_without_usage
         ));
 
         markdown.push_str("| Task | Status | Decision | Reason | Artifacts |\n");
@@ -932,6 +984,33 @@ mod tests {
         assert!(markdown.contains("| Task | Status | Axes | Metrics |"));
         assert!(markdown.contains("matrix | succeeded"));
         assert!(markdown.contains("duration_ms"));
+    }
+
+    #[test]
+    fn aggregate_sums_known_usage_and_counts_unknown_executions() {
+        let mut first = outcome("first", AgentTaskOutcomeStatus::Succeeded, Vec::new());
+        first.metadata = json!({
+            "provider_usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "cost_usd": 0.01,
+                "source": "opencode-jsonl"
+            }
+        });
+        let report = aggregate_agent_task_outcomes(&[
+            first,
+            outcome("unknown", AgentTaskOutcomeStatus::Failed, Vec::new()),
+        ]);
+
+        assert_eq!(report.summary.usage.input_tokens, Some(100));
+        assert_eq!(report.summary.usage.total_tokens, Some(120));
+        assert_eq!(report.summary.usage.cost_usd, Some(0.01));
+        assert_eq!(report.summary.usage.executions_with_usage, 1);
+        assert_eq!(report.summary.usage.executions_without_usage, 1);
+        assert!(report
+            .to_string()
+            .contains("usage: 1 executions with provider data, 1 without"));
     }
 
     fn outcome(

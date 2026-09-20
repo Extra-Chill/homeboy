@@ -1,7 +1,7 @@
 pub use super::agent_task_aggregate::{
     AgentTaskAggregateReport, AgentTaskAggregateSummary, AgentTaskArtifactInventoryItem,
     AgentTaskDecisionRef, AgentTaskMatrixRow, AgentTaskReconciliationDecision,
-    AgentTaskReconciliationItem, AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskReconciliationItem, AgentTaskUsageSummary, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 pub use super::agent_task_fanout::{
     AgentTaskFanoutAggregate, AgentTaskFanoutPlan, AgentTaskFanoutPlane, AgentTaskFanoutScheduler,
@@ -51,9 +51,9 @@ pub use executor::{
     AgentTaskRuntimeSelection, AgentTaskSourceRef, AgentTaskWorkspace, AgentTaskWorkspaceMode,
 };
 pub use outcome::{
-    AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus,
+    AgentTaskFailureClassification, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskUsage,
     AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkflowStepSuggestion,
+    AgentTaskWorkflowStepSuggestion, AGENT_TASK_USAGE_METADATA_KEY,
 };
 pub use policy::{
     AgentTaskLimits, AgentTaskPolicy, AgentToolExecutionLocation, AgentToolPolicy,
