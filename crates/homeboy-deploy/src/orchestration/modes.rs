@@ -8,7 +8,9 @@ use homeboy_core::server::SshClient;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::orchestration_ref_checkout::resolve_exact_ref;
-use super::super::orchestration_tag_checkout::{deploy_tag_for_version, TagCheckout};
+use super::super::orchestration_tag_checkout::{
+    deploy_tag_for_version, latest_default_deploy_tag, TagCheckout,
+};
 use super::super::planning::{
     calculate_component_status_with_git_cache, calculate_release_state, ExtensionSkippedComponent,
     GitProbeCache,
@@ -379,7 +381,15 @@ fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> R
         return Ok(deploy_tag_for_version(component, version));
     }
 
-    match homeboy_version::latest_component_tag(component) {
+    // Shared with `execution::release_plan::deploy_release_tag` (#14813): a
+    // component with no local checkout has no `git tag` to read, so this
+    // consults its GitHub repository's latest release instead of only ever
+    // reading local tags. Before this was unified, this call site kept the
+    // local-tag-only read even after #14793 taught the release-asset lookup
+    // the checkout-less fallback, so `deploy <project> <component>` with no
+    // `--version` still failed "no version tags found" for a checkout-less
+    // component.
+    match latest_default_deploy_tag(component) {
         Ok(Some(tag)) => Ok(tag),
         Ok(None) => Err(Error::validation_invalid_argument(
             "deploy",
