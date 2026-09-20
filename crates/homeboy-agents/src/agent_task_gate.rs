@@ -1003,8 +1003,9 @@ pub struct AgentTaskGateTestResult {
 /// The Cargo test population actually observed by a deterministic gate.
 ///
 /// A positional Cargo filter is substring matching unless the test harness gets
-/// `--exact`; recording both the declared interpretation and test IDs makes
-/// focused evidence independently reviewable.
+/// `--exact`; a filter whose selected IDs all use it as a module prefix is also
+/// admitted. Recording the interpretation and IDs makes focused evidence
+/// independently reviewable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateCargoSelection {
     pub effective_argv: Vec<String>,
@@ -1018,7 +1019,7 @@ pub struct AgentTaskGateCargoSelection {
     pub selected_ids: Vec<String>,
     pub selected_count: usize,
     /// Deterministic, redacted next action when a focused Cargo gate fails
-    /// closed rather than proving exactly one selected test.
+    /// closed rather than proving an exact or module-prefix selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<AgentTaskGateCargoSelectionRecovery>,
 }
@@ -3492,7 +3493,11 @@ fn gate_failure_evidence(
     });
     let invalid_focused_selection = cargo_selection.is_some_and(|selection| {
         selection.mode == "focused"
-            && (selection.filter_interpretation != "exact" || selection.selected_count != 1)
+            && (selection.selected_count == 0
+                || !matches!(
+                    selection.filter_interpretation.as_str(),
+                    "exact" | "module_prefix"
+                ))
     });
     let classification = invalid_focused_selection
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
@@ -3521,16 +3526,16 @@ fn gate_failure_evidence(
             .and_then(|selection| selection.recovery.as_ref())
             .map(|recovery| match recovery.action.as_str() {
                 "rerun_exact" => format!(
-                    "The Cargo test gate must use an exact filter and execute exactly one test. Rerun the structured exact recovery command `{}` before rerunning Cook.",
+                "The Cargo test gate must use an exact or module-prefix filter and select at least one test. Rerun the structured exact recovery command `{}` before rerunning Cook.",
                     recovery.command
                 ),
                 _ => format!(
-                    "The Cargo test gate must use an exact filter and execute exactly one test. Run the structured discovery command `{}` and choose one of the bounded candidate IDs before rerunning Cook.",
+                    "The Cargo test gate must use an exact or module-prefix filter and select at least one test. Run the structured discovery command `{}` and choose a bounded module or exact filter before rerunning Cook.",
                     recovery.command
                 ),
             })
             .unwrap_or_else(|| {
-                "The Cargo test gate must use an exact filter and execute exactly one test before rerunning Cook.".to_string()
+                "The Cargo test gate must use an exact or module-prefix filter and select at least one test before rerunning Cook.".to_string()
             })
     } else {
         match missing_script {
@@ -3561,7 +3566,11 @@ fn effective_gate_exit_code(
 ) -> i32 {
     if cargo_selection.is_some_and(|selection| {
         selection.mode == "focused"
-            && (selection.filter_interpretation != "exact" || selection.selected_count != 1)
+            && (selection.selected_count == 0
+                || !matches!(
+                    selection.filter_interpretation.as_str(),
+                    "exact" | "module_prefix"
+                ))
     }) {
         1
     } else {
@@ -3615,6 +3624,16 @@ fn cargo_selection(
         filter_interpretation: match (filter.is_some(), exact) {
             (false, _) => "broad_explicit".to_string(),
             (true, true) => "exact".to_string(),
+            (true, false)
+                if selected_count > 0
+                    && filter.as_ref().is_some_and(|filter| {
+                        selected_ids
+                            .iter()
+                            .all(|id| id.starts_with(&format!("{filter}::")))
+                    }) =>
+            {
+                "module_prefix".to_string()
+            }
             (true, false) => "substring_ambiguous".to_string(),
         },
         discovered_ids,
@@ -4265,7 +4284,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_selection_requires_one_exact_id_and_keeps_broad_gates_explicit() {
+    fn cargo_selection_admits_exact_or_module_prefix_and_keeps_broad_gates_explicit() {
         let focused = cargo_selection(
             "cargo test selected_test -- --exact",
             &[
@@ -4359,6 +4378,22 @@ mod tests {
             vec!["cargo", "test", "selected_test", "--", "--exact"]
         );
         assert_eq!(one_recovery.command, "cargo test selected_test -- --exact");
+
+        let module = cargo_selection(
+            "cargo test generation_store",
+            &[
+                "sh".to_string(),
+                "-lc".to_string(),
+                "cargo test generation_store".to_string(),
+            ],
+            "test generation_store::tests::first ... ok\ntest generation_store::tests::second ... ok\n",
+            "",
+            None,
+        )
+        .expect("module-prefix Cargo selection");
+        assert_eq!(module.filter_interpretation, "module_prefix");
+        assert_eq!(module.selected_count, 2);
+        assert_eq!(effective_gate_exit_code(0, Some(&module)), 0);
 
         let prefixed = cargo_selection(
             "RUSTFLAGS=\"-D warnings\" timeout --signal TERM 30 cargo test --locked -p example --test integration --features feature-a selected --lib -- --ignored --nocapture",

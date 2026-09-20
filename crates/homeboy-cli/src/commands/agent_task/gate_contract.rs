@@ -26,6 +26,12 @@ pub(crate) struct GateContractValidationEntry {
     pub command: String,
     pub kind: &'static str,
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_interpretation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_count: Option<usize>,
 }
 
 pub(crate) fn validate_gate_contracts(
@@ -84,6 +90,92 @@ pub(crate) fn validate_gate_contracts(
         status: "valid",
         gates: entries,
     })
+}
+
+/// Validate Cargo gate shape without executing Cargo. Test populations belong
+/// to the candidate checkout, so compiling the base during preview would both
+/// make preview unexpectedly expensive and reject tests the provider has not
+/// created yet. Runtime gate evidence performs the bounded population check.
+pub(crate) fn validate_cargo_gate_contracts(
+    gates: impl IntoIterator<Item = String>,
+    _workspace: Option<&Path>,
+) -> Result<Vec<GateContractValidationEntry>> {
+    let mut entries = Vec::new();
+    for command in gates {
+        let Some(selection) = cargo_gate_shape(&command)? else {
+            continue;
+        };
+        entries.push(GateContractValidationEntry {
+            command,
+            kind: "cargo",
+            status: "shape_valid",
+            mode: Some(selection.mode),
+            filter_interpretation: Some(selection.filter_interpretation),
+            selected_count: None,
+        });
+    }
+    Ok(entries)
+}
+
+struct CargoSelection {
+    mode: String,
+    filter_interpretation: String,
+}
+
+fn cargo_gate_shape(command: &str) -> Result<Option<CargoSelection>> {
+    let Some(tokens) = shlex::split(command) else {
+        return Ok(None);
+    };
+    let Some(cargo) = tokens.iter().position(|token| token == "cargo") else {
+        return Ok(None);
+    };
+    if tokens.get(cargo + 1).map(String::as_str) != Some("test") {
+        return Ok(None);
+    }
+    let args = &tokens[cargo + 2..];
+    let harness = args.iter().position(|token| token == "--");
+    let before_harness = &args[..harness.unwrap_or(args.len())];
+    let mut filter_index = 0;
+    while let Some(argument) = before_harness.get(filter_index) {
+        if !argument.starts_with('-') {
+            break;
+        }
+        filter_index += 1;
+        if matches!(
+            argument.as_str(),
+            "-p" | "--package"
+                | "--exclude"
+                | "--bin"
+                | "--example"
+                | "--test"
+                | "--bench"
+                | "--features"
+                | "--target"
+                | "--target-dir"
+                | "--manifest-path"
+                | "--profile"
+                | "-j"
+                | "--jobs"
+                | "--config"
+                | "--message-format"
+                | "--timings"
+        ) {
+            filter_index += 1;
+        }
+    }
+    let filter = before_harness.get(filter_index).cloned();
+    let exact = harness.is_some_and(|index| args[index + 1..].iter().any(|arg| arg == "--exact"));
+    let interpretation = if filter.is_none() {
+        "broad_explicit"
+    } else if exact {
+        "exact"
+    } else {
+        "candidate_resolved"
+    };
+    Ok(Some(CargoSelection {
+        mode: if filter.is_some() { "focused" } else { "broad" }.to_string(),
+        filter_interpretation: interpretation.to_string(),
+    }))
 }
 
 /// #14731: resolve each declared gate against the placement this process
@@ -156,6 +248,9 @@ fn entry(command: String, kind: &'static str, status: &'static str) -> GateContr
         command,
         kind,
         status,
+        mode: None,
+        filter_interpretation: None,
+        selected_count: None,
     }
 }
 
@@ -423,5 +518,27 @@ mod tests {
             false,
         )
         .expect("only the recognized `homeboy review test` prefix is rejected here");
+    }
+
+    #[test]
+    fn preview_validates_cargo_shape_without_compiling_the_workspace() {
+        let entries = validate_cargo_gate_contracts(
+            ["cargo test generation_store".to_string()],
+            Some(Path::new("/workspace-without-a-cargo-manifest")),
+        )
+        .expect("module gate shape");
+        assert_eq!(
+            entries[0].filter_interpretation.as_deref(),
+            Some("candidate_resolved")
+        );
+        assert_eq!(entries[0].status, "shape_valid");
+        assert_eq!(entries[0].selected_count, None);
+
+        let exact = validate_cargo_gate_contracts(
+            ["cargo test -p fixture selected_test -- --exact".to_string()],
+            None,
+        )
+        .expect("exact gate shape");
+        assert_eq!(exact[0].filter_interpretation.as_deref(), Some("exact"));
     }
 }
