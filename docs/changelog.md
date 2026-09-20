@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.380.0] - 2026-09-20
+
+### Added
+- route component env through API v1
+
 ## [0.379.0] - 2026-09-20
 
 ### Added
