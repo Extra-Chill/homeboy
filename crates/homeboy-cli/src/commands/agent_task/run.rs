@@ -1145,8 +1145,66 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
     if policy["requested"] == "local" {
         return policy;
     }
-    policy["admission"] = preview_placement_admission(&policy);
+    policy["admission"] = if policy["selected"] == "local" {
+        preview_local_placement_admission(replay_args)
+    } else {
+        preview_placement_admission(&policy)
+    };
     policy
+}
+
+fn preview_local_placement_admission(replay_args: &[String]) -> Value {
+    let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
+        return indeterminate_preview_admission();
+    };
+    if replay_args
+        .iter()
+        .any(|arg| arg == "--detach-after-handoff")
+        && result
+            .lab_readiness
+            .as_ref()
+            .is_some_and(|readiness| matches!(readiness.state.as_str(), "stale" | "disconnected"))
+    {
+        let readiness = result.lab_readiness.as_ref().expect("checked above");
+        let reason = readiness
+            .reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("Lab runner readiness is {}", readiness.state));
+        return blocked_preview_admission(reason, Some(local_preview_replay(replay_args)));
+    }
+    use homeboy::core::parsed_command_preflight::ResourceAdmissionDecision;
+    match result.resource_admission {
+        ResourceAdmissionDecision::NotRequired | ResourceAdmissionDecision::Admitted => {
+            admissible_preview_admission()
+        }
+        ResourceAdmissionDecision::Rejected {
+            label, evidence, ..
+        } => {
+            let reason = match evidence {
+                homeboy::core::parsed_command_preflight::ResourceAdmissionEvidence::Unavailable => {
+                    format!("resource admission unavailable for {label}")
+                }
+                _ => format!("resource admission rejected for {label}"),
+            };
+            blocked_preview_admission(reason, Some(local_preview_replay(replay_args)))
+        }
+    }
+}
+
+fn local_preview_replay(replay_args: &[String]) -> String {
+    let mut args = replay_args.to_vec();
+    if let Some(index) = args.iter().position(|arg| arg == "--placement") {
+        if index + 1 < args.len() {
+            args[index + 1] = "local".to_string();
+        }
+    } else if let Some(index) = args.iter().position(|arg| arg.starts_with("--placement=")) {
+        args[index] = "--placement=local".to_string();
+    } else {
+        args.insert(1, "--placement".to_string());
+        args.insert(2, "local".to_string());
+    }
+    homeboy::core::engine::shell::quote_args(&args)
 }
 
 fn preview_placement_admission(policy: &Value) -> Value {
@@ -1214,6 +1272,7 @@ fn indeterminate_preview_admission() -> Value {
         "deferred_to": "execution_placement_admission",
         "reason": PREVIEW_ADMISSION_UNCHECKED,
         "replay_prerequisite": PREVIEW_ADMISSION_UNCHECKED,
+        "next_action": "run with --placement local to authorize controller execution",
     })
 }
 
@@ -2967,6 +3026,52 @@ mod preview_tests {
                 .any(|requirement| { requirement.contains("base admission is indeterminate") }),
             "unmaterialized preview must not require a second preview: {replay:?}"
         );
+    }
+
+    #[test]
+    fn auto_local_fallback_preview_surfaces_disconnected_lab_admission() {
+        let _reset = ResetCapturedPreflight;
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--preview",
+            "--detach-after-handoff",
+            "--prompt",
+            "implement the issue",
+            "--verify",
+            "true",
+        ])
+        .expect("parse Auto Cook preview");
+        crate::cli_runtime::capture_preflight_result_for_test(
+            &cli,
+            Some(
+                homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
+                    state: "disconnected".to_string(),
+                    selected_runner_id: Some("homeboy-lab".to_string()),
+                    available_runner_ids: Vec::new(),
+                    reasons: vec!["not_connected".to_string()],
+                    remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+                    repair_admitted_runner_ids: Vec::new(),
+                },
+            ),
+        );
+
+        let policy = preview_placement_policy_with_admission(&[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--preview".to_string(),
+            "--detach-after-handoff".to_string(),
+        ]);
+
+        assert_eq!(policy["selected"], "local");
+        assert_eq!(policy["admission"]["state"], "blocked");
+        assert_eq!(policy["admission"]["remaining_blocker"], "not_connected");
+        assert!(policy["admission"]["next_action"]
+            .as_str()
+            .expect("local replay")
+            .contains("--placement local"));
     }
 
     #[test]
