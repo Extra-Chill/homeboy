@@ -212,36 +212,6 @@ fn explicit_config_root_override() -> Option<PathBuf> {
     Some(expand_tilde_path(value))
 }
 
-/// `XDG_CONFIG_HOME`, if set to a non-empty *absolute* value that lives under
-/// the resolved `HOME`.
-///
-/// The XDG Base Directory spec requires relative values to be ignored by
-/// conforming implementations, so a relative value here falls through to the
-/// next precedence tier rather than being resolved against an implicit base.
-///
-/// The under-`HOME` requirement guards against an *inherited* value that has
-/// gone stale after `HOME` was repointed. CI runners and login shells export
-/// `XDG_CONFIG_HOME=$HOME/.config` for the ambient user; when a process then
-/// isolates itself by setting `HOME` to a fresh directory, that variable still
-/// names the ambient user's config and would silently win over the new home
-/// (release run 35472447879: 85 hermetic tests read and wrote
-/// `/home/runner/.config/homeboy`). A legitimate XDG relocation is, in
-/// practice, always inside the user's own home; an operator who genuinely
-/// wants the config root somewhere else has the explicit
-/// `HOMEBOY_CONFIG_ROOT`, which is tier 1 and never second-guessed.
-fn xdg_config_home() -> Option<PathBuf> {
-    let value = env::var("XDG_CONFIG_HOME").ok()?;
-    if value.trim().is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(&value);
-    if !path.is_absolute() {
-        return None;
-    }
-    let home = resolved_home_root().ok()?;
-    path.starts_with(&home).then_some(path)
-}
-
 /// Base product config directory.
 ///
 /// Precedence, first match wins:
@@ -251,15 +221,18 @@ fn xdg_config_home() -> Option<PathBuf> {
 ///    Gives CI and multi-config operators an explicit, unambiguous lever
 ///    that does not require swapping `HOME`.
 /// 2. The process-local home-root override ([`set_home_root_override`]) --
-///    `<override>/.config/<dirname>`. Outranks `XDG_CONFIG_HOME` so hermetic
-///    test harnesses that repoint `HOME` keep working unchanged.
-/// 3. `XDG_CONFIG_HOME`, when set to a non-empty absolute path *under the
-///    resolved `HOME`* -- `<XDG_CONFIG_HOME>/<dirname>`. The Linux
-///    convention; per the XDG Base Directory spec, a relative value is
-///    invalid and ignored. A value outside `HOME` is treated as an inherited
-///    stale export from before `HOME` was repointed and is ignored too (see
-///    [`xdg_config_home`]); use `HOMEBOY_CONFIG_ROOT` for an out-of-home root.
-/// 4. `$HOME/.config/<dirname>` -- the historical default.
+///    `<override>/.config/<dirname>`.
+/// 3. `$HOME/.config/<dirname>` -- the historical default.
+///
+/// `XDG_CONFIG_HOME` is deliberately **not** consulted. Two attempts to honor
+/// it (#14784, #14794) each broke a different isolation contract: an
+/// inherited runner export outranked a repointed `HOME` and leaked every
+/// hermetic test into `/home/runner/.config/homeboy`; then an "under HOME"
+/// heuristic discarded the agent-task gate's own out-of-home XDG relocation
+/// (`<root>/gate-xdg/…` beside `<root>/gate-home`). There is no rule about
+/// `XDG_CONFIG_HOME` that is correct for both an inherited value and an
+/// intentional one, because the variable cannot say which it is.
+/// `HOMEBOY_CONFIG_ROOT` can, so it is the only explicit override.
 ///
 /// On Windows, `HOMEBOY_CONFIG_ROOT` is still honored first for parity, then
 /// `APPDATA/<dirname>`.
@@ -290,12 +263,6 @@ pub fn homeboy() -> Result<PathBuf> {
             return Ok(home
                 .join(".config")
                 .join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname));
-        }
-
-        if let Some(xdg_config_home) = xdg_config_home() {
-            return Ok(
-                xdg_config_home.join(homeboy_product_identity::PRODUCT_IDENTITY.config_dirname)
-            );
         }
 
         Ok(resolved_home_root()?
@@ -1672,12 +1639,40 @@ mod config_root_tests {
         );
     }
 
-    /// Tier 2: the process-local home override outranks `XDG_CONFIG_HOME`, so
-    /// the existing hermetic test harness (which sets both to a fake home)
-    /// keeps resolving through the override it actually asserts on.
+    /// `XDG_CONFIG_HOME` is never consulted, whatever it holds: an inherited
+    /// runner export (`/home/runner/.config`), an intentional out-of-home
+    /// relocation, a relative value, or empty. Resolution goes to `$HOME`.
     #[test]
-    fn home_override_outranks_xdg_config_home() {
+    fn xdg_config_home_is_never_consulted() {
+        for value in [
+            "/home/runner/.config",
+            "/tmp/hb-gate-root/gate-xdg/xdg_config_home",
+            "/tmp/hb-isolated-home/dotfiles/config",
+            "relative/xdg/root",
+            "",
+        ] {
+            let env = guard();
+            env.remove(HOMEBOY_CONFIG_ROOT_ENV);
+            set_home_root_override(None);
+            env.set("HOME", "/tmp/hb-isolated-home");
+            env.set("XDG_CONFIG_HOME", value);
+
+            let resolved = homeboy().expect("config root");
+
+            assert_eq!(
+                resolved,
+                PathBuf::from("/tmp/hb-isolated-home/.config/homeboy"),
+                "XDG_CONFIG_HOME={value:?} must not affect the config root, got {}",
+                resolved.display()
+            );
+        }
+    }
+
+    /// The home-root override is unaffected by `XDG_CONFIG_HOME` too.
+    #[test]
+    fn home_override_is_unaffected_by_xdg_config_home() {
         let env = guard();
+        env.remove(HOMEBOY_CONFIG_ROOT_ENV);
         env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
         set_home_root_override(Some(PathBuf::from("/tmp/hb-home-override")));
 
@@ -1685,90 +1680,11 @@ mod config_root_tests {
 
         assert_eq!(
             resolved,
-            PathBuf::from("/tmp/hb-home-override/.config/homeboy"),
-            "home override must win over XDG_CONFIG_HOME, got {}",
-            resolved.display()
+            PathBuf::from("/tmp/hb-home-override/.config/homeboy")
         );
     }
 
-    /// Tier 3: an absolute `XDG_CONFIG_HOME` is honored when no higher tier
-    /// applies. This is the behavior the issue asks for -- it was previously
-    /// read by test fixtures but never consulted by `homeboy()`.
-    #[test]
-    fn xdg_config_home_is_honored_when_absolute_and_under_home() {
-        let env = guard();
-        env.set("HOME", "/tmp/hb-home-fallback");
-        env.set("XDG_CONFIG_HOME", "/tmp/hb-home-fallback/dotfiles/config");
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-home-fallback/dotfiles/config/homeboy"),
-            "absolute XDG_CONFIG_HOME under HOME must be honored, got {}",
-            resolved.display()
-        );
-    }
-
-    /// An inherited `XDG_CONFIG_HOME` that points outside the current `HOME`
-    /// is the signature of a process that repointed `HOME` for isolation
-    /// while the ambient user's export was still in the environment. It must
-    /// not win over the new home, or every HOME-isolated test and sandbox
-    /// silently reads and writes the ambient user's real config.
-    #[test]
-    fn xdg_config_home_outside_home_is_ignored() {
-        let env = guard();
-        env.set("HOME", "/tmp/hb-isolated-home");
-        env.set("XDG_CONFIG_HOME", "/home/runner/.config");
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-isolated-home/.config/homeboy"),
-            "stale XDG_CONFIG_HOME from another home must fall through to HOME, got {}",
-            resolved.display()
-        );
-    }
-
-    /// Per the XDG Base Directory spec, relative values are invalid and must
-    /// be ignored by conforming implementations -- a relative
-    /// `XDG_CONFIG_HOME` must not be resolved against an implicit base, it
-    /// must fall through to `$HOME/.config`.
-    #[test]
-    fn relative_xdg_config_home_is_ignored() {
-        let env = guard();
-        env.set("HOME", "/tmp/hb-home-fallback");
-        env.set("XDG_CONFIG_HOME", "relative/xdg/root");
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
-            "relative XDG_CONFIG_HOME must be ignored per the XDG spec, got {}",
-            resolved.display()
-        );
-    }
-
-    /// An empty `XDG_CONFIG_HOME` must not shadow `$HOME/.config` either.
-    #[test]
-    fn empty_xdg_config_home_is_ignored() {
-        let env = guard();
-        env.set("HOME", "/tmp/hb-home-fallback");
-        env.set("XDG_CONFIG_HOME", "");
-
-        let resolved = homeboy().expect("config root");
-
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/hb-home-fallback/.config/homeboy"),
-            "empty XDG_CONFIG_HOME must fall through to $HOME/.config, got {}",
-            resolved.display()
-        );
-    }
-
-    /// Tier 4: the historical default, unchanged when nothing else applies.
+    /// Tier 3: the historical default, unchanged when nothing else applies.
     #[test]
     fn home_config_default_is_unchanged_when_no_override_applies() {
         let env = guard();
