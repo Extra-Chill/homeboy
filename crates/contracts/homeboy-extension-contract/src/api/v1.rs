@@ -314,6 +314,53 @@ mod tests {
     }
 
     #[test]
+    fn component_env_detect_wire_shape_excludes_script_paths_and_component_paths() {
+        let request = ExtensionApiComponentEnvDetectRequest {
+            schema: EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            extension_id: "fixture".to_string(),
+        };
+        let response = ExtensionApiComponentEnvDetectResponse {
+            schema: EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA.to_string(),
+            api_version: EXTENSION_API_V1,
+            detected_runtimes: vec![ExtensionApiRuntimeRequirement {
+                id: "php".to_string(),
+                version: "8.2".to_string(),
+            }],
+            extension_runtimes: vec![ExtensionApiRuntimeRequirement {
+                id: "node".to_string(),
+                version: "24".to_string(),
+            }],
+            failure: None,
+            process: None,
+        };
+
+        let request_json = serde_json::to_value(request).expect("component-env request JSON");
+        let response_json = serde_json::to_value(response).expect("component-env response JSON");
+        assert_eq!(
+            request_json,
+            serde_json::json!({
+                "schema": EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
+                "api_version": { "major": 1 },
+                "extension_id": "fixture"
+            })
+        );
+        assert_eq!(
+            response_json,
+            serde_json::json!({
+                "schema": EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA,
+                "api_version": { "major": 1 },
+                "detected_runtimes": [{ "id": "php", "version": "8.2" }],
+                "extension_runtimes": [{ "id": "node", "version": "24" }]
+            })
+        );
+        let serialized = format!("{request_json}{response_json}");
+        assert!(!serialized.contains("detect_script"));
+        assert!(!serialized.contains("component_path"));
+        assert!(!serialized.contains("extension_path"));
+    }
+
+    #[test]
     fn environment_resolve_wire_shape_excludes_private_execution_inputs() {
         let request = ExtensionApiEnvironmentResolveRequest {
             schema: EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA.to_string(),

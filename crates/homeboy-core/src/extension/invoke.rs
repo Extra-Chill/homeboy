@@ -18,6 +18,7 @@ use std::time::Duration;
 mod action;
 pub mod action_api;
 mod api;
+mod component_env_api;
 mod context;
 pub(crate) mod deadline_process;
 pub(crate) mod env_provider;
@@ -40,6 +41,7 @@ use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::ExtensionManifest;
 
 pub use api::invoke_api;
+pub use component_env_api::{detect_component_env_api, ComponentEnvDetectionContext};
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
 use environment::build_action_env;
@@ -1341,7 +1343,25 @@ mod tests {
             "fixture escapee must outlive marker cleanup to prove incomplete discovery"
         );
 
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        // The escaped shell owns a sleeping child in its own session. Killing
+        // only the leader leaves that child behind for the CI command
+        // supervisor to discover after the test suite has passed.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        for _ in 0..20 {
+            if !homeboy_core::process::pid_is_running(pid as u32) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !homeboy_core::process::pid_is_running(pid as u32),
+            "fixture escapee process group must be gone after cleanup"
+        );
+        assert_eq!(
+            unsafe { libc::kill(-pid, 0) },
+            -1,
+            "fixture escapee process group must not retain its child"
+        );
     }
 
     #[cfg(target_os = "linux")]

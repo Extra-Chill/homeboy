@@ -35,6 +35,8 @@ The wire schemas are:
 - `homeboy/extension-api-action-invoke-response/v1`
 - `homeboy/extension-api-environment-resolve-request/v1`
 - `homeboy/extension-api-environment-resolve-response/v1`
+- `homeboy/extension-api-component-env-detect-request/v1`
+- `homeboy/extension-api-component-env-detect-response/v1`
 - `homeboy/extension-api-deployment-provider-inventory-request/v1`
 - `homeboy/extension-api-deployment-provider-inventory-response/v1`
 - `homeboy/extension-api-deployment-provider-resolve-request/v1`
@@ -227,6 +229,25 @@ invalid output retain bounded, redacted process evidence. Provider ordering,
 environment layering, collision detection, and runner-side secret resolution
 remain caller policy over this operation.
 
+## Component Environment Detection
+
+`extension::invoke::detect_component_env_api` executes the advertised
+`component-env` capability after resolving it through v1. The serialized request
+carries only the selected extension ID. The component working directory is
+private service context and never enters the wire envelope. Detector script
+paths, extension installation paths, and process construction remain inside
+core.
+
+A successful response returns typed detected runtime requirements plus the
+extension's public descriptor runtime defaults. Empty detector stdout is a
+successful empty detection, not a failure. Missing capability and missing
+extension remain typed operation failures so callers can skip detection without
+loading manifests. Failed execution and invalid JSON stdout are explicit
+failures and retain bounded process evidence. `homeboy component env` consumes
+this operation and preserves detector-over-component-over-extension precedence
+and `component` / `extension:<id>` provenance. Runner diagnostic probes remain a
+separate remaining slice of #14639.
+
 ## Recipe-Run Provider Planning
 
 `extension::recipe_run_api` lists and plans `recipe-run-provider.<id>`
@@ -315,7 +336,7 @@ stability.
 
 | Classification | Modules | Direction |
 | --- | --- | --- |
-| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, execute invocation, environment-resolution, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
+| Stable Extension API | `api` | Versioned public descriptor, handshake, discovery, readiness, read-only invocation, execute invocation, environment-resolution, component-env detection, deployment-provider execution, recipe-provider planning, and external-check hydration envelopes. |
 | Stable API candidates | `capability`, `core_compat`, `exec_context`, `runtime_helper`, `sidecar_config` | Reuse or reference from future v1 operations after their wire semantics are reviewed. |
 | Extension-owned domain contracts | `action_types`, `agent_task_executor_declaration`, `autofix_config`, `bench_artifact`, `bench_diagnostics`, `bench_distribution`, `bench_gate`, `bench_metric_preset`, `bench_responsiveness`, `bench_result`, `bench_results`, `bench_stage`, `ci_config`, `ci_context`, `external_check_detail_resolver`, `external_storage_retention`, `fuzz_config`, `lint_result`, `lint_results`, `notification_transport_config`, `source_metadata_repair`, `test_analysis`, `test_drift`, `test_duration`, `test_inventory_config`, `test_parsing`, `test_result`, `test_results`, `test_workflow`, `trace_config`, `trace_parsing`, `trace_preview`, `trace_results`, `trace_spec`, `update_output`, `worktree_retention` | Remain portable domain schemas; the Extension API references their schema IDs rather than absorbing their fields. |
 | Manifest and implementation detail | `extension_contract_producer`, `hook_event`, `manifest`, `manifest_action_config`, `manifest_artifact_cleanup`, `manifest_capabilities`, `manifest_capability_config`, `manifest_deploy_config`, `manifest_test_config`, `manifest_toolchain_config`, `runner_contract`, `version` | Inputs and helpers used to build or execute descriptors. They are not a stable service API. |
