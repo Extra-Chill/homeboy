@@ -533,6 +533,11 @@ pub fn status(loop_id: &str) -> Result<AgentTaskLoopControllerRecord> {
     controller::load_controller(loop_id)
 }
 
+#[cfg(test)]
+pub(crate) fn write_test_record(record: &AgentTaskLoopControllerRecord) -> Result<()> {
+    controller::write_controller(record)
+}
+
 /// List every durable controller record.
 pub fn list() -> Result<ControllerListReport> {
     Ok(ControllerListReport {

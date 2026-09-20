@@ -207,8 +207,7 @@ fn authoritative_handoff(loop_id: &str) -> Result<Value, Error> {
         .into_iter()
         .filter_map(|record| {
             let handoff = record.metadata.get("provider_ci_handoff")?;
-            (handoff["loop_id"].as_str() == Some(loop_id))
-            .then(|| handoff.clone())
+            (handoff["loop_id"].as_str() == Some(loop_id)).then(|| handoff.clone())
         })
         .collect::<Vec<_>>();
     match matches.as_slice() {
