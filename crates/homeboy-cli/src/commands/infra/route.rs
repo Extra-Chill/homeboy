@@ -996,19 +996,41 @@ fn cook_requires_unmaterialized_admission(
         })
     );
     is_cook
-        && ((cli.detach_after_handoff
-            && !cli.placement.allows_local_fallback()
-            && !matches!(cli.placement, homeboy::cli_surface::Placement::Local))
-            || (matches!(cli.placement, homeboy::cli_surface::Placement::Auto)
-                && preflight.selected_runner_id.is_none()
-                && matches!(
-                    preflight.resource_admission,
-                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
-                )
-                && !matches!(
-                    preflight.fallback,
-                    homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
-                )))
+        && cook_requires_unmaterialized_admission_for_placement(
+            cli.placement,
+            cli.detach_after_handoff,
+            preflight,
+        )
+}
+
+pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
+    placement: homeboy::cli_surface::Placement,
+    detach_after_handoff: bool,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> bool {
+    (detach_after_handoff
+        && !placement.allows_local_fallback()
+        && !matches!(placement, homeboy::cli_surface::Placement::Local))
+        || (matches!(placement, homeboy::cli_surface::Placement::Auto)
+            && preflight.selected_runner_id.is_none()
+            && matches!(
+                preflight.resource_admission,
+                homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+            )
+            && !matches!(
+                preflight.fallback,
+                homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
+            ))
+}
+
+pub(crate) fn auto_cook_unavailable_lab_state(
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> Option<&str> {
+    let state = preflight
+        .lab_readiness
+        .as_ref()
+        .map(|readiness| readiness.state.as_str())?;
+    matches!(state, "stale" | "disconnected").then_some(state)
 }
 
 fn admission_digest(value: impl AsRef<[u8]>) -> String {
@@ -2126,12 +2148,8 @@ fn auto_cook_unavailable_lab_replay_error(
     if !matches!(cli.placement, homeboy::cli_surface::Placement::Auto) {
         return None;
     }
-    let state = preflight
-        .lab_readiness
-        .as_ref()
-        .map(|readiness| readiness.state.as_str())
-        .unwrap_or("absent");
-    if !matches!(state, "stale" | "disconnected") {
+    let state = auto_cook_unavailable_lab_state(preflight).unwrap_or("absent");
+    if state == "absent" {
         return None;
     }
     let local_args = cook_placement_replay_args(normalized_args, "local");
