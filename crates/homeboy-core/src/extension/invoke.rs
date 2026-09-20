@@ -1343,7 +1343,25 @@ mod tests {
             "fixture escapee must outlive marker cleanup to prove incomplete discovery"
         );
 
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        // The escaped shell owns a sleeping child in its own session. Killing
+        // only the leader leaves that child behind for the CI command
+        // supervisor to discover after the test suite has passed.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        for _ in 0..20 {
+            if !homeboy_core::process::pid_is_running(pid as u32) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            !homeboy_core::process::pid_is_running(pid as u32),
+            "fixture escapee process group must be gone after cleanup"
+        );
+        assert_eq!(
+            unsafe { libc::kill(-pid, 0) },
+            -1,
+            "fixture escapee process group must not retain its child"
+        );
     }
 
     #[cfg(target_os = "linux")]
