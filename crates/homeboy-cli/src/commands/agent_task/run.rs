@@ -3528,7 +3528,12 @@ where
             reconstruct_dispatcher,
         );
     }
-    if !record.state.is_terminal() {
+    // Provider-CI Cook runs deliberately remain non-terminal while the draft
+    // PR is waiting. Reconstructing this durable attempt is safe because the
+    // Cook service consumes the controller result before provider dispatch or
+    // local-gate execution, so pending reconnects do not replay either.
+    let provider_ci_reconnect = record.metadata.get("provider_ci_handoff").is_some();
+    if !record.state.is_terminal() && !provider_ci_reconnect {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
 
