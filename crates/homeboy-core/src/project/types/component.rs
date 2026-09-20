@@ -28,6 +28,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectComponentAttachment {
     pub id: String,
+    /// A checkout-less GitHub-Release-asset component (#14782) has nothing to
+    /// attach a path to, so checked-in project config may omit this key
+    /// entirely rather than round-tripping an empty string (#14795).
+    #[serde(default)]
     pub local_path: String,
     /// Project-specific deploy target for this attached component.
     ///
@@ -95,6 +99,18 @@ mod attachment_construction_tests {
 
         assert_eq!(attachment.id, "plugin");
         assert!(attachment.deployment_provider_input.is_none());
+    }
+
+    /// A checkout-less GitHub-Release-asset attachment (#14782) has nothing to
+    /// set `local_path` to, so checked-in project config may omit the key
+    /// entirely rather than round-tripping an empty string (#14795).
+    #[test]
+    fn an_attachment_with_no_local_path_key_deserializes() {
+        let attachment: ProjectComponentAttachment = serde_json::from_str(r#"{"id":"plugin"}"#)
+            .expect("an attachment with no local_path key must still deserialize");
+
+        assert_eq!(attachment.id, "plugin");
+        assert_eq!(attachment.local_path, "");
     }
 }
 

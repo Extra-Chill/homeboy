@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use crate::component;
 use crate::error::{Error, Result};
 
-use super::Project;
+use super::component::resolution::is_checkout_less_release_candidate;
+use super::{Project, StandaloneComponentConfigSnapshot};
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,7 +24,7 @@ pub struct ComponentLocalPathDiagnostic {
 
 pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
     let mut blockers = Vec::new();
-    let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
     let resolved_components = project
         .components
         .iter()
@@ -80,7 +81,10 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
             project.id
         ));
     } else {
-        blockers.extend(component_local_path_blockers(project));
+        blockers.extend(component_local_path_blockers_with_snapshot(
+            project,
+            Some(&standalone_snapshot),
+        ));
 
         let has_deployable =
             resolved_components
@@ -135,6 +139,7 @@ pub fn validate_deploy_component_local_paths(
     }
 
     let scoped_ids = scoped_deploy_component_ids(project, component_ids)?;
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
 
     let mut scoped_blockers = Vec::new();
     let mut hygiene_blockers = Vec::new();
@@ -142,6 +147,9 @@ pub fn validate_deploy_component_local_paths(
         let Some(blocker) = component_local_path_diagnostic(project, attachment) else {
             continue;
         };
+        if is_checkout_less_eligible_missing(&blocker, Some(&standalone_snapshot)) {
+            continue;
+        }
 
         if scoped_ids.contains(&attachment.id) {
             scoped_blockers.push(blocker.message);
@@ -178,7 +186,7 @@ fn scoped_deploy_component_ids(
     project: &Project,
     component_ids: &[String],
 ) -> Result<HashSet<String>> {
-    let standalone_snapshot = super::StandaloneComponentConfigSnapshot::load();
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
     let mut scoped_ids = HashSet::new();
     let mut pending = component_ids.to_vec();
 
@@ -250,12 +258,58 @@ pub fn validate_component_local_path(project: &Project, component_id: &str) -> R
 }
 
 pub(crate) fn component_local_path_blockers(project: &Project) -> Vec<String> {
+    let standalone_snapshot = StandaloneComponentConfigSnapshot::load();
+    component_local_path_blockers_with_snapshot(project, Some(&standalone_snapshot))
+}
+
+/// [`component_local_path_blockers`] against an already-loaded standalone
+/// snapshot, so a caller that loaded one for other reasons (readiness already
+/// does, to resolve every component) does not pay for a second one.
+fn component_local_path_blockers_with_snapshot(
+    project: &Project,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> Vec<String> {
     project
         .components
         .iter()
         .filter_map(|attachment| component_local_path_diagnostic(project, attachment))
+        .filter(|diagnostic| !is_checkout_less_eligible_missing(diagnostic, standalone_snapshot))
         .map(|diagnostic| diagnostic.message)
         .collect()
+}
+
+/// A `Missing` diagnostic (an absent/empty `local_path`) is not an actual
+/// deploy blocker when the component can resolve from a GitHub Release
+/// without a checkout (#14782) — project-wide and scoped deploy preflight and
+/// `project show` readiness must agree with resolution's own fallback
+/// eligibility, reusing the identical predicate resolution's checkout-less
+/// fallback already applies so the two paths cannot disagree about the same
+/// component (#14795).
+///
+/// This deliberately leaves [`component_local_path_diagnostic`],
+/// [`component_local_path_findings`], and [`validate_component_local_path`]
+/// themselves unchanged: they are the raw, eligibility-blind fact "does a
+/// local checkout exist for this component", and `resolve_project_component`
+/// depends on `validate_component_local_path` failing unconditionally on a
+/// missing path to know when to *attempt* the checkout-less fallback in the
+/// first place (see `resolution.rs`). Making that check eligibility-aware
+/// would make it stop signaling "try the fallback" for exactly the components
+/// the fallback exists for. The exemption instead lives one layer up, in the
+/// blocker-collecting callers that decide whether a missing checkout should
+/// stop a deploy or a readiness check — not in the fact-finding primitive
+/// resolution relies on.
+///
+/// A `Stale` diagnostic (a `local_path` that is set but wrong) always blocks
+/// regardless of eligibility — that is an authoring error, not the "no
+/// checkout at all" shape the checkout-less fallback exists for.
+fn is_checkout_less_eligible_missing(
+    diagnostic: &ComponentLocalPathDiagnostic,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> bool {
+    matches!(
+        diagnostic.status,
+        ComponentLocalPathDiagnosticStatus::Missing
+    ) && is_checkout_less_release_candidate(None, &diagnostic.component_id, standalone_snapshot)
 }
 
 pub fn component_local_path_diagnostic(
@@ -627,6 +681,156 @@ mod tests {
         assert!(blockers
             .iter()
             .any(|blocker| blocker.contains("Missing base_path")));
+    }
+
+    // =========================================================================
+    // A missing/empty local_path is not a blocker when the component can
+    // resolve from a GitHub Release without a checkout (#14782, #14795).
+    // =========================================================================
+
+    fn write_standalone_component(home: &TempDir, component_id: &str, extra: serde_json::Value) {
+        let components_dir = home
+            .path()
+            .join(".config")
+            .join("homeboy")
+            .join("components");
+        std::fs::create_dir_all(&components_dir).expect("components dir");
+        std::fs::write(
+            components_dir.join(format!("{component_id}.json")),
+            extra.to_string(),
+        )
+        .expect("write standalone component config");
+    }
+
+    #[test]
+    fn project_wide_validation_passes_when_every_missing_local_path_is_checkout_less_eligible() {
+        crate::test_support::with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "chubes-gallery-lightbox",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill/chubes-gallery-lightbox.git"
+                }),
+            );
+            write_standalone_component(
+                home,
+                "data-machine",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill/data-machine.git"
+                }),
+            );
+            let project = project_with_components(vec![
+                ("chubes-gallery-lightbox", String::new()),
+                ("data-machine", String::new()),
+            ]);
+
+            validate_component_local_paths(&project)
+                .expect("every missing local_path is checkout-less eligible");
+            validate_deploy_component_local_paths(&project, &[])
+                .expect("--outdated/--all project-wide deploy must not hard-fail either");
+
+            // `calculate_deploy_readiness` / `project show` reuse the same
+            // blocker collection — confirmed directly here rather than through
+            // `calculate_deploy_readiness` itself, which also attempts full
+            // component resolution (a real GitHub Release lookup) for its
+            // separate "has a deployable artifact" signal. That resolution
+            // path is exercised in `resolution.rs` and in
+            // `homeboy-deploy`'s `--outdated` planning tests, with the GitHub
+            // layer mocked; it is orthogonal to the local_path gate this test
+            // is about.
+            assert!(
+                component_local_path_blockers(&project).is_empty(),
+                "readiness must not report a local_path blocker for a checkout-less-eligible component"
+            );
+        });
+    }
+
+    #[test]
+    fn project_wide_validation_names_only_the_non_github_component_in_a_mixed_project() {
+        crate::test_support::with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "eligible",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill/eligible.git"
+                }),
+            );
+            write_standalone_component(
+                home,
+                "non-github",
+                serde_json::json!({
+                    "remote_url": "https://gitlab.com/example/non-github.git"
+                }),
+            );
+            let project = project_with_components(vec![
+                ("eligible", String::new()),
+                ("non-github", String::new()),
+            ]);
+
+            let err = validate_component_local_paths(&project)
+                .expect_err("a non-GitHub remote_url must still block");
+
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("Component 'non-github' is missing local_path")));
+            assert!(!err
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("Component 'eligible'")));
+        });
+    }
+
+    #[test]
+    fn project_wide_validation_names_the_component_with_no_standalone_entry_at_all() {
+        crate::test_support::with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "eligible",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill/eligible.git"
+                }),
+            );
+            let project = project_with_components(vec![
+                ("eligible", String::new()),
+                ("unregistered", String::new()),
+            ]);
+
+            let err = validate_component_local_paths(&project)
+                .expect_err("a component with no standalone entry must still block");
+
+            assert!(err.hints.iter().any(|hint| hint
+                .message
+                .contains("Component 'unregistered' is missing local_path")));
+            assert!(!err
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("Component 'eligible'")));
+        });
+    }
+
+    #[test]
+    fn a_stale_local_path_still_blocks_even_when_checkout_less_eligible() {
+        crate::test_support::with_isolated_home(|home| {
+            write_standalone_component(
+                home,
+                "eligible",
+                serde_json::json!({
+                    "remote_url": "https://github.com/Extra-Chill/eligible.git"
+                }),
+            );
+            let project = project_with_components(vec![(
+                "eligible",
+                "/tmp/homeboy-14795-stale-but-eligible".to_string(),
+            )]);
+
+            let err = validate_component_local_paths(&project).expect_err(
+                "a local_path that is set but wrong is an authoring error, not \"no checkout\"",
+            );
+
+            assert!(err.hints.iter().any(|hint| hint.message.contains(
+                "Component 'eligible' local_path '/tmp/homeboy-14795-stale-but-eligible' does not exist"
+            )));
+        });
     }
 
     #[test]

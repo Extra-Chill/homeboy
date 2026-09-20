@@ -216,11 +216,9 @@ fn resolve_checkout_less_release_component(
     component_id: &str,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) -> Result<Option<crate::component::Component>> {
-    let standalone = match standalone_snapshot {
-        Some(snapshot) => snapshot.get(component_id).cloned(),
-        None => load_standalone_component_config_core(config_root, component_id),
-    };
-    let Some(standalone) = standalone else {
+    let Some(standalone) =
+        standalone_component_config(config_root, component_id, standalone_snapshot)
+    else {
         return Ok(None);
     };
     let Some(remote_url) = standalone.remote_url.as_deref() else {
@@ -243,6 +241,53 @@ fn resolve_checkout_less_release_component(
     )?;
     component.id = component_id.to_string();
     Ok(Some(component))
+}
+
+/// The standalone registry entry for `component_id`, read from a snapshot when
+/// one is supplied or loaded fresh from `config_root` (ambient when `None`)
+/// otherwise. Shared by [`resolve_checkout_less_release_component`] and
+/// [`is_checkout_less_release_candidate`] so both read the exact same source
+/// (#14795).
+fn standalone_component_config(
+    config_root: Option<&Path>,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> Option<crate::component::Component> {
+    match standalone_snapshot {
+        Some(snapshot) => snapshot.get(component_id).cloned(),
+        None => load_standalone_component_config_core(config_root, component_id),
+    }
+}
+
+/// Whether `component_id` is structurally eligible to resolve from a GitHub
+/// Release without a local checkout: the standalone registry has an entry for
+/// it whose `remote_url` parses as a GitHub repository (#14782).
+///
+/// This is the exact early-exit condition [`resolve_checkout_less_release_component`]
+/// applies before it does any network I/O, extracted so project readiness and
+/// deploy preflight (#14795) can ask "does this component need a checkout to
+/// deploy?" without duplicating — and risking drifting from — resolution's own
+/// answer to the same question. It deliberately does *not* confirm the
+/// repository has a release yet; that check requires a GitHub API call, and
+/// making a readiness/preflight pass over dozens of components perform one per
+/// component would defeat the point of "no checkout" being cheap. A component
+/// that is a candidate by this predicate but turns out to have no releases
+/// still fails, just later and with its own actionable error, exactly as it
+/// does today when resolution itself is asked to fall back.
+pub(crate) fn is_checkout_less_release_candidate(
+    config_root: Option<&Path>,
+    component_id: &str,
+    standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
+) -> bool {
+    let Some(standalone) =
+        standalone_component_config(config_root, component_id, standalone_snapshot)
+    else {
+        return false;
+    };
+    let Some(remote_url) = standalone.remote_url.as_deref() else {
+        return false;
+    };
+    crate::git::release_download::parse_github_url(remote_url).is_some()
 }
 
 /// `remote_path` auto-resolution at the boundary this resolution is running on.
