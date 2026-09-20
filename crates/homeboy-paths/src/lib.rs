@@ -1639,11 +1639,6 @@ mod config_root_tests {
         );
     }
 
-
-
-
-
-
     /// `XDG_CONFIG_HOME` is never consulted, whatever it holds: an inherited
     /// runner export (`/home/runner/.config`), an intentional out-of-home
     /// relocation, a relative value, or empty. Resolution goes to `$HOME`.
@@ -1683,7 +1678,10 @@ mod config_root_tests {
 
         let resolved = homeboy().expect("config root");
 
-        assert_eq!(resolved, PathBuf::from("/tmp/hb-home-override/.config/homeboy"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-home-override/.config/homeboy")
+        );
     }
 
     /// Tier 3: the historical default, unchanged when nothing else applies.
