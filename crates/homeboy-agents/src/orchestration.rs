@@ -4067,7 +4067,8 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
-    if (record.owner_process_is_running() && record.state.is_terminal())
+    if (record.state == AgentTaskRunState::CandidateRecoverable
+        && record.owner_process_is_running())
         || record.has_live_pending_local_cook_supervisor(Utc::now())
     {
         return ControlPlaneRunState::Running;
