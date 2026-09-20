@@ -18,9 +18,11 @@ use homeboy_extension_contract::api::v1::{
     COMPILER_WARNINGS_CAPABILITY_ID, COMPILER_WARNINGS_INPUT_SCHEMA,
     COMPILER_WARNINGS_OUTPUT_SCHEMA, COMPILER_WARNING_FIXES_CAPABILITY_ID,
     COMPILER_WARNING_FIXES_INPUT_SCHEMA, COMPILER_WARNING_FIXES_OUTPUT_SCHEMA,
-    DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID, EXECUTE_CAPABILITY_ID,
-    EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA, EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA,
-    EXTENSION_API_CATALOG_REQUEST_SCHEMA, EXTENSION_API_CATALOG_RESPONSE_SCHEMA,
+    COMPONENT_ENV_CAPABILITY_ID, DEPLOYMENT_PROVIDER_CAPABILITY_PREFIX, ENVIRONMENT_CAPABILITY_ID,
+    EXECUTE_CAPABILITY_ID, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
+    EXTENSION_API_ACTION_INVOKE_RESPONSE_SCHEMA, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
+    EXTENSION_API_CATALOG_RESPONSE_SCHEMA, EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
+    EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA,
     EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_RESPONSE_SCHEMA, EXTENSION_API_DESCRIPTOR_SCHEMA,
     EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
@@ -128,6 +130,13 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
             ENVIRONMENT_CAPABILITY_ID,
             EXTENSION_API_ENVIRONMENT_RESOLVE_REQUEST_SCHEMA,
             EXTENSION_API_ENVIRONMENT_RESOLVE_RESPONSE_SCHEMA,
+        ));
+    }
+    if extension.component_env.is_some() {
+        capabilities.push(schema_capability_descriptor(
+            COMPONENT_ENV_CAPABILITY_ID,
+            EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
+            EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA,
         ));
     }
     // Advertised JSON-stdin capabilities come from the manifest contract, which
@@ -1097,6 +1106,44 @@ mod tests {
                 response.entries[1].status,
                 ExtensionApiCatalogEntryStatus::Available
             );
+        });
+    }
+
+    #[test]
+    fn descriptor_projects_component_env_detector_as_a_typed_capability() {
+        crate::test_support::with_isolated_home(|_| {
+            write_extension(
+                "fixture",
+                serde_json::json!({
+                    "name": "Fixture",
+                    "version": "1.0.0",
+                    "component_env": { "detect_script": "scripts/env/detect.sh" }
+                }),
+            );
+
+            let descriptor = api_descriptor("fixture").expect("descriptor");
+            let capability = descriptor
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == COMPONENT_ENV_CAPABILITY_ID)
+                .expect("component-env capability");
+            assert_eq!(
+                capability
+                    .input_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA)
+            );
+            assert_eq!(
+                capability
+                    .output_schema
+                    .as_ref()
+                    .map(|schema| schema.schema.as_str()),
+                Some(EXTENSION_API_COMPONENT_ENV_DETECT_RESPONSE_SCHEMA)
+            );
+            assert!(!serde_json::to_string(capability)
+                .expect("capability JSON")
+                .contains("detect_script"));
         });
     }
 

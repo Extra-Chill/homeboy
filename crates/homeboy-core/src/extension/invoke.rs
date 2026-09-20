@@ -18,6 +18,7 @@ use std::time::Duration;
 mod action;
 pub mod action_api;
 mod api;
+mod component_env_api;
 mod context;
 pub(crate) mod deadline_process;
 pub(crate) mod env_provider;
@@ -40,6 +41,7 @@ use homeboy_extension_contract::runner_contract::RunnerStepFilter;
 use homeboy_extension_contract::ExtensionManifest;
 
 pub use api::invoke_api;
+pub use component_env_api::{detect_component_env_api, ComponentEnvDetectionContext};
 pub use context::ResolvedExtensionInvocationContext;
 pub use env_provider::{resolve_installed, resolve_installed_all, EnvProviderContribution};
 use environment::build_action_env;

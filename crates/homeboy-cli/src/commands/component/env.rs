@@ -4,18 +4,22 @@
 //! Split out of `component.rs` to keep the top-level command dispatch focused on
 //! CRUD operations.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use homeboy::core::component;
+use homeboy_extension_contract::api::v1::{
+    ExtensionApiComponentEnvDetectRequest, ExtensionApiOperationFailureCode,
+    ExtensionApiRuntimeRequirement, EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA,
+    EXTENSION_API_V1,
+};
 use homeboy_extension_contract::manifest_capability_config::RuntimeRequirementsConfig;
-use homeboy_extension_contract::ExtensionManifest;
 
 use super::{CmdResult, ComponentOutput};
 
 /// Runtime environment requirements detected from the component's source files.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ComponentEnvOutput {
     command: String,
     id: String,
@@ -24,7 +28,7 @@ struct ComponentEnvOutput {
     runtimes: BTreeMap<String, ComponentRuntimeRequirement>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ComponentRuntimeRequirement {
     version: String,
     source: String,
@@ -57,44 +61,71 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
 
     let mut runtimes: BTreeMap<String, ComponentRuntimeRequirement> = BTreeMap::new();
 
-    // Read component-scoped runtime requirements from raw homeboy.json; the typed
-    // extension settings intentionally preserve extension-owned unknown fields.
+    // Read component-scoped runtime requirements from the resolved typed component.
     if let Some(ref ext_id) = extension_id {
-        let config_path = local_path.join("homeboy.json");
-        if let Ok(raw) = std::fs::read_to_string(&config_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(ext_obj) = json.get("extensions").and_then(|e| e.get(ext_id.as_str())) {
-                    if let Ok(requirements) =
-                        serde_json::from_value::<RuntimeRequirementsConfig>(ext_obj.clone())
-                    {
-                        apply_component_runtime_requirements(
-                            requirements,
-                            &mut runtimes,
-                            "component",
-                            true,
-                        );
-                    }
+        if let Some(settings) = component
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get(ext_id))
+            .map(|config| &config.settings)
+        {
+            if let Some(runtime_values) = settings.get("runtimes") {
+                if let Ok(requirements) = serde_json::from_value::<RuntimeRequirementsConfig>(
+                    serde_json::json!({ "runtimes": runtime_values }),
+                ) {
+                    apply_component_runtime_requirements(
+                        requirements,
+                        &mut runtimes,
+                        "component",
+                        true,
+                    );
                 }
             }
         }
     }
 
-    let extension = if let Some(ref ext_id) = extension_id {
-        homeboy_core::extension::catalog::load_extension(ext_id).ok()
-    } else {
-        None
-    };
-
-    if let Some(ref extension) = extension {
-        if let Some(detected) = run_component_env_detector(extension, local_path)? {
-            apply_component_env_detector_output(detected, &mut runtimes);
+    if let Some(ref ext_id) = extension_id {
+        let response = homeboy_core::extension::invoke::detect_component_env_api(
+            &ExtensionApiComponentEnvDetectRequest {
+                schema: EXTENSION_API_COMPONENT_ENV_DETECT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: ext_id.clone(),
+            },
+            homeboy_core::extension::invoke::ComponentEnvDetectionContext::new(local_path),
+        );
+        if let Some(failure) = response.failure {
+            match failure.code {
+                ExtensionApiOperationFailureCode::CapabilityNotProvided
+                | ExtensionApiOperationFailureCode::ExtensionNotFound => {}
+                ExtensionApiOperationFailureCode::CapabilityExecutionFailed => {
+                    return Err(homeboy::core::Error::internal_io(
+                        failure.message,
+                        response.process.map(|process| process.stderr),
+                    ));
+                }
+                ExtensionApiOperationFailureCode::CapabilityOutputInvalid => {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "component",
+                        failure.message,
+                        response
+                            .process
+                            .map(|process| process.stdout.chars().take(200).collect()),
+                        None,
+                    ));
+                }
+                _ => {
+                    return Err(homeboy::core::Error::validation_invalid_argument(
+                        "extension",
+                        failure.message,
+                        Some(ext_id.clone()),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            apply_detected_runtimes(&response.detected_runtimes, &mut runtimes);
         }
-    }
-
-    if let (Some(ext_id), Some(extension)) = (extension_id.as_ref(), extension.as_ref()) {
-        if let Some(runtime) = extension.runtime.as_ref() {
-            apply_extension_runtime_requirements(ext_id, runtime, &mut runtimes);
-        }
+        apply_extension_runtime_requirements(ext_id, &response.extension_runtimes, &mut runtimes);
     }
 
     let env_output = ComponentEnvOutput {
@@ -124,86 +155,39 @@ pub(super) fn env(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOu
     ))
 }
 
-fn run_component_env_detector(
-    extension: &ExtensionManifest,
-    component_path: &Path,
-) -> homeboy::core::Result<Option<RuntimeRequirementsConfig>> {
-    let Some(component_env) = extension.component_env.as_ref() else {
-        return Ok(None);
-    };
-
-    let extension_path = extension.extension_path.as_ref().ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "extension",
-            "Extension manifest is missing extension_path",
-            Some(extension.id.clone()),
-            None,
-        )
-    })?;
-    let script_path = Path::new(extension_path).join(&component_env.detect_script);
-    if !script_path.exists() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "extension",
-            format!(
-                "Extension '{}' component env detector is missing {}",
-                extension.id,
-                script_path.display()
-            ),
-            None,
-            None,
-        ));
-    }
-
-    let command = homeboy::core::engine::shell::quote_path(&script_path.to_string_lossy());
-    let output = homeboy::core::server::execute_local_command_in_dir(
-        &command,
-        Some(&component_path.to_string_lossy()),
-        None,
-    );
-
-    if !output.success {
-        return Err(homeboy::core::Error::internal_io(
-            format!(
-                "Component env detector for extension '{}' failed with exit code {}",
-                extension.id, output.exit_code
-            ),
-            Some(output.stderr),
-        ));
-    }
-
-    let trimmed = output.stdout.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    let detected = serde_json::from_str::<RuntimeRequirementsConfig>(trimmed).map_err(|error| {
-        homeboy::core::Error::validation_invalid_json(
-            error,
-            Some(format!(
-                "parse component env detector output for extension '{}'",
-                extension.id
-            )),
-            Some(trimmed.chars().take(200).collect()),
-        )
-    })?;
-
-    Ok(Some(detected))
-}
-
-fn apply_component_env_detector_output(
-    detected: RuntimeRequirementsConfig,
+fn apply_detected_runtimes(
+    detected: &[ExtensionApiRuntimeRequirement],
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
-    apply_component_runtime_requirements(detected, runtimes, "component", true);
+    apply_runtime_requirements(detected, runtimes, "component", true);
 }
 
 fn apply_extension_runtime_requirements(
     extension_id: &str,
-    runtime: &RuntimeRequirementsConfig,
+    requirements: &[ExtensionApiRuntimeRequirement],
     runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
 ) {
-    let source = format!("extension:{}", extension_id);
-    apply_component_runtime_requirements(runtime.clone(), runtimes, &source, false);
+    let source = format!("extension:{extension_id}");
+    apply_runtime_requirements(requirements, runtimes, &source, false);
+}
+
+fn apply_runtime_requirements(
+    requirements: &[ExtensionApiRuntimeRequirement],
+    runtimes: &mut BTreeMap<String, ComponentRuntimeRequirement>,
+    source: &str,
+    overwrite: bool,
+) {
+    for requirement in requirements {
+        if overwrite || !runtimes.contains_key(&requirement.id) {
+            runtimes.insert(
+                requirement.id.clone(),
+                ComponentRuntimeRequirement {
+                    version: requirement.version.clone(),
+                    source: source.to_string(),
+                },
+            );
+        }
+    }
 }
 
 fn apply_component_runtime_requirements(
@@ -212,17 +196,15 @@ fn apply_component_runtime_requirements(
     source: &str,
     overwrite: bool,
 ) {
-    for (id, requirement) in requirements.runtimes {
-        if overwrite || !runtimes.contains_key(&id) {
-            runtimes.insert(
-                id,
-                ComponentRuntimeRequirement {
-                    version: requirement.version,
-                    source: source.to_string(),
-                },
-            );
-        }
-    }
+    let mapped = requirements
+        .runtimes
+        .into_iter()
+        .map(|(id, requirement)| ExtensionApiRuntimeRequirement {
+            id,
+            version: requirement.version,
+        })
+        .collect::<Vec<_>>();
+    apply_runtime_requirements(&mapped, runtimes, source, overwrite);
 }
 
 #[cfg(test)]
@@ -230,6 +212,45 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+
+    fn requirement(id: &str, version: &str) -> ExtensionApiRuntimeRequirement {
+        ExtensionApiRuntimeRequirement {
+            id: id.to_string(),
+            version: version.to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn install_detector(home: &Path, id: &str, manifest: &str, script: &str) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(extension_dir.join("scripts/env")).expect("extension dirs");
+        fs::write(extension_dir.join(format!("{id}.json")), manifest).expect("manifest");
+        let script_path = extension_dir.join("scripts/env/detect.sh");
+        fs::write(&script_path, script).expect("write detector");
+        let mut perms = fs::metadata(&script_path)
+            .expect("script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod detector");
+    }
+
+    fn write_component(homeboy_json: &str) -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("homeboy.json"), homeboy_json).expect("homeboy.json");
+        let git_init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git init");
+        assert!(git_init.status.success());
+        temp
+    }
+
+    fn runtimes_from(output: &ComponentOutput) -> BTreeMap<String, ComponentRuntimeRequirement> {
+        serde_json::from_value::<ComponentEnvOutput>(output.entity.clone().expect("entity"))
+            .expect("env output")
+            .runtimes
+    }
 
     #[test]
     fn component_env_path_uses_shared_git_root_portable_discovery() {
@@ -254,58 +275,18 @@ mod tests {
 
     #[test]
     fn extension_runtime_requirements_fill_missing_component_versions() {
-        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
-            "runtimes": {
-                "node": { "version": "24" },
-                "php": { "version": "8.3" }
-            }
-        }))
-        .expect("runtime requirements");
         let mut runtimes = BTreeMap::new();
 
-        apply_extension_runtime_requirements("fixture-runtime", &runtime, &mut runtimes);
+        apply_extension_runtime_requirements(
+            "fixture-runtime",
+            &[requirement("node", "24"), requirement("php", "8.3")],
+            &mut runtimes,
+        );
 
         assert_eq!(runtimes["node"].version, "24");
         assert_eq!(runtimes["node"].source, "extension:fixture-runtime");
         assert_eq!(runtimes["php"].version, "8.3");
         assert_eq!(runtimes["php"].source, "extension:fixture-runtime");
-    }
-
-    #[test]
-    fn component_env_detector_executes_extension_script() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let extension_dir = temp.path().join("extensions/demo");
-        let component_dir = temp.path().join("component");
-        fs::create_dir_all(extension_dir.join("scripts/env")).expect("extension dirs");
-        fs::create_dir_all(&component_dir).expect("component dir");
-
-        let script = extension_dir.join("scripts/env/detect.sh");
-        fs::write(
-            &script,
-            "#!/bin/sh\nprintf '{\"runtimes\":{\"php\":{\"version\":\"8.2\"},\"node\":{\"version\":\"22\"}}}'\n",
-        )
-        .expect("write detector");
-        let mut perms = fs::metadata(&script)
-            .expect("script metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script, perms).expect("chmod detector");
-
-        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
-            "name": "Demo",
-            "version": "1.0.0",
-            "component_env": { "detect_script": "scripts/env/detect.sh" }
-        }))
-        .expect("extension manifest");
-        extension.id = "demo".to_string();
-        extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
-
-        let detected = run_component_env_detector(&extension, &component_dir)
-            .expect("detector should run")
-            .expect("detector output");
-
-        assert_eq!(detected.runtimes["php"].version, "8.2");
-        assert_eq!(detected.runtimes["node"].version, "22");
     }
 
     #[test]
@@ -324,13 +305,6 @@ mod tests {
 
     #[test]
     fn component_env_detector_output_overrides_component_values_before_runtime_defaults() {
-        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
-            "runtimes": {
-                "node": { "version": "24" },
-                "php": { "version": "8.4" }
-            }
-        }))
-        .expect("runtime requirements");
         let mut runtimes = BTreeMap::from([
             (
                 "node".to_string(),
@@ -348,14 +322,12 @@ mod tests {
             ),
         ]);
 
-        apply_component_env_detector_output(
-            serde_json::from_value(serde_json::json!({
-                "runtimes": { "php": { "version": "8.2" } }
-            }))
-            .expect("detected requirements"),
+        apply_detected_runtimes(&[requirement("php", "8.2")], &mut runtimes);
+        apply_extension_runtime_requirements(
+            "demo",
+            &[requirement("node", "24"), requirement("php", "8.4")],
             &mut runtimes,
         );
-        apply_extension_runtime_requirements("demo", &runtime, &mut runtimes);
 
         assert_eq!(runtimes["php"].version, "8.2");
         assert_eq!(runtimes["php"].source, "component");
@@ -365,13 +337,6 @@ mod tests {
 
     #[test]
     fn component_versions_win_over_extension_runtime_requirements() {
-        let runtime: RuntimeRequirementsConfig = serde_json::from_value(serde_json::json!({
-            "runtimes": {
-                "node": { "version": "24" },
-                "php": { "version": "8.3" }
-            }
-        }))
-        .expect("runtime requirements");
         let mut runtimes = BTreeMap::from([
             (
                 "node".to_string(),
@@ -389,11 +354,131 @@ mod tests {
             ),
         ]);
 
-        apply_extension_runtime_requirements("fixture-runtime", &runtime, &mut runtimes);
+        apply_extension_runtime_requirements(
+            "fixture-runtime",
+            &[requirement("node", "24"), requirement("php", "8.3")],
+            &mut runtimes,
+        );
 
         assert_eq!(runtimes["node"].version, "22");
         assert_eq!(runtimes["node"].source, "component");
         assert_eq!(runtimes["php"].version, "8.2");
         assert_eq!(runtimes["php"].source, "component");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_env_cli_applies_detector_precedence_and_provenance() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_detector(
+                home.path(),
+                "demo",
+                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"},"runtime":{"runtimes":{"node":{"version":"24"},"php":{"version":"8.4"}}}}"#,
+                "#!/bin/sh\nprintf '{\"runtimes\":{\"php\":{\"version\":\"8.2\"}}}'\n",
+            );
+            let component = write_component(
+                r#"{"id":"portable-env","extensions":{"demo":{"runtimes":{"node":{"version":"20"},"php":{"version":"8.0"}}}}}"#,
+            );
+            let (output, code) =
+                env(None, Some(&component.path().to_string_lossy())).expect("component env");
+
+            assert_eq!(code, 0);
+            let runtimes = runtimes_from(&output);
+            assert_eq!(runtimes["php"].version, "8.2");
+            assert_eq!(runtimes["php"].source, "component");
+            assert_eq!(runtimes["node"].version, "20");
+            assert_eq!(runtimes["node"].source, "component");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_env_cli_skips_missing_capability_and_keeps_extension_defaults() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions").join("demo");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("demo.json"),
+                r#"{"id":"demo","name":"Demo","version":"1.0.0","runtime":{"runtimes":{"node":{"version":"24"}}}}"#,
+            )
+            .expect("manifest");
+            let component = write_component(
+                r#"{"id":"portable-env","extensions":{"demo":{"runtimes":{"php":{"version":"8.2"}}}}}"#,
+            );
+            let (output, code) =
+                env(None, Some(&component.path().to_string_lossy())).expect("component env");
+
+            assert_eq!(code, 0);
+            let runtimes = runtimes_from(&output);
+            assert_eq!(runtimes["php"].version, "8.2");
+            assert_eq!(runtimes["php"].source, "component");
+            assert_eq!(runtimes["node"].version, "24");
+            assert_eq!(runtimes["node"].source, "extension:demo");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_env_cli_fails_when_detector_execution_fails() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_detector(
+                home.path(),
+                "demo",
+                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"}}"#,
+                "#!/bin/sh\nprintf 'detector boom' >&2\nexit 7\n",
+            );
+            let component = write_component(r#"{"id":"portable-env","extensions":{"demo":{}}}"#);
+            let error = env(None, Some(&component.path().to_string_lossy()))
+                .expect_err("detector failure must be explicit");
+            assert_eq!(error.message, "IO error");
+            assert!(error.details["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("failed"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_env_cli_fails_when_detector_output_is_invalid() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            install_detector(
+                home.path(),
+                "demo",
+                r#"{"id":"demo","name":"Demo","version":"1.0.0","component_env":{"detect_script":"scripts/env/detect.sh"}}"#,
+                "#!/bin/sh\nprintf 'not json'\n",
+            );
+            let component = write_component(r#"{"id":"portable-env","extensions":{"demo":{}}}"#);
+            let error = env(None, Some(&component.path().to_string_lossy()))
+                .expect_err("invalid detector output must be explicit");
+            assert!(error
+                .message
+                .contains("parse component env detector output"));
+        });
+    }
+
+    #[test]
+    fn component_env_cli_does_not_execute_detectors() {
+        let source = include_str!("env.rs");
+        let detector_helper = concat!("run_component_env", "_detector");
+        let local_exec = concat!("execute_local_command", "_in_dir");
+        let manifest_loader_marker = concat!("load", "_extension");
+        let manifest_type = concat!("Extension", "Manifest");
+        assert!(
+            !source.contains(detector_helper),
+            "CLI must not reintroduce detector helper execution"
+        );
+        assert!(
+            !source.contains(local_exec),
+            "CLI must not reintroduce local detector process execution"
+        );
+        assert!(
+            !source.contains(manifest_loader_marker),
+            "CLI must not load extension manifests for detector execution"
+        );
+        assert!(
+            !source.contains(manifest_type),
+            "CLI must not depend on raw extension manifests for component env"
+        );
     }
 }
