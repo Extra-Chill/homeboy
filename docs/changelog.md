@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.378.0] - 2026-09-20
+
+### Added
+- resolve and deploy GitHub-Release-asset components without a source checkout
+- honor HOMEBOY_CONFIG_ROOT and XDG_CONFIG_HOME in config root resolution
+
+### Changed
+- Migrate runner doctor tools to Extension API
+
+### Fixed
+- align Auto preview with detached admission
+- pin release quality gate action
+- stop consulting XDG_CONFIG_HOME; HOMEBOY_CONFIG_ROOT is the only explicit override
+- --outdated / --all still hard-fail on missing local_path before checkout-less resolution runs
+- ignore an inherited XDG_CONFIG_HOME that lives outside the resolved HOME
+
 ## [0.377.1] - 2026-09-19
 
 ### Fixed
