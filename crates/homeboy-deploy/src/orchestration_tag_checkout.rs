@@ -351,8 +351,7 @@ pub(super) fn latest_default_deploy_tag(component: &Component) -> Result<Option<
         let Some(remote_url) = component.remote_url.as_deref() else {
             return Ok(None);
         };
-        let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url)
-        else {
+        let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url) else {
             return Ok(None);
         };
         return homeboy_core::git::release_download::latest_release_tag_for_repo(

@@ -142,12 +142,8 @@ pub(super) fn prepare_components(
             .iter()
             .map(|skip| format!("{} ({})", skip.id, skip.reason))
             .collect();
-        let skipped_report: Vec<String> = loaded
-            .skipped
-            .iter()
-            .cloned()
-            .chain(unresolved)
-            .collect();
+        let skipped_report: Vec<String> =
+            loaded.skipped.iter().cloned().chain(unresolved).collect();
         let message = if skipped_report.is_empty() {
             "No components configured for project".to_string()
         } else {
