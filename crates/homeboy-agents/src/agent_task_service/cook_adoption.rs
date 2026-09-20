@@ -524,6 +524,14 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                                 command,
                                 pid,
                                 options.gates.gate_timeout_seconds,
+                            )?;
+                            agent_task_lifecycle::record_promotion_progress_in_store(
+                                &lifecycle_store,
+                                &run_id,
+                                "gate",
+                                Some(command),
+                                Some("gate process started"),
+                                None,
                             )
                         }
                     }),
@@ -536,6 +544,18 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                                 status.visibility,
                                 status.reveal_policy,
                                 status,
+                            )?;
+                            agent_task_lifecycle::record_promotion_progress_in_store(
+                                &lifecycle_store,
+                                &run_id,
+                                "gate",
+                                None,
+                                Some(&format!(
+                                    "gate elapsed={}ms last-progress={}ms",
+                                    status.elapsed_ms,
+                                    status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                                )),
+                                Some(&status.output_tail),
                             )
                         }
                     }),

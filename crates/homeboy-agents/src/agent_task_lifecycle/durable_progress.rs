@@ -250,6 +250,90 @@ pub(crate) fn prepared_progress_events(
     Ok(events)
 }
 
+pub fn record_promotion_progress(
+    run_id: &str,
+    phase: &str,
+    gate: Option<&str>,
+    detail: Option<&str>,
+    output_tail: Option<&str>,
+) -> Result<()> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    record_promotion_progress_in_store(&lifecycle_store, run_id, phase, gate, detail, output_tail)
+}
+
+pub fn record_promotion_progress_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    gate: Option<&str>,
+    detail: Option<&str>,
+    output_tail: Option<&str>,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let record = lifecycle_store
+        .mutate_record(&run_id, |record| {
+            let now = now_timestamp();
+            let progress = json!({
+                "phase": phase,
+                "gate": gate,
+            "detail": detail,
+            "output_tail": output_tail,
+                "updated_at": now,
+            });
+            record.metadata["promotion_progress"] = progress;
+            record.updated_at = Some(now);
+            update_lifecycle_heartbeat(record);
+            true
+        })?
+        .ok_or_else(|| Error::internal_unexpected("promotion progress record was unchanged"))?;
+    let run = RunId::new(&record.run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(record.run_id.clone()),
+            None,
+        )
+    })?;
+    let kind = if phase == "gate" && detail == Some("gate process started") {
+        "gate.started"
+    } else if phase == "gate" {
+        "gate.heartbeat"
+    } else {
+        "promotion.progress"
+    };
+    let request = progress_request(
+        &format!("promotion\0{}\0{}\0{}", record.run_id, kind, Uuid::new_v4()),
+        kind,
+        "agent-task-promotion",
+        record.tasks.first().map(|task| task.task_id.as_str()),
+        None,
+        json!({
+            "state": AgentTaskState::Running,
+            "message": detail,
+            "phase": phase,
+            "gate": gate.or_else(|| {
+                record
+                    .metadata
+                    .pointer("/promotion_progress/gate")
+                    .and_then(Value::as_str)
+            }),
+            "heartbeat_at": record.updated_at,
+            "output_tail": output_tail,
+        }),
+    )?;
+    let prepared = prepare_request(&run, &record, request)?;
+    lifecycle_store
+        .open_observation_initialized()?
+        .append_control_plane_event(
+            &run,
+            &prepared.request,
+            &prepared.idempotency_digest,
+            &prepared.request_digest,
+        )
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    Ok(())
+}
+
 /// The phase that failed a run is absent from its own log whenever a
 /// promotion runs deterministic gates: `latest_promotion`/`promotions` were
 /// durable evidence, but no gate start, per-gate result, or terminal event

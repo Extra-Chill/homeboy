@@ -4067,6 +4067,9 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+    if record.owner_process_is_running() && record.state.is_terminal() {
+        return ControlPlaneRunState::Running;
+    }
     if record.is_stale_running() {
         return ControlPlaneRunState::Stale;
     }
@@ -4150,6 +4153,16 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     if has_running_provider_execution(record) {
         return Some("provider_execution".to_string());
+    }
+    if record.owner_process_is_running() {
+        if let Some(progress) = record.metadata.get("promotion_progress") {
+            if let Some(phase) = progress.get("phase").and_then(Value::as_str) {
+                return Some(bounded(phase, STATE_BOUND));
+            }
+        }
+        if record.metadata["cook_progress"]["phase"] == "provider_execution" {
+            return Some("provider_execution".to_string());
+        }
     }
     record
         .metadata
@@ -4511,6 +4524,20 @@ fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             record
+                .metadata
+                .pointer("/promotion_progress/updated_at")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/cook_progress/updated_at")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            record
                 .candidate_adoption
                 .as_ref()
                 .map(|adoption| adoption.heartbeat_at.clone())
@@ -4561,7 +4588,7 @@ fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
 }
 
 fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
-    record
+    let mut gates: Vec<ControlPlaneStateSummary> = record
         .metadata
         .get("latest_promotion")
         .and_then(|promotion| {
@@ -4590,7 +4617,30 @@ fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
             })
         })
         .take(GATE_BOUND)
-        .collect()
+        .collect();
+    if record.owner_process_is_running() {
+        if let Some(gate) = record
+            .metadata
+            .pointer("/promotion_progress/gate")
+            .and_then(Value::as_str)
+            .filter(|gate| !gate.trim().is_empty())
+        {
+            if !gates
+                .iter()
+                .any(|candidate| candidate.id.as_deref() == Some(gate))
+            {
+                gates.insert(
+                    0,
+                    ControlPlaneStateSummary {
+                        id: nonempty_bounded(gate, ID_BOUND),
+                        state: "running".to_string(),
+                    },
+                );
+                gates.truncate(GATE_BOUND);
+            }
+        }
+    }
+    gates
 }
 
 fn publication(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
@@ -5931,6 +5981,37 @@ mod tests {
             Some("2020-01-01T00:00:00+00:00")
         );
         assert!(liveness.age_seconds > liveness.window_seconds);
+    }
+
+    #[test]
+    fn aggregate_absence_keeps_active_provider_execution_phase() {
+        let mut record: AgentTaskRunRecord = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "aggregate-absent-provider",
+            "plan_id": "plan",
+            "state": "running",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "plan_path": "/plan",
+            "metadata": {
+                "provider_executions": [{
+                    "state": "running",
+                    "task_id": "provider",
+                    "owner_pid": std::process::id()
+                }],
+                "cook_progress": {
+                    "phase": "provider_execution",
+                    "updated_at": "2026-01-01T00:00:05Z"
+                }
+            }
+        }))
+        .expect("record");
+        record.metadata["aggregate_absent"] = json!(true);
+        assert_eq!(
+            project_record(&record, None)
+                .expect("projected status")
+                .phase,
+            Some("provider_execution".to_string())
+        );
     }
 
     #[test]

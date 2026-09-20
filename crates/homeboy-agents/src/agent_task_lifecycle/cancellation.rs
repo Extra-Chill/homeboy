@@ -365,7 +365,7 @@ pub(crate) fn cancel_exact_run_in_store(
 pub(super) fn ensure_rooted_exact_cancellation_supported(
     record: &AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state.is_terminal() {
+    if record.state.is_terminal() && !record.owner_process_is_running() {
         return Err(Error::validation_invalid_argument(
             "run_id",
             format!(

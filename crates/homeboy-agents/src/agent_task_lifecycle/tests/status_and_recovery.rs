@@ -3412,3 +3412,61 @@ fn runner_backed_logs_read_persisted_events_without_a_runner_probe() {
         );
     });
 }
+
+#[test]
+fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status() {
+    with_isolated_home(|_| {
+        let lifecycle_store = test_lifecycle_store();
+        let run_id = "live-verification-pending-heartbeat";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submit run");
+        rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
+            set_run_state(record, AgentTaskRunState::Running);
+            record.metadata["latest_promotion"] = json!({
+                "status": "verification_pending"
+            });
+            record.metadata["provider_executions"] = json!([{
+                "state": "succeeded",
+                "task_id": "task-a"
+            }]);
+            record.metadata["runner_pid"] = json!(std::process::id());
+        })
+        .expect("prepare verification pending record");
+
+        record_promotion_progress_in_store(
+            &lifecycle_store,
+            run_id,
+            "gate",
+            Some("cargo test"),
+            Some("gate process started"),
+            None,
+        )
+        .expect("record live gate start");
+        record_promotion_progress_in_store(
+            &lifecycle_store,
+            run_id,
+            "gate",
+            Some("cargo test"),
+            Some("gate elapsed=5000ms last-progress=100ms"),
+            Some("test output tail"),
+        )
+        .expect("record live gate heartbeat");
+
+        let log = logs(run_id).expect("logs");
+        assert!(log.events.iter().any(|event| event.kind == "gate.started"));
+        assert!(log.events.iter().any(|event| event.kind == "gate.heartbeat"
+            && event.data["output_tail"] == "test output tail"));
+        let status = crate::orchestration::project_record(
+            &lifecycle_store.read_record(run_id).expect("record"),
+            None,
+        )
+        .expect("status");
+        assert_eq!(
+            status.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Running
+        );
+        assert_eq!(status.phase.as_deref(), Some("gate"));
+        assert_eq!(status.gates[0].id.as_deref(), Some("cargo test"));
+        assert!(status.heartbeat_at.is_some());
+    });
+}

@@ -24,7 +24,6 @@ pub use fingerprint::{
 };
 pub(crate) use patch::{normalize_promotion_patch, validate_artifact_content};
 pub(crate) use promote::capture_declared_base;
-pub(crate) use promote::emit_promotion_progress;
 pub(crate) use promote::with_gate_supervision;
 pub use promote::{canonical_recoverable_patch_artifacts, CanonicalRecoverablePatchArtifacts};
 pub(crate) use promote::{
@@ -34,6 +33,7 @@ pub(crate) use promote::{
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
     resume_promoted_patch_replacement_gates_in_observation_store,
 };
+pub(crate) use promote::{emit_promotion_progress, emit_promotion_progress_with_output};
 pub use promote::{
     promote, promote_with_checkpoint, resume_promoted_patch, with_promotion_progress,
     PromotionProgress, PromotionProgressCallback,
