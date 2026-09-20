@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -26,6 +28,12 @@ pub(crate) struct GateContractValidationEntry {
     pub command: String,
     pub kind: &'static str,
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_interpretation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_count: Option<usize>,
 }
 
 pub(crate) fn validate_gate_contracts(
@@ -84,6 +92,191 @@ pub(crate) fn validate_gate_contracts(
         status: "valid",
         gates: entries,
     })
+}
+
+/// Resolve Cargo gate shape against the already-resolved base workspace. This
+/// is deliberately list-only: preview must spend no provider budget and must
+/// not run the candidate gate, while still rejecting zero or ambiguous filters.
+pub(crate) fn validate_cargo_gate_contracts(
+    gates: impl IntoIterator<Item = String>,
+    workspace: Option<&Path>,
+) -> Result<Vec<GateContractValidationEntry>> {
+    let Some(workspace) = workspace else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for command in gates {
+        let Some(selection) = cargo_gate_selection(&command, workspace)? else {
+            continue;
+        };
+        if selection.selected_count == 0
+            || (selection.filter.is_some()
+                && !matches!(
+                    selection.filter_interpretation.as_str(),
+                    "exact" | "module_prefix"
+                ))
+        {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                format!(
+                    "Cargo gate `{command}` is invalid in preview: {} filter {:?} selected {} tests",
+                    selection.filter_interpretation, selection.filter, selection.selected_count
+                ),
+                None,
+                Some(vec![
+                    "Use an exact test filter or a module prefix that selects one or more tests."
+                        .to_string(),
+                ]),
+            ));
+        }
+        entries.push(GateContractValidationEntry {
+            command,
+            kind: "cargo",
+            status: "selection_valid",
+            mode: Some(selection.mode),
+            filter_interpretation: Some(selection.filter_interpretation),
+            selected_count: Some(selection.selected_count),
+        });
+    }
+    Ok(entries)
+}
+
+struct CargoSelection {
+    mode: String,
+    filter: Option<String>,
+    filter_interpretation: String,
+    selected_count: usize,
+}
+
+fn cargo_gate_selection(command: &str, workspace: &Path) -> Result<Option<CargoSelection>> {
+    let tokens = shlex::split(command).unwrap_or_default();
+    let Some(cargo) = tokens.iter().position(|token| token == "cargo") else {
+        return Ok(None);
+    };
+    if tokens.get(cargo + 1).map(String::as_str) != Some("test") {
+        return Ok(None);
+    }
+    let args = &tokens[cargo + 2..];
+    let harness = args.iter().position(|token| token == "--");
+    let before_harness = &args[..harness.unwrap_or(args.len())];
+    let mut filter_index = 0;
+    while let Some(argument) = before_harness.get(filter_index) {
+        if !argument.starts_with('-') {
+            break;
+        }
+        filter_index += 1;
+        if matches!(
+            argument.as_str(),
+            "-p" | "--package"
+                | "--exclude"
+                | "--bin"
+                | "--example"
+                | "--test"
+                | "--bench"
+                | "--features"
+                | "--target"
+                | "--target-dir"
+                | "--manifest-path"
+                | "--profile"
+                | "-j"
+                | "--jobs"
+                | "--config"
+                | "--message-format"
+                | "--timings"
+        ) {
+            filter_index += 1;
+        }
+    }
+    let filter = before_harness.get(filter_index).cloned();
+    let exact = harness.is_some_and(|index| args[index + 1..].iter().any(|arg| arg == "--exact"));
+    let mut list_command = tokens[..cargo + 2].to_vec();
+    list_command.extend_from_slice(args);
+    if let Some(index) = list_command.iter().position(|arg| arg == "--") {
+        list_command.truncate(index + 1);
+        list_command.push("--list".to_string());
+    } else {
+        list_command.extend(["--".to_string(), "--list".to_string()]);
+    }
+    if exact {
+        if let Some(index) = list_command.iter().position(|arg| arg == "--exact") {
+            list_command.remove(index);
+        }
+    }
+    let rendered = list_command
+        .iter()
+        .map(|arg| homeboy::core::engine::shell::quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut child = ProcessCommand::new("sh")
+        .args(["-lc", &rendered])
+        .current_dir(workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(rendered.clone())))?;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| Error::internal_io(error.to_string(), Some(rendered.clone())))?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                format!("Cargo gate preview timed out while listing tests: {command}"),
+                None,
+                None,
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(rendered)))?;
+    let listing = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let selected_count = listing
+        .lines()
+        .filter(|line| line.trim_end().ends_with(": test"))
+        .filter(|line| {
+            filter.as_ref().is_none_or(|filter| {
+                let id = line.trim_end().trim_end_matches(": test");
+                exact && id == filter || !exact && id.contains(filter)
+            })
+        })
+        .count();
+    let interpretation = if filter.is_none() {
+        "broad_explicit"
+    } else if exact {
+        "exact"
+    } else if selected_count > 0
+        && listing
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(": test"))
+            .filter(|id| filter.as_ref().is_none_or(|filter| id.contains(filter)))
+            .all(|id| {
+                filter
+                    .as_ref()
+                    .is_some_and(|filter| id.starts_with(&format!("{filter}::")))
+            })
+    {
+        "module_prefix"
+    } else {
+        "substring_ambiguous"
+    };
+    Ok(Some(CargoSelection {
+        mode: if filter.is_some() { "focused" } else { "broad" }.to_string(),
+        filter,
+        filter_interpretation: interpretation.to_string(),
+        selected_count,
+    }))
 }
 
 /// #14731: resolve each declared gate against the placement this process
@@ -156,6 +349,9 @@ fn entry(command: String, kind: &'static str, status: &'static str) -> GateContr
         command,
         kind,
         status,
+        mode: None,
+        filter_interpretation: None,
+        selected_count: None,
     }
 }
 
@@ -423,5 +619,39 @@ mod tests {
             false,
         )
         .expect("only the recognized `homeboy review test` prefix is rejected here");
+    }
+
+    #[test]
+    fn preview_resolves_module_prefix_and_rejects_zero_match() {
+        let workspace = TempDir::new().expect("workspace");
+        fs::create_dir(workspace.path().join("src")).expect("source directory");
+        fs::write(
+            workspace.path().join("Cargo.toml"),
+            "[package]\nname = \"preview-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        fs::write(
+            workspace.path().join("src/lib.rs"),
+            "#[cfg(test)] mod generation_store { #[test] fn first() {} #[test] fn second() {} }\n",
+        )
+        .expect("source");
+
+        let entries = validate_cargo_gate_contracts(
+            ["cargo test generation_store".to_string()],
+            Some(workspace.path()),
+        )
+        .expect("module gate preview");
+        assert_eq!(
+            entries[0].filter_interpretation.as_deref(),
+            Some("module_prefix")
+        );
+        assert_eq!(entries[0].selected_count, Some(2));
+
+        let error = validate_cargo_gate_contracts(
+            ["cargo test missing_module".to_string()],
+            Some(workspace.path()),
+        )
+        .expect_err("zero-match gate must fail preview");
+        assert!(error.message.contains("selected 0 tests"));
     }
 }

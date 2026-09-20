@@ -33,8 +33,8 @@ use super::args::{
 };
 use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 use super::gate_contract::{
-    reject_gates_unexecutable_under_resolved_placement, validate_gate_contracts,
-    GateContractValidation,
+    reject_gates_unexecutable_under_resolved_placement, validate_cargo_gate_contracts,
+    validate_gate_contracts, GateContractValidation,
 };
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -447,7 +447,7 @@ pub(crate) fn preview_cook(
             .filter(|path| path.is_dir())
     });
     record_preview_phase(&mut progress, "gate_contract_validation");
-    let gate_contract_validation = validate_gate_contracts(
+    let mut gate_contract_validation = validate_gate_contracts(
         args.gates
             .verify
             .iter()
@@ -456,6 +456,16 @@ pub(crate) fn preview_cook(
         gate_workspace,
         &crate::cli_runtime::current_augmented_command_contract(),
     )?;
+    gate_contract_validation
+        .gates
+        .extend(validate_cargo_gate_contracts(
+            args.gates
+                .verify
+                .iter()
+                .chain(&args.gates.private_verify)
+                .cloned(),
+            gate_workspace,
+        )?);
     reject_gates_unexecutable_under_resolved_placement(
         args.gates
             .verify
