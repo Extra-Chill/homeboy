@@ -212,18 +212,34 @@ fn explicit_config_root_override() -> Option<PathBuf> {
     Some(expand_tilde_path(value))
 }
 
-/// `XDG_CONFIG_HOME`, if set to a non-empty *absolute* value.
+/// `XDG_CONFIG_HOME`, if set to a non-empty *absolute* value that lives under
+/// the resolved `HOME`.
 ///
 /// The XDG Base Directory spec requires relative values to be ignored by
 /// conforming implementations, so a relative value here falls through to the
 /// next precedence tier rather than being resolved against an implicit base.
+///
+/// The under-`HOME` requirement guards against an *inherited* value that has
+/// gone stale after `HOME` was repointed. CI runners and login shells export
+/// `XDG_CONFIG_HOME=$HOME/.config` for the ambient user; when a process then
+/// isolates itself by setting `HOME` to a fresh directory, that variable still
+/// names the ambient user's config and would silently win over the new home
+/// (release run 35472447879: 85 hermetic tests read and wrote
+/// `/home/runner/.config/homeboy`). A legitimate XDG relocation is, in
+/// practice, always inside the user's own home; an operator who genuinely
+/// wants the config root somewhere else has the explicit
+/// `HOMEBOY_CONFIG_ROOT`, which is tier 1 and never second-guessed.
 fn xdg_config_home() -> Option<PathBuf> {
     let value = env::var("XDG_CONFIG_HOME").ok()?;
     if value.trim().is_empty() {
         return None;
     }
     let path = PathBuf::from(&value);
-    path.is_absolute().then_some(path)
+    if !path.is_absolute() {
+        return None;
+    }
+    let home = resolved_home_root().ok()?;
+    path.starts_with(&home).then_some(path)
 }
 
 /// Base product config directory.
@@ -237,9 +253,12 @@ fn xdg_config_home() -> Option<PathBuf> {
 /// 2. The process-local home-root override ([`set_home_root_override`]) --
 ///    `<override>/.config/<dirname>`. Outranks `XDG_CONFIG_HOME` so hermetic
 ///    test harnesses that repoint `HOME` keep working unchanged.
-/// 3. `XDG_CONFIG_HOME`, when set to a non-empty absolute path --
-///    `<XDG_CONFIG_HOME>/<dirname>`. The Linux convention; per the XDG Base
-///    Directory spec, a relative value is invalid and ignored.
+/// 3. `XDG_CONFIG_HOME`, when set to a non-empty absolute path *under the
+///    resolved `HOME`* -- `<XDG_CONFIG_HOME>/<dirname>`. The Linux
+///    convention; per the XDG Base Directory spec, a relative value is
+///    invalid and ignored. A value outside `HOME` is treated as an inherited
+///    stale export from before `HOME` was repointed and is ignored too (see
+///    [`xdg_config_home`]); use `HOMEBOY_CONFIG_ROOT` for an out-of-home root.
 /// 4. `$HOME/.config/<dirname>` -- the historical default.
 ///
 /// On Windows, `HOMEBOY_CONFIG_ROOT` is still honored first for parity, then
@@ -1676,17 +1695,38 @@ mod config_root_tests {
     /// applies. This is the behavior the issue asks for -- it was previously
     /// read by test fixtures but never consulted by `homeboy()`.
     #[test]
-    fn xdg_config_home_is_honored_when_absolute() {
+    fn xdg_config_home_is_honored_when_absolute_and_under_home() {
         let env = guard();
         env.set("HOME", "/tmp/hb-home-fallback");
-        env.set("XDG_CONFIG_HOME", "/tmp/hb-xdg-root");
+        env.set("XDG_CONFIG_HOME", "/tmp/hb-home-fallback/dotfiles/config");
 
         let resolved = homeboy().expect("config root");
 
         assert_eq!(
             resolved,
-            PathBuf::from("/tmp/hb-xdg-root/homeboy"),
-            "absolute XDG_CONFIG_HOME must be honored, got {}",
+            PathBuf::from("/tmp/hb-home-fallback/dotfiles/config/homeboy"),
+            "absolute XDG_CONFIG_HOME under HOME must be honored, got {}",
+            resolved.display()
+        );
+    }
+
+    /// An inherited `XDG_CONFIG_HOME` that points outside the current `HOME`
+    /// is the signature of a process that repointed `HOME` for isolation
+    /// while the ambient user's export was still in the environment. It must
+    /// not win over the new home, or every HOME-isolated test and sandbox
+    /// silently reads and writes the ambient user's real config.
+    #[test]
+    fn xdg_config_home_outside_home_is_ignored() {
+        let env = guard();
+        env.set("HOME", "/tmp/hb-isolated-home");
+        env.set("XDG_CONFIG_HOME", "/home/runner/.config");
+
+        let resolved = homeboy().expect("config root");
+
+        assert_eq!(
+            resolved,
+            PathBuf::from("/tmp/hb-isolated-home/.config/homeboy"),
+            "stale XDG_CONFIG_HOME from another home must fall through to HOME, got {}",
             resolved.display()
         );
     }
