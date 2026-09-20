@@ -8543,6 +8543,16 @@ mod tests {
     }
 
     #[test]
+    fn completed_run_with_a_reused_owner_pid_stays_terminal() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.metadata["runner_pid"] = json!(std::process::id());
+
+        let resource = project_record(&record, None).expect("project completed run");
+        assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
+        assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
     fn release_deploy_mission_projects_distinct_runs_artifact_and_target_graph() {
         with_isolated_home(|_| {
             let store = homeboy_core::observation::ObservationStore::open_initialized()
