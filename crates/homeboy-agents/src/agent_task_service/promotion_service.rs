@@ -344,7 +344,7 @@ pub fn execute_promotion_with_progress_and_cancellation(
                             Ok(())
                         }),
                         on_heartbeat: Arc::new(move |status| {
-                            crate::agent_task_promotion::emit_promotion_progress(
+                            crate::agent_task_promotion::emit_promotion_progress_with_output(
                                 "gate",
                                 active_gate.lock().expect("active promotion gate").clone(),
                                 Some(format!(
@@ -352,6 +352,7 @@ pub fn execute_promotion_with_progress_and_cancellation(
                                     status.elapsed_ms,
                                     status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
                                 )),
+                                Some(status.output_tail.clone()),
                             );
                             Ok(())
                         }),

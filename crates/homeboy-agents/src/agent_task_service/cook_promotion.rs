@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
@@ -388,37 +389,81 @@ pub(crate) fn promote_attempt_in_store(
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    promote_with_checkpoint_in_observation_store(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(run_id.to_string()),
-            source_path,
-            source_worktree_path: component_workspace_path(options)?
-                .or_else(|| options.workspace.source_worktree_path.clone()),
-            base_ref: Some(options.finalization.base.clone()),
-            task_base_sha: cook_candidate_base_sha(options),
-            candidate_ref: None,
-            to_worktree: options.workspace.to_worktree.clone(),
-            task_id: selected_task_id,
-            artifact_id,
-            dry_run: false,
-            gates: options.gates.clone(),
-            provider_command: options.provider_transport.provider_command.clone(),
-            provider_invocation: options.provider_transport.provider_invocation.clone(),
-            repository_integrity_evidence,
-        },
-        &observation_store,
-        |checkpoint| {
-            lifecycle_store.record_promotion(
-                run_id,
-                serde_json::to_value(checkpoint).map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some("serialize pending cook promotion".to_string()),
+    let run_id = run_id.to_string();
+    let gate_store = lifecycle_store.clone();
+    crate::agent_task_promotion::with_gate_supervision(
+        crate::agent_task_gate::GateSupervision {
+            timeout: options.gates.gate_timeout(),
+            no_progress_timeout: options.gates.gate_no_progress_timeout(),
+            heartbeat_interval: options.gates.gate_heartbeat_interval(),
+            on_spawn: Arc::new({
+                let run_id = run_id.clone();
+                let gate_store = gate_store.clone();
+                move |_, command| {
+                    agent_task_lifecycle::record_promotion_progress_in_store(
+                        &gate_store,
+                        &run_id,
+                        "gate",
+                        Some(command),
+                        Some("gate process started"),
+                        None,
                     )
-                })?,
-            )?;
-            Ok(())
+                }
+            }),
+            on_heartbeat: Arc::new({
+                let run_id = run_id.clone();
+                let gate_store = gate_store.clone();
+                move |status| {
+                    agent_task_lifecycle::record_promotion_progress_in_store(
+                        &gate_store,
+                        &run_id,
+                        "gate",
+                        None,
+                        Some(&format!(
+                            "gate elapsed={}ms last-progress={}ms",
+                            status.elapsed_ms,
+                            status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                        )),
+                        Some(&status.output_tail),
+                    )
+                }
+            }),
+            is_cancelled: Arc::new(|| false),
+        },
+        || {
+            promote_with_checkpoint_in_observation_store(
+                AgentTaskPromotionRequest {
+                    source,
+                    source_run_id: Some(run_id.to_string()),
+                    source_path,
+                    source_worktree_path: component_workspace_path(options)?
+                        .or_else(|| options.workspace.source_worktree_path.clone()),
+                    base_ref: Some(options.finalization.base.clone()),
+                    task_base_sha: cook_candidate_base_sha(options),
+                    candidate_ref: None,
+                    to_worktree: options.workspace.to_worktree.clone(),
+                    task_id: selected_task_id,
+                    artifact_id,
+                    dry_run: false,
+                    gates: options.gates.clone(),
+                    provider_command: options.provider_transport.provider_command.clone(),
+                    provider_invocation: options.provider_transport.provider_invocation.clone(),
+                    repository_integrity_evidence,
+                },
+                &observation_store,
+                |checkpoint| {
+                    lifecycle_store.record_promotion(
+                        &run_id,
+                        serde_json::to_value(checkpoint).map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("serialize pending cook promotion".to_string()),
+                            )
+                        })?,
+                    )?;
+                    Ok(())
+                },
+            )
         },
     )
 }

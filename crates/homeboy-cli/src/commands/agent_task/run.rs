@@ -4103,6 +4103,21 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             args.artifact_id.as_deref(),
         )
     };
+    if let Some(error) = agent_task_service::live_owner_continuation_denial(&record) {
+        let mut report = cook_continuation_preflight_report(
+            selected_run_id,
+            None,
+            args.artifact_id.as_deref(),
+            args.rearm,
+            candidate_fingerprint,
+            phases,
+            "continuation_admission",
+            &error,
+        );
+        report["continuation_command"] = Value::Null;
+        report["failure_context"]["next_action"]["command"] = Value::Null;
+        return Ok((report, 1));
+    }
     if let Some(finalization) = record
         .metadata
         .get("cook_finalization")

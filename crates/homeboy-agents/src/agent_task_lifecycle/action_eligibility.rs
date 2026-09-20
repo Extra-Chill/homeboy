@@ -554,4 +554,20 @@ mod tests {
             ControlPlaneActionAvailability::Unavailable
         );
     }
+
+    #[test]
+    fn cancel_remains_available_for_a_live_owner_after_candidate_recovery() {
+        let mut record = record(AgentTaskRunState::CandidateRecoverable, false);
+        record.metadata["provider_executions"] = serde_json::json!([{
+            "state": "running",
+            "owner_pid": std::process::id()
+        }]);
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&record, None),
+                ControlPlaneAction::Cancel
+            ),
+            ControlPlaneActionAvailability::Available
+        );
+    }
 }

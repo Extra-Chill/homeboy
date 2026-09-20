@@ -708,6 +708,7 @@ struct PromotionProgressState {
 }
 
 struct PromotionProgressReporter {
+    run_id: Option<String>,
     state: Arc<Mutex<PromotionProgressState>>,
     stopped: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -755,6 +756,7 @@ impl PromotionProgressReporter {
             }
         });
         Self {
+            run_id: run_id.map(str::to_string),
             state,
             stopped,
             worker: Some(worker),
@@ -762,6 +764,7 @@ impl PromotionProgressReporter {
     }
 
     fn callback(&self) -> homeboy::agents::agent_tasks::promotion::PromotionProgressCallback {
+        let run_id = self.run_id.clone();
         let state = self.state.clone();
         Arc::new(move |progress| {
             let mut state = state.lock().expect("promotion progress state");
@@ -776,6 +779,15 @@ impl PromotionProgressReporter {
                 state.gate.as_deref().unwrap_or("none"),
                 state.last_progress,
             ));
+            if let Some(run_id) = run_id.as_deref() {
+                homeboy::agents::agent_task_lifecycle::record_promotion_progress(
+                    run_id,
+                    progress.phase,
+                    progress.gate.as_deref(),
+                    progress.last_progress.as_deref(),
+                    progress.output_tail.as_deref(),
+                )?;
+            }
             Ok(())
         })
     }

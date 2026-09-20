@@ -4919,6 +4919,9 @@ pub fn preflight_cook_continuation_admission_for_observation(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
+    if let Some(error) = live_owner_continuation_denial(record) {
+        return Err(error);
+    }
     let mut options = options.clone();
     canonicalize_native_cook_workspace(&mut options)?;
     let moving_base_continuation = record.metadata.get("cook_moving_base_recovery").is_some();
@@ -4968,6 +4971,48 @@ pub fn preflight_cook_continuation_admission_for_observation(
         execution_only.push("provider_execution");
     }
     Ok(execution_only)
+}
+
+pub fn live_owner_continuation_denial(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<Error> {
+    if !record.owner_process_is_running() {
+        return None;
+    }
+    let phase = record
+        .metadata
+        .get("promotion_progress")
+        .and_then(|progress| progress.get("phase"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            record
+                .metadata
+                .pointer("/cook_progress/phase")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            record.metadata["provider_executions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|execution| execution["state"] == "running")
+                .map(|_| "provider_execution")
+        })
+        .unwrap_or("post_provider_work");
+    let mut error = Error::validation_invalid_argument(
+        "cook_continuation",
+        "continuation is blocked while the original local owner is still running",
+        Some(record.run_id.clone()),
+        None,
+    );
+    error.details["continuation_admission"] = serde_json::json!({
+        "first_authoritative_denial": "live_owner_in_progress",
+        "owner_pid": record.owner_pid(),
+        "phase": phase,
+        "status_command": format!("homeboy agent-task status {}", record.run_id),
+        "logs_command": format!("homeboy agent-task logs {}", record.run_id),
+    });
+    Some(error)
 }
 
 pub fn cook_continuation_replays_provider(
@@ -10003,6 +10048,54 @@ mod cook_deadline_tests {
         with_current_cook_deadline(Some(deadline), || {
             assert_eq!(expired_cook_deadline(), Some(deadline));
         });
+    }
+
+    #[test]
+    fn live_owner_denies_continuation_without_dispatch_hint() {
+        let record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-live-owner",
+                "plan_id": "plan",
+                "state": "candidate_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "provider_executions": [{
+                        "state": "running",
+                        "owner_pid": std::process::id()
+                    }]
+                }
+            }))
+            .expect("record");
+        let error = live_owner_continuation_denial(&record).expect("live owner denial");
+        assert_eq!(
+            error.details["continuation_admission"]["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert_eq!(
+            error.details["continuation_admission"]["phase"],
+            "provider_execution"
+        );
+    }
+
+    #[test]
+    fn dead_owner_does_not_block_persisted_continuation_states() {
+        let record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-dead-owner",
+                "plan_id": "plan",
+                "state": "candidate_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "latest_promotion": { "status": "verification_pending" },
+                    "runner_pid": u32::MAX
+                }
+            }))
+            .expect("record");
+        assert!(live_owner_continuation_denial(&record).is_none());
     }
 
     /// Expiry must terminalize cleanly and inspectably: a known status, a

@@ -209,6 +209,41 @@ fn logs_read_does_not_append_historical_metadata_progress() {
 }
 
 #[test]
+fn live_promotion_progress_is_available_to_status_and_logs_before_completion() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "durable-live-promotion";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+
+    record_promotion_progress_in_store(
+        &lifecycle_store,
+        run_id,
+        "gate",
+        Some("gate-2"),
+        Some("gate elapsed=12s last-progress=5s"),
+        None,
+    )
+    .expect("persisted live promotion progress");
+
+    let record = status_in_store(&lifecycle_store, run_id).expect("status record");
+    assert_eq!(record.metadata["promotion_progress"]["phase"], "gate");
+    assert_eq!(record.metadata["promotion_progress"]["gate"], "gate-2");
+    assert_eq!(record.metadata["promotion_progress"]["active"], true);
+
+    let logs = logs_in_store(&lifecycle_store, run_id).expect("live promotion logs");
+    assert!(logs.events.iter().any(|event| {
+        event.kind == "gate.heartbeat"
+            && event.data["gate"] == "gate-2"
+            && event.data["heartbeat_at"].is_string()
+    }));
+    let event_count = durable_events(&lifecycle_store, run_id).len();
+    let _ = logs_in_store(&lifecycle_store, run_id).expect("read-only log replay");
+    assert_eq!(durable_events(&lifecycle_store, run_id).len(), event_count);
+}
+
+#[test]
 fn live_runner_snapshot_appends_runner_progress_once() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());

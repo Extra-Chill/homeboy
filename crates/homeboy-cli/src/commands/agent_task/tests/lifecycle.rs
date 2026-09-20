@@ -1759,7 +1759,6 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             })
             .expect("persist local continuation placement");
         let before = filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root"));
-
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
             preflight: true,
@@ -1795,6 +1794,45 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             .contains("no concrete executed model"));
         assert_eq!(report["evidence_refs"][0]["run_id"], run_id);
         assert!(!report.to_string().contains("<run-id>"));
+        assert_eq!(
+            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
+            before
+        );
+        test_lifecycle_store()
+            .mutate_record(run_id, |record| {
+                record.metadata["provider_executions"] = json!([{
+                    "state": "succeeded",
+                    "task_id": "provider"
+                }]);
+                record.metadata["runner_pid"] = json!(std::process::id());
+                true
+            })
+            .expect("persist live Cook owner");
+        let (live_report, live_exit_code) =
+            super::super::run::preflight_continue_cook(CookContinueArgs {
+                cook_or_attempt_id: cook_id.to_string(),
+                preflight: true,
+                rearm: false,
+                artifact_id: Some("retained-patch".to_string()),
+                timeout_ms: None,
+                review_form_timeout_ms: None,
+                backend: None,
+                selector: None,
+                model: None,
+                allow_provider_rotation: false,
+                provider_rotations: None,
+                full: false,
+            })
+            .expect("live owner preflight reports denial");
+        assert_eq!(live_exit_code, 1);
+        assert_eq!(live_report["admitted"], false);
+        assert_eq!(
+            live_report["failure_context"]["diagnostic"]["details"]["continuation_admission"]
+                ["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert!(live_report["continuation_command"].is_null());
+        assert!(live_report["failure_context"]["next_action"]["command"].is_null());
         let bounded =
             super::super::status::bounded_full_operation_report(report.clone(), "cook-continue");
         assert_eq!(bounded["run_id"], run_id);
@@ -1824,10 +1862,6 @@ fn cook_continue_preflight_rejects_legacy_terminal_candidate_without_model_prove
             .as_str()
             .expect("message")
             .contains("no concrete executed model"));
-        assert_eq!(
-            filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
-            before
-        );
     });
 }
 

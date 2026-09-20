@@ -75,6 +75,7 @@ pub struct PromotionProgress {
     pub phase: &'static str,
     pub gate: Option<String>,
     pub last_progress: Option<String>,
+    pub output_tail: Option<String>,
 }
 
 pub fn with_promotion_progress<T>(
@@ -98,12 +99,22 @@ pub(crate) fn emit_promotion_progress(
     gate: Option<String>,
     last_progress: Option<String>,
 ) {
+    emit_promotion_progress_with_output(phase, gate, last_progress, None);
+}
+
+pub(crate) fn emit_promotion_progress_with_output(
+    phase: &'static str,
+    gate: Option<String>,
+    last_progress: Option<String>,
+    output_tail: Option<String>,
+) {
     PROMOTION_PROGRESS.with(|slot| {
         if let Some(progress) = slot.borrow().as_ref() {
             let _ = progress(&PromotionProgress {
                 phase,
                 gate,
                 last_progress,
+                output_tail,
             });
         }
     });

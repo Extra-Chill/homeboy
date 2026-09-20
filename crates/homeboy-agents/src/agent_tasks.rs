@@ -394,7 +394,7 @@ pub mod service {
         cook_continuation_requires_model_provenance, cook_request_is_review_form_only,
         detached_batch_coordinator_control, enqueue_terminal_continuation, evidence_ref_task_id,
         execute_promotion_with_progress, hydrate_evidence_ref, hydrate_evidence_summary,
-        liveness_for_record, load_recipe, load_recipe_for_attempt,
+        live_owner_continuation_denial, liveness_for_record, load_recipe, load_recipe_for_attempt,
         persist_manual_finalization_intent, persist_manual_finalization_receipt,
         persist_manual_finalization_retry_intent, persist_provider_boundary_replay_evidence,
         pre_execution_runtime_recovery_is_eligible, preflight_continuation_claim,

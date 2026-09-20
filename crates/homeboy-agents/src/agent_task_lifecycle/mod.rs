@@ -78,7 +78,8 @@ pub use control_plane_identities::{
 };
 pub use durable_progress::{
     migrate_durable_event_history, migrate_durable_event_history_in_store,
-    AgentTaskEventHistoryMigration, EVENT_HISTORY_MIGRATION_SCHEMA,
+    record_promotion_progress, record_promotion_progress_in_store, AgentTaskEventHistoryMigration,
+    EVENT_HISTORY_MIGRATION_SCHEMA,
 };
 pub use failure_recording::*;
 pub use health::*;
