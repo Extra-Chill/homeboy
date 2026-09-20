@@ -4067,6 +4067,9 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+    if record.has_live_pending_local_cook_supervisor(Utc::now()) {
+        return ControlPlaneRunState::Running;
+    }
     if record.is_stale_running() {
         return ControlPlaneRunState::Stale;
     }
@@ -4148,6 +4151,9 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
+    if record.has_live_pending_local_cook_supervisor(Utc::now()) {
+        return Some("promotion_gates".to_string());
+    }
     if has_running_provider_execution(record) {
         return Some("provider_execution".to_string());
     }
@@ -8433,6 +8439,26 @@ mod tests {
         let from_record = project_record(&seeded, None).expect("project");
         let from_service = service().run(&requested).expect("run");
         assert_eq!(from_record, from_service);
+    }
+
+    #[test]
+    fn active_local_cook_supervisor_projects_running_promotion_gate_state() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.state = AgentTaskRunState::Succeeded;
+        let now = chrono::Utc::now();
+        record.metadata["cook_id"] = json!("cook");
+        record.metadata["local_cook_supervisor"] = json!({
+            "state": "supervising",
+            "cook_id": "cook",
+            "pinned_run_id": AGENT_TASK_RUN,
+            "lease_started_at": now.to_rfc3339(),
+            "lease_expires_at": (now + chrono::Duration::seconds(30)).to_rfc3339(),
+        });
+
+        let resource = project_record(&record, None).expect("project active supervisor");
+        assert_eq!(resource.state, ControlPlaneRunState::Running);
+        assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
+        assert!(resource.finished_at.is_none());
     }
 
     #[test]
