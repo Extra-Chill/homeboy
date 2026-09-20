@@ -88,6 +88,15 @@ pub(super) struct DeployComponentPlan {
 }
 
 impl DeployComponentPlan {
+    /// Whether any component was resolved far enough to be compared.
+    ///
+    /// Distinguishes "compared everything, nothing is behind" from "resolved
+    /// nothing, so there was nothing to compare" — outcomes that otherwise
+    /// both surface as an empty ready set (#14813).
+    pub(super) fn has_resolved_components(&self) -> bool {
+        !self.components.is_empty()
+    }
+
     pub(super) fn ready_components(&self) -> Vec<Component> {
         self.plan
             .steps
@@ -308,9 +317,27 @@ fn validate_deploy_plan(config: &DeployConfig, plan: &DeployComponentPlan) -> Re
     }
 
     if config.outdated && plan.ready_components().is_empty() {
+        // Nothing to deploy is the *healthy* steady state for a polling
+        // caller: it compared every component against its latest release and
+        // found the server already current. Failing here made an unattended
+        // `--outdated` loop permanently red on success and indistinguishable
+        // from a real fault (#14813).
+        //
+        // The genuinely bad case is a pass where nothing could be *resolved* —
+        // every component skipped, so no comparison happened at all. That must
+        // still fail loudly, because silently reporting "nothing to do" while
+        // the server drifts is the one outcome an automated deploy loop cannot
+        // recover from.
+        if plan.has_resolved_components() {
+            homeboy_core::log_status!(
+                "deploy",
+                "No outdated components: every component matches its latest release"
+            );
+            return Ok(());
+        }
         return Err(empty_selection_error(
             "outdated",
-            "No outdated components found",
+            "No components could be resolved, so nothing was compared. This is not an up-to-date network",
         ));
     }
 
@@ -781,18 +808,37 @@ pub(super) fn load_project_components_with_projection(
         // should not block deploying the ones you asked for.
         let is_requested = requested_ids.is_empty() || requested_ids.contains(&attachment.id);
 
-        // A component whose local checkout is absent cannot be resolved from
-        // disk, and `resolve_project_component` fails closed on it so a real
-        // deploy never reads from a path that does not exist. In check mode that
-        // hard failure aborted the entire read-only pass, hiding the status of
-        // every other component (#12214). Report it as a scoped skip instead —
-        // the same skip-and-warn contract a missing extension already uses
-        // (#4587). Only applies when this loader would actually read the
-        // checkout: a projected source replaces it.
-        if check && projected_component(project, &attachment.id, projection).is_none() {
-            let findings = project::component_local_path_findings(project, &attachment.id);
-            if !findings.is_empty() {
-                let reason = findings.join("; ");
+        // `resolve_project_component` tries every fallback it has — a
+        // projected source, an on-disk checkout, and (#14782) a checkout-less
+        // GitHub Release materialization — before it fails. A failure here
+        // therefore means the component genuinely cannot be resolved on this
+        // host: no checkout, and either no `remote_url`, a non-GitHub
+        // `remote_url`, or a GitHub repository with no releases (or no
+        // `homeboy.json` reachable from one, e.g. a monorepo subdirectory).
+        //
+        // A previous version of this gate asked a *different*, eligibility-blind
+        // question — "does a local_path exist?" — before resolution ever ran,
+        // which meant `--check` could never reach the checkout-less fallback at
+        // all (#14813). Attempting resolution first and only branching on its
+        // outcome is what makes this agree with the named-component and
+        // `--outdated` paths, which already call the same resolver.
+        //
+        // In a project-wide read-only-ish pass (`--check`/`--outdated`) an
+        // unresolvable component is a fact about *that one component*, not a
+        // reason to abort the status of every other one (#12214) — report it as
+        // a scoped skip, the same skip-and-warn contract a missing extension
+        // already uses (#4587), instead of hiding every other component's
+        // status behind one component's failure. A mutating or explicitly
+        // targeted deploy still fails closed.
+        let mut loaded = match resolve_project_component(
+            project,
+            &attachment.id,
+            Some(&standalone_snapshot),
+            projection,
+        ) {
+            Ok(component) => component,
+            Err(error) if check => {
+                let reason = crate::content_manifest::diagnostic_text(&error);
                 homeboy_core::log_status!(
                     "deploy",
                     "Skipping '{}' in check mode: {}",
@@ -805,14 +851,8 @@ pub(super) fn load_project_components_with_projection(
                 });
                 continue;
             }
-        }
-
-        let mut loaded = resolve_project_component(
-            project,
-            &attachment.id,
-            Some(&standalone_snapshot),
-            projection,
-        )?;
+            Err(error) => return Err(error),
+        };
 
         // Bundled/retired components are no longer standalone deploy targets.
         // Skip them before extension validation and artifact resolution so they
@@ -1689,7 +1729,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn load_project_components_resolves_project_wide_checkout_less_components() {
-        let _lock = homeboy_core::test_support::env_lock();
+        // `with_isolated_home` already acquires `env_lock()` internally via
+        // `HomeGuard::new()` (see its doc comment). Taking it again here on
+        // the same thread self-deadlocks on the non-reentrant mutex — this
+        // test hung indefinitely until fixed (#14813).
         homeboy_core::test_support::with_isolated_home(|home| {
             let components_dir = home
                 .path()
@@ -1721,7 +1764,7 @@ mod tests {
                  for arg in \"$@\"; do last=\"$arg\"; done\n\
                  case \"$last\" in\n\
                  \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.0.0\"}'; printf '\\n200' ;;\n\
-                 \x20\x20*homeboy.json*) printf '%s' '{\"remote_path\":\"wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
+                 \x20\x20*homeboy.json*) printf '%s' '{\"id\":\"fixture\",\"remote_path\":\"wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
                  \x20\x20*) printf '\\n404' ;;\n\
                  esac\n",
             );

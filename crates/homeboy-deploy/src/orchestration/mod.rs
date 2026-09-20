@@ -75,10 +75,18 @@ pub(super) fn prepare_components(
         observation.phase("source_resolution", false)?;
     }
     let mut effective_config = config.clone();
+    // `--outdated` shares `--check`'s report-and-skip contract for a
+    // component `load_project_components_with_projection` cannot resolve:
+    // both are project-wide, read-only-ish passes where one unresolvable
+    // component (no checkout and no GitHub Release to fall back to, a
+    // non-GitHub `remote_url`, a monorepo `homeboy.json` not at the repo
+    // root) must be reported and skipped, not abort the status/comparison of
+    // every other component (#14813). A named/targeted deploy still fails
+    // closed on the same failure.
     let loaded = load_project_components_with_projection(
         project,
         &config.component_ids,
-        config.check,
+        config.check || config.outdated,
         config.prepared_projection.as_ref(),
     )?;
     validate_preflighted_component_identities(&loaded.deployable, config)?;
@@ -103,14 +111,50 @@ pub(super) fn prepare_components(
         }));
     }
 
+    // `--outdated` compares each resolvable component's local vs. remote
+    // version; a component that could not even be resolved was never part of
+    // that comparison. If *every* component ended up unresolvable, the
+    // downstream "no outdated components found" a moment later would be
+    // read as "compared everything, nothing needs an update" — the exact
+    // silent false negative #14813 exists to kill for an unattended
+    // `--outdated` poll. Fail loudly here instead, naming every component
+    // that could not be resolved and why.
+    if config.outdated && loaded.deployable.is_empty() && !loaded.extension_skipped.is_empty() {
+        let names: Vec<String> = loaded
+            .extension_skipped
+            .iter()
+            .map(|skip| format!("{}: {}", skip.id, skip.reason))
+            .collect();
+        return Err(Error::validation_invalid_argument(
+            "outdated",
+            format!(
+                "--outdated could not resolve any of the {} configured component(s); nothing was compared",
+                names.len()
+            ),
+            None,
+            Some(names),
+        ));
+    }
+
     if loaded.deployable.is_empty() {
-        let message = if loaded.skipped.is_empty() {
+        let unresolved: Vec<String> = loaded
+            .extension_skipped
+            .iter()
+            .map(|skip| format!("{} ({})", skip.id, skip.reason))
+            .collect();
+        let skipped_report: Vec<String> = loaded
+            .skipped
+            .iter()
+            .cloned()
+            .chain(unresolved)
+            .collect();
+        let message = if skipped_report.is_empty() {
             "No components configured for project".to_string()
         } else {
             format!(
-                "No deployable components found — {} component(s) skipped (no build artifact or deploy strategy): {}",
-                loaded.skipped.len(),
-                loaded.skipped.join(", ")
+                "No deployable components found — {} component(s) skipped: {}",
+                skipped_report.len(),
+                skipped_report.join(", ")
             )
         };
         return Err(Error::validation_invalid_argument(

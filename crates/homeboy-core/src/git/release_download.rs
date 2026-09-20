@@ -865,7 +865,7 @@ fn download_release_zipball(
     let tmp_dir = crate::engine::temp::runtime_temp_dir("deploy-portable-config")?;
     let dest_path = tmp_dir.join(format!("{}-{}.zip", github.repo, tag));
 
-    let curl_command = curl_release_artifact_command(
+    let curl_command = curl_zipball_download_command(
         &url,
         dest_path.to_str().unwrap_or("archive.zip"),
         Some(&auth_token),
@@ -1189,6 +1189,44 @@ fn curl_release_artifact_command(
     let config_stdin = auth_token.map(|token| {
         format!(
             "{}header = \"Accept: application/octet-stream\"\n",
+            github_api_config(token)
+        )
+    });
+
+    if config_stdin.is_some() {
+        args.extend(["--config".to_string(), "-".to_string()]);
+    }
+
+    args.extend(["-o".to_string(), dest_path.to_string(), url.to_string()]);
+
+    CurlReleaseArtifactCommand {
+        args,
+        config_stdin,
+        env,
+    }
+}
+
+/// Build a curl download for the GitHub *source archive* (zipball) API,
+/// distinct from [`curl_release_artifact_command`] (uploaded release assets).
+///
+/// The uploaded-release-asset download endpoint requires
+/// `Accept: application/octet-stream` to receive the binary instead of asset
+/// JSON metadata. The zipball endpoint (`/repos/{owner}/{repo}/zipball/{tag}`)
+/// is a different API surface with no such requirement — sending that same
+/// `Accept: application/octet-stream` header there gets a
+/// `415 Unsupported Media Type` instead of the archive (#14813). The zipball
+/// endpoint wants the standard GitHub REST media type instead.
+fn curl_zipball_download_command(
+    url: &str,
+    dest_path: &str,
+    auth_token: Option<&str>,
+    env: Vec<(String, String)>,
+) -> CurlReleaseArtifactCommand {
+    let mut args = vec!["-fsSL".to_string(), "--retry".to_string(), "3".to_string()];
+
+    let config_stdin = auth_token.map(|token| {
+        format!(
+            "{}header = \"Accept: application/vnd.github+json\"\n",
             github_api_config(token)
         )
     });

@@ -320,6 +320,50 @@ pub(super) fn deploy_tag_for_version(component: &Component, version: &str) -> St
     })
 }
 
+/// The tag a default (no `--version`, no `--ref`) deploy would select for
+/// `component`.
+///
+/// A component with a local checkout resolves through its local git tags —
+/// the existing ground truth (`git tag --merged HEAD`). A component resolved
+/// without a checkout (#14782) has no `git tag` to read, so this asks its
+/// GitHub repository for its latest release instead — the same authority
+/// `--outdated` already compares a checkout-less component's "local" version
+/// against (`planning::local_deploy_version`), and the authority the
+/// release-asset download resolves its artifact URL against
+/// (`execution::release_plan::deploy_release_tag`).
+///
+/// Both the "what ref will be reported/deployed" question
+/// (`orchestration::modes::latest_deploy_tag`) and the "what tag does the
+/// release asset come from" question (`deploy_release_tag`) route through
+/// this one function so they cannot silently answer differently for the same
+/// component again — that drift (one call site fixed in #14793, the other
+/// left reading local tags unconditionally) is what let `deploy <project>
+/// <component>` with no `--version` keep failing "no version tags found"
+/// for a checkout-less component even after #14793 shipped (#14813).
+///
+/// `Ok(None)` means "no tag found" (no releases yet, or no local tags) — a
+/// legitimate negative, not a failure. Callers decide separately whether that
+/// is fatal (`latest_deploy_tag` errors) or a soft signal to fall back to a
+/// local build (`deploy_release_tag` treats it, and any `Err`, as "no release
+/// asset available").
+pub(super) fn latest_default_deploy_tag(component: &Component) -> Result<Option<String>> {
+    if !component.has_local_checkout() {
+        let Some(remote_url) = component.remote_url.as_deref() else {
+            return Ok(None);
+        };
+        let Some(github) = homeboy_core::git::release_download::parse_github_url(remote_url)
+        else {
+            return Ok(None);
+        };
+        return homeboy_core::git::release_download::latest_release_tag_for_repo(
+            &github,
+            &component.github,
+        );
+    }
+
+    release::latest_component_tag(component)
+}
+
 /// Restore original branches after deployment.
 ///
 /// Best-effort: logs warnings on failure but does not abort.
