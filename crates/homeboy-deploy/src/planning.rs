@@ -1679,4 +1679,90 @@ mod tests {
             assert!(loaded.skipped.contains(&"retired".to_string()));
         });
     }
+
+    /// #14795: a project-wide pass (`--outdated`/`--all`, empty
+    /// `component_ids`) over a project whose attachments all have an empty
+    /// `local_path` must resolve every component from its GitHub Release
+    /// instead of hard-failing before resolution ever runs — the same
+    /// checkout-less fallback #14793 already wired for a single named
+    /// component, now reachable project-wide.
+    #[cfg(unix)]
+    #[test]
+    fn load_project_components_resolves_project_wide_checkout_less_components() {
+        let _lock = homeboy_core::test_support::env_lock();
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let components_dir = home
+                .path()
+                .join(".config")
+                .join("homeboy")
+                .join("components");
+            std::fs::create_dir_all(&components_dir).expect("components dir");
+            for id in ["chubes-gallery-lightbox", "data-machine"] {
+                std::fs::write(
+                    components_dir.join(format!("{id}.json")),
+                    serde_json::json!({
+                        "remote_url": format!("https://github.com/Extra-Chill/{id}.git")
+                    })
+                    .to_string(),
+                )
+                .expect("write standalone component config");
+            }
+
+            let bin_dir = home.path().join("fake-bin");
+            std::fs::create_dir_all(&bin_dir).expect("bin dir");
+            write_fake_binary(
+                &bin_dir.join("gh"),
+                "#!/bin/sh\necho fake-test-token\nexit 0\n",
+            );
+            write_fake_binary(
+                &bin_dir.join("curl"),
+                "#!/bin/sh\n\
+                 cat > /dev/null 2>&1\n\
+                 for arg in \"$@\"; do last=\"$arg\"; done\n\
+                 case \"$last\" in\n\
+                 \x20\x20*releases/latest*) printf '%s' '{\"tag_name\":\"v1.0.0\"}'; printf '\\n200' ;;\n\
+                 \x20\x20*homeboy.json*) printf '%s' '{\"remote_path\":\"wp-content/plugins/fixture\",\"build_artifact\":\"dist/fixture.zip\"}'; printf '\\n200' ;;\n\
+                 \x20\x20*) printf '\\n404' ;;\n\
+                 esac\n",
+            );
+            let existing = std::env::var_os("PATH").unwrap_or_default();
+            let mut new_path = bin_dir.as_os_str().to_os_string();
+            new_path.push(":");
+            new_path.push(existing);
+            let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", new_path);
+
+            let attach = |id: &str| homeboy_core::project::ProjectComponentAttachment {
+                id: id.to_string(),
+                local_path: String::new(),
+                ..Default::default()
+            };
+
+            let project = Project {
+                id: "site".to_string(),
+                components: vec![attach("chubes-gallery-lightbox"), attach("data-machine")],
+                ..Project::default()
+            };
+
+            // The project-wide deploy preflight gate must not hard-fail on the
+            // empty local_path before resolution ever runs.
+            project::validate_deploy_component_local_paths(&project, &[])
+                .expect("project-wide --outdated/--all preflight must not hard-fail");
+
+            // Resolution itself must actually materialize both components from
+            // their GitHub Release, exactly as `--outdated`/`--all` planning
+            // does for a project with no local checkouts at all.
+            let loaded = load_project_components(&project, &[], false)
+                .expect("project-wide load must resolve every checkout-less component");
+
+            let deployable_ids: Vec<&str> =
+                loaded.deployable.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(
+                deployable_ids,
+                vec!["chubes-gallery-lightbox", "data-machine"]
+            );
+            for component in &loaded.deployable {
+                assert_eq!(component.remote_path, "wp-content/plugins/fixture");
+            }
+        });
+    }
 }

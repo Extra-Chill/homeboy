@@ -317,7 +317,7 @@ A component whose deploy source resolves to a GitHub Release asset does not need
 
 **When it applies:**
 
-- The project attachment's `local_path` is missing or does not point at an existing directory.
+- The project attachment's `local_path` is missing or does not point at an existing directory — the attachment may omit `local_path` entirely; checked-in project config is not required to carry an empty placeholder.
 - The standalone component registry entry for that component ID has a GitHub `remote_url` (`homeboy component set <id> --remote-url https://github.com/<owner>/<repo>`).
 - The repository has at least one GitHub Release.
 
@@ -328,6 +328,8 @@ homeboy deploy myproject my-plugin --version 1.2.3 --dry-run
 ```
 
 **`--outdated` compares against the latest GitHub Release.** For a checkout-less component there is no local `version_targets` file to read a "current" version from, so `--outdated` (and any other local-vs-remote version comparison) uses the version implied by the repository's latest release tag instead — the same authority a version-pinned deploy falls back to when `--version` is omitted. This makes a project-wide `--outdated` catch-up deploy cheap on a host with no workspace: it costs one GitHub API call per checkout-less component, not one clone.
+
+**This works project-wide, not just for one named component.** `--outdated`, `--all`, and `homeboy project show` readiness all honor the same eligibility as a single named-component deploy — a project whose attachments all omit `local_path` is not blocked from a project-wide catch-up deploy, and `project show` does not list those components as deploy blockers, as long as each has a GitHub-backed standalone registry entry.
 
 **What still requires a checkout:**
 
