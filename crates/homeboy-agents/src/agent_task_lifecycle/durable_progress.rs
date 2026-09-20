@@ -247,7 +247,46 @@ pub(crate) fn prepared_progress_events(
     for request in gate_lifecycle_requests(record)? {
         events.push(prepare_request(&run, record, request)?);
     }
+    if let Some(request) = promotion_progress_request(record)? {
+        events.push(prepare_request(&run, record, request)?);
+    }
     Ok(events)
+}
+
+fn promotion_progress_request(
+    record: &AgentTaskRunRecord,
+) -> Result<Option<ControlPlaneEventAppendRequest>> {
+    let Some(progress) = record.metadata.get("promotion_progress") else {
+        return Ok(None);
+    };
+    let Some(updated_at) = progress.get("updated_at").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let phase = progress
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("promotion");
+    let gate = progress.get("gate").and_then(Value::as_str);
+    let active = progress.get("active").and_then(Value::as_bool) == Some(true);
+    Ok(Some(progress_request(
+        &format!("promotion\0{}\0{updated_at}", record.run_id),
+        if active {
+            "gate.heartbeat"
+        } else {
+            "gate.completed"
+        },
+        "agent-task-gate",
+        record.tasks.first().map(|task| task.task_id.as_str()),
+        None,
+        json!({
+            "state": if active { AgentTaskState::Running } else { AgentTaskState::Succeeded },
+            "message": progress.get("last_progress"),
+            "phase": phase,
+            "gate": gate,
+            "elapsed_seconds": progress.get("elapsed_seconds"),
+            "heartbeat_at": updated_at,
+        }),
+    )?))
 }
 
 /// The phase that failed a run is absent from its own log whenever a

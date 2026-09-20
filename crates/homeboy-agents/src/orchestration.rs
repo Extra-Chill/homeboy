@@ -3729,6 +3729,22 @@ pub fn execute_promotion_action_from_current_environment(
     request: &ControlPlaneActionRequest,
     progress: Option<crate::agent_task_promotion::PromotionProgressCallback>,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let progress = progress.map(|progress| {
+        let run_id = run_id.to_string();
+        std::sync::Arc::new(
+            move |frame: &crate::agent_task_promotion::PromotionProgress| {
+                let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+                let _ = crate::agent_task_lifecycle::record_promotion_progress_in_store(
+                    &lifecycle_store,
+                    &run_id,
+                    frame.phase,
+                    frame.gate.as_deref(),
+                    frame.last_progress.as_deref(),
+                );
+                progress(frame)
+            },
+        ) as crate::agent_task_promotion::PromotionProgressCallback
+    });
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
@@ -3866,7 +3882,8 @@ pub fn project_record(
     resource.heartbeat_at = heartbeat_at(record);
     resource.created_at = record.submitted_at.clone();
     resource.updated_at = record.updated_at.clone();
-    resource.liveness = live_provider_liveness(record, plan, Utc::now());
+    resource.liveness = live_promotion_liveness(record, Utc::now())
+        .or_else(|| live_provider_liveness(record, plan, Utc::now()));
     if let Some(observed_at) = resource
         .liveness
         .as_ref()
@@ -4067,6 +4084,9 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+    if live_promotion_progress(record, chrono::Utc::now()) {
+        return ControlPlaneRunState::Running;
+    }
     if record.is_stale_running() {
         return ControlPlaneRunState::Stale;
     }
@@ -4148,6 +4168,18 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
+    if live_promotion_progress(record, chrono::Utc::now()) {
+        let progress = record.metadata.get("promotion_progress")?;
+        let phase = progress
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or("promotion");
+        let gate = progress
+            .get("gate")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        return Some(bounded(&format!("{phase}:{gate}"), STATE_BOUND));
+    }
     if has_running_provider_execution(record) {
         return Some("provider_execution".to_string());
     }
@@ -4181,6 +4213,28 @@ fn has_running_provider_execution(record: &AgentTaskRunRecord) -> bool {
             .into_iter()
             .flatten()
             .any(|execution| execution["state"].as_str() == Some("running"))
+}
+
+fn live_promotion_progress(record: &AgentTaskRunRecord, now: chrono::DateTime<Utc>) -> bool {
+    let Some(progress) = record.metadata.get("promotion_progress") else {
+        return false;
+    };
+    if progress.get("active").and_then(Value::as_bool) != Some(true)
+        || progress.get("owner_pid").and_then(Value::as_u64) != Some(u64::from(std::process::id()))
+    {
+        return false;
+    }
+    let Some(updated_at) = progress
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return false;
+    };
+    now.signed_duration_since(updated_at.with_timezone(&Utc))
+        .num_seconds()
+        .abs()
+        <= 30
 }
 
 /// Read metadata for the finite stream references recorded at provider launch.
@@ -4503,6 +4557,15 @@ fn assigned_provider(record: &AgentTaskRunRecord) -> Option<ControlPlaneProvider
 }
 
 fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
+    if live_promotion_progress(record, Utc::now()) {
+        if let Some(updated_at) = record
+            .metadata
+            .pointer("/promotion_progress/updated_at")
+            .and_then(Value::as_str)
+        {
+            return Some(updated_at.to_string());
+        }
+    }
     record
         .lifecycle
         .heartbeat
@@ -4516,6 +4579,29 @@ fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
                 .map(|adoption| adoption.heartbeat_at.clone())
                 .filter(|value| !value.trim().is_empty())
         })
+}
+
+fn live_promotion_liveness(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<Utc>,
+) -> Option<ControlPlaneLiveness> {
+    if !live_promotion_progress(record, now) {
+        return None;
+    }
+    let progress = record.metadata.get("promotion_progress")?;
+    let observed_at = progress
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))?;
+    let age_seconds = now.signed_duration_since(observed_at).num_seconds().max(0) as u64;
+    Some(ControlPlaneLiveness {
+        state: "active".to_string(),
+        source: Some("promotion".to_string()),
+        last_observed_progress_at: Some(observed_at.to_rfc3339()),
+        age_seconds,
+        window_seconds: 30,
+    })
 }
 
 fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
@@ -4561,7 +4647,7 @@ fn candidate(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
 }
 
 fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
-    record
+    let mut gates = record
         .metadata
         .get("latest_promotion")
         .and_then(|promotion| {
@@ -4590,7 +4676,25 @@ fn gates(record: &AgentTaskRunRecord) -> Vec<ControlPlaneStateSummary> {
             })
         })
         .take(GATE_BOUND)
-        .collect()
+        .collect::<Vec<_>>();
+    if live_promotion_progress(record, chrono::Utc::now()) {
+        if let Some(gate) = record
+            .metadata
+            .pointer("/promotion_progress/gate")
+            .and_then(Value::as_str)
+            .and_then(|value| nonempty_bounded(value, ID_BOUND))
+        {
+            gates.insert(
+                0,
+                ControlPlaneStateSummary {
+                    id: Some(gate),
+                    state: "running".to_string(),
+                },
+            );
+            gates.truncate(GATE_BOUND);
+        }
+    }
+    gates
 }
 
 fn publication(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> {
@@ -8433,6 +8537,35 @@ mod tests {
         let from_record = project_record(&seeded, None).expect("project");
         let from_service = service().run(&requested).expect("run");
         assert_eq!(from_record, from_service);
+    }
+
+    #[test]
+    fn live_promotion_progress_projects_gate_identity_and_liveness() {
+        let mut record = record(AGENT_TASK_RUN);
+        let now = chrono::Utc::now();
+        record.metadata["promotion_progress"] = json!({
+            "schema": "homeboy/agent-task-promotion-progress/v1",
+            "active": true,
+            "phase": "gate",
+            "gate": "gate-2",
+            "last_progress": "gate elapsed=12s last-progress=5s",
+            "started_at": (now - chrono::Duration::seconds(12)).to_rfc3339(),
+            "updated_at": now.to_rfc3339(),
+            "elapsed_seconds": 12,
+            "owner_pid": std::process::id(),
+        });
+
+        let resource = project_record(&record, None).expect("project live promotion");
+        assert_eq!(resource.state, ControlPlaneRunState::Running);
+        assert_eq!(resource.phase.as_deref(), Some("gate:gate-2"));
+        assert_eq!(resource.gates[0].id.as_deref(), Some("gate-2"));
+        assert_eq!(resource.gates[0].state, "running");
+        assert_eq!(
+            resource.liveness.as_ref().unwrap().source.as_deref(),
+            Some("promotion")
+        );
+        assert_eq!(resource.liveness.as_ref().unwrap().age_seconds, 0);
+        assert!(resource.finished_at.is_none());
     }
 
     #[test]

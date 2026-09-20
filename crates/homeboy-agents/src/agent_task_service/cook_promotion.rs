@@ -32,8 +32,9 @@ use crate::agent_task_promotion::{
     canonical_recoverable_patch_artifacts_in_observation_store,
     preflight_recoverable_candidate_promotion_in_observation_store,
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,
-    resume_promoted_patch_replacement_gates_in_observation_store, AgentTaskPromotionCandidate,
-    AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
+    resume_promoted_patch_replacement_gates_in_observation_store, with_promotion_progress,
+    AgentTaskPromotionCandidate, AgentTaskPromotionReport, AgentTaskPromotionRequest,
+    AgentTaskPromotionStatus, PromotionProgressCallback,
 };
 use crate::agent_task_review_dossier::{
     resolve_review_profile, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
@@ -388,39 +389,55 @@ pub(crate) fn promote_attempt_in_store(
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    promote_with_checkpoint_in_observation_store(
-        AgentTaskPromotionRequest {
-            source,
-            source_run_id: Some(run_id.to_string()),
-            source_path,
-            source_worktree_path: component_workspace_path(options)?
-                .or_else(|| options.workspace.source_worktree_path.clone()),
-            base_ref: Some(options.finalization.base.clone()),
-            task_base_sha: cook_candidate_base_sha(options),
-            candidate_ref: None,
-            to_worktree: options.workspace.to_worktree.clone(),
-            task_id: selected_task_id,
-            artifact_id,
-            dry_run: false,
-            gates: options.gates.clone(),
-            provider_command: options.provider_transport.provider_command.clone(),
-            provider_invocation: options.provider_transport.provider_invocation.clone(),
-            repository_integrity_evidence,
-        },
-        &observation_store,
-        |checkpoint| {
-            lifecycle_store.record_promotion(
-                run_id,
-                serde_json::to_value(checkpoint).map_err(|error| {
-                    Error::internal_json(
-                        error.to_string(),
-                        Some("serialize pending cook promotion".to_string()),
-                    )
-                })?,
-            )?;
+    let progress: PromotionProgressCallback = std::sync::Arc::new({
+        let lifecycle_store = lifecycle_store.clone();
+        let run_id = run_id.to_string();
+        move |frame| {
+            let _ = agent_task_lifecycle::record_promotion_progress_in_store(
+                &lifecycle_store,
+                &run_id,
+                frame.phase,
+                frame.gate.as_deref(),
+                frame.last_progress.as_deref(),
+            );
             Ok(())
-        },
-    )
+        }
+    });
+    with_promotion_progress(progress, || {
+        promote_with_checkpoint_in_observation_store(
+            AgentTaskPromotionRequest {
+                source,
+                source_run_id: Some(run_id.to_string()),
+                source_path,
+                source_worktree_path: component_workspace_path(options)?
+                    .or_else(|| options.workspace.source_worktree_path.clone()),
+                base_ref: Some(options.finalization.base.clone()),
+                task_base_sha: cook_candidate_base_sha(options),
+                candidate_ref: None,
+                to_worktree: options.workspace.to_worktree.clone(),
+                task_id: selected_task_id,
+                artifact_id,
+                dry_run: false,
+                gates: options.gates.clone(),
+                provider_command: options.provider_transport.provider_command.clone(),
+                provider_invocation: options.provider_transport.provider_invocation.clone(),
+                repository_integrity_evidence,
+            },
+            &observation_store,
+            |checkpoint| {
+                lifecycle_store.record_promotion(
+                    run_id,
+                    serde_json::to_value(checkpoint).map_err(|error| {
+                        Error::internal_json(
+                            error.to_string(),
+                            Some("serialize pending cook promotion".to_string()),
+                        )
+                    })?,
+                )?;
+                Ok(())
+            },
+        )
+    })
 }
 
 fn admitted_repository_integrity_evidence(
