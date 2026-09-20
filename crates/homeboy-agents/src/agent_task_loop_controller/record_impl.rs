@@ -98,6 +98,10 @@ impl AgentTaskLoopControllerRecord {
             payload: event.payload.clone(),
         });
 
+        if event.event_type == "github.pr.checks_changed" {
+            self.apply_github_check_results(&event.payload);
+        }
+
         for wait in &mut self.waits {
             if wait.status != AgentTaskLoopWaitStatus::Open || wait.event_type != event.event_type {
                 continue;
@@ -125,6 +129,112 @@ impl AgentTaskLoopControllerRecord {
         }
         self.touch();
         actions
+    }
+
+    /// Project an authoritative CI publication onto the matching pending gate
+    /// without rerunning local verification. The publisher supplies stable
+    /// `check_id` values and the candidate identity; acceptance remains blocked
+    /// for missing, pending, or non-matching results.
+    fn apply_github_check_results(&mut self, payload: &serde_json::Value) {
+        let Some(checks) = payload.get("checks").and_then(serde_json::Value::as_array) else {
+            return;
+        };
+        let bundle_ids: Vec<String> = self
+            .gate_bundles
+            .iter()
+            .map(|bundle| bundle.bundle_id.clone())
+            .collect();
+        for bundle_id in bundle_ids {
+            let expected_head_shas: std::collections::BTreeMap<String, String> = self
+                .gate_bundles
+                .iter()
+                .find(|bundle| bundle.bundle_id == bundle_id)
+                .into_iter()
+                .flat_map(|bundle| bundle.checks.iter())
+                .filter_map(|check| {
+                    check
+                        .input
+                        .get("head_sha")
+                        .and_then(serde_json::Value::as_str)
+                        .map(|sha| (check.check_id.clone(), sha.to_string()))
+                })
+                .collect();
+            let Some(result) = self
+                .gate_results
+                .iter_mut()
+                .rev()
+                .find(|result| result.bundle_id == bundle_id)
+            else {
+                continue;
+            };
+            for check in &mut result.checks {
+                let expected_head_sha = expected_head_shas.get(&check.check_id);
+                if expected_head_sha.is_none()
+                    || payload.get("head_sha").and_then(serde_json::Value::as_str)
+                        != expected_head_sha.map(String::as_str)
+                {
+                    continue;
+                }
+                let Some(publication) = checks.iter().find(|candidate| {
+                    candidate
+                        .get("check_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(check.check_id.as_str())
+                }) else {
+                    continue;
+                };
+                let status = publication
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("pending");
+                check.status = match status {
+                    "passed" | "success" | "completed" => AgentTaskLoopGateStatus::Satisfied,
+                    "failed" | "failure" | "cancelled" | "timed_out" => {
+                        AgentTaskLoopGateStatus::Failed
+                    }
+                    _ => AgentTaskLoopGateStatus::Pending,
+                };
+                check.classification = Some("github_ci_result".to_string());
+                check.details = publication.clone();
+            }
+            result.status = if result
+                .checks
+                .iter()
+                .any(|check| check.status == AgentTaskLoopGateStatus::Failed)
+            {
+                AgentTaskLoopGateStatus::Failed
+            } else if result
+                .checks
+                .iter()
+                .any(|check| check.status == AgentTaskLoopGateStatus::Pending)
+            {
+                AgentTaskLoopGateStatus::Pending
+            } else {
+                AgentTaskLoopGateStatus::Satisfied
+            };
+            if result.status == AgentTaskLoopGateStatus::Satisfied {
+                for action in &mut self.next_actions {
+                    if matches!(
+                        action.action,
+                        AgentTaskLoopPolicyAction::RunGates {
+                            bundle_id: ref action_bundle_id,
+                            ..
+                        } if action_bundle_id == &bundle_id
+                    ) && matches!(
+                        action.status,
+                        AgentTaskLoopActionStatus::Failed | AgentTaskLoopActionStatus::Pending
+                    ) {
+                        action.status = AgentTaskLoopActionStatus::Pending;
+                        let action_id = action.action_id.clone();
+                        self.terminal_outcomes.retain(|outcome| {
+                            outcome.action_id.as_deref() != Some(action_id.as_str())
+                        });
+                    }
+                }
+                self.state = AgentTaskLoopControllerState::Running;
+            }
+        }
+        self.touch();
     }
 
     pub fn evaluate_policy(

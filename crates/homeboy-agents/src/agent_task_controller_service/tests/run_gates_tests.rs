@@ -240,3 +240,61 @@ fn command_gate_check_caps_stored_stdout_and_records_truncation() {
         64 * 1024
     );
 }
+
+#[test]
+fn github_ci_event_satisfies_a_pending_gate_without_rerunning_local_checks() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            phase: "verify".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.gate_bundles.push(AgentTaskGateBundle {
+            bundle_id: "ci".to_string(),
+            description: "authoritative CI".to_string(),
+            checks: vec![AgentTaskGateBundleCheck {
+                check_id: "homeboy-test".to_string(),
+                kind: AgentTaskGateBundleCheckKind::Manual,
+                input: json!({ "provider": "github", "head_sha": "candidate-sha" }),
+                retryable: false,
+            }],
+        });
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunGates {
+                bundle_id: "ci".to_string(),
+                entity_id: None,
+            },
+            "wait for CI",
+        );
+        controller::write_controller(&record).expect("controller written");
+        let blocked = run_next(
+            "loop-ci-handoff",
+            Arc::new(CapturingExecutor::default()),
+            &NoopDispatchHook,
+        )
+        .expect("pending CI gate records a blocked result");
+        assert_eq!(blocked.exit_code, 1);
+
+        let report = apply_event(ControllerApplyEventRequest {
+            loop_id: "loop-ci-handoff".to_string(),
+            event_type: "github.pr.checks_changed".to_string(),
+            event_id: Some("check-run-1".to_string()),
+            event_key: Some("pr:1".to_string()),
+            entity_id: None,
+            payload: json!({
+                "head_sha": "candidate-sha",
+                "checks": [{"check_id": "homeboy-test", "status": "success", "url": "https://github.test/check/1"}]
+            }),
+        })
+        .expect("CI result applied");
+        assert_eq!(
+            report.controller.gate_results[0].status,
+            AgentTaskLoopGateStatus::Satisfied
+        );
+        assert!(report.controller.next_actions.iter().any(|action| {
+            matches!(action.action, AgentTaskLoopPolicyAction::RunGates { ref bundle_id, .. } if bundle_id == "ci")
+                && action.status == AgentTaskLoopActionStatus::Pending
+        }));
+    });
+}
