@@ -5192,6 +5192,7 @@ impl BatchCookSpec {
                 finalization: CookFinalization {
                     no_finalize: self.no_finalize,
                     draft_pr: self.draft_pr,
+                    provider_ci: None,
                     base: self.base.clone(),
                     head: self.head.clone(),
                     title,

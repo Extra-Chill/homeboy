@@ -5,6 +5,102 @@ use serde_json::Value;
 use crate::plan::HomeboyPlan;
 
 pub const HOMEBOY_GATE_RESULT_SCHEMA: &str = "homeboy/gate-result/v1";
+pub const EXTERNAL_CHECK_PUBLICATION_SCHEMA: &str = "homeboy/external-check-publication/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalCheckPublication {
+    pub schema: String,
+    pub provider: String,
+    pub repository: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub gate_id: String,
+    pub check_id: String,
+    pub environment_digest: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub observed_at: String,
+    pub sequence: u64,
+    pub evidence_id: String,
+    pub authoritative: bool,
+    pub hydrated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalCheckOutcome {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
+impl ExternalCheckPublication {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != EXTERNAL_CHECK_PUBLICATION_SCHEMA {
+            return Err("unsupported external check publication schema".to_string());
+        }
+        if !self.authoritative || !self.hydrated {
+            return Err("external check publication is not authoritative and hydrated".to_string());
+        }
+        for (name, value) in [
+            ("provider", &self.provider),
+            ("repository", &self.repository),
+            ("base_sha", &self.base_sha),
+            ("head_sha", &self.head_sha),
+            ("gate_id", &self.gate_id),
+            ("check_id", &self.check_id),
+            ("environment_digest", &self.environment_digest),
+            ("observed_at", &self.observed_at),
+            ("evidence_id", &self.evidence_id),
+        ] {
+            if value.is_empty() {
+                return Err(format!("external check publication {name} is empty"));
+            }
+        }
+        if !matches!(
+            self.status.as_str(),
+            "queued"
+                | "in_progress"
+                | "waiting"
+                | "pending"
+                | "completed"
+                | "success"
+                | "failure"
+                | "cancelled"
+                | "timed_out"
+                | "action_required"
+                | "neutral"
+                | "skipped"
+        ) {
+            return Err(format!(
+                "unsupported external check status `{}`",
+                self.status
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn outcome(&self) -> ExternalCheckOutcome {
+        match self.status.as_str() {
+            "success" => match self.conclusion.as_deref() {
+                None | Some("success") => ExternalCheckOutcome::Succeeded,
+                Some(_) => ExternalCheckOutcome::Failed,
+            },
+            "completed" => match self.conclusion.as_deref() {
+                Some("success") => ExternalCheckOutcome::Succeeded,
+                Some(
+                    "failure" | "cancelled" | "timed_out" | "action_required" | "neutral"
+                    | "skipped",
+                ) => ExternalCheckOutcome::Failed,
+                _ => ExternalCheckOutcome::Pending,
+            },
+            "failure" | "cancelled" | "timed_out" | "action_required" | "neutral" | "skipped" => {
+                ExternalCheckOutcome::Failed
+            }
+            _ => ExternalCheckOutcome::Pending,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HomeboyGateResult {
@@ -156,6 +252,26 @@ fn gate_result_schema() -> String {
 mod tests {
     use super::*;
 
+    fn publication(status: &str, conclusion: Option<&str>) -> ExternalCheckPublication {
+        ExternalCheckPublication {
+            schema: EXTERNAL_CHECK_PUBLICATION_SCHEMA.into(),
+            provider: "github".into(),
+            repository: "Extra-Chill/homeboy".into(),
+            base_sha: "base".into(),
+            head_sha: "head".into(),
+            gate_id: "ci".into(),
+            check_id: "test".into(),
+            environment_digest: "sha256:env".into(),
+            status: status.into(),
+            conclusion: conclusion.map(str::to_string),
+            observed_at: "2026-09-20T19:00:00Z".into(),
+            sequence: 1,
+            evidence_id: "evidence-1".into(),
+            authoritative: true,
+            hydrated: true,
+        }
+    }
+
     #[test]
     fn gate_result_serializes_with_stable_schema() {
         let result = HomeboyGateResult::new(
@@ -197,5 +313,27 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "gate-1");
         assert_eq!(results[0].status, HomeboyGateStatus::Passed);
+    }
+
+    #[test]
+    fn external_publication_requires_hydration_and_conclusion_success() {
+        let mut pending = publication("completed", None);
+        pending.validate().unwrap();
+        assert_eq!(pending.outcome(), ExternalCheckOutcome::Pending);
+        pending.conclusion = Some("failure".into());
+        assert_eq!(pending.outcome(), ExternalCheckOutcome::Failed);
+        pending.conclusion = Some("success".into());
+        assert_eq!(pending.outcome(), ExternalCheckOutcome::Succeeded);
+        pending.status = "success".into();
+        pending.conclusion = Some("failure".into());
+        assert_eq!(pending.outcome(), ExternalCheckOutcome::Failed);
+        pending.hydrated = false;
+        assert!(pending.validate().is_err());
+    }
+
+    #[test]
+    fn external_publication_rejects_unknown_status() {
+        let invalid = publication("bogus", None);
+        assert!(invalid.validate().is_err());
     }
 }

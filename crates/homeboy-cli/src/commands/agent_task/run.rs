@@ -613,7 +613,8 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         },
         "publication": {
             "finalize": !args.no_finalize,
-            "draft": args.draft_pr,
+            "draft": args.draft_pr || args.ci_mode,
+            "provider_ci": args.ci_mode,
             "ai_tool": args.ai_tool,
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
@@ -3716,7 +3717,12 @@ where
             reconstruct_dispatcher,
         );
     }
-    if !record.state.is_terminal() {
+    // Provider-CI Cook runs deliberately remain non-terminal while the draft
+    // PR is waiting. Reconstructing this durable attempt is safe because the
+    // Cook service consumes the controller result before provider dispatch or
+    // local-gate execution, so pending reconnects do not replay either.
+    let provider_ci_reconnect = record.metadata.get("provider_ci_handoff").is_some();
+    if !record.state.is_terminal() && !provider_ci_reconnect {
         return Ok((cook_continuation_status(&recipe.cook_id, &record), 0));
     }
 
@@ -6813,7 +6819,13 @@ fn run_preflight_cook_execution(
             },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 no_finalize: args.no_finalize,
-                draft_pr: args.draft_pr,
+                draft_pr: args.draft_pr || args.ci_mode,
+                provider_ci: args.ci_mode.then(|| homeboy::agents::agent_task_service::CookProviderCi {
+                    loop_id: args.ci_loop_id.clone().expect("ci loop id is required"),
+                    gate_id: args.ci_gate_id.clone().expect("ci gate id is required"),
+                    check_id: args.ci_check_id.clone().expect("ci check id is required"),
+                    environment_digest: args.ci_environment_digest.clone().expect("ci environment digest is required"),
+                }),
                 base: args.base.expect("Cook base is resolved before execution"),
                 head: args.head,
                 title,
