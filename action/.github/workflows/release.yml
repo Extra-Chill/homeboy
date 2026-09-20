@@ -93,12 +93,23 @@ on:
         description: 'homeboy-action ref used by this workflow.'
         type: string
         default: 'v2'
+      dispatch-repo:
+        description: 'owner/repo to notify with a repository_dispatch after a successful release. Empty disables dispatch.'
+        type: string
+        default: ''
+      dispatch-event:
+        description: 'event_type for the post-release repository_dispatch.'
+        type: string
+        default: 'component-released'
     secrets:
       HOMEBOY_APP_ID:
         description: 'GitHub App client ID for release credentials. Optional; falls back to the automatic token.'
         required: false
       HOMEBOY_APP_PRIVATE_KEY:
         description: 'GitHub App private key for release credentials. Optional; falls back to the automatic token.'
+        required: false
+      DISPATCH_TOKEN:
+        description: 'Token with actions:write on dispatch-repo. Optional; when absent, a HOMEBOY_APP_* installation token scoped to dispatch-repo is used. GITHUB_TOKEN cannot dispatch cross-repo.'
         required: false
     outputs:
       released:
@@ -119,6 +130,15 @@ on:
       tooling-identity:
         description: 'Cache-key-safe token identifying the resolved release tooling (homeboy CLI version + extension revision).'
         value: ${{ jobs.check.outputs.tooling-identity }}
+      component:
+        description: 'Resolved Homeboy portable component id.'
+        value: ${{ jobs.release.outputs.component }}
+      dispatched:
+        description: 'Whether the post-release repository_dispatch was delivered (true/false).'
+        value: ${{ jobs.dispatch.result == 'success' }}
+      dispatch-repo:
+        description: 'The owner/repo that was notified, or empty.'
+        value: ${{ inputs.dispatch-repo }}
 
 # A called workflow cannot request a permission the CALLER has not granted —
 # GitHub fails the whole run at startup, before any job, with no usable error
@@ -256,6 +276,7 @@ jobs:
       release-tag: ${{ steps.release.outputs.release-tag }}
       release-bump-type: ${{ steps.release.outputs.release-bump-type }}
       skipped-reason: ${{ steps.release.outputs.skipped-reason }}
+      component: ${{ steps.release.outputs.component }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -301,6 +322,94 @@ jobs:
           release-skip-publish: ${{ inputs.release-skip-publish }}
           release-skip-github-release: ${{ inputs.release-skip-github-release }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
+
+  # ── Post-release dispatch ──
+  # Notifies a central workflow (for example a network deploy) that a release
+  # exists. Runs only after a real, successful release; a dry run never
+  # dispatches. A dispatch failure fails this job only — the release has
+  # already been tagged and published and is not rolled back.
+  #
+  # GITHUB_TOKEN cannot dispatch to another repository, so the token is
+  # DISPATCH_TOKEN when the caller provides it, otherwise a HOMEBOY_APP_*
+  # installation token scoped to exactly dispatch-repo.
+  dispatch:
+    name: Dispatch
+    needs:
+      - check
+      - release
+    if: needs.check.outputs.should-release == 'true' && needs.release.outputs.released == 'true' && inputs.dispatch-repo != '' && inputs.dry-run != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Split dispatch target
+        id: target
+        shell: bash
+        env:
+          DISPATCH_REPO: ${{ inputs.dispatch-repo }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${DISPATCH_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::dispatch-repo must be owner/repo, got '${DISPATCH_REPO}'"
+            exit 1
+          fi
+          echo "owner=${DISPATCH_REPO%%/*}" >> "${GITHUB_OUTPUT}"
+          echo "repo=${DISPATCH_REPO##*/}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.repo }}
+
+      - name: Send repository_dispatch
+        shell: bash
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          DISPATCH_REPO: ${{ inputs.dispatch-repo }}
+          DISPATCH_EVENT: ${{ inputs.dispatch-event }}
+          COMPONENT: ${{ needs.release.outputs.component }}
+          VERSION: ${{ needs.release.outputs.release-version }}
+          TAG: ${{ needs.release.outputs.release-tag }}
+          BUMP: ${{ needs.release.outputs.release-bump-type }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DISPATCH_TOKEN}" ]; then
+            token="${DISPATCH_TOKEN}"
+            source="DISPATCH_TOKEN"
+          elif [ -n "${APP_TOKEN}" ]; then
+            token="${APP_TOKEN}"
+            source="HOMEBOY_APP installation token scoped to ${DISPATCH_REPO}"
+          else
+            echo "::error::No token can dispatch to ${DISPATCH_REPO}: GITHUB_TOKEN cannot send repository_dispatch cross-repo. Pass secrets.DISPATCH_TOKEN (actions:write on the target) or install the Homeboy App on the target repository."
+            exit 1
+          fi
+
+          jq -n \
+            --arg component "${COMPONENT}" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg version "${VERSION}" \
+            --arg tag "${TAG}" \
+            --arg bump "${BUMP}" \
+            --arg sha "${GITHUB_SHA}" \
+            --arg run_url "${RUN_URL}" \
+            '{component:$component,repository:$repository,version:$version,tag:$tag,bump:$bump,sha:$sha,run_url:$run_url}' \
+            > "${RUNNER_TEMP}/client_payload.json"
+
+          echo "Dispatching ${DISPATCH_EVENT} to ${DISPATCH_REPO} using ${source}"
+          cat "${RUNNER_TEMP}/client_payload.json"
+
+          GH_TOKEN="${token}" gh api \
+            --method POST \
+            "repos/${DISPATCH_REPO}/dispatches" \
+            -f "event_type=${DISPATCH_EVENT}" \
+            -F "client_payload=@${RUNNER_TEMP}/client_payload.json"
 
   # ── Record failed SHA to prevent retry loops ──
   record-failure:

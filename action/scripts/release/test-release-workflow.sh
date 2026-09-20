@@ -184,4 +184,20 @@ assert_contains '  contents: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal relea
 assert_contains '  pull-requests: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture grants pull-requests write"
 assert_contains '  issues: write' "${RELEASE_CONSUMER_FIXTURE}" "minimal release consumer fixture grants issues write"
 
+# Post-release dispatch (#476): declared, gated on a real successful release,
+# never fires on dry-run, and never relies on GITHUB_TOKEN for cross-repo.
+DISPATCH_CONSUMER_FIXTURE="${ROOT_DIR}/fixtures/reusable-release-dispatch-consumer.yml"
+assert_contains '      dispatch-repo:' "${REUSABLE_RELEASE}" "reusable release workflow exposes dispatch-repo"
+assert_contains '      dispatch-event:' "${REUSABLE_RELEASE}" "reusable release workflow exposes dispatch-event"
+assert_contains '      DISPATCH_TOKEN:' "${REUSABLE_RELEASE}" "reusable release workflow accepts an optional DISPATCH_TOKEN secret"
+assert_contains '  dispatch:' "${REUSABLE_RELEASE}" "reusable release workflow declares the dispatch job"
+assert_contains "needs.release.outputs.released == 'true' && inputs.dispatch-repo != '' && inputs.dry-run != true" "${REUSABLE_RELEASE}" "dispatch job is gated on a real successful release with a target and no dry-run"
+assert_contains '"repos/${DISPATCH_REPO}/dispatches"' "${REUSABLE_RELEASE}" "dispatch job posts a repository_dispatch to the target"
+assert_contains 'GITHUB_TOKEN cannot send repository_dispatch cross-repo' "${REUSABLE_RELEASE}" "dispatch job fails closed without a cross-repo-capable token"
+assert_contains 'value: ${{ jobs.dispatch.result == '"'"'success'"'"' }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports dispatched"
+assert_contains 'component: ${{ steps.release.outputs.component }}' "${REUSABLE_RELEASE}" "release job exposes the portable component id for the payload"
+assert_contains 'dispatch-repo: example-org/example-deploy' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture sets a dispatch target"
+assert_contains 'dry-run: true' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture stays dry-run so it can never dispatch"
+assert_contains 'secrets: inherit' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture inherits secrets"
+
 printf 'All release workflow checks passed.\n'

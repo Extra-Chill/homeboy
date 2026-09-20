@@ -1,0 +1,23 @@
+# Minimal caller exercising the post-release repository_dispatch contract of
+# the Homeboy continuous-release reusable workflow. `dry-run: true` means the
+# dispatch job is declared but can never fire from this fixture; it proves the
+# caller shape (inputs + secrets: inherit) that a real consumer uses to notify
+# a central deploy workflow.
+name: Minimal Homeboy release consumer with dispatch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      dry-run: true
+      dispatch-repo: example-org/example-deploy
+      dispatch-event: component-released
+    secrets: inherit

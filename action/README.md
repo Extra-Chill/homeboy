@@ -170,7 +170,8 @@ caller is maintained in
 
 Available inputs: `dry-run`, `args`, `extension`, `extension-ref`,
 `php-version`, `node-version`, `release-skip-publish`,
-`release-skip-github-release`, `release-branch`, `execution-timeout-seconds`.
+`release-skip-github-release`, `release-branch`, `execution-timeout-seconds`,
+`dispatch-repo`, `dispatch-event`.
 Workflow outputs mirror the composite action (`released`, `release-version`,
 `release-tag`, `release-bump-type`, `skipped-reason`, `tooling-identity`) so a
 post-release job can chain on the result.
@@ -199,6 +200,49 @@ Inside a reusable workflow `uses: ./` would resolve to the caller's checkout,
 so the workflow pins `Extra-Chill/homeboy-action` via an `action-ref` input
 (default `v2`) resolved to one immutable revision per run — the same contract
 as the reusable CI workflow.
+
+#### Post-release dispatch
+
+Set `dispatch-repo` to have the workflow send a `repository_dispatch` to
+another repository after a real, successful release — for example a central
+deploy workflow that receives every component's releases. A dry run never
+dispatches. A dispatch failure fails only the `dispatch` job; the release is
+already tagged and published and is not rolled back.
+
+```yaml
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      dispatch-repo: my-org/my-deploy-repo
+      dispatch-event: component-released   # default
+    secrets: inherit
+```
+
+The receiving workflow declares `on: repository_dispatch: types: [component-released]`
+and reads `github.event.client_payload`:
+
+```json
+{
+  "component": "my-plugin",
+  "repository": "my-org/my-plugin",
+  "version": "1.2.3",
+  "tag": "v1.2.3",
+  "bump": "minor",
+  "sha": "0123456789abcdef0123456789abcdef01234567",
+  "run_url": "https://github.com/my-org/my-plugin/actions/runs/123"
+}
+```
+
+`component` is the Homeboy portable id from `homeboy.json`, not the repository
+name.
+
+`GITHUB_TOKEN` cannot dispatch to another repository. The job uses
+`secrets.DISPATCH_TOKEN` when the caller provides one (a token with
+`actions: write` on the target), otherwise a `HOMEBOY_APP_*` installation
+token scoped to exactly `dispatch-repo` — so the Homeboy App must be installed
+on the target repository. With neither, the job fails with an explicit error.
+Outputs `dispatched` and `dispatch-repo` are exported for chaining.
 
 #### Direct composite action
 
