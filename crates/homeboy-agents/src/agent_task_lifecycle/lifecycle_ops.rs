@@ -507,7 +507,7 @@ pub fn record_detached_cook_handoff_parent_in_store(
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_without_events(&record)?;
     record_cook_progress_in_store(
         lifecycle_store,
         &record.run_id,

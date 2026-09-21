@@ -1423,6 +1423,7 @@ mod tests {
 
     #[test]
     fn fetch_and_merge_upstream_uses_the_caller_deadline_for_authority_wait() {
+        let _env_lock = crate::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let repository = dir.path();
         git(repository, &["init", "-q", "-b", "main"]);

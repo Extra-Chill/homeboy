@@ -4778,30 +4778,43 @@ impl AgentTaskCookAttemptDispatcher for ProviderDiscoveryReplayDispatcher {
     ) -> Result<()> {
         let dispatch = self.dispatches.fetch_add(1, Ordering::SeqCst);
         let provider_missing = dispatch < self.provider_missing_before_success;
-        let result = if provider_missing {
-            run_loaded_plan_with_derived_cook_baseline(
+        if provider_missing {
+            let result = run_loaded_plan_with_derived_cook_baseline(
                 plan,
                 Some(run_id),
                 Arc::new(ProviderMissingExecutor),
                 derived_cook_baseline,
                 None,
-            )?
-        } else {
-            run_loaded_plan_with_derived_cook_baseline(
-                plan,
-                Some(run_id),
-                Arc::new(ReviewFormOnlyExecutor),
-                derived_cook_baseline,
-                None,
-            )?
-        };
-        if provider_missing {
+            )?;
             assert_eq!(result.exit_code, 1);
             return Err(Error::internal_unexpected(
                 "fixture runner reported provider discovery failure",
             ));
         }
+        let result = run_loaded_plan_with_derived_cook_baseline(
+            plan,
+            Some(run_id),
+            Arc::new(ReviewFormOnlyExecutor),
+            derived_cook_baseline,
+            None,
+        )?;
         assert_eq!(result.exit_code, 0, "{:#?}", result.value);
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            let operation_key = record.metadata["cook_operation_claims"][0]["operation_key"]
+                .as_str()
+                .expect("retry operation key")
+                .to_string();
+            record.metadata["cook_dispatch_acceptance_receipts"] = serde_json::json!([{
+                "schema": "homeboy/cook-dispatch-acceptance-receipt/v1",
+                "operation_key": operation_key,
+                "accepted_at": "2026-01-01T00:00:00Z",
+                "receipt": {
+                    "accepted_by": "runner_daemon",
+                    "runner_id": "fixture-lab",
+                    "runner_job_id": "provider-replay-accepted-job"
+                }
+            }]);
+        })?;
         Ok(())
     }
 }
@@ -7373,6 +7386,7 @@ struct CandidateAdoptionFixture {
     source: std::path::PathBuf,
     provider: std::path::PathBuf,
     target: std::path::PathBuf,
+    base: String,
     candidate: String,
     cook_id: String,
     run_id: String,
@@ -7549,6 +7563,7 @@ impl CandidateAdoptionFixture {
             source,
             provider,
             target,
+            base,
             candidate,
             cook_id: cook_id.to_string(),
             run_id,
@@ -7605,6 +7620,20 @@ impl CandidateAdoptionFixture {
         .is_ok());
     }
 
+    fn reset_target_to_immutable_base(&self) {
+        let status = Command::new("git")
+            .args([
+                "-C",
+                self.target.to_str().expect("target path"),
+                "reset",
+                "--hard",
+                &self.base,
+            ])
+            .status()
+            .expect("reset target to immutable base");
+        assert!(status.success(), "reset target to immutable base");
+    }
+
     fn append_adoptable_attempt(&mut self, attempt: u32) {
         assert!(attempt > 1);
         let run_id = agent_task_lifecycle::cook_attempt_run_id(&self.cook_id, attempt);
@@ -7644,6 +7673,26 @@ impl CandidateAdoptionFixture {
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
         self.adopt_run_with_inherited_failure_acceptance(
             run_id, false, dispatcher, executor, backend,
+        )
+    }
+
+    fn adopt_replacing_interrupted(
+        &self,
+        dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+        executor: SharedAgentTaskExecutor,
+        backend: &mut CaptureBackend,
+    ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+        adopt_cook_candidate_with_dispatcher_and_backend(
+            &self.run_id,
+            &self.candidate,
+            AgentTaskCandidateAdoptionOptions {
+                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                replace_interrupted: true,
+                accept_inherited_failures: false,
+            },
+            dispatcher,
+            executor,
+            backend,
         )
     }
 
@@ -14536,6 +14585,7 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
             "interrupted"
         );
 
+        fixture.reset_target_to_immutable_base();
         let result = fixture
             .adopt(
                 |_| Ok(Some(dispatcher.clone())),
@@ -14590,13 +14640,13 @@ fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() 
         let mut backend = CaptureBackend::default();
 
         for expected_dispatches in 1..=2 {
-            fixture
-                .adopt(
-                    |_| Ok(Some(dispatcher.clone())),
-                    Arc::new(UnusedExecutor),
-                    &mut backend,
-                )
-                .expect_err("provider discovery failure interrupts adoption");
+            fixture.reset_target_to_immutable_base();
+            let adoption_result = fixture.adopt_replacing_interrupted(
+                |_| Ok(Some(dispatcher.clone())),
+                Arc::new(UnusedExecutor),
+                &mut backend,
+            );
+            adoption_result.expect_err("provider discovery failure interrupts adoption");
             assert_eq!(
                 dispatcher.dispatches.load(Ordering::SeqCst),
                 expected_dispatches
@@ -14612,6 +14662,7 @@ fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() 
             agent_task_lifecycle::reconcile_status(&fixture.run_id).unwrap();
         }
 
+        fixture.reset_target_to_immutable_base();
         let exhausted = fixture
             .adopt(
                 |_| Ok(Some(dispatcher.clone())),
