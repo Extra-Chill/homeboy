@@ -1,6 +1,6 @@
 use homeboy_core::defaults;
 use homeboy_core::engine::shell::quote_path;
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 use homeboy_engine_primitives::command::{
@@ -1122,15 +1122,36 @@ fn run_source_upgrade_command(
             supervised.output.status,
             cargo_target.map(|(path, _)| path),
         )),
-        SupervisedCommandTermination::TimedOut => Err(Error::internal_io(
-            format!("source upgrade timed out after {}s", timeout.as_secs()),
-            Some("run source upgrade".to_string()),
-        )),
+        SupervisedCommandTermination::TimedOut => Err(source_upgrade_timeout_error(timeout)),
         termination => Err(Error::internal_io(
             format!("source upgrade terminated before completion: {termination:?}"),
             Some("run source upgrade".to_string()),
         )),
     }
+}
+
+fn source_upgrade_timeout_error(timeout: Duration) -> Error {
+    let message = format!(
+        "source candidate build timed out after {}ms (configured deadline)",
+        timeout.as_millis()
+    );
+    Error::new(
+        ErrorCode::InternalUnexpected,
+        message.clone(),
+        serde_json::json!({
+            "error": message,
+            "kind": "source_build_deadline_exceeded",
+            "phase": "building_candidate",
+            "budget_ms": timeout.as_millis(),
+            "retryable": true,
+            "recovery": "Retry the source upgrade after checking compiler progress and capacity. Controller promotion was not attempted."
+        }),
+    )
+    .with_hint(format!(
+        "The source candidate build exceeded its configured {}ms deadline; retry after addressing the build cause.",
+        timeout.as_millis()
+    ))
+    .with_retryable(true)
 }
 
 fn source_upgrade_command_failure(
