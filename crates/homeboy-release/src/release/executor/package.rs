@@ -1027,6 +1027,19 @@ fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> 
 
     let mut detail = format!("Package command failed (exit {})", exit_code);
 
+    // Lead with the lines that actually explain the failure. The captured
+    // output from a build tool is mostly progress chatter, and the error is
+    // typically last, so a reader (or a bounded summary) that only sees the
+    // start of `detail` would otherwise get preamble and nothing actionable.
+    // These same lines are already published in the structured payload below;
+    // surfacing them here puts them where the message is read first (#14859).
+    let highlights = keyword_matched_error_lines(stdout, stderr);
+    if !highlights.is_empty() {
+        detail.push_str(": ");
+        detail.push_str(&highlights.join(" | "));
+        detail.push_str("\n\n--- full output ---");
+    }
+
     if has_stderr {
         detail.push_str(": ");
         detail.push_str(stderr_trimmed);
@@ -1058,7 +1071,12 @@ fn package_command_failure_error(exit_code: i64, stdout: &str, stderr: &str) -> 
     )
 }
 
-fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
+/// Lines that explicitly look like an error, with no fallback.
+///
+/// Kept separate from [`relevant_package_error_lines`] so callers can tell a
+/// genuine match from a best-effort guess. Leading a failure message with a
+/// guess would just print the same output twice.
+fn keyword_matched_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
     let mut lines = Vec::new();
     for line in stderr.lines().chain(stdout.lines()) {
         let trimmed = line.trim();
@@ -1078,18 +1096,35 @@ fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
             break;
         }
     }
-    if lines.is_empty() {
-        lines.extend(
-            stderr
-                .lines()
-                .chain(stdout.lines())
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .take(12)
-                .map(str::to_string),
-        );
-    }
     lines
+}
+
+fn relevant_package_error_lines(stdout: &str, stderr: &str) -> Vec<String> {
+    let lines = keyword_matched_error_lines(stdout, stderr);
+    if !lines.is_empty() {
+        return lines;
+    }
+
+    // Nothing matched. That is common when a build tool is killed rather than
+    // exiting with a message, which is precisely the case that is hardest to
+    // diagnose — so the fallback has to be the most informative slice
+    // available.
+    //
+    // It previously returned the FIRST 12 lines, which for build output is the
+    // banner and dependency checks: identical for every component, and true of
+    // successful runs too. The end of the output is where a run diverges from
+    // a healthy one, so the tail is what gets kept (#14859).
+    let all: Vec<&str> = stderr
+        .lines()
+        .chain(stdout.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    all.iter()
+        .skip(all.len().saturating_sub(12))
+        .map(|line| (*line).to_string())
+        .collect()
 }
 
 fn package_output_reports_missing_frontend_assets(stdout: &str, stderr: &str) -> bool {
@@ -1112,4 +1147,95 @@ fn package_missing_frontend_assets_error(stdout: &str, stderr: &str) -> Error {
     }
 
     Error::internal_unexpected(detail)
+}
+
+#[cfg(test)]
+mod package_failure_message_tests {
+    use super::{
+        keyword_matched_error_lines, package_command_failure_error, relevant_package_error_lines,
+    };
+
+    /// A build tool's error is the last thing it prints, after a wall of
+    /// progress output. The failure message therefore has to repeat it near the
+    /// front, because anything reading only the start of the message — an
+    /// operator skimming, or a bounded summary — would otherwise see nothing
+    /// but preamble and have to go digging in raw CI logs (#14859).
+    #[test]
+    fn failure_message_leads_with_the_actionable_lines() {
+        let stdout = "[BUILD] Universal WordPress Build Script\n\
+                      [BUILD] Checking build dependencies...\n\
+                      [SUCCESS] All build dependencies found\n\
+                      [BUILD] Detecting project type...\n";
+        let stderr = "webpack: ERROR in ./src/index.js\nModule not found: Can't resolve './missing'\n";
+
+        let error = package_command_failure_error(255, stdout, stderr);
+        let message = error.to_string();
+
+        let error_position = message
+            .find("ERROR in ./src/index.js")
+            .expect("the real error must appear in the message");
+        let preamble_position = message
+            .find("Universal WordPress Build Script")
+            .expect("full output is still included");
+
+        assert!(
+            error_position < preamble_position,
+            "actionable lines must precede the captured preamble; got: {message}"
+        );
+        assert!(
+            message.starts_with("Package command failed (exit 255)"),
+            "the message still identifies the failing step first; got: {message}"
+        );
+    }
+
+    /// With nothing matching, the message must not sprout an empty header.
+    #[test]
+    fn failure_message_omits_highlights_when_nothing_matches() {
+        let error = package_command_failure_error(1, "all quiet\n", "");
+        let message = error.to_string();
+
+        assert!(!message.contains("--- full output ---"), "got: {message}");
+        assert!(message.contains("all quiet"), "got: {message}");
+    }
+
+    /// When nothing matches, the fallback must surface where the run DIVERGED,
+    /// not the banner every build prints — including successful ones (#14859).
+    #[test]
+    fn fallback_keeps_the_tail_not_the_banner() {
+        let stdout = format!(
+            "[BUILD] Universal WordPress Build Script\n{}[BUILD] final distinguishing line\n",
+            "[BUILD] routine progress\n".repeat(30)
+        );
+
+        assert!(
+            keyword_matched_error_lines(&stdout, "").is_empty(),
+            "fixture must not match a keyword or it tests the wrong path"
+        );
+
+        let lines = relevant_package_error_lines(&stdout, "");
+
+        assert!(
+            lines.iter().any(|line| line.contains("final distinguishing line")),
+            "the tail must survive: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("Universal WordPress Build Script")),
+            "the banner is identical on success and tells nobody anything: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn relevant_lines_pick_up_common_build_failure_shapes() {
+        let lines = relevant_package_error_lines(
+            "ENOENT: no such file or directory\nfine line\n",
+            "npm ERR! build failed\n",
+        );
+
+        assert!(lines.iter().any(|line| line.contains("npm ERR!")));
+        assert!(lines.iter().any(|line| line.contains("ENOENT")));
+        assert!(
+            !lines.iter().any(|line| line.contains("fine line")),
+            "unrelated output must not be promoted: {lines:?}"
+        );
+    }
 }
