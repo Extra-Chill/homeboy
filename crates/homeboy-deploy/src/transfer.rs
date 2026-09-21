@@ -305,9 +305,7 @@ fn scp_file_atomic(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        process_output_result, rsync_base_args, scp_file, upload_directory, upload_file,
-    };
+    use super::{process_output_result, rsync_base_args, scp_file, upload_directory, upload_file};
     use crate::test_support::local_client;
     use std::fs;
     use std::process::Command;
