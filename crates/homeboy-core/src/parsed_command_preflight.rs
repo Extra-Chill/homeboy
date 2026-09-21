@@ -282,18 +282,71 @@ pub fn resolve_parsed_command_preflight(
             }));
     let preferred_runner_inadmissible =
         policy.selected_runner_id.is_some() && !selected_runner_admitted;
-    // `--placement auto` is a policy over the set of available routes, not a
-    // commitment to the preferred runner. An already-observed Lab rejection
-    // falls through to local instead of failing closed on the first route.
+    // Split-placement Cook keeps its durable admission on the controller but
+    // requires an admitted Lab runner for the provider attempt. Do not let its
+    // preview silently choose local when execution will reject the same stale
+    // runner; explicit `lab-or-local` remains the opt-in fallback.
+    let auto_split_placement_requires_lab = matches!(
+        (
+            &input.controller_execution,
+            &input.placement,
+            &input.lab_route
+        ),
+        (
+            &ControllerExecution::SplitPlacementCoordinator,
+            &PlacementIntent::Auto,
+            &LabRouteIntent::Supported { automatic: true }
+        )
+    );
+    let required = if matches!(input.placement, PlacementIntent::Lab)
+        || matches!(
+            input.runner,
+            RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
+        )
+        || auto_split_placement_requires_lab
+    {
+        ExecutionPlacementRequirement::Lab
+    } else {
+        ExecutionPlacementRequirement::Either
+    };
+
+    // Ordinary automatic routes may still fall through to local. Cook's
+    // split-placement route is intentionally excluded because local fallback
+    // is an explicit operator choice there.
     let auto_route_fallback = preferred_runner_inadmissible
-        && matches!(input.placement, PlacementIntent::Auto)
-        && matches!(input.runner, RunnerIntent::Default);
+        && matches!(
+            input.placement,
+            PlacementIntent::Auto | PlacementIntent::LabOrLocal
+        )
+        && matches!(input.runner, RunnerIntent::Default)
+        && !auto_split_placement_requires_lab;
     if preferred_runner_inadmissible && !auto_route_fallback {
         return Err(crate::Error::validation_invalid_argument(
-            "selected_runner_id",
-            "selected runner requires admitted connected readiness evidence",
+            if auto_split_placement_requires_lab {
+                "placement"
+            } else {
+                "selected_runner_id"
+            },
+            if auto_split_placement_requires_lab {
+                "required Lab placement has no selected ready runner"
+            } else {
+                "selected runner requires admitted connected readiness evidence"
+            },
             policy.selected_runner_id.clone(),
-            None,
+            auto_split_placement_requires_lab.then(|| {
+                policy
+                    .lab_readiness
+                    .as_ref()
+                    .map(|readiness| {
+                        readiness
+                            .remediation_commands
+                            .iter()
+                            .cloned()
+                            .chain(readiness.reasons.iter().cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }),
         ));
     }
     if policy.runner_admitted && policy.runner_incompatible {
@@ -371,21 +424,27 @@ pub fn resolve_parsed_command_preflight(
         }
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
     };
-    let required = if matches!(input.placement, PlacementIntent::Lab)
-        || matches!(
-            input.runner,
-            RunnerIntent::Explicit(_) | RunnerIntent::ReadinessRepair(_)
-        ) {
-        ExecutionPlacementRequirement::Lab
-    } else {
-        ExecutionPlacementRequirement::Either
-    };
     let selected =
         if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
             EffectiveExecutionPlacement::Local
         } else {
             EffectiveExecutionPlacement::Lab
         };
+    if auto_split_placement_requires_lab && selected_runner_id.is_none() {
+        return Err(crate::Error::validation_invalid_argument(
+            "placement",
+            "required Lab placement has no selected ready runner",
+            Some("lab".to_string()),
+            policy.lab_readiness.as_ref().map(|readiness| {
+                readiness
+                    .remediation_commands
+                    .iter()
+                    .cloned()
+                    .chain(readiness.reasons.iter().cloned())
+                    .collect()
+            }),
+        ));
+    }
     let runner = selected_runner_id
         .as_ref()
         .map(|runner_id| ExecutionPlacementRunnerSelection {
@@ -399,15 +458,16 @@ pub fn resolve_parsed_command_preflight(
                 homeboy_lab_runner_contract::RunnerSelectionSource::Policy
             },
         });
-    let fallback = if policy.auto_local_capacity_fallback {
-        FallbackDirective::LocalCapacity
-    } else if auto_route_fallback {
-        FallbackDirective::LocalAllowed
-    } else if matches!(input.placement, PlacementIntent::Lab) && selected_runner_id.is_none() {
-        FallbackDirective::RequiredLabUnavailable
-    } else {
-        FallbackDirective::None
-    };
+    let fallback =
+        if required != ExecutionPlacementRequirement::Lab && policy.auto_local_capacity_fallback {
+            FallbackDirective::LocalCapacity
+        } else if auto_route_fallback {
+            FallbackDirective::LocalAllowed
+        } else if matches!(input.placement, PlacementIntent::Lab) && selected_runner_id.is_none() {
+            FallbackDirective::RequiredLabUnavailable
+        } else {
+            FallbackDirective::None
+        };
     // Operator-facing evidence for *why* an operator's Lab-desiring placement
     // resolved to local execution. This was structurally present but never
     // populated, so a silent auto -> local degrade left no trace in preview or
@@ -902,6 +962,99 @@ mod tests {
     }
 
     #[test]
+    fn split_cook_auto_blocks_stale_lab_instead_of_previewing_local() {
+        let input = split_cook_input();
+        let policy = auto_route_policy(
+            Some("homeboy-lab"),
+            "stale",
+            Vec::new(),
+            vec!["runner daemon is stale".into()],
+            false,
+            ResourceAdmissionEvidence::Unavailable,
+        );
+
+        let error = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
+            .expect_err("stale Cook Lab admission must block before execution");
+        assert_eq!(error.details["field"], "placement");
+        assert!(error.message.contains("required Lab placement"));
+    }
+
+    #[test]
+    fn split_cook_auto_selects_a_ready_lab_runner() {
+        let result = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            split_cook_input(),
+            auto_route_policy(
+                Some("homeboy-lab"),
+                "connected_ready",
+                vec!["homeboy-lab".into()],
+                Vec::new(),
+                true,
+                ResourceAdmissionEvidence::Unavailable,
+            ),
+        )
+        .expect("ready Lab admission should be selected");
+
+        assert_eq!(
+            result.placement.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        );
+        assert_eq!(
+            result.placement.required,
+            ExecutionPlacementRequirement::Lab
+        );
+    }
+
+    #[test]
+    fn split_cook_explicit_local_stays_local_without_lab_admission() {
+        let mut input = split_cook_input();
+        input.placement = PlacementIntent::Local;
+        let mut policy = auto_route_policy(
+            None,
+            "stale",
+            Vec::new(),
+            vec!["runner daemon is stale".into()],
+            false,
+            ResourceAdmissionEvidence::Unavailable,
+        );
+        policy.lab_readiness = None;
+
+        let result = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
+            .expect("explicit local placement must not inspect Lab admission");
+        assert_eq!(
+            result.placement.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        );
+        assert!(result.placement.override_authorization.authorized);
+    }
+
+    #[test]
+    fn split_cook_lab_or_local_authorizes_stale_lab_fallback() {
+        let mut input = split_cook_input();
+        input.placement = PlacementIntent::LabOrLocal;
+        let result = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            input,
+            auto_route_policy(
+                Some("homeboy-lab"),
+                "stale",
+                Vec::new(),
+                vec!["runner daemon is stale".into()],
+                false,
+                ResourceAdmissionEvidence::Unavailable,
+            ),
+        )
+        .expect("lab-or-local explicitly authorizes local fallback");
+
+        assert_eq!(
+            result.placement.selected,
+            homeboy_lab_runner_contract::EffectiveExecutionPlacement::Local
+        );
+        assert_eq!(result.fallback, FallbackDirective::LocalAllowed);
+        assert!(result.placement.fallback.local_allowed);
+    }
+
+    #[test]
     fn auto_enumerates_every_inadmissible_route_when_none_remain() {
         let mut input = auto_route_input();
         input.resource_admission = ResourceAdmissionRequirement::Required {
@@ -992,6 +1145,14 @@ mod tests {
             lab_route: LabRouteIntent::Supported { automatic: true },
             provenance: ProvenanceRequirement::None,
         }
+    }
+
+    fn split_cook_input() -> ParsedCommandPreflightInput {
+        let mut input = auto_route_input();
+        input.identity.family = "agent-task".into();
+        input.identity.operation = vec!["cook".into()];
+        input.controller_execution = ControllerExecution::SplitPlacementCoordinator;
+        input
     }
 
     fn auto_route_policy(
