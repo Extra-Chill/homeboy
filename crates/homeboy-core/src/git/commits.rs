@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::engine::command;
 use crate::error::Result;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -379,6 +380,66 @@ pub fn get_latest_tag_any_with_prefix_with_timeout(
         })
         .max_by(|(_, left), (_, right)| left.cmp(right))
         .map(|(tag, _)| tag))
+}
+
+/// A stable release coordinate discovered from a remote tag namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemoteReleaseCoordinate {
+    pub version: String,
+    pub tag: String,
+    pub commit: String,
+}
+
+/// Resolve the newest stable namespaced release tag directly from a remote.
+///
+/// The query uses `ls-remote` only, so it does not create or update a checkout.
+/// Annotated tags emit both an object and a peeled `^{}` ref; the peeled commit
+/// is preferred over the object SHA. A lightweight tag has only its direct SHA.
+pub fn get_latest_remote_release_with_prefix(
+    repository: &str,
+    tag_prefix: Option<&str>,
+    timeout: Duration,
+) -> Result<Option<RemoteReleaseCoordinate>> {
+    let output = super::run_git_with_env_timeout(
+        Path::new("."),
+        &["ls-remote", "--tags", repository],
+        "resolve remote release coordinates",
+        &[],
+        timeout,
+    )?;
+    let mut commits = HashMap::new();
+    let mut peeled = HashMap::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(commit) = fields.next() else {
+            continue;
+        };
+        let Some(reference) = fields.next() else {
+            continue;
+        };
+        let Some(tag) = reference.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        if let Some(tag) = tag.strip_suffix("^{}") {
+            peeled.insert(tag.to_string(), commit.to_string());
+        } else {
+            commits.insert(tag.to_string(), commit.to_string());
+        }
+    }
+
+    Ok(commits
+        .into_iter()
+        .filter_map(|(tag, commit)| {
+            let version = exact_release_version_from_tag(&tag, tag_prefix)?;
+            let commit = peeled.get(&tag).cloned().unwrap_or(commit);
+            Some((version, tag, commit))
+        })
+        .max_by(|(left, ..), (right, ..)| left.cmp(right))
+        .map(|(version, tag, commit)| RemoteReleaseCoordinate {
+            version: version.to_string(),
+            tag,
+            commit,
+        }))
 }
 
 /// Get the previous release tag reachable from `current_tag`.
@@ -1434,6 +1495,69 @@ mod tests {
         assert_eq!(
             get_latest_tag_with_prefix(&path, Some("wordpress")).unwrap(),
             Some("wordpress-v1.4.0".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_release_coordinates_peel_annotated_tags_and_choose_latest_stable() {
+        let (dir, path) = init_repo();
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path().to_str().unwrap(), &["init", "--bare", "-q"]);
+        git(
+            &path,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(&path, &["tag", "figma-transformer-v1.2.3"]);
+        commit_file(&dir, &path, "next.txt", "next\n", "fix: next");
+        git(
+            &path,
+            &["tag", "-a", "figma-transformer-v1.10.0", "-m", "release"],
+        );
+        git(&path, &["tag", "figma-transformer-v2.0.0-rc.1"]);
+        git(&path, &["tag", "other-v9.9.9"]);
+        git(&path, &["push", "origin", "--tags"]);
+
+        let expected = crate::git::get_head_commit(&path).unwrap();
+        let coordinate = get_latest_remote_release_with_prefix(
+            remote.path().to_str().unwrap(),
+            Some("figma-transformer"),
+            Duration::from_secs(5),
+        )
+        .unwrap()
+        .expect("stable release coordinate");
+
+        assert_eq!(coordinate.version, "1.10.0");
+        assert_eq!(coordinate.tag, "figma-transformer-v1.10.0");
+        assert_eq!(coordinate.commit, expected);
+    }
+
+    #[test]
+    fn remote_release_coordinates_distinguish_no_match_from_remote_failure() {
+        assert!(get_latest_remote_release_with_prefix(
+            "file:///tmp/does-not-exist-homeboy-release-coordinate",
+            Some("component"),
+            Duration::from_secs(5),
+        )
+        .is_err());
+
+        let (_dir, path) = init_repo();
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        git(remote.path().to_str().unwrap(), &["init", "--bare", "-q"]);
+        git(
+            &path,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(&path, &["tag", "unrelated-v1.0.0"]);
+        git(&path, &["push", "origin", "--tags"]);
+
+        assert_eq!(
+            get_latest_remote_release_with_prefix(
+                remote.path().to_str().unwrap(),
+                Some("component"),
+                Duration::from_secs(5),
+            )
+            .unwrap(),
+            None
         );
     }
 
