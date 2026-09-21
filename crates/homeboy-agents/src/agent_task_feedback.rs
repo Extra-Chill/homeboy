@@ -214,18 +214,29 @@ impl CookFeedbackStore {
         cook_id: &str,
         candidate_identity: &str,
     ) -> Result<Vec<CookFeedback>> {
+        let pending = self.prepare_for_candidate(cook_id, candidate_identity)?;
+        self.acknowledge(cook_id, &pending)
+    }
+
+    /// Prepare matching findings without acknowledging provider consumption.
+    /// Candidate mismatches are still made explicit as stale under the same
+    /// lock, while matching findings remain pending across a restart.
+    pub fn prepare_for_candidate(
+        &self,
+        cook_id: &str,
+        candidate_identity: &str,
+    ) -> Result<Vec<CookFeedback>> {
         self.with_lock(cook_id, || {
-            self.consume_for_candidate_locked(cook_id, candidate_identity)
+            self.prepare_for_candidate_locked(cook_id, candidate_identity)
         })
     }
 
-    fn consume_for_candidate_locked(
+    fn prepare_for_candidate_locked(
         &self,
         cook_id: &str,
         candidate_identity: &str,
     ) -> Result<Vec<CookFeedback>> {
         let mut document = self.load(cook_id)?;
-        let now = Utc::now().to_rfc3339();
         let mut consumed = Vec::new();
         for feedback in &mut document.feedback {
             if feedback.state != FeedbackState::Pending {
@@ -239,14 +250,50 @@ impl CookFeedbackStore {
                 ));
                 continue;
             }
-            feedback.state = FeedbackState::Consumed;
-            feedback.consumed_at = Some(now.clone());
             consumed.push(feedback.clone());
         }
-        if !document.feedback.is_empty() {
+        if document
+            .feedback
+            .iter()
+            .any(|feedback| feedback.state == FeedbackState::Stale)
+        {
             self.persist(&document)?;
         }
         Ok(consumed)
+    }
+
+    /// Acknowledge only the findings whose remediation provider invocation has
+    /// been durably observed. The idempotency keys make this restart-safe.
+    pub fn acknowledge(
+        &self,
+        cook_id: &str,
+        prepared: &[CookFeedback],
+    ) -> Result<Vec<CookFeedback>> {
+        if prepared.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_lock(cook_id, || {
+            let mut document = self.load(cook_id)?;
+            let now = Utc::now().to_rfc3339();
+            let keys = prepared
+                .iter()
+                .map(|feedback| feedback.idempotency_key.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let mut acknowledged = Vec::new();
+            for feedback in &mut document.feedback {
+                if keys.contains(feedback.idempotency_key.as_str())
+                    && feedback.state == FeedbackState::Pending
+                {
+                    feedback.state = FeedbackState::Consumed;
+                    feedback.consumed_at = Some(now.clone());
+                    acknowledged.push(feedback.clone());
+                }
+            }
+            if !acknowledged.is_empty() {
+                self.persist(&document)?;
+            }
+            Ok(acknowledged)
+        })
     }
 
     /// Mark a pending finding superseded by a newer operator submission while
@@ -321,7 +368,7 @@ mod tests {
         assert!(!created);
         assert_eq!(duplicate, first);
         let stale = store
-            .consume_for_candidate("cook-1", "candidate-b")
+            .prepare_for_candidate("cook-1", "candidate-b")
             .expect("stale candidate is explicit");
         assert!(stale.is_empty());
         assert_eq!(store.list("cook-1").unwrap()[0].state, FeedbackState::Stale);
@@ -338,11 +385,18 @@ mod tests {
             .expect("second submit");
         let restarted = CookFeedbackStore::new(root.path().to_path_buf());
         let consumed = restarted
-            .consume_for_candidate("cook-1", "candidate-b")
+            .prepare_for_candidate("cook-1", "candidate-b")
             .expect("consume after restart");
         assert_eq!(consumed[0].idempotency_key, second.idempotency_key);
-        assert_eq!(consumed[0].text, second.text);
-        assert_eq!(consumed[0].state, FeedbackState::Consumed);
+        assert_eq!(
+            restarted.list("cook-1").unwrap()[1].state,
+            FeedbackState::Pending
+        );
+        let acknowledged = restarted
+            .acknowledge("cook-1", &consumed)
+            .expect("acknowledge provider invocation");
+        assert_eq!(acknowledged[0].text, second.text);
+        assert_eq!(acknowledged[0].state, FeedbackState::Consumed);
         assert_eq!(
             restarted.list("cook-1").unwrap()[1].state,
             FeedbackState::Consumed
