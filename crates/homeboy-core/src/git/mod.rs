@@ -34,10 +34,11 @@ pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_in_range,
     get_commits_since_tag, get_commits_since_tag_for_path, get_commits_since_tag_for_paths,
     get_commits_since_tag_for_scope, get_component_changes_since_tag, get_last_n_commits,
-    get_latest_tag, get_latest_tag_any_with_prefix, get_latest_tag_any_with_prefix_with_timeout,
-    get_latest_tag_with_prefix, get_previous_tag_before_any_with_prefix,
-    get_previous_tag_before_with_prefix, recommended_bump_from_commits, strip_conventional_prefix,
-    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, SemverBump,
+    get_latest_remote_release_with_prefix, get_latest_tag, get_latest_tag_any_with_prefix,
+    get_latest_tag_any_with_prefix_with_timeout, get_latest_tag_with_prefix,
+    get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
+    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
+    CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
 };
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::push_markdown_body_file_arg;

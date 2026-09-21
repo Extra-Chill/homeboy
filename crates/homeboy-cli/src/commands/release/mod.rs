@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use std::{fs, path::Path};
 
 use homeboy::core::component;
@@ -72,6 +73,8 @@ enum ReleaseSubcommand {
     Contains(contains::ContainsArgs),
     /// Report how far the installed build is behind the newest release
     Gap(contains::GapArgs),
+    /// Resolve the newest stable release coordinate from a remote tag namespace
+    Resolve(ResolveArgs),
     /// Inspect retained portable release-readiness evidence
     Readiness(ReleaseReadinessArgs),
 }
@@ -124,6 +127,18 @@ struct ArtifactSourceAuthorityArgs {
 struct ReleaseVersionArgs {
     #[command(subcommand)]
     command: version::VersionCommand,
+}
+
+#[derive(Args)]
+#[command(
+    after_help = "Example: homeboy release resolve https://github.com/example/monorepo.git --prefix figma-transformer"
+)]
+struct ResolveArgs {
+    /// Remote Git repository URL or path
+    repository: String,
+    /// Namespaced tag prefix (for example, figma-transformer matches figma-transformer-v1.2.3)
+    #[arg(long)]
+    prefix: String,
 }
 
 #[derive(Args)]
@@ -355,6 +370,21 @@ pub struct ReleaseReadinessListOutput {
 }
 
 #[derive(Serialize)]
+pub struct ResolveOutput {
+    pub command: &'static str,
+    pub variant: &'static str,
+    pub repository: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    pub no_match: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
     Candidate(candidate::CandidatePublication),
@@ -367,6 +397,7 @@ pub enum ReleaseCommandOutput {
     Version(version::VersionOutput),
     Contains(Box<release::ReleaseContainsReport>),
     Gap(Box<release::ReleaseGapReport>),
+    Resolve(ResolveOutput),
     ReadinessShow(ReleaseReadinessShowOutput),
     ReadinessList(ReleaseReadinessListOutput),
 }
@@ -530,6 +561,34 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
             return map_nested(contains::run_gap(args), |report| {
                 ReleaseCommandOutput::Gap(Box::new(report))
             });
+        }
+        Some(ReleaseSubcommand::Resolve(args)) => {
+            let coordinate = homeboy_core::git::get_latest_remote_release_with_prefix(
+                &args.repository,
+                Some(&args.prefix),
+                Duration::from_secs(30),
+            )?;
+            let output = match coordinate {
+                Some(coordinate) => ResolveOutput {
+                    command: "release.resolve",
+                    variant: "resolve",
+                    repository: args.repository,
+                    version: Some(coordinate.version),
+                    tag: Some(coordinate.tag),
+                    commit: Some(coordinate.commit),
+                    no_match: None,
+                },
+                None => ResolveOutput {
+                    command: "release.resolve",
+                    variant: "resolve",
+                    repository: args.repository,
+                    version: None,
+                    tag: None,
+                    commit: None,
+                    no_match: Some(serde_json::Value::Null),
+                },
+            };
+            return Ok((ReleaseCommandOutput::Resolve(output), 0));
         }
         Some(ReleaseSubcommand::ArtifactSourceAuthority(args)) => {
             let release_notes = artifact_source_authority_release_notes(&args);
