@@ -956,9 +956,11 @@ pub(super) fn ensure_remote_daemon(
         }
         RemoteDaemonEnsureError::EnsureRunning(failure) => {
             let mut error = homeboy_core::Error::internal_unexpected(failure.message);
-            error.details = serde_json::to_value(&failure.evidence_ref)
-                .map(|reference| json!({ "failure_evidence_ref": reference }))
-                .unwrap_or(Value::Null);
+            error.details = json!({
+                "failure_evidence_ref": failure.evidence_ref,
+                "classification": failure.classification,
+                "safe_next_action": failure.safe_next_action,
+            });
             error
         }
     })
@@ -1838,10 +1840,28 @@ fn remote_daemon_ensure_running(
         remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
-        return Err(RemoteDaemonEnsureError::Other(command_failure_message(
-            "remote daemon ensure-running failed",
-            &output,
-        )));
+        return Err(RemoteDaemonEnsureError::EnsureRunning(
+            summarize_ensure_running_failure(
+                runner_id,
+                &command,
+                &json!({
+                    "code": "daemon_bootstrap_failure",
+                    "message": command_failure_message(
+                        "remote daemon ensure-running failed",
+                        &output,
+                    ),
+                    "details": {
+                        "classification": "daemon_bootstrap_failure",
+                        "safe_next_action": format!(
+                            "homeboy runner doctor {} --scope lab-offload",
+                            shell::quote_arg(runner_id)
+                        )
+                    }
+                }),
+                &output.stderr,
+                None,
+            ),
+        ));
     }
     let envelope = parse_envelope(&output.stdout).map_err(|err| {
         format!(
@@ -1896,6 +1916,8 @@ pub(super) const MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES: usize = 1400;
 pub(super) struct EnsureRunningFailure {
     pub(super) message: String,
     pub(super) evidence_ref: Option<RunnerConnectFailureEvidenceRef>,
+    pub(super) classification: String,
+    pub(super) safe_next_action: String,
 }
 
 enum RemoteDaemonEnsureError {
@@ -1970,6 +1992,8 @@ pub(super) fn summarize_ensure_running_failure(
     EnsureRunningFailure {
         message: truncate_utf8(&message, MAX_ENSURE_RUNNING_FAILURE_MESSAGE_BYTES),
         evidence_ref: artifact_ref,
+        classification: truncate_utf8(classification, 96),
+        safe_next_action: truncate_utf8(next_action, MAX_NEXT_ACTION_BYTES),
     }
 }
 

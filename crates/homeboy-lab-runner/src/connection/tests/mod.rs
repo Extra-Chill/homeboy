@@ -533,6 +533,52 @@ fn ensure_running_failure_keeps_the_registered_reference_when_remote_text_inject
         .is_some());
 }
 
+#[test]
+fn bootstrap_transport_failure_keeps_bounded_original_diagnostic() {
+    let artifact_root = tempfile::tempdir().expect("artifact root");
+    let store = homeboy_core::observation::ObservationStore::open_initialized_at(
+        artifact_root.path().join("observations.sqlite"),
+    )
+    .expect("store");
+    let output = homeboy_core::server::CommandOutput {
+        stdout: String::new(),
+        stderr: "bootstrap: permission denied".to_string(),
+        success: false,
+        exit_code: 23,
+        timed_out: false,
+        observation: Default::default(),
+        child_resource: None,
+    };
+    let command = "homeboy daemon ensure-running --addr 127.0.0.1:0";
+    let failure = super::remote_daemon::summarize_ensure_running_failure(
+        "synthetic-runner",
+        command,
+        &serde_json::json!({
+            "code": "daemon_bootstrap_failure",
+            "message": "remote daemon ensure-running failed",
+            "details": {
+                "classification": "daemon_bootstrap_failure",
+                "safe_next_action": "homeboy runner doctor synthetic-runner --scope lab-offload"
+            }
+        }),
+        &output.stderr,
+        Some(&store),
+    );
+
+    assert!(failure.message.contains("daemon_bootstrap_failure"));
+    assert!(failure.message.contains("evidence_ref=homeboy://run/"));
+    let reference = failure.evidence_ref.expect("diagnostic reference");
+    let artifact = store
+        .get_artifact(&reference.artifact_id)
+        .expect("read artifact")
+        .expect("retained artifact");
+    let retained: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(artifact.path).expect("read diagnostic artifact"))
+            .expect("diagnostic JSON");
+    assert_eq!(retained["remote_stderr"], "bootstrap: permission denied");
+    assert_eq!(retained["remote_command"], command);
+}
+
 pub(super) fn sample_leaseless_recovery() -> DaemonLeaselessRecoveryResult {
     serde_json::from_value(serde_json::json!({
         "affected_job_ids": [],
