@@ -33,6 +33,7 @@ const COMPATIBLE_WAIT_HEARTBEAT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(5)
 };
+const COOK_ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Observable state for a caller waiting on a compatible runtime mutation.
 ///
@@ -1043,6 +1044,21 @@ impl RuntimePromotionLease {
 /// Pin the current generation for the complete cook lifecycle. Promotion is
 /// deliberately conservative: any live pin blocks a writer until finalization.
 pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_generation_waiting(cook_id, COOK_ADMISSION_WAIT_TIMEOUT, || false, |_| {})
+}
+
+/// Pin a cook generation without blocking indefinitely behind a promotion.
+///
+/// The shared lock is deliberately acquired with `try_lock_shared`: callers
+/// can observe the live exclusive owner, cancel the wait, and receive a
+/// deadline error instead of appearing provider-ready while admission is
+/// blocked. The lock is never stolen.
+pub fn pin_cook_generation_waiting(
+    cook_id: &str,
+    timeout: Duration,
+    mut is_cancelled: impl FnMut() -> bool,
+    mut progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimeGenerationPinGuard> {
     let promotion_root = paths::runtime_promotion_dir()?;
     fs::create_dir_all(&promotion_root).map_err(io("create runtime promotion directory"))?;
     let transaction = validated_pin_transaction(&promotion_root);
@@ -1051,9 +1067,48 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     // below could be observed by the owner.
     let _admission_lock = if transaction.is_none() {
         let admission_lock = open_admission_lock(&promotion_root)?;
-        admission_lock
-            .lock_shared()
-            .map_err(io("join runtime promotion admission"))?;
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last_progress: Option<Instant> = None;
+        loop {
+            if is_cancelled() {
+                return Err(pin_admission_cancelled(started.elapsed()));
+            }
+            match FileExt::try_lock_shared(&admission_lock) {
+                Ok(true) => break,
+                Ok(false) => {
+                    let owner = admission_lock_owner(&promotion_root.join(LEASE_DIR))?;
+                    if last_progress.is_none_or(|last| last.elapsed() >= COMPATIBLE_WAIT_HEARTBEAT)
+                    {
+                        progress(RuntimePromotionWaitEvent {
+                            schema: "homeboy/runtime-promotion-admission/v1",
+                            state: "queued",
+                            resource_class: "runtime_promotion",
+                            wait_timeout_ms: timeout.as_millis(),
+                            waited_ms: started.elapsed().min(timeout).as_millis(),
+                            wait_stage: "os_lock",
+                            owner_pid: owner.pid,
+                            owner_operation: owner.operation.clone(),
+                            owner_operation_id: owner.operation_id.clone(),
+                            owner_status_command: owner.status_command.clone(),
+                            target: owner.target.clone(),
+                            owner_generation: owner.generation.clone(),
+                        });
+                        last_progress = Some(Instant::now());
+                    }
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(pin_admission_wait_timeout(
+                            &owner,
+                            timeout,
+                            started.elapsed(),
+                        ));
+                    }
+                    std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
+                }
+                Err(error) => return Err(io("join runtime promotion admission")(error)),
+            }
+        }
         Some(admission_lock)
     } else {
         None
@@ -1461,6 +1516,63 @@ fn selection_wait_timeout_without_owner(timeout: Duration) -> Error {
     )
 }
 
+fn pin_admission_wait_timeout(
+    owner: &RuntimePromotionLeaseRecord,
+    timeout: Duration,
+    waited: Duration,
+) -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        format!(
+            "runtime promotion admission wait timed out after {}ms behind pid {} operation `{}`",
+            waited.as_millis(),
+            owner.pid,
+            owner.operation
+        ),
+        serde_json::json!({
+            "schema": "homeboy/runtime-promotion-admission/v1",
+            "queue_state": "timed_out_waiting_for_admission_lock",
+            "wait_stage": "os_lock",
+            "resource_class": "runtime_promotion",
+            "state": "busy",
+            "wait_timeout_ms": timeout.as_millis(),
+            "waited_ms": waited.as_millis(),
+            "target": owner.target,
+            "holder_pid": owner.pid,
+            "holder_operation": owner.operation,
+            "holder_operation_id": owner.operation_id,
+            "holder_status_command": owner.status_command,
+            "holder_generation": owner.generation,
+            "tried": [
+                "The live runtime promotion owner did not finish before the deadline.",
+                "Retry after the reported owner completes or inspect its status command."
+            ]
+        }),
+    )
+}
+
+fn pin_admission_cancelled(waited: Duration) -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        format!(
+            "runtime promotion admission wait cancelled after {}ms",
+            waited.as_millis()
+        ),
+        serde_json::json!({
+            "schema": "homeboy/runtime-promotion-admission/v1",
+            "queue_state": "cancelled_waiting_for_admission_lock",
+            "wait_stage": "os_lock",
+            "resource_class": "runtime_promotion",
+            "state": "cancelled",
+            "waited_ms": waited.as_millis(),
+            "tried": [
+                "The cook was cancelled before runtime admission completed.",
+                "Do not resume it as a duplicate; retry only if the lifecycle record remains resumable."
+            ]
+        }),
+    )
+}
+
 pub fn is_contention_error(error: &Error) -> bool {
     error.code == ErrorCode::RuntimePromotionContended
 }
@@ -1712,6 +1824,12 @@ fn admission_lock_owner(lease_path: &Path) -> Result<RuntimePromotionLeaseRecord
         if let Some(owner) = owners.into_iter().next() {
             return Ok(owner);
         }
+    }
+
+    // Promotion owners hold the same exclusive inode but do not publish an
+    // admission-owner record. Their lease is the durable owner evidence.
+    if let Ok(owner) = read_record(lease_path) {
+        return Ok(owner);
     }
 
     Ok(RuntimePromotionLeaseRecord {
@@ -2116,6 +2234,137 @@ mod tests {
             }));
             drop(owner);
         });
+    }
+
+    #[test]
+    fn cook_pin_waits_for_a_process_owner_then_dispatches_once() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = cook_pin_admission_owner();
+            let (events_tx, events_rx) = std::sync::mpsc::channel();
+            let pin = pin_cook_generation_waiting(
+                "queued-cook",
+                Duration::from_secs(1),
+                || false,
+                |event| events_tx.send(event).expect("report cook admission wait"),
+            )
+            .expect("cook pin admits after the owner disappears");
+
+            let event = events_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("cook wait reports the live owner");
+            assert_eq!(event.owner_pid, owner.id());
+            assert_eq!(event.owner_operation, "process promotion owner");
+            assert_eq!(event.wait_stage, "os_lock");
+            assert!(event.waited_ms <= event.wait_timeout_ms);
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            assert_eq!(fs::read_dir(pins).expect("list dispatched pins").count(), 1);
+
+            owner.wait().expect("owner exits");
+            drop(pin);
+        });
+    }
+
+    #[test]
+    fn cook_pin_wait_can_be_cancelled_without_publishing_a_pin() {
+        crate::test_support::with_isolated_home(|_| {
+            let (owner_ready_tx, owner_ready_rx) = std::sync::mpsc::channel();
+            let (owner_release_tx, owner_release_rx) = std::sync::mpsc::channel();
+            let owner = std::thread::spawn(move || {
+                let owner = acquire("cancellable promotion", "controller").expect("owner acquires");
+                owner_ready_tx.send(()).expect("report owner admission");
+                owner_release_rx.recv().expect("wait for owner release");
+                drop(owner);
+            });
+            owner_ready_rx
+                .recv()
+                .expect("owner acquires before cancellation test");
+            let cancelled = std::cell::Cell::new(false);
+            let error = pin_cook_generation_waiting(
+                "cancelled-cook",
+                Duration::from_secs(1),
+                || cancelled.get(),
+                |_| cancelled.set(true),
+            )
+            .expect_err("cancelled cook does not enter provider execution");
+
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["state"], "cancelled");
+            assert_eq!(
+                error.details["queue_state"],
+                "cancelled_waiting_for_admission_lock"
+            );
+            assert!(error.details["waited_ms"].as_u64().is_some());
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            assert!(!pins.exists() || fs::read_dir(pins).expect("list pins").next().is_none());
+            owner_release_tx.send(()).expect("release owner");
+            owner.join().expect("owner exits");
+        });
+    }
+
+    #[test]
+    fn cook_pin_deadline_names_the_live_owner_and_elapsed_wait() {
+        crate::test_support::with_isolated_home(|_| {
+            let (owner_ready_tx, owner_ready_rx) = std::sync::mpsc::channel();
+            let (owner_release_tx, owner_release_rx) = std::sync::mpsc::channel();
+            let owner = std::thread::spawn(move || {
+                let owner = acquire("deadline promotion", "controller").expect("owner acquires");
+                owner_ready_tx.send(()).expect("report owner admission");
+                owner_release_rx.recv().expect("wait for owner release");
+                drop(owner);
+            });
+            owner_ready_rx
+                .recv()
+                .expect("owner acquires before deadline test");
+            let error = pin_cook_generation_waiting(
+                "deadline-cook",
+                Duration::from_millis(25),
+                || false,
+                |_| {},
+            )
+            .expect_err("cook admission has a bounded deadline");
+
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation"], "deadline promotion");
+            assert_eq!(error.details["wait_stage"], "os_lock");
+            assert!(error.details["waited_ms"].as_u64().unwrap_or(0) >= 25);
+            owner_release_tx.send(()).expect("release owner");
+            owner.join().expect("owner exits");
+        });
+    }
+
+    fn cook_pin_admission_owner() -> std::process::Child {
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let child = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "runtime_promotion::tests::cook_pin_admission_owner_child",
+            ])
+            .spawn()
+            .expect("start process promotion owner");
+        let lease = paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join(LEASE_DIR);
+        for _ in 0..100 {
+            if lease.exists() {
+                return child;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("process promotion owner did not acquire the lease");
+    }
+
+    #[test]
+    #[ignore = "invoked by cook pin admission process test"]
+    fn cook_pin_admission_owner_child() {
+        let _lease = acquire("process promotion owner", "controller")
+            .expect("process owner acquires promotion lease");
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     #[test]
