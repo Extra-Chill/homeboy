@@ -3291,6 +3291,13 @@ fn persisted_terminal_cook_status(
         .map(CookStatus::from_status)
 }
 
+fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> CookStatus {
+    match state {
+        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+        _ => CookStatus::ProviderFailure,
+    }
+}
+
 /// Report a child from the durable state a previous coordinator left, without
 /// running it. The exit code follows the same rule the live path uses: only a
 /// successful run is a zero exit.
@@ -7820,56 +7827,72 @@ fn run_cook_spine(
             let remaining_budget = budget_limit
                 .as_ref()
                 .and_then(|budget| budget_remaining(budget, budget_used));
+            let status = terminal_fallback_status(record.state);
+            let cancelled = status == CookStatus::Cancelled;
             let mut report = cook_report(CookReportInput {
                 cook_id,
-                status: "provider_failure",
+                status: status.as_str(),
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
-                stop_reason: Some(format!(
-                    "agent-task run {run_id} ended in state {:?}",
-                    record.state
-                )),
+                stop_reason: if cancelled {
+                    Some(format!(
+                        "Cook was cancelled: {}",
+                        record.metadata["cancel_reason"]
+                            .as_str()
+                            .unwrap_or("cancel requested")
+                    ))
+                } else {
+                    Some(format!(
+                        "agent-task run {run_id} ended in state {:?}",
+                        record.state
+                    ))
+                },
                 exit_code: 1,
                 invocation_latest_run_id: Some(&run_id),
             });
-            make_provider_timeout_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &plan,
-                &run_id,
-                remaining_budget,
-                agent_task_lifecycle::has_active_provider_execution_in_store(
-                    lifecycle_store,
+            if cancelled {
+                report.value.terminal_phase = Some("cancellation".to_string());
+                report.value.terminal_failure_classification = Some("cancelled".to_string());
+            } else {
+                make_provider_timeout_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &plan,
                     &run_id,
-                )
-                .unwrap_or(true),
-            );
-            make_provider_rotation_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &run_id,
-            );
-            make_startup_without_output_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &run_id,
-            );
-            if report.value.terminal_phase.is_none() {
-                if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
-                    record.metadata["provider_executions_consumed"]
-                        .as_u64()
-                        .unwrap_or(0),
-                    aggregate
-                        .outcomes
-                        .iter()
-                        .flat_map(|outcome| &outcome.diagnostics),
-                ) {
-                    report.value.terminal_phase = Some(phase);
-                    report.value.terminal_failure_classification = Some(classification);
+                    remaining_budget,
+                    agent_task_lifecycle::has_active_provider_execution_in_store(
+                        lifecycle_store,
+                        &run_id,
+                    )
+                    .unwrap_or(true),
+                );
+                make_provider_rotation_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &run_id,
+                );
+                make_startup_without_output_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &run_id,
+                );
+                if report.value.terminal_phase.is_none() {
+                    if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
+                        record.metadata["provider_executions_consumed"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        aggregate
+                            .outcomes
+                            .iter()
+                            .flat_map(|outcome| &outcome.diagnostics),
+                    ) {
+                        report.value.terminal_phase = Some(phase);
+                        report.value.terminal_failure_classification = Some(classification);
+                    }
                 }
             }
             return Ok(report);
