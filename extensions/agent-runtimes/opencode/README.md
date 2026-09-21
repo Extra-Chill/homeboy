@@ -92,3 +92,31 @@ This is the runtime-side producer for Homeboy #8282. Homeboy must ingest the JSO
 file or callback as its single canonical structured event stream, preserving the
 cursor rather than serializing frames into log messages; that adoption is tracked by
 Homeboy #9162.
+
+## External Storage Retention
+
+The retention adapter emits the strict five-key reclaim receipt: `schema`,
+`provider_id`, `generation`, `reclaimed_item_ids`, and `reclaimed_bytes`. Native
+event-log compaction is a bounded rewrite operation; logical payload savings are
+private maintenance evidence and are never reported as physical reclaim. Physical
+reclaim requires the native CLI's separate verified maintenance operation.
+
+The native planner does not use an adapter-invented age threshold: default
+selection is superseded, projection-verified local message/part snapshots, while
+workspace- or sync-owned aggregates remain dry-run-only. A bounded response's
+`next.cursor` and `next.afterSeq` are persisted as private evidence and consumed
+on the next provider invocation after an interruption. They are not serialized as
+one cursor or exposed in the Homeboy receipt.
+
+Homeboy's external-storage planner defaults are `retention.external_storage_days`
+of 7 and `retention.external_storage_max_bytes` of 20 GiB. Because compaction
+inventory is intentionally reported with its real age and measured database
+bytes, default unattended cleanup does not select a newly created large event
+store. Operators may explicitly configure supported policy overrides; this does
+not make physical vacuum automatic. The real planner check is
+`npm run test:opencode-external-storage-homeboy-planner`.
+
+Run the real SQLite/native dependency check with
+`npm run test:opencode-external-storage-native-integration`. Set
+`HOMEBOY_OPENCODE_NATIVE_ROOT` only when using a different settled native checkout.
+The normal unit fixtures do not replace this dependency test.

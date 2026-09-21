@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { CONFIG_ENV, SCHEMA, finalizeOwnershipMarker, handleRequest, writeOwnershipMarker } = require('../lib/opencode-external-storage-retention');
+const { consumeReclaimReceipt } = require('./fixtures/external-storage-reclaim-consumer.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-retention-reclaim-'));
 try {
@@ -57,6 +58,8 @@ else if (args === 'session list --format json') process.stdout.write('[]');
 	);
 	assert.deepEqual(empty.reclaimed_item_ids, [], 'an empty reclaim reclaims nothing');
 	assert.equal(empty.reclaimed_bytes, 0);
+	consumeReclaimReceipt(empty);
+	assert.throws(() => consumeReclaimReceipt({ ...empty, logical_deleted_bytes: 1 }), /unknown|missing/);
 
 	// Unrelated activity under the retention root: a new sibling directory and
 	// a new file both bump the root's own mtime.
@@ -88,6 +91,7 @@ else if (args === 'session list --format json') process.stdout.write('[]');
 	assert.equal(fs.existsSync(churned), false, 'the reclaimed directory is removed');
 	assert.equal(fs.existsSync(mutated), true, 'the mutated target is left on disk');
 	assert.ok(result.reclaimed_bytes > 0, 'reclaimed bytes are reported');
+	consumeReclaimReceipt(result);
 
 	console.log('opencode external storage reclaim: ok');
 } finally {

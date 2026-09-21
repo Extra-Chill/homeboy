@@ -10,6 +10,7 @@
       "node agent-runtimes/opencode/tests/opencode-agent-task-executor-boundary.test.js",
       "node agent-runtimes/opencode/tests/opencode-external-storage-retention.test.js",
       "node agent-runtimes/opencode/tests/opencode-external-storage-bounds.test.js",
+      "node agent-runtimes/opencode/tests/opencode-external-storage-native-session.test.js",
       "node tests/opencode-external-storage-retention-interoperability.test.mjs",
       "node agent-runtimes/opencode/tests/opencode-progress-relay.test.js",
       "node agent-runtimes/claude-code/tests/claude-code-agent-task-executor-boundary.test.js",

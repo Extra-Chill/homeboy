@@ -39,6 +39,8 @@ const args = process.argv.slice(2);
 if (args.join(' ') === 'debug paths') process.stdout.write('data  ${data}\\ntmp  ${temp}\\n');
 else if (args.join(' ') === 'db path') process.stdout.write('${database}\\n');
 else if (args.join(' ') === 'session list --format json') process.stdout.write(JSON.stringify([{id:'ses_old', updated:Date.parse('2020-01-01T00:00:00Z'), directory:'${path.join(root, 'workspace')}'},{id:'ses_expired', updated:Date.parse('2020-01-01T00:00:00Z'), directory:'${path.join(root, 'expired-workspace')}'},{id:'ses_pinned', updated:Date.parse('2020-01-01T00:00:00Z'), pinned:true, directory:'${path.join(root, 'workspace')}'}]));
+else if (args.join(' ') === 'db event-log-status') process.stdout.write(JSON.stringify({events:0,payloadBytes:0,compactableEvents:0,recommended:false}));
+else if (args[0] === 'db' && args[1] && args[1].startsWith('SELECT s.id')) process.stdout.write(JSON.stringify([{id:'ses_old',parent_id:null,active:0,logical_bytes:12},{id:'ses_expired',parent_id:null,active:0,logical_bytes:0},{id:'ses_pinned',parent_id:null,active:0,logical_bytes:0}]));
 else { fs.appendFileSync('${commandLog}', args.join(' ') + '\\n'); if (process.env.FAIL_DELETE === '1' && args[0] === 'session') process.exit(1); if (process.env.FAIL_VACUUM === '1' && args[0] === 'db') process.exit(1); if (args[0] === 'db') fs.truncateSync('${database}', 5); }
 `);
 	fs.chmodSync(command, 0o755);
@@ -60,12 +62,12 @@ else { fs.appendFileSync('${commandLog}', args.join(' ') + '\\n'); if (process.e
 	assert.equal(inventory.provider_id, PROVIDER_ID);
 	assert.equal(inventory.roots.some((entry) => entry.path === path.dirname(database)), true);
 	assert.equal(inventory.items.find((entry) => entry.id === 'scratch:task-active').active, true);
-	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_old').referenced, true);
+	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_old').referenced, false);
 	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_expired').referenced, false);
 	assert.equal(inventory.items.find((entry) => entry.id.startsWith('session-store:')).bytes, Buffer.byteLength('12345678901234567890'));
 	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_expired').bytes, 0);
-	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_pinned').referenced, true);
-	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_expired').reconstructable, true);
+	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_pinned').ownership_known, false, 'native list fixture fields do not establish ownership or pin semantics');
+	assert.equal(inventory.items.find((entry) => entry.id === 'session:ses_expired').reconstructable, false);
 	assert.deepEqual(Object.fromEntries(['ownership_known', 'reconstructable', 'active', 'referenced'].map((key) => [key, inventory.items.find((entry) => entry.id === 'scratch:task-terminal')[key]])), { ownership_known: true, reconstructable: true, active: false, referenced: true });
 	assert.equal(inventory.items.some((entry) => entry.id === 'scratch:forged'), false);
 	assert.equal(inventory.items.some((entry) => entry.class === 'credential'), true);

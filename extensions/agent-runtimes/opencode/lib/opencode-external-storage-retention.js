@@ -22,6 +22,11 @@ const MAX_TARGETS = 1000;
 const MAX_ITEMS = 5000;
 const MAX_ROOTS = 32;
 const MAX_COMMAND_BYTES = 1024 * 1024;
+const NATIVE_COMMAND_TIMEOUT_MS = 10_000;
+const MAX_NATIVE_COMMAND_TIMEOUT_MS = 120_000;
+const NATIVE_COMPACTION_LIMIT = 1000;
+const MAX_COMPACTION_BATCHES = 10_000;
+const NATIVE_COMPACTION_CONTRACT = 'opencode.db.compact-events.v1';
 const MAX_WALK_ENTRIES = 10_000;
 const MAX_WALK_DEPTH = 32;
 const MAX_WALK_BYTES = 1024 * 1024 * 1024 * 1024;
@@ -46,14 +51,18 @@ function handleRequest(request, options = {}) {
 		const receipt = nativeReclaim(item, config, options);
 		if (!receipt) continue;
 		reclaimed.push(item.id);
-		reclaimedBytes += receipt.bytes;
+		// Logical event payload savings are private evidence, never physical reclaim.
+		reclaimedBytes += receipt.physical_bytes ?? receipt.bytes ?? 0;
 	}
 	// Echo the generation the reclaim was requested against. Homeboy validates
 	// this to confirm the provider acted on the inventory view it was handed;
 	// returning a freshly recomputed generation fails that check on any root
 	// that saw unrelated writes since inventory (#2832). Per-item reclaim
 	// tokens, not this value, decide whether an individual item may be removed.
-	return { schema: SCHEMA, provider_id: PROVIDER_ID, generation: request.generation, reclaimed_item_ids: reclaimed, reclaimed_bytes: reclaimedBytes };
+	return {
+		schema: SCHEMA, provider_id: PROVIDER_ID, generation: request.generation,
+		reclaimed_item_ids: reclaimed, reclaimed_bytes: reclaimedBytes,
+	};
 }
 
 function writeOwnershipMarker(root, metadata = {}, env = process.env) {
@@ -88,19 +97,22 @@ function retentionConfig(env, options) {
 	if (tempRoots.length + dataRoots.length > MAX_ROOTS) throw new Error('Retention configuration exceeds the root ceiling.');
 	if (hasOverlappingRoots(tempRoots) || hasOverlappingRoots(dataRoots)) throw new Error('Retention roots in the same storage class must not overlap.');
 	if (tempRoots.some((root) => dataRoots.some((data) => overlaps(root, data)))) throw new Error('Retention roots must not overlap.');
-	return { command, temp_roots: tempRoots, data_roots: dataRoots, db_path: dbPath, marker_key: markerKey(env) };
+	const operation_timeout_ms = value.operation_timeout_ms === undefined ? NATIVE_COMMAND_TIMEOUT_MS : Number(value.operation_timeout_ms);
+	if (!Number.isSafeInteger(operation_timeout_ms) || operation_timeout_ms < 1000 || operation_timeout_ms > MAX_NATIVE_COMMAND_TIMEOUT_MS) throw new Error('Retention operation timeout is invalid.');
+	return { command, temp_roots: tempRoots, data_roots: dataRoots, db_path: dbPath, marker_key: markerKey(env), operation_timeout_ms };
 }
 
 function inventoryFor(config, options) {
 	const roots = [...config.temp_roots.map((value, index) => ({ id: `temp-${index}`, path: value })), ...config.data_roots.map((value, index) => ({ id: `data-${index}`, path: value }))];
 	const markerDiscovery = config.marker_key ? discoverMarkers(config, roots, options, new Set()) : { items: [], incomplete: [] };
-	const sessionDiscovery = discoverSessions(config, roots, options, new Set(markerDiscovery.items.map((entry) => entry._session_id).filter(Boolean)));
+	const sessionDiscovery = discoverSessions(config, roots, options, markerDiscovery.items);
 	for (const marker of markerDiscovery.items) marker.referenced = Boolean(marker._session_id && sessionDiscovery.ids.has(marker._session_id));
 	const protectedItems = discoverProtected(config, roots);
 	const cargoDiscovery = discoverCargoTargets(config, options, new Set([...markerDiscovery.items, ...sessionDiscovery.items].map((entry) => entry._path).filter(Boolean)));
 	// Scratch is discovered before session rows so a busy session store cannot
 	// starve signed terminal scratch from the bounded inventory.
-	const items = [...markerDiscovery.items, ...sessionDiscovery.items, ...protectedItems, ...cargoDiscovery.items].slice(0, MAX_ITEMS);
+	const pending = pendingCompaction(config, options.env || process.env, roots);
+	const items = [...markerDiscovery.items, ...sessionDiscovery.items, ...protectedItems, ...(pending ? [pending] : []), ...cargoDiscovery.items].slice(0, MAX_ITEMS);
 	const known = new Set(items.map((item) => item._path).filter(Boolean));
 	const unknown = roots.map((root) => unknownBytesBelow(root.path, known));
 	const unknownBytes = unknown.reduce((total, value) => total + value.bytes, 0);
@@ -138,10 +150,19 @@ function discoverSessions(config, roots, options, markerSessions = markerSession
 	if (!Array.isArray(sessions)) return { items: [item(`session-store:${digest(config.db_path).slice(0, 16)}`, rootId(config.db_path, roots), 'session_store', config.db_path, false, true, true, 0, `db:${fingerprint(config.db_path)}`)], ids: new Set() };
 	const storeId = `session-store:${digest(config.db_path).slice(0, 16)}`;
 	const validSessions = sessions.filter((session) => validId(session.id));
-	const sessionItems = validSessions.slice(0, MAX_ITEMS - 1).map((session) => item(`session:${session.id}`, rootId(config.db_path, roots), 'durable_artifact', config.db_path, true, processAlive(session.owner_pid), session.pinned === true || markerSessions.has(session.id), ageDays(session.updated || session.created, options.now), `session:${session.id}:${fingerprint(config.db_path)}`, 0));
+	const markers = new Map(markerSessions.map((entry) => [entry._session_id, entry]));
+	const sessionItems = validSessions.slice(0, MAX_ITEMS - 1).map((session) => {
+		const marker = markers.get(session.id);
+		const metadataKnown = Object.prototype.hasOwnProperty.call(session, 'owner_pid') && Object.prototype.hasOwnProperty.call(session, 'pinned');
+		const active = Boolean(marker?.active || processAlive(session.owner_pid));
+		const referenced = Boolean(marker?.active || session.pinned === true);
+		const discovered = item(`session:${session.id}`, rootId(config.db_path, roots), 'durable_artifact', config.db_path, false, active, referenced, ageDays(session.updated || session.created, options.now), `session:${session.id}:${digest(JSON.stringify({ marker: marker?.state, owner_pid: session.owner_pid, pinned: session.pinned }))}`, 0);
+		discovered.ownership_known = metadataKnown;
+		return discovered;
+	});
 	return { items: [item(storeId, rootId(config.db_path, roots), 'session_store', config.db_path, false, false, true, 0, `db:${fingerprint(config.db_path)}`), ...sessionItems], ids: new Set(validSessions.map((session) => session.id)) };
 }
-function markerSessionIds(config, env) { const ids = new Set(); for (const root of config.temp_roots) for (const candidate of boundedDirectories(root).directories) { const marker = readMarker(candidate, env); if (marker?.session_id) ids.add(marker.session_id); } return ids; }
+function markerSessionIds(config, env) { const ids = []; for (const root of config.temp_roots) for (const candidate of boundedDirectories(root).directories) { const marker = readMarker(candidate, env); if (marker?.session_id) ids.push({ _session_id: marker.session_id, active: marker.active === true || processAlive(marker.owner_pid), state: `marker:${marker.signature}:${sizeOf(candidate)}` }); } return ids; }
 
 function discoverProtected(config, roots) {
 	const items = [];
@@ -159,6 +180,9 @@ function discoverProtected(config, roots) {
 function nativeReclaim(itemToReclaim, config, options) {
 	if (itemToReclaim.id.startsWith(CARGO_TARGET_PREFIX)) return reclaimCargoTarget(itemToReclaim.id, config, options);
 	if (itemToReclaim.class === 'scratch') return reclaimScratch(itemToReclaim.id, config, options);
+	if (itemToReclaim.id.startsWith('compaction:')) return compactEvents(config, options.env || process.env);
+	// Session deletion is intentionally unavailable until native guarded graph and
+	// liveness APIs exist. Native session list metadata is never a delete proof.
 	return null;
 }
 
@@ -321,11 +345,11 @@ function validateRequest(request) {
 	if (request.operation === 'inventory' && (request.generation !== undefined || (request.reclaim_targets && request.reclaim_targets.length))) throw new Error('Inventory requests must not contain reclaim fields.');
 	if (request.operation === 'reclaim' && (!validId(request.generation) || !Array.isArray(request.reclaim_targets) || request.reclaim_targets.length > MAX_TARGETS || request.reclaim_targets.some((target) => !target || Object.keys(target).some((key) => !['id', 'reclaim_token'].includes(key)) || !validId(target.id) || !validId(target.reclaim_token)))) throw new Error('Reclaim request is invalid or exceeds the protocol target ceiling.');
 }
-function readConfig(file) { if (!file) return {}; if (!safeRegularFile(file) || fs.statSync(file).size > MAX_CONFIG_BYTES) throw new Error('Retention configuration is invalid or exceeds its byte ceiling.'); const value = JSON.parse(fs.readFileSync(file, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => !['command', 'temp_roots', 'data_roots'].includes(key)) || (value.temp_roots && !Array.isArray(value.temp_roots)) || (value.data_roots && !Array.isArray(value.data_roots))) throw new Error('Retention configuration has an invalid shape.'); return value; }
+function readConfig(file) { if (!file) return {}; if (!safeRegularFile(file) || fs.statSync(file).size > MAX_CONFIG_BYTES) throw new Error('Retention configuration is invalid or exceeds its byte ceiling.'); const value = JSON.parse(fs.readFileSync(file, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => !['command', 'temp_roots', 'data_roots', 'operation_timeout_ms'].includes(key)) || (value.temp_roots && !Array.isArray(value.temp_roots)) || (value.data_roots && !Array.isArray(value.data_roots))) throw new Error('Retention configuration has an invalid shape.'); return value; }
 function openCodePaths(command, env) { const result = run(command, ['debug', 'paths'], env); return result.status === 0 ? Object.fromEntries(String(result.stdout).split(/\r?\n/).map((line) => line.trim().split(/\s{2,}/)).filter(([key, value]) => key && value)) : {}; }
 function openCodeDbPath(command, env) { const result = run(command, ['db', 'path'], env); const candidate = String(result.stdout || '').trim(); return result.status === 0 && safeAbsolutePath(candidate) ? candidate : ''; }
-function openCodeJson(command, args, env) { const result = run(command, args, env); if (result.status !== 0 || Buffer.byteLength(result.stdout || '') > MAX_COMMAND_BYTES) return null; try { return JSON.parse(result.stdout); } catch { return null; } }
-function run(command, args, env) { return spawnSync(command, args, { encoding: 'utf8', env, maxBuffer: MAX_COMMAND_BYTES }); }
+function openCodeJson(command, args, env, timeout = NATIVE_COMMAND_TIMEOUT_MS) { const result = run(command, args, env, timeout); if (result.status !== 0 || Buffer.byteLength(result.stdout || '') > MAX_COMMAND_BYTES) return null; try { return JSON.parse(result.stdout); } catch { return null; } }
+function run(command, args, env, timeout = NATIVE_COMMAND_TIMEOUT_MS) { return spawnSync(command, args, { encoding: 'utf8', env, timeout, maxBuffer: MAX_COMMAND_BYTES }); }
 function markerKey(env) {
 	try {
 		const state = env?.XDG_STATE_HOME || (env?.HOME && path.join(env.HOME, '.local', 'state'));
@@ -335,6 +359,10 @@ function markerKey(env) {
 		const stat = fs.lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return '';
 		const key = fs.readFileSync(file, 'utf8').trim(); return /^[a-f0-9]{64}$/.test(key) ? key : '';
 	} catch { return ''; }
+}
+function stateFile(env, name) {
+	const state = env?.XDG_STATE_HOME || (env?.HOME && path.join(env.HOME, '.local', 'state'));
+	return safeAbsolutePath(state) ? path.join(state, 'homeboy', name) : '';
 }
 function safeStateDirectory(state) {
 	const absolute = safeAbsolutePath(state); if (!absolute) return '';
@@ -346,9 +374,68 @@ function safeStateDirectory(state) {
 	const directory = path.join(current, 'homeboy'); if (fs.existsSync(directory) && fs.lstatSync(directory).isSymbolicLink()) return '';
 	fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); return fs.realpathSync(directory);
 }
+function nativeEventLogStatus(config, env) {
+	const status = openCodeJson(config.command, ['db', 'event-log-status'], env, config.operation_timeout_ms);
+	return status && Number.isSafeInteger(Number(status.events)) && Number.isSafeInteger(Number(status.payloadBytes)) && Number.isSafeInteger(Number(status.compactableEvents)) && typeof status.recommended === 'boolean' ? status : null;
+}
+function pendingCompaction(config, env, roots) {
+	const status = nativeEventLogStatus(config, env);
+	if (!status || status.compactableEvents <= 0) return null;
+	return item(`compaction:${digest(config.db_path).slice(0, 16)}`, rootId(config.db_path, roots), 'durable_artifact', config.db_path, true, false, false, 0, `event-log:${JSON.stringify(status)}`, Number(status.payloadBytes));
+}
+function compactEvents(config, env) {
+	const status = nativeEventLogStatus(config, env);
+	if (!status || status.compactableEvents <= 0) return null;
+	const databaseId = digest(`${NATIVE_COMPACTION_CONTRACT}:${safeAbsolutePath(config.db_path)}`);
+	const evidencePath = stateFile({ XDG_STATE_HOME: env.XDG_STATE_HOME }, `opencode-event-log-maintenance-${databaseId.slice(0, 32)}.json`);
+	let cursor;
+	let afterSeq;
+	let batches = 0;
+	let logicalBytes = 0;
+	const previous = readMaintenanceEvidence(evidencePath, databaseId);
+	if (previous?.status === 'running') {
+		cursor = previous.cursor;
+		afterSeq = previous.after_seq;
+		batches = previous.batches;
+		logicalBytes = previous.logical_bytes;
+	}
+	while (batches < MAX_COMPACTION_BATCHES) {
+		const args = ['db', 'compact-events', '--all', '--apply', '--limit', String(NATIVE_COMPACTION_LIMIT)];
+		if (cursor !== undefined) args.push('--cursor', cursor);
+		if (afterSeq !== undefined) args.push('--after-seq', String(afterSeq));
+		const applied = openCodeJson(config.command, args, env, config.operation_timeout_ms);
+		if (!nativeCompactionResponse(applied) || applied.dryRun !== false || !nonNegativeInteger(applied.inspected) || !nonNegativeInteger(applied.candidates) || !nonNegativeInteger(applied.rewritten) || !nonNegativeInteger(applied.payloadBytesReclaimed) || (applied.outcome !== undefined && applied.outcome !== 'completed')) return null;
+		batches += 1;
+		logicalBytes += Number(applied.bytes.logicalPayloadReclaimed);
+		if (applied.next && (typeof applied.next.cursor !== 'string' || (applied.next.afterSeq !== undefined && !nonNegativeInteger(applied.next.afterSeq)))) return null;
+		writeMaintenanceEvidence(evidencePath, { schema: 'homeboy/opencode-event-log-maintenance/v1', contract: NATIVE_COMPACTION_CONTRACT, database_id: databaseId, status: 'running', batches, logical_bytes: logicalBytes, cursor: applied.next?.cursor, after_seq: applied.next?.afterSeq });
+		if (!applied.next) {
+			writeMaintenanceEvidence(evidencePath, { schema: 'homeboy/opencode-event-log-maintenance/v1', contract: NATIVE_COMPACTION_CONTRACT, database_id: databaseId, status: 'completed', batches, logical_bytes: logicalBytes, physical_bytes: 0 });
+			return { physical_bytes: 0 };
+		}
+		cursor = applied.next.cursor;
+		afterSeq = applied.next.afterSeq;
+	}
+	return null;
+}
+function nativeCompactionResponse(value) {
+	return value && value.contract === NATIVE_COMPACTION_CONTRACT && value.capabilities?.replaySafe === 'supported' && value.capabilities?.interruptionResume === 'supported' && value.bytes && nonNegativeInteger(value.bytes.logicalPayloadReclaimed) && value.bytes.physicalReclaimed === null;
+}
+function readMaintenanceEvidence(file, databaseId) {
+	if (!file || !safeRegularFile(file)) return null;
+	try {
+		const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+		return value?.schema === 'homeboy/opencode-event-log-maintenance/v1' && value.contract === NATIVE_COMPACTION_CONTRACT && value.database_id === databaseId && value.status === 'running' && nonNegativeInteger(value.batches) && (value.cursor === undefined || typeof value.cursor === 'string') && (value.after_seq === undefined || nonNegativeInteger(value.after_seq)) && (value.after_seq === undefined || typeof value.cursor === 'string') && nonNegativeInteger(value.logical_bytes) ? value : null;
+	} catch { return null; }
+}
+function nonNegativeInteger(value) { return Number.isSafeInteger(Number(value)) && Number(value) >= 0; }
+function writeMaintenanceEvidence(file, value) {
+	if (!file) return;
+	try { fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); fs.writeFileSync(`${file}.tmp-${process.pid}`, JSON.stringify(value), { mode: 0o600 }); fs.renameSync(`${file}.tmp-${process.pid}`, file); } catch { /* evidence is best effort and never enters the wire receipt */ }
+}
 function sign(value, key) { return crypto.createHmac('sha256', key).update(JSON.stringify(value)).digest('hex'); }
 function secureEqual(left, right) { return left.length === right.length && crypto.timingSafeEqual(Buffer.from(left), Buffer.from(right)); }
-function reclaimable(value) { return value.class === 'scratch' && value.ownership_known && value.reconstructable && !value.active && !value.referenced; }
+function reclaimable(value) { return value.ownership_known && value.reconstructable && !value.active && !value.referenced && (value.id.startsWith('compaction:') || !['credential', 'history', 'pinned_export', 'session_store'].includes(value.class)); }
 function processAlive(pid) { if (!Number.isInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } }
 function safeEntries(directory, limit = MAX_WALK_ENTRIES) { try { const handle = fs.opendirSync(directory, { bufferSize: Math.min(limit, 128) }); const entries = []; for (let entry = handle.readSync(); entry && entries.length < limit; entry = handle.readSync()) entries.push(entry); handle.closeSync(); return entries; } catch { return []; } }
 function sizeOf(candidate) { return walkBytes(candidate).bytes; }
@@ -385,7 +472,7 @@ function fingerprint(candidate) { try { const stat = fs.lstatSync(candidate); re
 // reclaim and rejected every request, including ones targeting items that
 // never moved (#2832). An item whose own directory changed since inventory
 // still fails this check and is left alone.
-function reclaimToken(id, state, candidate) { return digest(`${id}:${state}:${fingerprint(candidate)}`); }
+function reclaimToken(id, state, candidate) { return digest(id.startsWith('compaction:') ? `${id}:${state}` : `${id}:${state}:${fingerprint(candidate)}`); }
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value); }
 function ageDays(value, now = Date.now()) { const time = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(time) && time <= now ? Math.floor((now - time) / 86_400_000) : 0; }

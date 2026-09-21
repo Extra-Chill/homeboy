@@ -26,6 +26,10 @@
     "test:opencode-progress-events": "node tests/opencode-progress-events.test.js",
     "test:opencode-progress-relay": "node tests/opencode-progress-relay.test.js",
     "test:opencode-external-storage-retention": "node tests/opencode-external-storage-retention.test.js",
+    "test:opencode-external-storage-native-session": "node tests/opencode-external-storage-native-session.test.js",
+    "test:opencode-external-storage-native-integration": "node tests/opencode-external-storage-native-integration.test.js",
+    "test:opencode-external-storage-maintenance-state": "node tests/opencode-external-storage-maintenance-state.test.js",
+    "test:opencode-external-storage-homeboy-planner": "node tests/opencode-external-storage-homeboy-planner.test.js",
     "test:opencode-runtime-readiness": "node tests/opencode-runtime-readiness.test.js"
   },
   "engines": {
