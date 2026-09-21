@@ -2823,6 +2823,79 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
 }
 
 #[test]
+fn post_apply_promotion_failure_keeps_cause_and_bounded_resume_action() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let recipe_store = CookRecipeStore::new(context.path_roots());
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "post-apply-promotion-failure";
+    let run_id = "post-apply-promotion-failure-attempt-1";
+    let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.identity.initial_plan, run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("submit run");
+    lifecycle_store
+        .record_cook_attempt(cook_id, 1, run_id)
+        .expect("record attempt");
+    lifecycle_store
+        .record_metadata_value(
+            run_id,
+            "latest_promotion",
+            serde_json::json!({
+                "status": "verification_pending",
+                "target": { "worktree": "synthetic-candidate" },
+                "provenance": { "candidate": { "sha256": "candidate" } }
+            }),
+        )
+        .expect("persist post-apply checkpoint");
+    agent_task_lifecycle::record_cook_controller_failure_in_store(
+        &lifecycle_store,
+        run_id,
+        &serde_json::json!({
+                "status": "failed",
+                "code": "InternalIoError",
+                "message": "IO error",
+                "details": {
+                    "error": "permission denied",
+                    "context": "destination_gate_setup: synthetic-gate-root"
+                },
+                "deepest_cause": {
+                    "code": "internal.io_error",
+                    "message": "IO error"
+                }
+        }),
+    )
+    .expect("persist causal controller failure");
+
+    let context = super::super::cook_failure_context_with_stores(
+        Some(&recipe_store),
+        Some(&lifecycle_store),
+        cook_id,
+        Some(run_id),
+        "durable_failure",
+    )
+    .expect("build failure context");
+
+    assert_eq!(context.phase, "promotion");
+    assert_eq!(context.reason_code, "internal.io_error");
+    let diagnostic = context.diagnostic.expect("causal diagnostic");
+    assert_eq!(diagnostic["details"]["error"], "permission denied");
+    assert_eq!(
+        diagnostic["details"]["context"],
+        "destination_gate_setup: synthetic-gate-root"
+    );
+    assert!(context
+        .next_actions
+        .iter()
+        .any(|action| action.command.contains("cook-continue")));
+}
+
+#[test]
 fn candidate_selection_uses_the_winner_for_review_form() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =

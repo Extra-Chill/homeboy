@@ -244,6 +244,38 @@ fn live_promotion_progress_is_available_to_status_and_logs_before_completion() {
 }
 
 #[test]
+fn promotion_heartbeat_truncates_large_gate_output_before_event_append() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "durable-large-promotion-output";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+
+    record_promotion_progress_in_store(
+        &lifecycle_store,
+        run_id,
+        "gate",
+        Some("gate-1"),
+        Some("gate heartbeat"),
+        Some(&"x".repeat(128 * 1024)),
+    )
+    .expect("large heartbeat remains persistable");
+
+    let logs = logs_in_store(&lifecycle_store, run_id).expect("heartbeat logs");
+    let event = logs
+        .events
+        .iter()
+        .find(|event| event.kind == "gate.heartbeat")
+        .expect("heartbeat event");
+    let output = event.data["output_tail"]
+        .as_str()
+        .expect("bounded output tail");
+    assert!(output.starts_with("[output truncated]\n"));
+    assert!(output.len() <= 8 * 1024 + "[output truncated]\n".len());
+}
+
+#[test]
 fn live_runner_snapshot_appends_runner_progress_once() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());

@@ -2204,12 +2204,35 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 None,
                             )
                         }
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                        ),
+                        Err(error) => {
+                            // Promotion can fail after applying the candidate (for
+                            // example while setting up the destination gate). Keep
+                            // the causal error on the run instead of reducing the
+                            // action acknowledgement to "IO error". The durable
+                            // post-apply promotion checkpoint remains resumable.
+                            let diagnostic =
+                                crate::agent_task_service::bounded_error_diagnostic(&error);
+                            crate::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                                &self.lookup.store,
+                                &resolved,
+                                &diagnostic,
+                            )
+                            .map_err(map_lifecycle_error)?;
+                            let current = self
+                                .lookup
+                                .store
+                                .read_record(&resolved)
+                                .map_err(map_lifecycle_error)?;
+                            (
+                                ControlPlaneActionOutcome::Failed,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: "homeboy/control-plane-action-failure/v1".to_string(),
+                                    data: diagnostic,
+                                },
+                                Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            )
+                        }
                     }
                 }
                 ControlPlaneAction::Resume
@@ -4076,6 +4099,14 @@ fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     if record.is_stale_running() {
         return ControlPlaneRunState::Stale;
     }
+    if record
+        .metadata
+        .pointer("/latest_promotion/status")
+        .and_then(Value::as_str)
+        == Some("verification_pending")
+    {
+        return ControlPlaneRunState::CandidateRecoverable;
+    }
     match record.state {
         AgentTaskRunState::Queued => ControlPlaneRunState::Queued,
         AgentTaskRunState::Running => ControlPlaneRunState::Running,
@@ -5572,7 +5603,7 @@ mod tests {
         bounded_review_evidence, decode_event_cursor, decode_mission_cursor, encode_event_cursor,
         encode_mission_cursor, event_page, live_provider_liveness, normalize_event_references,
         observed_file_timestamp, phase, project_record, references_for_record,
-        register_reference_in_store, review_failure_reasons, validate_event_scope,
+        register_reference_in_store, review_failure_reasons, run_state, validate_event_scope,
         validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
         RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
         RunSnapshotPage, EVENT_STREAM_DURABLE_PROGRESS, REVIEW_EVIDENCE_BOUND,
@@ -5819,6 +5850,20 @@ mod tests {
             stale_after_seconds: None,
         });
         record
+    }
+
+    #[test]
+    fn public_run_projection_is_not_succeeded_while_verification_is_pending() {
+        let mut record = record("verification-pending-public-state");
+        record.metadata["latest_promotion"]["status"] = json!("verification_pending");
+
+        assert_eq!(
+            run_state(&record),
+            ControlPlaneRunState::CandidateRecoverable
+        );
+        let projected = project_record(&record, None).expect("project run");
+        assert_eq!(projected.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_ne!(projected.state, ControlPlaneRunState::Succeeded);
     }
 
     fn runner_placement_decision(
