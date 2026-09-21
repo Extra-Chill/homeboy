@@ -7614,11 +7614,13 @@ fn validate_cook_provider_execution_plan(
     plan: &homeboy::agents::agent_tasks::AgentTaskPlan,
     catalog: &homeboy::agents::agent_task_provider::AgentTaskProviderCatalog,
 ) -> homeboy::core::Result<()> {
+    let mut readiness_cache =
+        homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
     let selected_plan =
         homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &plan,
             &catalog,
-            &mut homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            &mut readiness_cache,
         )?;
     catalog.validate_selected_models(&selected_plan)?;
     Ok(())

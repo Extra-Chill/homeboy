@@ -23,6 +23,9 @@ pub struct ProviderRuntimeReadinessCache {
     shared: Arc<ProviderRuntimeReadinessCacheShared>,
 }
 
+static PROCESS_READINESS_CACHE: OnceLock<Arc<ProviderRuntimeReadinessCacheShared>> =
+    OnceLock::new();
+
 #[derive(Debug)]
 struct ProviderRuntimeReadinessCacheShared {
     state: Mutex<ProviderRuntimeReadinessCacheState>,
@@ -63,6 +66,22 @@ impl Default for ProviderRuntimeReadinessCache {
                 state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
                 changed: Condvar::new(),
             }),
+        }
+    }
+}
+
+impl ProviderRuntimeReadinessCache {
+    /// Share evidence across compile, admission, and execution phases. The
+    /// request identity still includes credential value hashes, so refreshed
+    /// credentials cannot reuse old readiness evidence.
+    pub fn process_local() -> Self {
+        Self {
+            shared: Arc::clone(PROCESS_READINESS_CACHE.get_or_init(|| {
+                Arc::new(ProviderRuntimeReadinessCacheShared {
+                    state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                    changed: Condvar::new(),
+                })
+            })),
         }
     }
 }
@@ -906,6 +925,38 @@ mod tests {
 
         assert_eq!(first.cache_key, second.cache_key);
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+    }
+
+    #[test]
+    fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let provider = provider(&readiness_script(root.path()), &count);
+        let config = json!({ "model": "ready" });
+
+        readiness_verdict_with_credentials(
+            &provider,
+            &config,
+            &[("TOKEN".to_string(), "first".to_string())],
+            &mut ProviderRuntimeReadinessCache::process_local(),
+        )
+        .expect("first phase verdict");
+        readiness_verdict_with_credentials(
+            &provider,
+            &config,
+            &[("TOKEN".to_string(), "first".to_string())],
+            &mut ProviderRuntimeReadinessCache::process_local(),
+        )
+        .expect("same-credential phase verdict");
+        readiness_verdict_with_credentials(
+            &provider,
+            &config,
+            &[("TOKEN".to_string(), "rotated".to_string())],
+            &mut ProviderRuntimeReadinessCache::process_local(),
+        )
+        .expect("rotated-credential phase verdict");
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
     }
 
     #[test]
