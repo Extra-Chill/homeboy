@@ -1479,11 +1479,16 @@ mod tests {
     }
 
     /// Write a component manifest that declares a (missing) required extension.
+    ///
+    /// Deliberately has no explicit `build_artifact` override: the artifact
+    /// pattern must come from the missing extension, so resolution genuinely
+    /// depends on it being installed (#244) — with an explicit override
+    /// present, `resolve_artifact` never even looks at `extensions` and the
+    /// missing extension would be irrelevant to this component's deploy.
     fn write_component_manifest_with_extension(dir: &Path, id: &str, extension_id: &str) {
         let manifest = serde_json::json!({
             "id": id,
             "remote_path": format!("wp-content/plugins/{id}"),
-            "build_artifact": "dist/plugin.zip",
             "extensions": { extension_id: {} },
         });
         std::fs::write(dir.join("homeboy.json"), manifest.to_string()).expect("write manifest");
@@ -1864,6 +1869,156 @@ mod tests {
                     .any(|w| w.contains("nonexistent-extension-xyz789")),
                 "the skip reason must name what made it unresolvable, got: {:?}",
                 skipped.warnings
+            );
+        });
+    }
+
+    /// Reproduces the false positive from Extra-Chill/extrachill-network#244
+    /// end to end through the real sweep pipeline: `prepare_components` then
+    /// `apply_prepared_components`, exactly as `homeboy_deploy::run` chains
+    /// them for a live deploy.
+    ///
+    /// `plugin` declares two extensions: `fixture-wp` (installed, declares
+    /// `build.artifact_pattern` — the one actually consulted, standing in for
+    /// the real `wordpress` extension) and `fixture-toolchain-xyz789` (never
+    /// installed, standing in for `nodejs` — a build/test toolchain the
+    /// deploy never touches). The artifact bytes already exist on disk,
+    /// standing in for a downloaded GitHub Release asset; `skip_build: true`
+    /// is the in-process equivalent of the real pipeline's release-asset
+    /// short-circuit, which skips `build::build_component` entirely when a
+    /// release asset is reused (`execution/prepare.rs`) — in neither case
+    /// does anything ever consult `fixture-toolchain-xyz789`.
+    ///
+    /// Before the fix, `validate_required_extensions` ran unconditionally
+    /// over every declared extension before artifact resolution ever got a
+    /// chance to prove it unnecessary, so this component was skipped with
+    /// "missing extension fixture-toolchain-xyz789" despite being fully
+    /// resolvable and deliverable. This test fails on pre-fix code with the
+    /// component landing in `extension_skipped` / `summary.skipped == 1`
+    /// instead of actually deploying.
+    #[test]
+    fn sweep_deploys_component_whose_artifact_resolves_without_an_uninstalled_toolchain_extension()
+    {
+        with_isolated_home(|home| {
+            // `fixture-wp`: the one extension actually consulted for this
+            // component's artifact. It must be installed for resolution to
+            // work at all — proving this test isn't just "extensions are
+            // never checked".
+            let extension_dir = home.path().join(".config/homeboy/extensions/fixture-wp");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join("fixture-wp.json"),
+                r#"{"name":"fixture-wp","version":"1.0.0","build":{"artifact_pattern":"build/{component_id}"}}"#,
+            )
+            .expect("fixture-wp manifest");
+
+            let component_dir = TempDir::new().expect("component dir");
+            let install_root = TempDir::new().expect("install root");
+            let install_dir = install_root.path().join("plugin-install");
+
+            let manifest = serde_json::json!({
+                "id": "plugin",
+                "remote_path": install_dir.to_string_lossy(),
+                "extensions": {
+                    "fixture-wp": {},
+                    "fixture-toolchain-xyz789": {},
+                },
+            });
+            std::fs::write(
+                component_dir.path().join("homeboy.json"),
+                manifest.to_string(),
+            )
+            .expect("write component manifest");
+
+            // The artifact bytes already exist on disk. A directory artifact
+            // (not a `.zip`) keeps this test on the plain rsync upload path
+            // and out of extract-command territory, which is orthogonal to
+            // this bug.
+            let artifact_dir = component_dir.path().join("build/plugin");
+            std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+            std::fs::write(artifact_dir.join("plugin.php"), "<?php\n// v1\n")
+                .expect("artifact payload");
+
+            let project = project_with_component_dirs(&[("plugin", component_dir.path())]);
+            let base_path = install_root
+                .path()
+                .join("unused-base-path")
+                .to_string_lossy()
+                .to_string();
+
+            let ctx = RemoteProjectContext {
+                project: project.clone(),
+                server_id: "test-server".to_string(),
+                server: homeboy_core::server::Server {
+                    id: "test-server".to_string(),
+                    aliases: Vec::new(),
+                    host: "localhost".to_string(),
+                    user: "test".to_string(),
+                    port: 22,
+                    identity_file: None,
+                    kind: None,
+                    auth: None,
+                    env: HashMap::new(),
+                    runner: None,
+                },
+                client: crate::test_support::local_client(),
+                base_path: Some(base_path.clone()),
+            };
+
+            // A plain full sweep (`--all`), no `--check`, no targeted
+            // component_ids. `skip_build` mirrors the real pipeline's
+            // release-asset reuse, which also skips `build::build_component`
+            // entirely.
+            let config = DeployConfig {
+                all: true,
+                skip_build: true,
+                no_pull: true,
+                force: true,
+                ..Default::default()
+            };
+
+            let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+            let mut artifacts = crate::preparation::DeploymentArtifactStore::default();
+
+            let deployment = prepare_components(
+                &data_root,
+                &config,
+                &project,
+                &ctx,
+                &base_path,
+                &mut artifacts,
+                None,
+            )
+            .expect(
+                "the sweep must resolve and plan 'plugin' despite the uninstalled toolchain \
+                 extension",
+            );
+
+            let plan = match deployment {
+                PreparedDeployment::Apply(plan) => plan,
+                PreparedDeployment::Complete(result) => panic!(
+                    "expected an Apply plan — the component must not be skipped: {:?}",
+                    result.summary
+                ),
+            };
+
+            let result = apply_prepared_components(&data_root, *plan, &ctx, &base_path, None)
+                .expect("apply must succeed");
+
+            assert_eq!(
+                result.summary.succeeded, 1,
+                "the component must actually deploy despite the uninstalled toolchain \
+                 extension: {:?}",
+                result.results
+            );
+            assert_eq!(result.summary.skipped, 0, "{:?}", result.results);
+            assert_eq!(result.summary.failed, 0, "{:?}", result.results);
+
+            let deployed_file = install_dir.join("plugin.php");
+            assert!(
+                deployed_file.exists(),
+                "artifact bytes must actually land on the target: {}",
+                deployed_file.display()
             );
         });
     }
