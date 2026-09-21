@@ -260,18 +260,50 @@ pub(super) fn homeboy_version_skew_check_with(
             )
         }
         _ => {
-            details.insert(
-                "direction".to_string(),
-                "diverged_or_unverified".to_string(),
+            let ancestry_unavailable = match (controller_commit, runner_commit) {
+                (Some(controller), Some(runner)) => {
+                    ancestry(controller, runner) == CommitAncestry::Unavailable
+                }
+                _ => true,
+            };
+            if ancestry_unavailable {
+                let quoted_runner_id = shell::quote_arg(runner_id);
+                details.insert(
+                    "direction".to_string(),
+                    "diverged_or_unverified".to_string(),
+                );
+                let refresh_ref = homeboy_product_identity::build_identity().git_commit;
+                details.insert(
+                    "recovery_ref_source".to_string(),
+                    "controller_build_identity".to_string(),
+                );
+                let remediation = format!(
+                "Ancestry could not be verified. Safely try aligning runner `{runner_id}` to controller ref `{}` with `homeboy runner refresh-homeboy {quoted_runner_id} --ref {} --reconnect`; the refresh refuses a downgrade. If it is rejected, select a common published or source revision and inspect it with `homeboy ssh {server_id} -- homeboy --version`",
+                refresh_ref.as_deref().unwrap_or("unavailable"),
+                refresh_ref.as_deref().unwrap_or("unavailable"),
             );
-            Some(error(
+                let mut check = error("homeboy.version_skew", message, Some(remediation), details);
+                if let Some(git_ref) = refresh_ref {
+                    check = check.with_action(RunnerRepairAction::RefreshHomeboy {
+                        git_ref: Some(git_ref),
+                        allow_downgrade: false,
+                    });
+                }
+                Some(check)
+            } else {
+                details.insert(
+                    "direction".to_string(),
+                    "diverged_or_unverified".to_string(),
+                );
+                Some(error(
                 "homeboy.version_skew",
                 message,
                 Some(format!(
-                    "Controller and runner commits are divergent or cannot be compared. Select a common published or source revision before refreshing runner `{runner_id}`; use `--allow-downgrade` only for an intentional rollback authorized by an operator. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
+                    "Controller and runner commits are divergent. Select a common published or source revision before refreshing runner `{runner_id}`; use `--allow-downgrade` only for an intentional rollback authorized by an operator. Inspect it with `homeboy ssh {server_id} -- homeboy --version`"
                 )),
                 details,
             ))
+            }
         }
     }
 }

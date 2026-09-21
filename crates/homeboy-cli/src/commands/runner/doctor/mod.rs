@@ -69,25 +69,70 @@ pub(crate) fn run_with_options(
 
     if options.repair {
         repair::apply(&target, &options, &mut report);
-
-        // Repair is not success by itself. Re-probe the same resolved target so
-        // the terminal report verifies its identity, binary, SSH, workspace,
-        // daemon, and provider readiness after the mutation.
         let mut repairs = std::mem::take(&mut report.repairs);
-        report = report_for_target(&target, &options);
-        match target.ensure_current() {
-            Ok(()) => {
-                let migration = runner::secret_env_migration_plan(runner_id)?;
-                report.secret_env_migration = (!migration.is_empty()).then_some(migration);
-            }
-            Err(error) => repairs.push(types::RunnerRepair {
-                id: "repair.target_identity".to_string(),
-                status: RunnerDoctorStatus::Error,
-                message: error.message,
-                commands: Vec::new(),
-            }),
-        }
+        report = reprobe_after_repair(&target, &options, runner_id, &mut repairs)?;
         report.repairs = repairs;
+
+        let mut history = Vec::new();
+        for _ in 0..repair_policy::DEFAULT_MAX_ATTEMPTS {
+            match repair_policy::next_step(
+                &report.checks,
+                &history,
+                repair_policy::DEFAULT_MAX_ATTEMPTS,
+            ) {
+                repair_policy::RepairStep::Apply { action } => {
+                    let action_label = serde_json::to_string(&action)
+                        .unwrap_or_else(|_| "unknown repair action".to_string());
+                    history.push(action.clone());
+                    match repair::apply_typed_action(&target, &action) {
+                        Ok(()) => {
+                            let mut action_repairs = std::mem::take(&mut report.repairs);
+                            report = reprobe_after_repair(
+                                &target,
+                                &options,
+                                runner_id,
+                                &mut action_repairs,
+                            )?;
+                            report.repairs = action_repairs;
+                        }
+                        Err(message) => {
+                            report.repairs.push(types::RunnerRepair {
+                                id: "repair.convergence".to_string(),
+                                status: RunnerDoctorStatus::Error,
+                                message: format!(
+                                    "Could not apply typed repair {action_label}: {message}"
+                                ),
+                                commands: Vec::new(),
+                            });
+                            break;
+                        }
+                    }
+                }
+                repair_policy::RepairStep::Converged => break,
+                repair_policy::RepairStep::Exhausted { attempts } => {
+                    report.repairs.push(types::RunnerRepair {
+                        id: "repair.convergence".to_string(),
+                        status: RunnerDoctorStatus::Error,
+                        message: format!(
+                            "Runner repair exhausted its bounded attempt budget ({attempts})"
+                        ),
+                        commands: Vec::new(),
+                    });
+                    break;
+                }
+                repair_policy::RepairStep::Ineffective { action } => {
+                    report.repairs.push(types::RunnerRepair {
+                        id: "repair.convergence".to_string(),
+                        status: RunnerDoctorStatus::Error,
+                        message: format!(
+                            "Runner repair remained blocked after applying the same action: {action:?}"
+                        ),
+                        commands: Vec::new(),
+                    });
+                    break;
+                }
+            }
+        }
     }
 
     // Only general doctor observes the complete capability surface. Scoped
@@ -136,6 +181,28 @@ fn report_for_target(
             client,
         } => remote::report(id, runner, server, client, &options),
     }
+}
+
+fn reprobe_after_repair(
+    target: &target::RunnerTarget,
+    options: &RunnerDoctorOptions,
+    runner_id: &str,
+    repairs: &mut Vec<types::RunnerRepair>,
+) -> homeboy::core::Result<RunnerDoctorOutput> {
+    let mut report = report_for_target(target, options);
+    match target.ensure_current() {
+        Ok(()) => {
+            let migration = runner::secret_env_migration_plan(runner_id)?;
+            report.secret_env_migration = (!migration.is_empty()).then_some(migration);
+        }
+        Err(error) => repairs.push(types::RunnerRepair {
+            id: "repair.target_identity".to_string(),
+            status: RunnerDoctorStatus::Error,
+            message: error.message,
+            commands: Vec::new(),
+        }),
+    }
+    Ok(report)
 }
 
 const COMPACT_CHECK_LIMIT: usize = 12;
