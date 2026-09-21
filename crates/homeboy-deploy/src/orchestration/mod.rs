@@ -1821,7 +1821,11 @@ mod tests {
                 "the resolvable component must actually deploy: {:?}",
                 result.results
             );
-            assert_eq!(result.summary.failed, 0, "no component should fail: {:?}", result.results);
+            assert_eq!(
+                result.summary.failed, 0,
+                "no component should fail: {:?}",
+                result.results
+            );
 
             // The behavioral assertion this bug is about: the unresolvable
             // component must be named in the result with a reason, and the
