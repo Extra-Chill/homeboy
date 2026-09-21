@@ -2773,40 +2773,137 @@ fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>>
         let identity = super::DaemonLeaseIdentity::from_state(&state);
         if !pid_is_running(state.pid) {
             super::remove_lease_if_identity_matches(&state_path, &identity)?;
-            cleanup.push(format!("removed stale token lease for pid {}", state.pid));
-        } else if pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
-            let signal = terminate_token_owned_startup_process(state.pid, startup_token)?;
-            super::remove_lease_if_identity_matches(&state_path, &identity)?;
             cleanup.push(format!(
-                "terminated token-owned daemon pid {} with {signal}",
+                "startup cleanup observed an exit race and removed the stale token lease for pid {}",
                 state.pid
             ));
+        } else if pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
+            match terminate_token_owned_startup_process(state.pid, startup_token) {
+                Ok(StartupCleanupOutcome::Terminated(signal)) => {
+                    super::remove_lease_if_identity_matches(&state_path, &identity)?;
+                    cleanup.push(format!(
+                        "terminated token-owned daemon pid {} with {signal}",
+                        state.pid
+                    ));
+                }
+                Ok(StartupCleanupOutcome::ExitedBeforeEscalation) => cleanup.push(format!(
+                    "startup cleanup observed an exit race for daemon pid {}; no SIGKILL sent",
+                    state.pid
+                )),
+                Ok(StartupCleanupOutcome::OwnershipLost) => cleanup.push(format!(
+                    "did not signal daemon pid {} after live token ownership was lost",
+                    state.pid
+                )),
+                Err(error) => cleanup.push(format!(
+                    "retained lease for pid {} after cleanup race: {error}",
+                    state.pid
+                )),
+            }
         } else {
             cleanup.push(format!(
-                "retained lease for pid {} because its token ownership could not be proven",
+                "retained lease for pid {} because live token ownership could not be proven",
                 state.pid
             ));
         }
     }
-    if pid_is_running(pid) && pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)?
-    {
-        let signal = terminate_token_owned_startup_process(pid, startup_token)?;
+    if pid_is_running(pid) {
+        if pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
+            match terminate_token_owned_startup_process(pid, startup_token) {
+                Ok(StartupCleanupOutcome::Terminated(signal)) => cleanup.push(format!(
+                    "terminated token-owned launcher pid {pid} with {signal}"
+                )),
+                Ok(StartupCleanupOutcome::ExitedBeforeEscalation) => cleanup.push(format!(
+                    "startup cleanup observed an exit race for launcher pid {pid}; no SIGKILL sent"
+                )),
+                Ok(StartupCleanupOutcome::OwnershipLost) => cleanup.push(format!(
+                    "did not signal launcher pid {pid} after live token ownership was lost"
+                )),
+                Err(error) => cleanup.push(format!(
+                    "retained launcher pid {pid} after cleanup race: {error}"
+                )),
+            }
+        } else {
+            cleanup.push(format!(
+                "did not signal launcher pid {pid}: live token ownership could not be proven"
+            ));
+        }
+    } else {
         cleanup.push(format!(
-            "terminated token-owned launcher pid {pid} with {signal}"
+            "startup cleanup observed an exit race for launcher pid {pid}; no signal sent"
         ));
     }
     Ok(cleanup)
 }
 
-fn terminate_token_owned_startup_process(pid: u32, startup_token: &str) -> Result<&'static str> {
-    terminate_token_owned_startup_process_with_operations(
+fn terminate_token_owned_startup_process(
+    pid: u32,
+    startup_token: &str,
+) -> Result<StartupCleanupOutcome> {
+    terminate_token_owned_startup_process_with_outcome(
         pid,
         startup_token,
         super::FORCE_STOP_WAIT,
         |pid, token| pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, token),
+        pid_is_running,
         signal_pid,
         wait_for_pid_exit,
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupCleanupOutcome {
+    Terminated(&'static str),
+    ExitedBeforeEscalation,
+    OwnershipLost,
+}
+
+fn terminate_token_owned_startup_process_with_outcome<Owns, IsRunning, Signal, Wait>(
+    pid: u32,
+    startup_token: &str,
+    timeout: Duration,
+    mut owns_token: Owns,
+    mut is_running: IsRunning,
+    mut signal: Signal,
+    mut wait_for_exit: Wait,
+) -> Result<StartupCleanupOutcome>
+where
+    Owns: FnMut(u32, &str) -> Result<bool>,
+    IsRunning: FnMut(u32) -> bool,
+    Signal: FnMut(u32, libc::c_int) -> Result<()>,
+    Wait: FnMut(u32, Duration) -> bool,
+{
+    if !owns_token(pid, startup_token)? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_startup_cleanup",
+            format!("process {pid} no longer owns the daemon startup token"),
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+
+    signal(pid, SIGNAL_TERMINATE)?;
+    if wait_for_exit(pid, timeout) {
+        return Ok(StartupCleanupOutcome::Terminated("SIGTERM"));
+    }
+
+    // A process can exit after the grace-window observation, or the PID can be
+    // reused before the second ownership check. Only a still-live, still-owned
+    // process may receive SIGKILL.
+    if !is_running(pid) {
+        return Ok(StartupCleanupOutcome::ExitedBeforeEscalation);
+    }
+    if !owns_token(pid, startup_token)? {
+        return Ok(StartupCleanupOutcome::OwnershipLost);
+    }
+
+    signal(pid, SIGNAL_KILL)?;
+    if wait_for_exit(pid, timeout) {
+        Ok(StartupCleanupOutcome::Terminated("SIGKILL"))
+    } else {
+        Err(Error::internal_unexpected(format!(
+            "startup process {pid} survived bounded SIGTERM-to-SIGKILL escalation"
+        )))
+    }
 }
 
 fn terminate_token_owned_startup_process_with_operations<Owns, Signal, Wait>(
@@ -2822,38 +2919,30 @@ where
     Signal: FnMut(u32, libc::c_int) -> Result<()>,
     Wait: FnMut(u32, Duration) -> bool,
 {
-    if !owns_token(pid, startup_token)? {
-        return Err(Error::validation_invalid_argument(
+    match terminate_token_owned_startup_process_with_outcome(
+        pid,
+        startup_token,
+        timeout,
+        &mut owns_token,
+        |_| true,
+        &mut signal,
+        &mut wait_for_exit,
+    )? {
+        StartupCleanupOutcome::Terminated(signal) => Ok(signal),
+        StartupCleanupOutcome::ExitedBeforeEscalation => Err(Error::validation_invalid_argument(
             "daemon_startup_cleanup",
-            format!("process {pid} no longer owns the daemon startup token"),
+            format!("process {pid} exited before SIGKILL escalation"),
             Some(pid.to_string()),
             None,
-        ));
-    }
-
-    signal(pid, SIGNAL_TERMINATE)?;
-    if wait_for_exit(pid, timeout) {
-        return Ok("SIGTERM");
-    }
-
-    if !owns_token(pid, startup_token)? {
-        return Err(Error::validation_invalid_argument(
+        )),
+        StartupCleanupOutcome::OwnershipLost => Err(Error::validation_invalid_argument(
             "daemon_startup_cleanup",
             format!(
                 "process {pid} lost daemon startup-token ownership before SIGKILL; refusing to signal"
             ),
             Some(pid.to_string()),
             None,
-        ));
-    }
-
-    signal(pid, SIGNAL_KILL)?;
-    if wait_for_exit(pid, timeout) {
-        Ok("SIGKILL")
-    } else {
-        Err(Error::internal_unexpected(format!(
-            "startup process {pid} survived bounded SIGTERM-to-SIGKILL escalation"
-        )))
+        )),
     }
 }
 
@@ -3020,7 +3109,11 @@ fn spawn_and_wait_for_lease_attempt(
             Ok(result)
         }
         Err(observation) => {
-            let cleanup = cleanup_startup_attempt(pid, startup_token)?;
+            // Cleanup is evidence about the failed attempt, not a replacement
+            // for the startup failure that caused this control path.
+            let cleanup = cleanup_startup_attempt(pid, startup_token).unwrap_or_else(|error| {
+                vec![format!("startup cleanup could not complete: {error}")]
+            });
             cleanup_evidence.extend(cleanup);
             if can_recover_startup_attempt(
                 allow_retry,

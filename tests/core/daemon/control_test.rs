@@ -1841,3 +1841,81 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
         },
     }
 }
+
+mod startup_cleanup_contract {
+    use super::*;
+
+    #[test]
+    fn exit_race_is_not_escalated_to_sigkill() {
+        let mut signals = Vec::new();
+        let outcome = super::super::terminate_token_owned_startup_process_with_outcome(
+            4343,
+            "attempt-token",
+            Duration::from_millis(1),
+            |_, _| Ok(true),
+            |_| false,
+            |_, signal| {
+                signals.push(signal);
+                Ok(())
+            },
+            |_, _| false,
+        )
+        .expect("exit race is cleanup evidence, not a cleanup error");
+
+        assert_eq!(
+            outcome,
+            super::super::StartupCleanupOutcome::ExitedBeforeEscalation
+        );
+        assert_eq!(signals, vec![SIGNAL_TERMINATE]);
+    }
+
+    #[test]
+    fn live_ownership_loss_is_distinct_and_never_signals_the_reused_pid() {
+        let mut signals = Vec::new();
+        let mut ownership = VecDeque::from([true, false]);
+        let outcome = super::super::terminate_token_owned_startup_process_with_outcome(
+            4343,
+            "attempt-token",
+            Duration::from_millis(1),
+            |_, _| Ok(ownership.pop_front().expect("ownership probe")),
+            |_| true,
+            |_, signal| {
+                signals.push(signal);
+                Ok(())
+            },
+            |_, _| false,
+        )
+        .expect("ownership loss is cleanup evidence, not a cleanup error");
+
+        assert_eq!(outcome, super::super::StartupCleanupOutcome::OwnershipLost);
+        assert_eq!(signals, vec![SIGNAL_TERMINATE]);
+    }
+
+    #[test]
+    fn cleanup_evidence_does_not_replace_the_primary_startup_error() {
+        let observation = super::super::StartupLeaseObservation {
+            observed_pid: Some(4343),
+            observed_lease_id: Some("lease-new".to_string()),
+            observed_token: Some("attempt-token".to_string()),
+            observed_running: Some(false),
+            observed_fresh: Some(true),
+            observed_reachable: Some(true),
+        };
+        let error = super::super::startup_timeout_error(
+            4343,
+            "attempt-token",
+            observation,
+            vec!["startup cleanup observed an exit race; no signal sent".to_string()],
+        );
+
+        assert!(error.message.contains("daemon startup did not reach"));
+        assert_eq!(
+            error.details["cleanup"][0],
+            serde_json::json!("startup cleanup observed an exit race; no signal sent")
+        );
+        assert_eq!(
+            error.details["classification"],
+            serde_json::json!("terminal_pre_provider_startup")
+        );
+    }
+}
