@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::work_job::{
-    register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation, WorkJobPhase,
+    register_work_job_handler, work_job_submission, WorkJobHandler, WorkJobInvocation,
+    WorkJobPhase, WorkJobStep,
 };
 use crate::agent_task_loop_controller::{self, AgentTaskLoopControllerState};
 
@@ -164,17 +164,24 @@ impl WorkJobHandler for LoopWorkHandler {
         job.to_checkpoint()
     }
 
-    fn advance(
-        &self,
-        checkpoint: Value,
-        handle: WorkJobHandle,
-        invocation: WorkJobInvocation,
-    ) -> Result<Value> {
+    fn initial_progress(&self, checkpoint: &Value) -> Result<Value> {
+        Ok(AgentTaskLoopJob::parse(checkpoint.clone())?.result())
+    }
+
+    fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskLoopJob::parse(checkpoint)?;
-        if invocation == WorkJobInvocation::Resume && job.phase == WorkJobPhase::Completed {
-            return Ok(job.result());
+        if job.phase == WorkJobPhase::Completed {
+            return Ok(WorkJobStep::Complete(job.result()));
         }
-        self.supervise(&mut job, handle)
+        self.observe(&mut job, invocation)
+    }
+
+    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep> {
+        let mut job = AgentTaskLoopJob::parse(checkpoint)?;
+        Ok(WorkJobStep::Complete(terminalize_interrupted(
+            &mut job,
+            AgentTaskLoopControllerState::Abandoned,
+        )?))
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -192,36 +199,34 @@ impl WorkJobHandler for LoopWorkHandler {
 }
 
 impl LoopWorkHandler {
-    fn supervise(&self, job: &mut AgentTaskLoopJob, handle: WorkJobHandle) -> Result<Value> {
+    fn observe(
+        &self,
+        job: &mut AgentTaskLoopJob,
+        _invocation: WorkJobInvocation,
+    ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
-        handle.checkpoint(job.to_checkpoint()?)?;
-        handle.progress(job.result())?;
-
-        loop {
-            if job.refresh_controller_state() {
-                handle.checkpoint(job.to_checkpoint()?)?;
-                handle.progress(job.result())?;
-            }
-            if job
-                .controller_state
-                .is_some_and(controller_state_is_terminal)
-            {
-                job.phase = WorkJobPhase::Completed;
-                return Ok(job.result());
-            }
-            if handle.is_cancelled() {
-                let _ = self.cancel(&job.to_checkpoint()?);
-                return terminalize_interrupted(job, AgentTaskLoopControllerState::Abandoned);
-            }
-            if !super::work_job::supervised_child_is_live(
-                job.request.child_pid,
-                &job.request.child_start_identity,
-            ) {
-                return terminalize_interrupted(job, AgentTaskLoopControllerState::Failed);
-            }
-            std::thread::sleep(SUPERVISION_POLL);
+        if job
+            .controller_state
+            .is_some_and(controller_state_is_terminal)
+        {
+            job.phase = WorkJobPhase::Completed;
+            return Ok(WorkJobStep::Complete(job.result()));
         }
+        if !super::work_job::supervised_child_is_live(
+            job.request.child_pid,
+            &job.request.child_start_identity,
+        ) {
+            return Ok(WorkJobStep::Complete(terminalize_interrupted(
+                job,
+                AgentTaskLoopControllerState::Failed,
+            )?));
+        }
+        Ok(WorkJobStep::Continue {
+            checkpoint: job.to_checkpoint()?,
+            progress: job.result(),
+            wait: SUPERVISION_POLL,
+        })
     }
 }
 

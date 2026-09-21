@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use homeboy_core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
@@ -94,6 +95,15 @@ pub enum WorkJobInvocation {
     Resume,
 }
 
+pub enum WorkJobStep {
+    Continue {
+        checkpoint: Value,
+        progress: Value,
+        wait: Duration,
+    },
+    Complete(Value),
+}
+
 /// Domain behavior behind the one generic orchestration lifecycle driver.
 ///
 /// Implementations receive only [`WorkJobHandle`], so they can publish domain
@@ -106,12 +116,9 @@ pub trait WorkJobHandler: Send + Sync {
     fn public_result(&self, result: &Value) -> Result<Value>;
     fn validate_secret_references(&self, request: &Value) -> Result<()>;
     fn prepare(&self, request: Value) -> Result<Value>;
-    fn advance(
-        &self,
-        checkpoint: Value,
-        handle: WorkJobHandle,
-        invocation: WorkJobInvocation,
-    ) -> Result<Value>;
+    fn initial_progress(&self, checkpoint: &Value) -> Result<Value>;
+    fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep>;
+    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep>;
     fn cancel(&self, checkpoint: &Value) -> Result<()>;
 }
 
@@ -255,11 +262,11 @@ impl ControllerJobDriver for WorkJobDriver {
     }
 
     fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
-        self.advance(prepared, handle, WorkJobInvocation::Execute)
+        self.supervise(prepared, handle, WorkJobInvocation::Execute)
     }
 
     fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
-        self.advance(checkpoint, handle, WorkJobInvocation::Resume)
+        self.supervise(checkpoint, handle, WorkJobInvocation::Resume)
     }
 
     fn cancel(&self, prepared: &Value) -> Result<()> {
@@ -269,7 +276,7 @@ impl ControllerJobDriver for WorkJobDriver {
 }
 
 impl WorkJobDriver {
-    fn advance(
+    fn supervise(
         &self,
         prepared: Value,
         handle: ControllerJobHandle,
@@ -277,17 +284,50 @@ impl WorkJobDriver {
     ) -> Result<Value> {
         let checkpoint = parse_checkpoint(prepared)?;
         let handler = handler(&checkpoint.work_type, checkpoint.work_version)?;
-        let result = handler.advance(
-            checkpoint.checkpoint,
-            WorkJobHandle::versioned(handle, handler.as_ref()),
-            invocation,
-        )?;
-        to_value(WorkJobResult {
-            schema: WORK_JOB_RESULT_SCHEMA.to_string(),
-            work_type: checkpoint.work_type,
-            work_version: checkpoint.work_version,
-            result,
-        })
+        let work_handle = WorkJobHandle::versioned(handle, handler.as_ref());
+        let mut checkpoint = checkpoint.checkpoint;
+        work_handle.checkpoint(checkpoint.clone())?;
+        work_handle.progress(handler.initial_progress(&checkpoint)?)?;
+        loop {
+            if work_handle.is_cancelled() {
+                handler.cancel(&checkpoint)?;
+                return match handler.cancelled(checkpoint)? {
+                    WorkJobStep::Complete(result) => {
+                        work_handle.progress(result.clone())?;
+                        to_value(WorkJobResult {
+                            schema: WORK_JOB_RESULT_SCHEMA.to_string(),
+                            work_type: handler.work_type().to_string(),
+                            work_version: handler.version(),
+                            result,
+                        })
+                    }
+                    WorkJobStep::Continue { .. } => {
+                        Err(invalid_work_job("cancelled work did not terminalize"))
+                    }
+                };
+            }
+            match handler.advance(checkpoint, invocation)? {
+                WorkJobStep::Complete(result) => {
+                    work_handle.progress(result.clone())?;
+                    return to_value(WorkJobResult {
+                        schema: WORK_JOB_RESULT_SCHEMA.to_string(),
+                        work_type: handler.work_type().to_string(),
+                        work_version: handler.version(),
+                        result,
+                    });
+                }
+                WorkJobStep::Continue {
+                    checkpoint: next,
+                    progress,
+                    wait,
+                } => {
+                    work_handle.checkpoint(next.clone())?;
+                    work_handle.progress(progress)?;
+                    checkpoint = next;
+                    std::thread::sleep(wait);
+                }
+            }
+        }
     }
 }
 

@@ -57,8 +57,8 @@ use homeboy_core::Result;
 
 use super::cook::AgentTaskCookBatchControl;
 use super::work_job::{
-    register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation, WorkJobPhase,
+    register_work_job_handler, work_job_submission, WorkJobHandler, WorkJobInvocation,
+    WorkJobPhase, WorkJobStep,
 };
 use crate::agent_task_batch::{self, AgentTaskBatchState};
 use crate::agent_task_lifecycle;
@@ -375,19 +375,23 @@ impl WorkJobHandler for CookBatchWorkHandler {
         job.to_checkpoint()
     }
 
-    fn advance(
-        &self,
-        checkpoint: Value,
-        handle: WorkJobHandle,
-        invocation: WorkJobInvocation,
-    ) -> Result<Value> {
+    fn initial_progress(&self, checkpoint: &Value) -> Result<Value> {
+        let mut job = AgentTaskCookBatchJob::parse(checkpoint.clone())?;
+        job.refresh_observations();
+        Ok(job.progress_projection())
+    }
+
+    fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskCookBatchJob::parse(checkpoint)?;
-        if invocation == WorkJobInvocation::Resume
-            && job.resume_disposition() == CookBatchJobResumeDisposition::AlreadyComplete
-        {
-            return job.completed_result();
+        if job.phase == WorkJobPhase::Completed {
+            return Ok(WorkJobStep::Complete(job.completed_result()?));
         }
-        self.supervise(&mut job, handle)
+        self.observe(&mut job, invocation)
+    }
+
+    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep> {
+        let mut job = AgentTaskCookBatchJob::parse(checkpoint)?;
+        Ok(WorkJobStep::Complete(job.observe_terminal()?))
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -441,91 +445,28 @@ fn stop_batch(batch_id: &str) -> Result<()> {
 }
 
 impl CookBatchWorkHandler {
-    /// Watch a detached coordinator to the wave's durable terminal state.
-    ///
-    /// Liveness is judged by PID *and* kernel start identity. An
-    /// `IdentityMismatch` or `Unverifiable` reading is treated as "no longer our
-    /// coordinator" rather than as death, so supervision can never attribute a
-    /// stranger's process to this batch.
-    fn supervise(&self, job: &mut AgentTaskCookBatchJob, handle: WorkJobHandle) -> Result<Value> {
+    fn observe(
+        &self,
+        job: &mut AgentTaskCookBatchJob,
+        _invocation: WorkJobInvocation,
+    ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_observations();
-        handle.checkpoint(job.to_checkpoint()?)?;
-        handle.progress(job.progress_projection())?;
-
-        loop {
-            // Cancellation is the daemon's to terminalize; this thread only
-            // needs to stop supervising promptly so the supervisor can join it.
-            //
-            // It also plants the stop signal a second time. `cancel` runs the
-            // moment the daemon cancels the job, which can be before the
-            // coordinator has written its batch record — and with no record
-            // there is nothing to mark and no children to stop. This is the
-            // later chance, and it is the one that actually stops a wave
-            // cancelled during its startup window.
-            if handle.is_cancelled() {
-                let _ = stop_batch(&job.request.batch_id);
-                return job.observe_terminal();
-            }
-
-            // Checkpoint every time a child terminalizes, so a daemon restart
-            // resumes against what the wave has actually finished rather than
-            // re-observing it from zero.
-            if job.refresh_observations() {
-                handle.checkpoint(job.to_checkpoint()?)?;
-                handle.progress(job.progress_projection())?;
-            }
-
-            // A pre-child admission timeout is the one safe point to stop the
-            // coordinator directly: the batch store just proved every child is
-            // still unstarted and terminalized the wave with its recovery
-            // command. Later phases retain the ordinary child-safe cancellation
-            // path above.
-            if agent_task_batch::expire_stalled_fanout_admission(&job.request.batch_id)? {
-                let _ = homeboy_core::process::terminate_process_tree(job.request.child_pid);
-                return job.observe_terminal();
-            }
-
-            if !super::work_job::supervised_child_is_live(
-                job.request.child_pid,
-                &job.request.child_start_identity,
-            ) {
-                return job.observe_terminal();
-            }
-
-            std::thread::sleep(SUPERVISION_POLL);
+        if agent_task_batch::expire_stalled_fanout_admission(&job.request.batch_id)? {
+            let _ = homeboy_core::process::terminate_process_tree(job.request.child_pid);
+            return Ok(WorkJobStep::Complete(job.observe_terminal()?));
         }
-    }
-}
-
-/// What a resumed cook batch job must do, decided before any job handle is
-/// needed.
-///
-/// Extracted so the idempotency property can be asserted directly: no variant
-/// here starts a coordinator or a child, and the enum is exhaustive over the
-/// states a recovered checkpoint can be in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CookBatchJobResumeDisposition {
-    /// The job already reached a durable terminal state. Replay it.
-    AlreadyComplete,
-    /// The supervised coordinator is still provably the process we were handed.
-    ReadoptLiveCoordinator,
-    /// The coordinator is gone. Read the wave's durable outcome; never re-run it.
-    ObserveTerminalOutcome,
-}
-
-impl AgentTaskCookBatchJob {
-    pub fn resume_disposition(&self) -> CookBatchJobResumeDisposition {
-        if self.phase == WorkJobPhase::Completed {
-            return CookBatchJobResumeDisposition::AlreadyComplete;
-        }
-        if super::work_job::supervised_child_is_live(
-            self.request.child_pid,
-            &self.request.child_start_identity,
+        if !super::work_job::supervised_child_is_live(
+            job.request.child_pid,
+            &job.request.child_start_identity,
         ) {
-            return CookBatchJobResumeDisposition::ReadoptLiveCoordinator;
+            return Ok(WorkJobStep::Complete(job.observe_terminal()?));
         }
-        CookBatchJobResumeDisposition::ObserveTerminalOutcome
+        Ok(WorkJobStep::Continue {
+            checkpoint: job.to_checkpoint()?,
+            progress: job.progress_projection(),
+            wait: SUPERVISION_POLL,
+        })
     }
 }
 
@@ -823,10 +764,6 @@ mod tests {
             .insert("cook-fanout-complete-b".to_string());
         job.terminal_state = Some(AgentTaskBatchState::Succeeded);
 
-        assert_eq!(
-            job.resume_disposition(),
-            CookBatchJobResumeDisposition::AlreadyComplete
-        );
         // Replay is byte-identical however many times recovery happens.
         let first = job.completed_result().expect("first replay");
         let second = job.completed_result().expect("second replay");
@@ -845,11 +782,6 @@ mod tests {
         // u32::MAX is not a live pid, and the recorded start identity cannot
         // match, so liveness is provably false.
         job.request.child_pid = u32::MAX;
-
-        assert_eq!(
-            job.resume_disposition(),
-            CookBatchJobResumeDisposition::ObserveTerminalOutcome
-        );
     }
 
     #[test]
