@@ -94,6 +94,9 @@ pub enum AgentTaskCookLoopStatus {
     /// remediation attempt, so it never spends provider execution budget
     /// (#14731).
     GatesDeferred,
+    /// The declared gate itself was invalid or selected an inadmissible test
+    /// population. This is operator remediation, never candidate-code retry.
+    GateDeclarationInvalid,
     RetryRequested,
     RetriesExhausted,
 }
@@ -291,6 +294,13 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             })
         && !baseline_red
         && retry_budget_remaining > 0;
+    let invalid_gate_declaration = failed_gates.iter().any(|gate| {
+        matches!(
+            gate.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+                | AgentTaskGateFailureClassification::ZeroTestsSelected
+        )
+    });
     // Deterministic gates take precedence: a red gate must be fixed before the
     // review form is even worth requesting. Only once the change itself is green
     // (and actually produced changes) does the AI-authored form become the last
@@ -319,6 +329,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if invalid_gate_declaration {
+        AgentTaskCookLoopStatus::GateDeclarationInvalid
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
         AgentTaskCookLoopStatus::NoOpGateFailed
     } else if options.promotion_report.status == AgentTaskPromotionStatus::GateDeferred {
@@ -1083,7 +1095,10 @@ mod tests {
             metadata: Value::Null,
         });
 
-        assert_eq!(report.status, AgentTaskCookLoopStatus::RetriesExhausted);
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::GateDeclarationInvalid
+        );
         assert!(report.follow_up_request.is_none());
         assert_eq!(
             report.failed_gates[0].classification,

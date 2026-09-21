@@ -8447,6 +8447,21 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            AgentTaskCookLoopStatus::GateDeclarationInvalid => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "gate_declaration_invalid",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "a declared deterministic gate is invalid or selects an inadmissible test population; correct the gate declaration and start Cook again"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
                     return Ok(cook_report(CookReportInput {

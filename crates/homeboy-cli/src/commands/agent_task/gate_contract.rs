@@ -164,6 +164,22 @@ fn cargo_gate_shape(command: &str) -> Result<Option<CargoSelection>> {
         }
     }
     let filter = before_harness.get(filter_index).cloned();
+    if filter
+        .as_deref()
+        .is_some_and(|filter| filter.ends_with("::"))
+    {
+        return Err(Error::validation_invalid_argument(
+            "gate declaration",
+            format!(
+                "declared Cargo test filter `{}` is intrinsically invalid: a focused filter must name a test or module prefix, not end with `::`",
+                filter.expect("checked above")
+            ),
+            None,
+            Some(vec![
+                "Use an exact test ID with `-- --exact`, or remove the trailing `::` and use a bounded module prefix.".to_string(),
+            ]),
+        ));
+    }
     let exact = harness.is_some_and(|index| args[index + 1..].iter().any(|arg| arg == "--exact"));
     let interpretation = if filter.is_none() {
         "broad_explicit"
@@ -540,5 +556,14 @@ mod tests {
         )
         .expect("exact gate shape");
         assert_eq!(exact[0].filter_interpretation.as_deref(), Some("exact"));
+    }
+
+    #[test]
+    fn preview_rejects_an_intrinsically_invalid_trailing_module_separator() {
+        let error =
+            validate_cargo_gate_contracts(["cargo test -p fixture git::".to_string()], None)
+                .expect_err("trailing separator must fail before provider dispatch");
+        assert!(error.message.contains("intrinsically invalid"));
+        assert!(error.message.contains("git::"));
     }
 }
