@@ -336,6 +336,18 @@ fn unreachable_transport_report_is_terminal_and_has_no_daemon_evidence() {
     assert_eq!(report.status, RunnerDoctorStatus::Error);
     assert_eq!(report.checks.len(), 1);
     assert_eq!(report.checks[0].id, "ssh.execution");
+    assert_eq!(
+        report.checks[0].details.get("phase").map(String::as_str),
+        Some("ssh_transport")
+    );
+    assert_eq!(
+        report.checks[0].remediation.as_deref(),
+        Some("homeboy server status lab")
+    );
+    assert_eq!(
+        report.checks[0].details.get("stderr").map(String::as_str),
+        Some("mm_send_fd: sendmsg(0): Message too long")
+    );
     assert!(report.daemon_recovery.is_none());
     assert!(report.admission_summary.is_none());
     assert_eq!(report.diagnostics.expect("diagnostics").completed_checks, 1);

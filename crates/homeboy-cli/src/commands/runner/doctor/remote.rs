@@ -456,13 +456,37 @@ pub(super) fn unreachable_report(
     server: &Server,
     output: homeboy::core::server::CommandOutput,
 ) -> RunnerDoctorOutput {
+    let recovery_command = format!("homeboy server status {}", shell::quote_arg(&server.id));
     RunnerDoctorOutput {
-        variant: "doctor", command: "runner.doctor", runner_id: runner_id.to_string(),
-        runner: runner_summary("ssh", Some(runner), Some(server)), status: RunnerDoctorStatus::Error,
+        variant: "doctor",
+        command: "runner.doctor",
+        runner_id: runner_id.to_string(),
+        runner: runner_summary("ssh", Some(runner), Some(server)),
+        status: RunnerDoctorStatus::Error,
         failure: None,
-        capabilities: RunnerCapabilities::default(), resources: RunnerResources::default(),
-        checks: vec![checks::error("ssh.execution", format!("SSH runner {} is not reachable", runner_id), Some("Run `homeboy server status <server-id>` and verify host, user, port, identity_file, and network access".to_string()), common::detail_map(&[("stderr", output.stderr.trim()), ("stdout", output.stdout.trim())]))],
-        secret_env_migration: None, diagnostics: Some(types::RunnerDoctorDiagnostics { status: "partial", completed_checks: 1, timed_out_probes: Vec::new() }), daemon_recovery: None, admission_summary: None, provider_readiness: None, repairs: Vec::new(),
+        capabilities: RunnerCapabilities::default(),
+        resources: RunnerResources::default(),
+        checks: vec![checks::error(
+            "ssh.execution",
+            format!("SSH runner {} is not reachable", runner_id),
+            Some(recovery_command.clone()),
+            common::detail_map(&[
+                ("phase", "ssh_transport"),
+                ("stderr", output.stderr.trim()),
+                ("stdout", output.stdout.trim()),
+                ("recovery_command", &recovery_command),
+            ]),
+        )],
+        secret_env_migration: None,
+        diagnostics: Some(types::RunnerDoctorDiagnostics {
+            status: "partial",
+            completed_checks: 1,
+            timed_out_probes: Vec::new(),
+        }),
+        daemon_recovery: None,
+        admission_summary: None,
+        provider_readiness: None,
+        repairs: Vec::new(),
     }
 }
 

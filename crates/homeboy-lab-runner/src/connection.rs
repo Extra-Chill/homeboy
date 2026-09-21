@@ -1411,6 +1411,27 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
         );
         if let Some(evidence) = report.failure_evidence.as_mut() {
             evidence.failure_evidence_ref = failure_evidence_ref;
+            evidence.classification = error
+                .details
+                .get("classification")
+                .and_then(Value::as_str)
+                .unwrap_or("daemon_bootstrap_failure")
+                .to_string();
+            evidence.remote_start_command =
+                Some(remote_daemon::remote_daemon_ensure_running_command(
+                    homeboy,
+                    runner_id,
+                    Some(&replacement_operation_id),
+                ));
+            evidence.tunnel_state = Some("not_established".to_string());
+            if let Some(action) = error
+                .details
+                .get("safe_next_action")
+                .and_then(Value::as_str)
+                .filter(|action| action.starts_with("homeboy "))
+            {
+                evidence.recovery_command = action.to_string();
+            }
         }
         attach_state_loss_recovery(&mut report, state_loss_recovery);
         return Ok((report, exit_code));
