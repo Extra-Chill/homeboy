@@ -87,6 +87,8 @@ pub enum AgentTaskCommand {
     /// The persisted recipe supplies the original prompt, transport, gates,
     /// worktree, and disclosure policy.
     CookContinue(CookContinueArgs),
+    /// Attach candidate-bound review findings to an existing Cook.
+    CookFeedback(CookFeedbackArgs),
     /// Operate durable defined multi-agent loops: define, inspect, resume, and stop.
     ///
     /// A loop is not a one-shot PR cook. It persists controller state, tracks
@@ -299,6 +301,36 @@ pub struct CookContinueArgs {
     pub full: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct CookFeedbackArgs {
+    /// Durable Cook ID receiving the review.
+    pub cook_id: String,
+    /// Reviewed commit, artifact, or other durable candidate identity.
+    #[arg(long, value_name = "IDENTITY")]
+    pub candidate: Option<String>,
+    /// Inline Markdown feedback.
+    #[arg(long, conflicts_with_all = ["file", "stdin"])]
+    pub text: Option<String>,
+    /// Markdown file containing feedback.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["text", "stdin"])]
+    pub file: Option<String>,
+    /// Read Markdown feedback from stdin.
+    #[arg(long, conflicts_with_all = ["text", "file"])]
+    pub stdin: bool,
+    /// Reviewer identity retained with the finding.
+    #[arg(long, default_value = "operator")]
+    pub author: String,
+    /// Source label retained with the finding.
+    #[arg(long, default_value = "review")]
+    pub source: String,
+    /// Stable retry key. Reusing it returns the original durable finding.
+    #[arg(long)]
+    pub idempotency_key: Option<String>,
+    /// Read the durable feedback ledger instead of submitting a finding.
+    #[arg(long)]
+    pub status: bool,
+}
+
 #[cfg(test)]
 mod cook_continue_tests {
     use clap::Parser;
@@ -378,6 +410,54 @@ mod cook_continue_tests {
             "run-a",
             "--model",
             "replacement-model",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn feedback_accepts_inline_file_or_stdin_contract_and_status() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--text",
+            "fix this",
+            "--idempotency-key",
+            "review-1",
+        ])
+        .expect("inline feedback parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookFeedback(args) = agent_task.command else {
+            panic!("expected cook-feedback command");
+        };
+        assert_eq!(args.candidate.as_deref(), Some("candidate-a"));
+        assert_eq!(args.text.as_deref(), Some("fix this"));
+        assert!(!args.status);
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--status",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--text",
+            "one",
+            "--stdin",
         ])
         .is_err());
     }
