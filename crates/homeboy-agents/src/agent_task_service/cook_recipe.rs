@@ -2939,6 +2939,7 @@ fn consume_claimed_with_dispatcher_policy(
             return Err(error);
         }
     }
+    let record = lifecycle_store.read_record(&claim.continuation().run_id)?;
     if let Some(attempt) = recipe
         .attempts
         .iter()
@@ -2955,6 +2956,18 @@ fn consume_claimed_with_dispatcher_policy(
         );
         claim.fail(&error.message)?;
         return Err(error);
+    }
+    // Feedback is acknowledged only at the same durable continuation boundary
+    // that owns the next remediation. Candidate mismatch is recorded as stale
+    // by the feedback store and cannot leak into another attempt.
+    if let Some(candidate) = crate::agent_task_feedback::candidate_identity(&record) {
+        let feedback_store = crate::agent_task_feedback::CookFeedbackStore::new(store.data_root());
+        let feedback = feedback_store.consume_for_candidate(&recipe.cook_id, &candidate)?;
+        crate::agent_task_feedback::append_to_plan(
+            &record,
+            &mut options.identity.initial_plan,
+            &feedback,
+        )?;
     }
     match execute(options) {
         Ok(0) => {
