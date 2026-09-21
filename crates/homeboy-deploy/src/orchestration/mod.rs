@@ -19,6 +19,7 @@ use super::orchestration_tag_checkout::{
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     load_project_components_with_projection, local_deploy_version, plan_components,
+    ExtensionSkippedComponent,
 };
 use super::types::{
     ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary,
@@ -60,6 +61,14 @@ pub(super) struct PreparedDeploymentPlan {
     built_from_commits: HashMap<String, String>,
     _exact_ref_checkouts: Vec<ExactRefCheckout>,
     _tag_ref_checkouts: Vec<ExactRefCheckout>,
+    /// Components `load_project_components_with_projection` could not resolve
+    /// on this host (missing extension, unresolvable artifact, absent local
+    /// checkout). `--outdated` reuses `--check`'s report-and-skip contract for
+    /// these (line ~89 above), so they never reach `plan_components` and never
+    /// appear in `prepared_deployments` — carrying them here is what lets
+    /// `apply_prepared_components` name them in the real deploy result instead
+    /// of dropping them once loading is done (Extra-Chill/extrachill-network#244).
+    extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
 pub(super) fn prepare_components(
@@ -632,6 +641,7 @@ pub(super) fn prepare_components(
             built_from_commits,
             _exact_ref_checkouts: exact_ref_checkouts,
             _tag_ref_checkouts: tag_ref_checkouts,
+            extension_skipped: loaded.extension_skipped,
         },
     )))
 }
@@ -654,6 +664,7 @@ pub(super) fn apply_prepared_components(
         built_from_commits,
         _exact_ref_checkouts,
         _tag_ref_checkouts,
+        extension_skipped,
     } = plan;
 
     // Execute deployments only after every component passed the local preflight.
@@ -784,13 +795,22 @@ pub(super) fn apply_prepared_components(
         }
     }
 
+    // Name every component load resolved out before this real deploy ever
+    // touched it. Without this, a sweep that deployed two components and
+    // could not resolve a third reported only the two it deployed — a
+    // released version stayed live on the target for hours with the run
+    // reporting unqualified success (Extra-Chill/extrachill-network#244).
+    let skipped_results = extension_skipped_results(&extension_skipped, &project, base_path);
+    let skipped = skipped_results.len() as u32;
+    results.extend(skipped_results);
+
     let mut result = DeployOrchestrationResult {
         results,
         summary: DeploySummary {
-            total: succeeded + failed,
+            total: succeeded + failed + skipped,
             succeeded,
             failed,
-            skipped: 0,
+            skipped,
         },
         deploy_run_id: None,
     };
@@ -1619,6 +1639,229 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.contains("missing extension rust")));
+    }
+
+    /// Reproduces Extra-Chill/extrachill-network#244 end to end through the
+    /// real `--outdated` sweep pipeline: `prepare_components` then
+    /// `apply_prepared_components`, exactly as `homeboy_deploy::run` chains
+    /// them for a live deploy.
+    ///
+    /// The project has two attached components. `gated` cannot be resolved
+    /// on this host (its `homeboy.json` declares an extension nobody
+    /// installed) and must never build or deploy. `deployable` is a real
+    /// git-deploy component pointed at an actual local git checkout —
+    /// `is_local: true` on the `SshClient` fixture makes every "remote" git
+    /// command in `deploy_via_git` run against real files on this machine, so
+    /// this exercises the genuine deploy path, not a stand-in for it.
+    ///
+    /// Before this fix, `load_project_components_with_projection` correctly
+    /// recorded `gated` in `extension_skipped` (`check` is `true` here
+    /// because `--outdated` shares `--check`'s report-and-skip contract —
+    /// see `prepare_components`, line ~89), but `PreparedDeploymentPlan`
+    /// never carried that list forward, so `apply_prepared_components`
+    /// deployed `deployable`, reported `summary.skipped == 0`, and `gated`
+    /// was simply absent from `results` — success with 0 skipped and 0
+    /// failed while a component silently never deployed. This test fails on
+    /// pre-fix code because `results` has only one entry and
+    /// `summary.skipped == 0`.
+    #[test]
+    fn outdated_sweep_reports_unresolvable_component_instead_of_dropping_it() {
+        with_isolated_home(|_| {
+            // `gated`: a project attachment this host cannot resolve at all —
+            // the same bucket a missing "nodejs" extension or an
+            // `Invalid argument 'components.local_path'` failure land in.
+            let gated = TempDir::new().expect("gated dir");
+            write_component_manifest_with_extension(
+                gated.path(),
+                "gated",
+                "nonexistent-extension-xyz789",
+            );
+
+            // `deployable`: a real git-deploy component that is genuinely
+            // outdated, so `--outdated` selects it the same way it would
+            // select a real released version bump. `source` is the
+            // registered checkout; `install_dir` is a separate real clone of
+            // it — released version 1.0.0 — standing in for the live remote
+            // target, so `deploy_via_git` has a genuine `origin` remote to
+            // fetch/checkout/pull against, and the local checkout is bumped
+            // to 1.1.0 afterward so the sweep has real, comparable versions
+            // to act on instead of two indistinguishable trees.
+            let source = TempDir::new().expect("source repo");
+            run_git(source.path(), &["init", "-q"]);
+            run_git(source.path(), &["checkout", "-q", "-b", "main"]);
+            run_git(source.path(), &["config", "user.email", "test@example.com"]);
+            run_git(source.path(), &["config", "user.name", "Test"]);
+            std::fs::write(
+                source.path().join("plugin.php"),
+                "<?php\n/*\nVersion: 1.0.0\n*/\n",
+            )
+            .expect("write source file at v1.0.0");
+            run_git(source.path(), &["add", "."]);
+            run_git(source.path(), &["commit", "-q", "-m", "release 1.0.0"]);
+
+            let install_root = TempDir::new().expect("install root");
+            let install_dir = install_root.path().join("deployable-install");
+            let clone = std::process::Command::new("git")
+                .args([
+                    "clone",
+                    "-q",
+                    &source.path().to_string_lossy(),
+                    &install_dir.to_string_lossy(),
+                ])
+                .output()
+                .expect("git clone");
+            assert!(
+                clone.status.success(),
+                "git clone failed: {}",
+                String::from_utf8_lossy(&clone.stderr)
+            );
+
+            // The install target is now pinned at 1.0.0. Advance the source
+            // past it so the sweep has a real, comparable version delta —
+            // exactly the shape of extrachill-community releasing 1.27.1
+            // while the target still served 1.27.0.
+            std::fs::write(
+                source.path().join("plugin.php"),
+                "<?php\n/*\nVersion: 1.1.0\n*/\n",
+            )
+            .expect("write source file at v1.1.0");
+            run_git(source.path(), &["commit", "-q", "-am", "release 1.1.0"]);
+
+            // `homeboy.json` is read directly off disk by portable discovery,
+            // not through git, so it does not need to be committed.
+            let manifest = serde_json::json!({
+                "id": "deployable",
+                "remote_path": install_dir.to_string_lossy(),
+                "deploy_strategy": "git",
+                "git_deploy": { "remote": "origin", "branch": "main" },
+                "version_targets": [{
+                    "file": "plugin.php",
+                    "pattern": "Version:\\s*([0-9.]+)",
+                }],
+            });
+            std::fs::write(source.path().join("homeboy.json"), manifest.to_string())
+                .expect("write deployable manifest");
+
+            let project = project_with_component_dirs(&[
+                ("gated", gated.path()),
+                ("deployable", source.path()),
+            ]);
+
+            let base_path = install_root
+                .path()
+                .join("unused-base-path")
+                .to_string_lossy()
+                .to_string();
+            let ctx = RemoteProjectContext {
+                project: project.clone(),
+                server_id: "test-server".to_string(),
+                server: homeboy_core::server::Server {
+                    id: "test-server".to_string(),
+                    aliases: Vec::new(),
+                    host: "localhost".to_string(),
+                    user: "test".to_string(),
+                    port: 22,
+                    identity_file: None,
+                    kind: None,
+                    auth: None,
+                    env: HashMap::new(),
+                    runner: None,
+                },
+                client: crate::test_support::local_client(),
+                base_path: Some(base_path.clone()),
+            };
+
+            // The real config an unattended `--outdated` poll runs with:
+            // `--outdated` alone, no `--check`, no targeted component_ids.
+            let config = DeployConfig {
+                outdated: true,
+                skip_build: true,
+                no_pull: true,
+                // The manifest lives next to the source but is not committed
+                // (portable discovery reads it straight off disk), which
+                // otherwise trips the dirty-worktree gate. Project policy is
+                // `None` here, so `--force` bypasses only that gate, not a
+                // provenance guard.
+                force: true,
+                ..Default::default()
+            };
+
+            let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+            let mut artifacts = crate::preparation::DeploymentArtifactStore::default();
+
+            let deployment = prepare_components(
+                &data_root,
+                &config,
+                &project,
+                &ctx,
+                &base_path,
+                &mut artifacts,
+                None,
+            )
+            .expect(
+                "the sweep must resolve 'deployable' and defer 'gated' rather than hard-failing",
+            );
+
+            let plan = match deployment {
+                PreparedDeployment::Apply(plan) => plan,
+                PreparedDeployment::Complete(result) => panic!(
+                    "expected an Apply plan for the resolvable component, got a short-circuited \
+                     Complete result: {:?}",
+                    result.summary
+                ),
+            };
+
+            let result = apply_prepared_components(&data_root, *plan, &ctx, &base_path, None)
+                .expect("apply must succeed for the one real, resolvable component");
+
+            // The deployable component actually deployed — this is a real
+            // sweep doing real work, not a no-op.
+            assert_eq!(
+                result.summary.succeeded, 1,
+                "the resolvable component must actually deploy: {:?}",
+                result.results
+            );
+            assert_eq!(result.summary.failed, 0, "no component should fail: {:?}", result.results);
+
+            // The behavioral assertion this bug is about: the unresolvable
+            // component must be named in the result with a reason, and the
+            // summary must not claim unqualified success.
+            assert_eq!(
+                result.summary.skipped, 1,
+                "the unresolvable component must be counted as skipped, not dropped: {:?}",
+                result.results
+            );
+            assert_eq!(result.summary.total, 2);
+
+            let deployed = result
+                .results
+                .iter()
+                .find(|r| r.id == "deployable")
+                .expect("deployable's result must be present");
+            assert_eq!(deployed.status, "deployed");
+
+            let skipped = result
+                .results
+                .iter()
+                .find(|r| r.id == "gated")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "'gated' must appear in the sweep result with a reason, not be silently \
+                         dropped — this is the exact shape of Extra-Chill/extrachill-network#244. \
+                         Got results: {:?}",
+                        result.results
+                    )
+                });
+            assert_eq!(skipped.status, "skipped");
+            assert!(
+                skipped
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("nonexistent-extension-xyz789")),
+                "the skip reason must name what made it unresolvable, got: {:?}",
+                skipped.warnings
+            );
+        });
     }
 
     #[test]
