@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.18.2] - 2026-09-21
+
+### Fixed
+- disambiguate the results artifact name per invocation
+
 ## [2.18.1] - 2026-09-21
 
 ### Fixed
