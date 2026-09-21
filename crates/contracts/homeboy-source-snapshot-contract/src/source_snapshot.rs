@@ -134,16 +134,18 @@ mod tests {
 
     #[test]
     fn source_snapshot_preserves_repository_integrity_evidence_across_json() {
-        let mut snapshot = SourceSnapshot::default();
-        snapshot.repository_integrity_evidence = Some(RepositoryIntegrityEvidence {
-            origin: "ssh://example.test/homeboy.git".to_string(),
-            symlink_exceptions: vec![RepositoryIntegritySymlinkException {
-                path: "assets/link".to_string(),
-                target_base64: "L3Nydi9hc3NldHM=".to_string(),
-                reason: "operator mounted assets".to_string(),
-            }],
-            sha256: "sha256:evidence".to_string(),
-        });
+        let snapshot = SourceSnapshot {
+            repository_integrity_evidence: Some(RepositoryIntegrityEvidence {
+                origin: "ssh://example.test/homeboy.git".to_string(),
+                symlink_exceptions: vec![RepositoryIntegritySymlinkException {
+                    path: "assets/link".to_string(),
+                    target_base64: "L3Nydi9hc3NldHM=".to_string(),
+                    reason: "operator mounted assets".to_string(),
+                }],
+                sha256: "sha256:evidence".to_string(),
+            }),
+            ..Default::default()
+        };
 
         let restored: SourceSnapshot = serde_json::from_str(
             &serde_json::to_string(&snapshot).expect("serialize source snapshot"),
