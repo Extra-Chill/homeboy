@@ -10,6 +10,8 @@ mod cook_preview_lifecycle;
 mod cook_prompt_stdin;
 #[path = "cli_binary/cook_retry_projection_recursion.rs"]
 mod cook_retry_projection_recursion;
+#[path = "cli_binary/extension_action_payload.rs"]
+mod extension_action_payload;
 #[path = "cli_binary/fanout_supervisor_cli.rs"]
 mod fanout_supervisor_cli;
 #[path = "cli_binary/help_fast_path.rs"]
