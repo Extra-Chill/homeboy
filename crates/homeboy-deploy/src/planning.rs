@@ -893,12 +893,26 @@ pub(super) fn load_project_components_with_projection(
                 return Err(err);
             }
 
-            homeboy_core::log_status!(
-                "deploy",
-                "Skipping '{}': missing required extension (not requested for deploy)",
-                loaded.id
-            );
-            skipped.push(loaded.id.clone());
+            // A sweep (`--outdated` / `--all`) reaches here. The component
+            // cannot be deployed, and it will stay behind until someone
+            // installs the extension — so the reason has to survive.
+            //
+            // This previously pushed a bare id into `skipped`, discarding the
+            // diagnosis in exactly the mode that runs unattended. A component
+            // then sat stale indefinitely while the run reported success:
+            // extrachill-community released 1.27.1 and kept serving 1.27.0 for
+            // hours because every poll dropped it silently
+            // (Extra-Chill/extrachill-network#244).
+            //
+            // Recording it as an extension skip — the same structure check mode
+            // already produces — means consumers read a status and a reason
+            // instead of parsing log text.
+            let reason = missing_extension_reason(&err);
+            homeboy_core::log_status!("deploy", "Skipping '{}': {}", loaded.id, reason);
+            extension_skipped.push(ExtensionSkippedComponent {
+                id: loaded.id.clone(),
+                reason,
+            });
             continue;
         }
 

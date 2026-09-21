@@ -19,6 +19,7 @@ use super::orchestration_tag_checkout::{
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{
     load_project_components_with_projection, local_deploy_version, plan_components,
+    ExtensionSkippedComponent,
 };
 use super::types::{
     ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary,
@@ -60,6 +61,12 @@ pub(super) struct PreparedDeploymentPlan {
     built_from_commits: HashMap<String, String>,
     _exact_ref_checkouts: Vec<ExactRefCheckout>,
     _tag_ref_checkouts: Vec<ExactRefCheckout>,
+    /// Components that could not be deployed because a required extension is
+    /// not installed. They are carried through execution so the final result
+    /// can name them; a sweep that deploys some components and silently drops
+    /// others reports success while the dropped ones drift
+    /// (Extra-Chill/extrachill-network#244).
+    extension_skipped: Vec<ExtensionSkippedComponent>,
 }
 
 pub(super) fn prepare_components(
@@ -632,6 +639,7 @@ pub(super) fn prepare_components(
             built_from_commits,
             _exact_ref_checkouts: exact_ref_checkouts,
             _tag_ref_checkouts: tag_ref_checkouts,
+            extension_skipped: loaded.extension_skipped,
         },
     )))
 }
@@ -654,6 +662,7 @@ pub(super) fn apply_prepared_components(
         built_from_commits,
         _exact_ref_checkouts,
         _tag_ref_checkouts,
+        extension_skipped,
     } = plan;
 
     // Execute deployments only after every component passed the local preflight.
@@ -784,13 +793,21 @@ pub(super) fn apply_prepared_components(
         }
     }
 
+    // Name the components that never deployed. Without this a sweep that
+    // updated two components and dropped a third reported only the two, so the
+    // third drifted with no signal anywhere in the output.
+    let mut results = results;
+    let skipped_results = extension_skipped_results(&extension_skipped, &project, base_path);
+    let skipped = skipped_results.len() as u32;
+    results.extend(skipped_results);
+
     let mut result = DeployOrchestrationResult {
         results,
         summary: DeploySummary {
-            total: succeeded + failed,
+            total: succeeded + failed + skipped,
             succeeded,
             failed,
-            skipped: 0,
+            skipped,
         },
         deploy_run_id: None,
     };
