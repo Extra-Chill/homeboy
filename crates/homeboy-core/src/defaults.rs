@@ -57,11 +57,13 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub automation: AutomationConfig,
 
-    /// Host-scoped environment for GitHub CLI subprocesses keyed by hostname.
+    /// Host-scoped environment for GitHub CLI and Git subprocesses keyed by hostname.
     ///
-    /// Values are applied whenever Homeboy runs `gh` for a repository whose
-    /// remote URL resolves to that host. Component-level `github.hosts` entries
-    /// override these global defaults.
+    /// Values are applied whenever Homeboy runs `gh` or a remote-capable Git
+    /// command for a repository whose remote URL resolves to that host.
+    /// Component-level `github.hosts` entries override these global defaults.
+    /// Git receives them as process environment only; persistent Git config and
+    /// stored remote URLs are not rewritten.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub github_hosts: HashMap<String, crate::component::GithubHostConfig>,
 

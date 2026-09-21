@@ -1321,6 +1321,199 @@ fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
 }
 
 #[test]
+fn create_partial_clone_worktree_requires_configured_host_transport() {
+    crate::test_support::with_isolated_home(|home| {
+        let canonical = "https://127.0.0.1:1/acme/repo.git";
+        let bare = seed_partial_clone_remote(home.path());
+        let file_url = format!(
+            "file://{}",
+            bare.canonicalize().expect("bare remote").display()
+        );
+        let missing = materialize_partial_clone(
+            home.path(),
+            "partial-missing-transport",
+            &bare,
+            canonical,
+        );
+        let routed =
+            materialize_partial_clone(home.path(), "partial-configured-route", &bare, canonical);
+        write_component_registration(home.path(), "partial-missing-transport", &missing);
+        write_component_registration(home.path(), "partial-configured-route", &routed);
+        let stored_config = fs::read(routed.join(".git/config")).expect("stored config");
+
+        let missing_err = create(WorktreeCreateOptions {
+            component_id: "partial-missing-transport".to_string(),
+            branch: "fix/hydrate".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect_err("blobless worktree add cannot reach an unrouted HTTPS origin");
+        assert_eq!(missing_err.code.as_str(), "git.command_failed");
+        assert!(missing_err.message.contains("127.0.0.1")
+            || missing_err.to_string().contains("127.0.0.1"));
+
+        let mut config = crate::defaults::HomeboyConfig::default();
+        config.github_hosts.insert(
+            "127.0.0.1".to_string(),
+            crate::component::GithubHostConfig {
+                proxy: None,
+                env: std::collections::HashMap::from([
+                    ("GIT_CONFIG_COUNT".to_string(), "2".to_string()),
+                    (
+                        "GIT_CONFIG_KEY_0".to_string(),
+                        format!("url.{file_url}.insteadOf"),
+                    ),
+                    ("GIT_CONFIG_VALUE_0".to_string(), canonical.to_string()),
+                    (
+                        "GIT_CONFIG_KEY_1".to_string(),
+                        "protocol.file.allow".to_string(),
+                    ),
+                    ("GIT_CONFIG_VALUE_1".to_string(), "always".to_string()),
+                    (
+                        "GIT_ASKPASS".to_string(),
+                        "/opt/credential-helper".to_string(),
+                    ),
+                ]),
+            },
+        );
+        crate::defaults::save_config(&config).expect("save host transport");
+
+        let created = create(WorktreeCreateOptions {
+            component_id: "partial-configured-route".to_string(),
+            branch: "fix/hydrate".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect("configured rewrite hydrates missing checkout blobs");
+        let worktree = PathBuf::from(&created.record.worktree_path);
+
+        assert!(worktree.join(".git").is_file(), "must be a linked worktree");
+        assert_eq!(
+            fs::read_to_string(worktree.join("payload.txt")).expect("hydrated blob"),
+            "partial-clone payload\n"
+        );
+        assert_eq!(
+            fs::read(routed.join(".git/config")).expect("stored config after hydration"),
+            stored_config,
+            "transport must preserve all stored remote and repository settings"
+        );
+        assert_eq!(
+            git::run_git(&routed, &["remote", "get-url", "origin"], "origin url")
+                .unwrap()
+                .trim(),
+            canonical
+        );
+        assert!(
+            git::run_git(
+                &routed,
+                &["config", "--local", "--get-regexp", r"url\..*\.insteadOf"],
+                "local insteadOf",
+            )
+            .is_err(),
+            "HTTPS rewrite must not persist into repository config"
+        );
+        let listed = git::run_git(&routed, &["worktree", "list", "--porcelain"], "worktree list")
+            .unwrap();
+        assert!(
+            listed.contains(&worktree.to_string_lossy().to_string()),
+            "git must register the linked worktree"
+        );
+
+        let unrelated =
+            git::git_transport_env("git.example.test", &crate::component::GithubConfig::default());
+        assert!(
+            !unrelated.iter().any(|(key, value)| {
+                key.starts_with("GIT_CONFIG")
+                    && (value.contains(&file_url) || value.contains("insteadOf"))
+            }),
+            "unrelated hosts keep default transport"
+        );
+    });
+}
+
+fn seed_partial_clone_remote(home: &Path) -> PathBuf {
+    let seed = home.join("partial-seed");
+    let bare = home.join("partial-upstream.git");
+    fs::create_dir_all(&seed).expect("seed directory");
+    run_git(&seed, &["init", "-q", "-b", "main"]);
+    run_git(&seed, &["config", "user.email", "homeboy@example.test"]);
+    run_git(&seed, &["config", "user.name", "Homeboy Test"]);
+    fs::write(seed.join("payload.txt"), "partial-clone payload\n").expect("payload");
+    fs::write(seed.join("homeboy.json"), r#"{"id":"partial-clone"}"#).expect("manifest");
+    run_git(&seed, &["add", "."]);
+    run_git(&seed, &["commit", "-q", "-m", "payload"]);
+    run_git(
+        home,
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            &seed.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+    run_git(&bare, &["config", "uploadpack.allowFilter", "true"]);
+    bare
+}
+
+fn materialize_partial_clone(home: &Path, id: &str, bare: &Path, origin_url: &str) -> PathBuf {
+    let parent = home.join("Developer");
+    fs::create_dir_all(&parent).expect("developer directory");
+    let source = parent.join(id);
+    let file_url =
+        reqwest::Url::from_file_path(bare.canonicalize().expect("bare path")).expect("file URL");
+    run_git(
+        home,
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "-q",
+            file_url.as_str(),
+            &source.to_string_lossy(),
+        ],
+    );
+    run_git(&source, &["remote", "set-url", "origin", origin_url]);
+    let tree = git::run_git(&source, &["ls-tree", "-r", "HEAD"], "checkout blobs")
+        .expect("tree available without blobs");
+    for entry in tree.lines() {
+        let fields: Vec<_> = entry.split_whitespace().collect();
+        assert_eq!(fields[1], "blob");
+        let output = std::process::Command::new("git")
+            .current_dir(&source)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-e", fields[2]])
+            .output()
+            .expect("inspect local object database");
+        assert!(
+            !output.status.success(),
+            "checkout blob must actually be absent"
+        );
+    }
+    assert_eq!(
+        git::run_git(
+            &source,
+            &["config", "--get", "remote.origin.partialclonefilter"],
+            "partial clone filter",
+        )
+        .unwrap()
+        .trim(),
+        "blob:none"
+    );
+    assert!(
+        !source.join("payload.txt").is_file(),
+        "blobless clone must not materialize checkout blobs"
+    );
+    source
+}
+
+#[test]
 fn create_reuses_existing_worktree_with_a_relative_gitdir_pointer() {
     crate::test_support::with_isolated_home(|home| {
         let (source, options) = registered_create_fixture(home.path(), "relative-existing-fixture");
