@@ -867,41 +867,6 @@ pub(super) fn load_project_components_with_projection(
             continue;
         }
 
-        // Validate required extensions are installed before attempting artifact resolution.
-        // Without this check, missing extensions cause resolve_artifact() to silently
-        // return None, and the component gets skipped with a vague "no artifact" message.
-        if let Err(err) = extension::resolve::validate_required_extensions(&loaded) {
-            if check {
-                // Read-only diff: a missing extension must not poison the whole pass.
-                // Skip-and-warn so operators still see the diff for the components they
-                // actually care about (see issue #4587).
-                let reason = missing_extension_reason(&err);
-                homeboy_core::log_status!(
-                    "deploy",
-                    "Skipping '{}' in check mode: {}",
-                    loaded.id,
-                    reason
-                );
-                extension_skipped.push(ExtensionSkippedComponent {
-                    id: loaded.id.clone(),
-                    reason,
-                });
-                continue;
-            }
-
-            if is_requested {
-                return Err(err);
-            }
-
-            homeboy_core::log_status!(
-                "deploy",
-                "Skipping '{}': missing required extension (not requested for deploy)",
-                loaded.id
-            );
-            skipped.push(loaded.id.clone());
-            continue;
-        }
-
         // Git-deploy and file-deploy components don't need a build artifact
         let is_git_deploy = loaded.deploy_strategy.as_deref() == Some("git");
         let is_file_deploy = loaded.deploy_strategy.as_deref() == Some("file");
@@ -916,11 +881,57 @@ pub(super) fn load_project_components_with_projection(
         // It is reported like a missing extension: fatal for a component the
         // operator actually asked to deploy, skip-and-warn otherwise, so one
         // misconfigured component cannot poison a whole project-wide pass (#4587).
+        //
+        // A component's `extensions` map legitimately mixes an artifact-pattern
+        // provider with build/test/lint toolchains a release-asset deploy never
+        // invokes (#244) — `resolve_artifact` already skips any extension that
+        // fails to load, so an uninstalled toolchain extension is invisible to
+        // it as long as some other installed extension resolves the pattern.
+        // Deploy therefore requires only the extensions it actually needs to
+        // obtain and deliver the artifact, not every extension the component
+        // declares: extension *installation* is checked only when resolution
+        // genuinely comes up empty, turning that into an actionable "missing
+        // extension" diagnosis instead of gating on the full declared set.
         let effective_artifact = if is_git_deploy || is_file_deploy {
             None
         } else {
             match component::resolve_artifact(&loaded) {
-                Ok(artifact) => artifact,
+                Ok(Some(artifact)) => Some(artifact),
+                Ok(None) => {
+                    if let Err(err) = extension::resolve::validate_required_extensions(&loaded) {
+                        if check {
+                            // Read-only diff: a missing extension must not poison the whole
+                            // pass. Skip-and-warn so operators still see the diff for the
+                            // components they actually care about (see issue #4587).
+                            let reason = missing_extension_reason(&err);
+                            homeboy_core::log_status!(
+                                "deploy",
+                                "Skipping '{}' in check mode: {}",
+                                loaded.id,
+                                reason
+                            );
+                            extension_skipped.push(ExtensionSkippedComponent {
+                                id: loaded.id.clone(),
+                                reason,
+                            });
+                            continue;
+                        }
+
+                        if is_requested {
+                            return Err(err);
+                        }
+
+                        homeboy_core::log_status!(
+                            "deploy",
+                            "Skipping '{}': missing required extension (not requested for deploy)",
+                            loaded.id
+                        );
+                        skipped.push(loaded.id.clone());
+                        continue;
+                    }
+
+                    None
+                }
                 Err(err) => {
                     if is_requested && !check {
                         return Err(err);
