@@ -637,6 +637,7 @@ runs:
 
         echo "homeboy-ci-results=homeboy-ci-results-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
         echo "homeboy-observations=homeboy-observations-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
+        echo "homeboy-phase-progress=homeboy-phase-progress-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
 
     - name: Upload Homeboy CI results
       if: always()
@@ -875,6 +876,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: homeboy-phase-progress-${{ github.job }}-${{ runner.os }}
+        name: ${{ steps.artifact-names.outputs.homeboy-phase-progress }}
         path: ${{ steps.phase-summary.outputs.phase-progress }}
         if-no-files-found: warn

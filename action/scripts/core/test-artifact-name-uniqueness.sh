@@ -69,5 +69,25 @@ grep -q 'ACTION_INSTANCE_VALUE: ${{ github.action }}' "${ROOT_DIR}/action.yml" \
   && echo "PASS: action.yml passes the step instance id into the suffix" \
   || { echo "FAIL: action.yml does not pass the step instance id into the suffix"; fail=1; }
 
+# Every uploaded artifact must derive its name from the shared suffix.
+# #483 was fixed for homeboy-ci-results while homeboy-phase-progress kept its
+# own `${{ github.job }}-${{ runner.os }}` name, which is identical for two
+# invocations in one job — so the job still failed on a 409, just on a
+# different artifact. One suffix, one place, no exceptions.
+bypassed="$(grep -nE '^\s+name: homeboy-' "${ROOT_DIR}/action.yml" || true)"
+if [ -n "${bypassed}" ]; then
+  echo "FAIL: an artifact name bypasses the shared suffix:"
+  printf '%s\n' "${bypassed}"
+  fail=1
+else
+  echo "PASS: no artifact name bypasses the shared suffix"
+fi
+
+for out in homeboy-ci-results homeboy-observations homeboy-phase-progress; do
+  grep -q "echo \"${out}=${out}-\${artifact_suffix}\"" "${ROOT_DIR}/action.yml" \
+    && echo "PASS: ${out} is derived from the shared suffix" \
+    || { echo "FAIL: ${out} is not derived from the shared suffix"; fail=1; }
+done
+
 [ "$fail" -eq 0 ] || exit 1
 echo "All artifact name uniqueness checks passed."
