@@ -556,13 +556,18 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let lock = open_task_worktree_registry_lock()?;
-    lock.lock_shared().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("lock task worktree registry for read".to_string()),
-        )
-    })?;
+    let _lock = match open_existing_task_worktree_registry_lock()? {
+        Some(lock) => {
+            lock.lock_shared().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("lock task worktree registry for read".to_string()),
+                )
+            })?;
+            Some(lock)
+        }
+        None => None,
+    };
     operation()
 }
 
@@ -655,6 +660,27 @@ fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
                 Some("open task worktree registry lock".to_string()),
             )
         })
+}
+
+fn open_existing_task_worktree_registry_lock() -> Result<Option<std::fs::File>> {
+    let store = metadata_dir()?;
+    let parent = store.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store has no parent: {}",
+            store.display()
+        ))
+    })?;
+    match OpenOptions::new()
+        .read(true)
+        .open(parent.join("task-worktrees.lock"))
+    {
+        Ok(lock) => Ok(Some(lock)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some("open task worktree registry lock for read".to_string()),
+        )),
+    }
 }
 
 pub fn status(id: &str) -> Result<WorktreeStatusOutput> {

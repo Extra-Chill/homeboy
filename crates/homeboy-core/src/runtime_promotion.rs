@@ -7,6 +7,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -20,6 +21,7 @@ const LEASE_DIR: &str = "promotion.lock";
 const LEASE_FILE: &str = "lease.json";
 const ADMISSION_LOCK_FILE: &str = "admission.lock";
 const ADMISSION_OWNER_DIR: &str = "admission-owners";
+const COOK_ADMISSION_WAIT_DIR: &str = "cook-admission-waits";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
@@ -170,6 +172,17 @@ struct RuntimeGenerationPin {
     transaction: Option<SubprocessLeaseCapability>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RuntimeCookAdmissionWait {
+    pid: u32,
+    cook_id: String,
+    started_at: String,
+    #[serde(default)]
+    linux_starttime_ticks: Option<u64>,
+    #[serde(default)]
+    process_start_identity: Option<crate::process::ProcessStartIdentity>,
+}
+
 /// Held while a controller/runner runtime transaction is in progress.
 #[derive(Debug)]
 pub struct RuntimePromotionLease {
@@ -198,6 +211,16 @@ pub struct RuntimePromotionSubprocessFence {
 #[derive(Debug)]
 pub struct RuntimeGenerationPinGuard {
     path: PathBuf,
+}
+
+struct RuntimeCookAdmissionWaitGuard {
+    path: PathBuf,
+}
+
+impl Drop for RuntimeCookAdmissionWaitGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Protects a selected controller identity from replacement without claiming
@@ -1065,6 +1088,10 @@ pub fn pin_cook_generation_waiting(
     // The exact transaction capability already owns exclusive admission. Trying
     // to reacquire the shared side here would deadlock before the pin exemption
     // below could be observed by the owner.
+    let _admission_wait = transaction
+        .is_none()
+        .then(|| register_cook_admission_wait(&promotion_root, cook_id))
+        .transpose()?;
     let _admission_lock = if transaction.is_none() {
         let admission_lock = open_admission_lock(&promotion_root)?;
         let started = Instant::now();
@@ -1150,6 +1177,120 @@ fn open_admission_lock(root: &Path) -> Result<fs::File> {
         .write(true)
         .open(root.join(ADMISSION_LOCK_FILE))
         .map_err(io("open runtime promotion admission"))
+}
+
+fn register_cook_admission_wait(
+    root: &Path,
+    cook_id: &str,
+) -> Result<RuntimeCookAdmissionWaitGuard> {
+    let waits = root.join(COOK_ADMISSION_WAIT_DIR);
+    fs::create_dir_all(&waits).map_err(io("create runtime cook admission wait directory"))?;
+    for entry in fs::read_dir(&waits).map_err(io("read runtime cook admission waits"))? {
+        let path = entry
+            .map_err(io("read runtime cook admission wait"))?
+            .path();
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(wait) = serde_json::from_str::<RuntimeCookAdmissionWait>(&content) else {
+            continue;
+        };
+        if wait.cook_id == cook_id {
+            if reclaimable_process(
+                wait.pid,
+                wait.linux_starttime_ticks,
+                wait.process_start_identity.as_ref(),
+            ) {
+                let _ = fs::remove_file(&path);
+            } else {
+                return Err(duplicate_cook_admission_error(&wait));
+            }
+        }
+    }
+    let pid = std::process::id();
+    let wait = RuntimeCookAdmissionWait {
+        pid,
+        cook_id: cook_id.to_string(),
+        started_at: now(),
+        linux_starttime_ticks: crate::process::linux_process_starttime_ticks(pid)
+            .ok()
+            .flatten(),
+        process_start_identity: crate::process::process_start_identity(pid).ok().flatten(),
+    };
+    let path = waits.join(format!(
+        "{}.json",
+        URL_SAFE_NO_PAD.encode(cook_id.as_bytes())
+    ));
+    let payload = serde_json::to_vec_pretty(&wait)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let mut file = match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let wait = read_wait_record(&path)?;
+            return Err(duplicate_cook_admission_error(&wait));
+        }
+        Err(error) => return Err(io("publish runtime cook admission wait")(error)),
+    };
+    if let Err(error) = file.write_all(&payload) {
+        let _ = fs::remove_file(&path);
+        return Err(io("publish runtime cook admission wait")(error));
+    }
+    Ok(RuntimeCookAdmissionWaitGuard { path })
+}
+
+fn read_wait_record(path: &Path) -> Result<RuntimeCookAdmissionWait> {
+    let content = fs::read_to_string(path).map_err(io("read runtime cook admission wait"))?;
+    serde_json::from_str(&content).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("parse runtime cook admission wait".to_string()),
+            None,
+        )
+    })
+}
+
+fn reclaimable_process(
+    pid: u32,
+    linux_starttime_ticks: Option<u64>,
+    process_start_identity: Option<&crate::process::ProcessStartIdentity>,
+) -> bool {
+    matches!(
+        crate::process::process_identity_state_with_start_identity(
+            pid,
+            linux_starttime_ticks,
+            process_start_identity,
+        ),
+        crate::process::ProcessIdentityState::Dead
+            | crate::process::ProcessIdentityState::IdentityMismatch
+    )
+}
+
+fn duplicate_cook_admission_error(wait: &RuntimeCookAdmissionWait) -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        format!(
+            "Cook `{}` is already waiting for runtime promotion admission under pid {}",
+            wait.cook_id, wait.pid
+        ),
+        serde_json::json!({
+            "schema": "homeboy/runtime-promotion-admission/v1",
+            "queue_state": "duplicate_cook_admission_refused",
+            "wait_stage": "os_lock",
+            "resource_class": "runtime_promotion",
+            "state": "busy",
+            "cook_id": wait.cook_id,
+            "holder_pid": wait.pid,
+            "wait_started_at": wait.started_at,
+            "tried": [
+                "A live Cook admission waiter already owns this Cook identity.",
+                "Do not resume it as a duplicate; inspect the existing Cook status."
+            ]
+        }),
+    )
 }
 
 /// Archive, rather than delete, a proven dead promotion lease. Normal
@@ -2337,6 +2478,48 @@ mod tests {
         });
     }
 
+    #[test]
+    fn duplicate_cook_waiter_is_refused_while_the_first_waiter_is_live() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = duplicate_cook_admission_owner();
+            let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+            let first = std::thread::spawn(move || {
+                pin_cook_generation_waiting(
+                    "duplicate-wait-cook",
+                    Duration::from_secs(1),
+                    || false,
+                    |event| waiting_tx.send(event).expect("report first waiter"),
+                )
+            });
+            waiting_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first waiter publishes durable owner evidence");
+
+            let error = pin_cook_generation_waiting(
+                "duplicate-wait-cook",
+                Duration::from_secs(1),
+                || false,
+                |_| panic!("duplicate waiter must not emit progress"),
+            )
+            .expect_err("a live Cook cannot be resumed as a duplicate");
+            assert_eq!(
+                error.details["queue_state"],
+                "duplicate_cook_admission_refused"
+            );
+            assert_eq!(error.details["holder_pid"], std::process::id());
+
+            let release = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join("duplicate-wait-release");
+            fs::write(release, b"release").expect("release process owner");
+            first
+                .join()
+                .expect("first waiter exits")
+                .expect("first waiter admits after owner release");
+            owner.wait().expect("process owner exits");
+        });
+    }
+
     fn cook_pin_admission_owner() -> std::process::Child {
         let executable = std::env::current_exe().expect("resolve test executable");
         let child = Command::new(executable)
@@ -2365,6 +2548,41 @@ mod tests {
         let _lease = acquire("process promotion owner", "controller")
             .expect("process owner acquires promotion lease");
         std::thread::sleep(Duration::from_millis(250));
+    }
+
+    fn duplicate_cook_admission_owner() -> std::process::Child {
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let child = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "runtime_promotion::tests::duplicate_cook_admission_owner_child",
+            ])
+            .spawn()
+            .expect("start duplicate admission owner");
+        let lease = paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join(LEASE_DIR);
+        for _ in 0..100 {
+            if lease.exists() {
+                return child;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("duplicate admission owner did not acquire the lease");
+    }
+
+    #[test]
+    #[ignore = "invoked by duplicate Cook admission test"]
+    fn duplicate_cook_admission_owner_child() {
+        let _lease = acquire("duplicate-wait owner", "controller")
+            .expect("duplicate admission owner acquires lease");
+        let release = paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join("duplicate-wait-release");
+        while !release.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
