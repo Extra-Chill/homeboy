@@ -6263,7 +6263,7 @@ pub fn cook_failure_context(
     cook_failure_context_with_stores(None, None, cook_id, latest_run_id, status)
 }
 
-fn cook_failure_context_with_stores(
+pub(crate) fn cook_failure_context_with_stores(
     recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     cook_id: &str,
@@ -6445,6 +6445,17 @@ fn cook_failure_context_with_stores(
             "promotion".to_string(),
             "operation_in_progress".to_string(),
             None,
+        )
+    } else if let Some(diagnostic) = controller_diagnostic.as_ref() {
+        (
+            "promotion".to_string(),
+            diagnostic
+                .pointer("/deepest_cause/code")
+                .or_else(|| diagnostic.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("promotion_failure")
+                .to_string(),
+            Some(diagnostic.clone()),
         )
     } else if let Some(diagnostic) = promotion_diagnostic.as_ref() {
         (

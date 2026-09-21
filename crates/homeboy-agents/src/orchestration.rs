@@ -2204,12 +2204,35 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 None,
                             )
                         }
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
-                        ),
+                        Err(error) => {
+                            // Promotion can fail after applying the candidate (for
+                            // example while setting up the destination gate). Keep
+                            // the causal error on the run instead of reducing the
+                            // action acknowledgement to "IO error". The durable
+                            // post-apply promotion checkpoint remains resumable.
+                            let diagnostic =
+                                crate::agent_task_service::bounded_error_diagnostic(&error);
+                            crate::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                                &self.lookup.store,
+                                &resolved,
+                                &diagnostic,
+                            )
+                            .map_err(map_lifecycle_error)?;
+                            let current = self
+                                .lookup
+                                .store
+                                .read_record(&resolved)
+                                .map_err(map_lifecycle_error)?;
+                            (
+                                ControlPlaneActionOutcome::Failed,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: "homeboy/control-plane-action-failure/v1".to_string(),
+                                    data: diagnostic,
+                                },
+                                Some(redacted_bounded(&error.message, MESSAGE_BOUND)),
+                            )
+                        }
                     }
                 }
                 ControlPlaneAction::Resume

@@ -872,7 +872,7 @@ fn promote_with_operation_claim_in_store(
     }
 }
 
-fn bounded_error_diagnostic(error: &Error) -> Value {
+pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
     let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
