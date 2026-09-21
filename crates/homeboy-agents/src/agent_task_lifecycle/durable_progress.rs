@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub(crate) const DURABLE_EVENT_HISTORY_METADATA_KEY: &str = "durable_event_history";
 pub const EVENT_HISTORY_MIGRATION_SCHEMA: &str = "homeboy/agent-task-event-history-migration/v1";
+const PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskEventHistoryMigration {
@@ -270,6 +271,7 @@ pub fn record_promotion_progress_in_store(
     output_tail: Option<&str>,
 ) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
+    let output_tail = output_tail.map(bound_promotion_progress_output);
     let record = lifecycle_store
         .mutate_record(&run_id, |record| {
             let now = now_timestamp();
@@ -354,6 +356,23 @@ pub fn record_promotion_progress_in_store(
         )
         .map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(())
+}
+
+/// Control-plane event data is bounded at 64 KiB. Gate subprocess capture is
+/// bounded independently, but a long final line can still fill that budget
+/// once the heartbeat envelope is added. Keep the durable heartbeat useful
+/// without allowing diagnostic output to abort the gate itself.
+fn bound_promotion_progress_output(output: &str) -> String {
+    if output.len() <= PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES {
+        return output.to_string();
+    }
+    let start = output.len() - PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES;
+    let start = output
+        .char_indices()
+        .find(|(index, _)| *index >= start)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    format!("[output truncated]\n{}", &output[start..])
 }
 
 /// The phase that failed a run is absent from its own log whenever a
