@@ -1329,12 +1329,8 @@ fn create_partial_clone_worktree_requires_configured_host_transport() {
             "file://{}",
             bare.canonicalize().expect("bare remote").display()
         );
-        let missing = materialize_partial_clone(
-            home.path(),
-            "partial-missing-transport",
-            &bare,
-            canonical,
-        );
+        let missing =
+            materialize_partial_clone(home.path(), "partial-missing-transport", &bare, canonical);
         let routed =
             materialize_partial_clone(home.path(), "partial-configured-route", &bare, canonical);
         write_component_registration(home.path(), "partial-missing-transport", &missing);
@@ -1352,8 +1348,10 @@ fn create_partial_clone_worktree_requires_configured_host_transport() {
         })
         .expect_err("blobless worktree add cannot reach an unrouted HTTPS origin");
         assert_eq!(missing_err.code.as_str(), "git.command_failed");
-        assert!(missing_err.message.contains("127.0.0.1")
-            || missing_err.to_string().contains("127.0.0.1"));
+        assert!(
+            missing_err.message.contains("127.0.0.1")
+                || missing_err.to_string().contains("127.0.0.1")
+        );
 
         let mut config = crate::defaults::HomeboyConfig::default();
         config.github_hosts.insert(
@@ -1418,15 +1416,21 @@ fn create_partial_clone_worktree_requires_configured_host_transport() {
             .is_err(),
             "HTTPS rewrite must not persist into repository config"
         );
-        let listed = git::run_git(&routed, &["worktree", "list", "--porcelain"], "worktree list")
-            .unwrap();
+        let listed = git::run_git(
+            &routed,
+            &["worktree", "list", "--porcelain"],
+            "worktree list",
+        )
+        .unwrap();
         assert!(
             listed.contains(&worktree.to_string_lossy().to_string()),
             "git must register the linked worktree"
         );
 
-        let unrelated =
-            git::git_transport_env("git.example.test", &crate::component::GithubConfig::default());
+        let unrelated = git::git_transport_env(
+            "git.example.test",
+            &crate::component::GithubConfig::default(),
+        );
         assert!(
             !unrelated.iter().any(|(key, value)| {
                 key.starts_with("GIT_CONFIG")

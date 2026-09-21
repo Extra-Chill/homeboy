@@ -193,8 +193,8 @@ fn command_remote_host(root: &Path, args: &[&str]) -> Option<String> {
                     break;
                 }
                 "--depth" | "--deepen" | "--shallow-since" | "--shallow-exclude"
-                | "--upload-pack" | "--receive-pack" | "--exec" | "--filter"
-                | "--refmap" | "-o" | "--push-option" | "--server-option" => {
+                | "--upload-pack" | "--receive-pack" | "--exec" | "--filter" | "--refmap"
+                | "-o" | "--push-option" | "--server-option" => {
                     args.next()?;
                 }
                 "--" => {
@@ -205,12 +205,36 @@ fn command_remote_host(root: &Path, args: &[&str]) -> Option<String> {
                     target = Some(&value[7..]);
                     break;
                 }
-                "-q" | "--quiet" | "-v" | "--verbose" | "--prune" | "-p"
-                | "--tags" | "--no-tags" | "--force" | "-f" | "--dry-run" | "-n"
-                | "--symref" | "--heads" | "--branches" | "--refs" | "--exit-code"
-                | "--get-url" | "--atomic" | "--mirror" | "--set-upstream" | "-u"
-                | "--delete" | "-d" | "--porcelain" | "--no-recurse-submodules"
-                | "--recurse-submodules" | "--ff-only" | "--rebase" | "--no-rebase" => {}
+                "-q"
+                | "--quiet"
+                | "-v"
+                | "--verbose"
+                | "--prune"
+                | "-p"
+                | "--tags"
+                | "--no-tags"
+                | "--force"
+                | "-f"
+                | "--dry-run"
+                | "-n"
+                | "--symref"
+                | "--heads"
+                | "--branches"
+                | "--refs"
+                | "--exit-code"
+                | "--get-url"
+                | "--atomic"
+                | "--mirror"
+                | "--set-upstream"
+                | "-u"
+                | "--delete"
+                | "-d"
+                | "--porcelain"
+                | "--no-recurse-submodules"
+                | "--recurse-submodules"
+                | "--ff-only"
+                | "--rebase"
+                | "--no-rebase" => {}
                 value if value.starts_with('-') && value.contains('=') => {}
                 value if value.starts_with('-') => return None,
                 value => {
@@ -221,21 +245,35 @@ fn command_remote_host(root: &Path, args: &[&str]) -> Option<String> {
         }
         let branch = output_optional(root, &["symbolic-ref", "--short", "HEAD"]);
         let push = operation == "push";
-        let default = branch.as_ref().and_then(|branch| {
-            if push {
-                config(&format!("branch.{branch}.pushRemote"))
-                    .or_else(|| config("remote.pushDefault"))
-                    .or_else(|| config(&format!("branch.{branch}.remote")))
-            } else {
-                config(&format!("branch.{branch}.remote"))
-            }
-        }).or_else(|| if push { config("remote.pushDefault") } else { None });
-        urls.extend(resolve(target.or(default.as_deref()).unwrap_or("origin"), push));
+        let default = branch
+            .as_ref()
+            .and_then(|branch| {
+                if push {
+                    config(&format!("branch.{branch}.pushRemote"))
+                        .or_else(|| config("remote.pushDefault"))
+                        .or_else(|| config(&format!("branch.{branch}.remote")))
+                } else {
+                    config(&format!("branch.{branch}.remote"))
+                }
+            })
+            .or_else(|| {
+                if push {
+                    config("remote.pushDefault")
+                } else {
+                    None
+                }
+            });
+        urls.extend(resolve(
+            target.or(default.as_deref()).unwrap_or("origin"),
+            push,
+        ));
     }
     // Process-wide proxies/helpers cannot safely represent multiple hosts.
     let mut hosts = urls.iter().map(|url| remote_host(url));
     let host = hosts.next()??;
-    hosts.all(|other| other.as_ref() == Some(&host)).then_some(host)
+    hosts
+        .all(|other| other.as_ref() == Some(&host))
+        .then_some(host)
 }
 
 fn strip_gh_host(env: Vec<(String, String)>) -> Vec<(String, String)> {
@@ -304,50 +342,100 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path();
             git(root, &["init", "-q"]);
-            git(root, &["remote", "add", "origin", "https://a.example.test/repo"]);
-            git(root, &["remote", "add", "other", "https://b.example.test/repo"]);
-            git(root, &["remote", "set-url", "--push", "origin", "ssh://git@b.example.test/repo"]);
+            git(
+                root,
+                &["remote", "add", "origin", "https://a.example.test/repo"],
+            );
+            git(
+                root,
+                &["remote", "add", "other", "https://b.example.test/repo"],
+            );
+            git(
+                root,
+                &[
+                    "remote",
+                    "set-url",
+                    "--push",
+                    "origin",
+                    "ssh://git@b.example.test/repo",
+                ],
+            );
             git(root, &["config", "remote.other.promisor", "true"]);
             let config = GithubConfig {
                 hosts: HashMap::from([
-                    ("a.example.test".to_string(), GithubHostConfig {
-                        proxy: Some("https://a-proxy.example.test".to_string()),
-                        env: HashMap::from([("GIT_ASKPASS".to_string(), "/a-helper".to_string())]),
-                    }),
-                    ("b.example.test".to_string(), GithubHostConfig {
-                        proxy: Some("https://b-proxy.example.test".to_string()),
-                        env: HashMap::new(),
-                    }),
+                    (
+                        "a.example.test".to_string(),
+                        GithubHostConfig {
+                            proxy: Some("https://a-proxy.example.test".to_string()),
+                            env: HashMap::from([(
+                                "GIT_ASKPASS".to_string(),
+                                "/a-helper".to_string(),
+                            )]),
+                        },
+                    ),
+                    (
+                        "b.example.test".to_string(),
+                        GithubHostConfig {
+                            proxy: Some("https://b-proxy.example.test".to_string()),
+                            env: HashMap::new(),
+                        },
+                    ),
                 ]),
                 ..GithubConfig::default()
             };
             save_config(&HomeboyConfig {
                 github_hosts: config.hosts.clone(),
                 ..HomeboyConfig::default()
-            }).unwrap();
+            })
+            .unwrap();
             for args in [
                 vec!["fetch", "other"],
                 vec!["push", "origin", "HEAD"],
-                vec!["ls-remote", "--symref", "https://b.example.test/repo", "HEAD"],
+                vec![
+                    "ls-remote",
+                    "--symref",
+                    "https://b.example.test/repo",
+                    "HEAD",
+                ],
                 vec!["worktree", "add", "../checkout"],
             ] {
                 let env = git_transport_env_for_command(root, &args, &config);
-                assert!(env.contains(&("HTTPS_PROXY".to_string(), "https://b-proxy.example.test".to_string())));
-                assert!(!env.iter().any(|(key, value)| key == "GIT_ASKPASS" || value == "https://a-proxy.example.test"));
+                assert!(env.contains(&(
+                    "HTTPS_PROXY".to_string(),
+                    "https://b-proxy.example.test".to_string()
+                )));
+                assert!(!env
+                    .iter()
+                    .any(|(key, value)| key == "GIT_ASKPASS"
+                        || value == "https://a-proxy.example.test"));
                 let mut command = Command::new("git");
                 apply_configured_transport(&mut command, root, &args, &[]);
-                let pairs: Vec<_> = command.get_envs()
-                    .filter_map(|(key, value)| value.map(|value| (
-                        key.to_string_lossy().to_string(),
-                        value.to_string_lossy().to_string(),
-                    )))
+                let pairs: Vec<_> = command
+                    .get_envs()
+                    .filter_map(|(key, value)| {
+                        value.map(|value| {
+                            (
+                                key.to_string_lossy().to_string(),
+                                value.to_string_lossy().to_string(),
+                            )
+                        })
+                    })
                     .collect();
-                assert_eq!(pairs.iter().find(|(key, _)| key == "HTTPS_PROXY").map(|(_, value)| value.as_str()), Some("https://b-proxy.example.test"));
+                assert_eq!(
+                    pairs
+                        .iter()
+                        .find(|(key, _)| key == "HTTPS_PROXY")
+                        .map(|(_, value)| value.as_str()),
+                    Some("https://b-proxy.example.test")
+                );
                 assert!(!pairs.iter().any(|(key, _)| key == "GIT_ASKPASS"));
             }
             git(root, &["config", "remote.origin.promisor", "true"]);
             assert!(git_transport_env_for_command(root, &["worktree", "add"], &config).is_empty());
-            assert_eq!(remote_url(root, "origin").as_deref(), Some("https://a.example.test/repo"));
+            assert_eq!(
+                remote_url(root, "origin").as_deref(),
+                Some("https://a.example.test/repo")
+            );
         });
     }
 
@@ -355,10 +443,19 @@ mod tests {
     fn structured_config_layers_replace_whole_slot_sets() {
         let global = vec![
             ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
-            ("GIT_CONFIG_KEY_0".to_string(), "credential.helper".to_string()),
-            ("GIT_CONFIG_VALUE_0".to_string(), "global-helper".to_string()),
+            (
+                "GIT_CONFIG_KEY_0".to_string(),
+                "credential.helper".to_string(),
+            ),
+            (
+                "GIT_CONFIG_VALUE_0".to_string(),
+                "global-helper".to_string(),
+            ),
         ];
-        let partial = vec![("GIT_CONFIG_VALUE_0".to_string(), "component-helper".to_string())];
+        let partial = vec![(
+            "GIT_CONFIG_VALUE_0".to_string(),
+            "component-helper".to_string(),
+        )];
         let merged = merge_explicit_git_env(global.clone(), &partial);
         assert!(merged.contains(&("GIT_CONFIG_COUNT".to_string(), "0".to_string())));
         assert!(!merged.iter().any(|(key, _)| key == "GIT_CONFIG_KEY_0"));
@@ -369,8 +466,12 @@ mod tests {
         command.env("GIT_CONFIG_KEY_0", "credential.helper");
         command.env("GIT_CONFIG_VALUE_0", "inherited-helper");
         apply_configured_transport(&mut command, temp.path(), &["status"], &explicit);
-        assert!(command.get_envs().any(|(key, value)| key == "GIT_CONFIG_KEY_0" && value.is_none()));
-        assert!(command.get_envs().any(|(key, value)| key == "GIT_CONFIG_VALUE_0" && value.is_none()));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "GIT_CONFIG_KEY_0" && value.is_none()));
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "GIT_CONFIG_VALUE_0" && value.is_none()));
     }
 
     #[test]
@@ -378,36 +479,65 @@ mod tests {
         with_isolated_home(|_| {
             let host = "git.example.test".to_string();
             save_config(&HomeboyConfig {
-                github_hosts: HashMap::from([(host.clone(), GithubHostConfig {
-                    proxy: Some("https://global-proxy.example.test".to_string()),
-                    env: HashMap::from([
-                        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
-                        ("GIT_CONFIG_KEY_0".to_string(), "credential.helper".to_string()),
-                        ("GIT_CONFIG_VALUE_0".to_string(), "global-helper".to_string()),
-                    ]),
-                })]),
+                github_hosts: HashMap::from([(
+                    host.clone(),
+                    GithubHostConfig {
+                        proxy: Some("https://global-proxy.example.test".to_string()),
+                        env: HashMap::from([
+                            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+                            (
+                                "GIT_CONFIG_KEY_0".to_string(),
+                                "credential.helper".to_string(),
+                            ),
+                            (
+                                "GIT_CONFIG_VALUE_0".to_string(),
+                                "global-helper".to_string(),
+                            ),
+                        ]),
+                    },
+                )]),
                 ..HomeboyConfig::default()
-            }).unwrap();
+            })
+            .unwrap();
             let component = GithubConfig {
-                hosts: HashMap::from([(host.clone(), GithubHostConfig {
-                    proxy: Some("https://component-proxy.example.test".to_string()),
-                    env: HashMap::from([
-                        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
-                        ("GIT_CONFIG_KEY_0".to_string(), "http.version".to_string()),
-                        ("GIT_CONFIG_VALUE_0".to_string(), "HTTP/1.1".to_string()),
-                    ]),
-                })]),
+                hosts: HashMap::from([(
+                    host.clone(),
+                    GithubHostConfig {
+                        proxy: Some("https://component-proxy.example.test".to_string()),
+                        env: HashMap::from([
+                            ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+                            ("GIT_CONFIG_KEY_0".to_string(), "http.version".to_string()),
+                            ("GIT_CONFIG_VALUE_0".to_string(), "HTTP/1.1".to_string()),
+                        ]),
+                    },
+                )]),
                 ..GithubConfig::default()
             };
             let env = git_transport_env(&host, &component);
-            assert!(env.contains(&("HTTPS_PROXY".to_string(), "https://component-proxy.example.test".to_string())));
-            assert!(!env.iter().any(|(_, value)| value == "credential.helper" || value == "global-helper"));
-            let explicit = merge_explicit_git_env(env, &[
-                ("GIT_CONFIG_COUNT".to_string(), "0".to_string()),
-                ("HTTPS_PROXY".to_string(), "https://explicit-proxy.example.test".to_string()),
-            ]);
-            assert!(!explicit.iter().any(|(key, _)| key == "GIT_CONFIG_KEY_0" || key == "GIT_CONFIG_VALUE_0"));
-            assert!(explicit.contains(&("HTTPS_PROXY".to_string(), "https://explicit-proxy.example.test".to_string())));
+            assert!(env.contains(&(
+                "HTTPS_PROXY".to_string(),
+                "https://component-proxy.example.test".to_string()
+            )));
+            assert!(!env
+                .iter()
+                .any(|(_, value)| value == "credential.helper" || value == "global-helper"));
+            let explicit = merge_explicit_git_env(
+                env,
+                &[
+                    ("GIT_CONFIG_COUNT".to_string(), "0".to_string()),
+                    (
+                        "HTTPS_PROXY".to_string(),
+                        "https://explicit-proxy.example.test".to_string(),
+                    ),
+                ],
+            );
+            assert!(!explicit
+                .iter()
+                .any(|(key, _)| key == "GIT_CONFIG_KEY_0" || key == "GIT_CONFIG_VALUE_0"));
+            assert!(explicit.contains(&(
+                "HTTPS_PROXY".to_string(),
+                "https://explicit-proxy.example.test".to_string()
+            )));
         });
     }
 
@@ -436,15 +566,17 @@ mod tests {
             "push"
         ]));
         assert!(!git_command_may_contact_remote(&[
-            "worktree",
-            "remove",
-            "../topic"
+            "worktree", "remove", "../topic"
         ]));
         assert!(!git_command_may_contact_remote(&[
             "rev-parse",
             "--show-toplevel"
         ]));
-        assert!(!git_command_may_contact_remote(&["config", "--get", "remote.origin.url"]));
+        assert!(!git_command_may_contact_remote(&[
+            "config",
+            "--get",
+            "remote.origin.url"
+        ]));
     }
 
     #[test]
