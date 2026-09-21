@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.18.1] - 2026-09-21
+
+### Fixed
+- stop stale reusable runs after cancellation
+
 ## [2.18.0] - 2026-09-20
 
 ### Added
