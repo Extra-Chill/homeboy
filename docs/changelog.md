@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.0] - 2026-09-21
+
+### Added
+- expose provider capacity as typed readiness evidence
+- publish configured git subtrees
+
+### Fixed
+- stop rsyncing directories into a live path in place
+- require consent for model overrides
+- pass action payloads through CLI
+- preserve cancellation lifecycle classification
+
 ## [0.382.0] - 2026-09-21
 
 ### Added
