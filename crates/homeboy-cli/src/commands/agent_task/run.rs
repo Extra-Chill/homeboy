@@ -3231,6 +3231,12 @@ mod preview_tests {
             .expect("origin SHA is UTF-8")
             .trim()
             .to_string();
+            let evidence_source = tempfile::NamedTempFile::new().expect("evidence source");
+            std::fs::write(evidence_source.path(), "issue evidence\n").expect("write evidence");
+            let evidence_arg = format!(
+                r#"{{"id":"issue","source":"{}"}}"#,
+                evidence_source.path().display()
+            );
             let repository = checkout.display().to_string();
             let handle = "fixture@fix-issue-14714";
             let args = cook(&[
@@ -3255,6 +3261,8 @@ mod preview_tests {
                 "--to-worktree",
                 handle,
                 "--no-finalize",
+                "--provider-evidence",
+                &evidence_arg,
             ]);
 
             let (preview, exit_code) = preview_cook(args.clone(), None).expect("preview");
@@ -3288,6 +3296,11 @@ mod preview_tests {
             let provision =
                 provision_cook_destination(&args).expect("execution admits planned create");
             assert_eq!(provision["action"], "lookup_pending");
+            let plan = compile_cook_plan(&args, provision.clone()).expect("compile deferred Cook");
+            let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("deferred projected evidence path");
+            assert!(Path::new(projected_path).is_file());
 
             let executor = Arc::new(UnmaterializedPreviewExecutor);
             let (report, _) = run_cook_with_executor(args, executor).expect("cook replay");
@@ -3351,26 +3364,34 @@ mod preview_tests {
     }
 
     #[test]
-    fn compile_cook_plan_returns_a_typed_evidence_blocker_without_a_workspace() {
-        let args = cook(&[
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "read the evidence",
-            "--to-worktree",
-            "missing@worktree",
-            "--no-finalize",
-            "--provider-evidence",
-            r#"{"id":"issue","source":"/tmp/issue.md"}"#,
-        ]);
-        let error = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
-            .expect_err("evidence without a workspace must not panic");
-        assert_eq!(
-            error.code,
-            homeboy::core::ErrorCode::ValidationInvalidArgument
-        );
-        assert_eq!(error.details["field"], "provider-evidence");
+    fn compile_cook_plan_projects_evidence_before_deferred_workspace_binding() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("evidence");
+            std::fs::write(source.path(), "deferred evidence\n").expect("write evidence");
+            let evidence_arg =
+                format!(r#"{{"id":"issue","source":"{}"}}"#, source.path().display());
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "read the evidence",
+                "--to-worktree",
+                "missing@worktree",
+                "--no-finalize",
+                "--provider-evidence",
+                &evidence_arg,
+            ]);
+            let plan = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
+                .expect("deferred evidence is admitted before workspace binding");
+            let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("projected evidence path");
+            assert!(Path::new(projected_path).is_file());
+            assert_eq!(plan.metadata["cook_provision"]["action"], "lookup_pending");
+        });
     }
 
     #[test]
@@ -7476,14 +7497,6 @@ pub(crate) fn compile_cook_plan(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
-    if !args.provider_evidence_inputs.is_empty() && requested_workspace.is_none() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "provider-evidence",
-            "provider evidence requires a bound Cook workspace",
-            None,
-            None,
-        ));
-    }
     if let Some(workspace) = requested_workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
@@ -7512,14 +7525,14 @@ pub(crate) fn compile_cook_plan(
     dispatch.cwd = None;
     dispatch.workspace = requested_workspace.clone();
     let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
-    let evidence = if requested_workspace.is_some() {
-        project_admitted_provider_evidence_inputs(
-            &args.provider_evidence_inputs,
-            &admitted_evidence,
-        )?
-    } else {
-        Vec::new()
-    };
+    // The controller store snapshots evidence before a deferred native
+    // workspace is materialized. Its content-addressed paths are independent
+    // of the eventual checkout, so keep the same projection in the durable
+    // plan for both existing and deferred destinations.
+    let evidence = project_admitted_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        &admitted_evidence,
+    )?;
     let projected_paths = projected_provider_evidence_paths(&evidence);
     rewrite_provider_evidence_prompt(
         &mut dispatch.prompt,
