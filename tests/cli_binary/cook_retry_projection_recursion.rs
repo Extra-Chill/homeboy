@@ -47,6 +47,7 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
         finalization: CookFinalization {
             no_finalize: true,
             draft_pr: false,
+            provider_ci: None,
             base: "main".to_string(),
             head: None,
             title: "Retry projection fixture".to_string(),
