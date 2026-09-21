@@ -348,7 +348,13 @@ impl UpgradeOperation {
         self.metadata["error"] = json!({
             "code": format!("{:?}", error.code),
             "message": error.message,
+            "details": error.details,
+            "retryable": error.retryable,
+            "hints": error.hints,
         });
+        if let Some(failure) = failure_from_error(error, self.started.elapsed().as_secs()) {
+            self.metadata["failure"] = json!(failure);
+        }
         self.finish_durable(RunStatus::Error)
     }
 
@@ -904,6 +910,32 @@ fn failure_from_metadata(metadata: &Value, status: &str) -> Option<UpgradeOperat
     })
 }
 
+fn failure_from_error(error: &Error, elapsed_seconds: u64) -> Option<UpgradeOperationFailure> {
+    let details = error.details.as_object()?;
+    let predicate = details.get("kind")?.as_str()?.to_string();
+    Some(UpgradeOperationFailure {
+        phase: details
+            .get("phase")
+            .and_then(Value::as_str)
+            .unwrap_or("failed")
+            .to_string(),
+        predicate,
+        elapsed_seconds,
+        budget_ms: details
+            .get("budget_ms")
+            .and_then(Value::as_u64)
+            .map(u128::from),
+        expected_identity: None,
+        observed_identity: None,
+        diagnostic_references: details
+            .get("recovery")
+            .and_then(Value::as_str)
+            .map(|recovery| vec![recovery.to_string()])
+            .unwrap_or_default(),
+        runners: Vec::new(),
+    })
+}
+
 fn failure_from_result(
     result: &UpgradeResult,
     elapsed_seconds: u64,
@@ -1156,6 +1188,53 @@ mod tests {
                     .map(|component| component.status.as_str()),
                 Some("pending")
             );
+        });
+    }
+
+    #[test]
+    fn source_build_failure_projects_deadline_and_unattempted_promotion() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            operation
+                .set_phase_durable("building_candidate")
+                .expect("persist build phase");
+            operation
+                .mark_controller_durable(
+                    "failed",
+                    "source candidate build timed out; controller promotion was not attempted",
+                )
+                .expect("persist failed candidate state");
+            let error = Error::new(
+                homeboy_core::error::ErrorCode::InternalUnexpected,
+                "source candidate build timed out after 1s (configured deadline)",
+                serde_json::json!({
+                    "error": "source candidate build timed out after 1000ms (configured deadline)",
+                    "kind": "source_build_deadline_exceeded",
+                    "phase": "building_candidate",
+                    "budget_ms": 1_000,
+                    "retryable": true,
+                    "recovery": "retry source upgrade"
+                }),
+            );
+            operation
+                .finish_failed_durable(&error)
+                .expect("persist terminal failure");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            assert_eq!(status.phase, "failed");
+            assert_eq!(
+                status
+                    .controller
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("failed")
+            );
+            let failure = status.failure.expect("typed failure evidence");
+            assert_eq!(failure.predicate, "source_build_deadline_exceeded");
+            assert_eq!(failure.phase, "building_candidate");
+            assert_eq!(failure.budget_ms, Some(1_000));
+            assert_eq!(failure.diagnostic_references, vec!["retry source upgrade"]);
         });
     }
 

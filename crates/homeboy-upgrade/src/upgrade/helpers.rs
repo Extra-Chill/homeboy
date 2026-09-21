@@ -752,6 +752,12 @@ fn run_controller_upgrade_with_operation(
                                 .borrow_mut()
                                 .record_replacement_checkpoint_durable(checkpoint)
                         };
+                    if install_method == InstallMethod::Source {
+                        operation.borrow_mut().mark_controller_durable(
+                            "candidate_building",
+                            "source candidate build started; controller promotion not attempted",
+                        )?;
+                    }
                     execute_upgrade(
                         install_method,
                         source_upgrade_path.as_deref(),
@@ -788,7 +794,26 @@ fn run_controller_upgrade_with_operation(
             }
             result
         },
-    )?;
+    );
+    let controller_upgrade = match controller_upgrade {
+        Ok(result) => result,
+        Err(error) => {
+            operation.mark_controller_durable(
+                "failed",
+                if error
+                    .details
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("source_build_deadline_exceeded")
+                {
+                    "source candidate build timed out; controller promotion was not attempted"
+                } else {
+                    "controller candidate execution failed before promotion"
+                },
+            )?;
+            return Err(error);
+        }
+    };
     let (success, new_version, new_build_identity, source_revision, superseded) =
         match controller_upgrade {
             Ok(result) => result,

@@ -367,6 +367,27 @@ fn source_upgrade_timeout_terminates_the_entire_child_process_group() {
     panic!("source-upgrade child must not be orphaned");
 }
 
+#[test]
+fn source_upgrade_timeout_preserves_typed_build_deadline_evidence() {
+    let error = source_upgrade_timeout_error(Duration::from_secs(1));
+
+    assert_eq!(
+        error.code,
+        homeboy_core::error::ErrorCode::InternalUnexpected
+    );
+    assert_eq!(
+        error.details["kind"],
+        serde_json::json!("source_build_deadline_exceeded")
+    );
+    assert_eq!(
+        error.details["phase"],
+        serde_json::json!("building_candidate")
+    );
+    assert_eq!(error.details["budget_ms"], serde_json::json!(1_000));
+    assert_eq!(error.details["retryable"], serde_json::json!(true));
+    assert_eq!(error.retryable, Some(true));
+}
+
 #[cfg(unix)]
 #[test]
 fn installer_completion_reaps_background_process_group() {
