@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.6] - 2026-09-21
+
+### Fixed
+- refresh Composer dependencies transactionally
+
 ## [3.48.5] - 2026-09-19
 
 ### Fixed
