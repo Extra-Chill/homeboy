@@ -315,8 +315,17 @@ jobs:
 The release command:
 
 1. Scans conventional commits since the last version tag
-2. Skips if no releasable commits (`chore:`, `ci:`, `docs:`, `test:` are ignored)
-3. Computes version bump: `fix:` → patch, `feat:` → minor, `BREAKING CHANGE` → major
+2. Computes version bump: `feat:` → minor, `BREAKING CHANGE` → major, and
+   **everything else → patch**. `fix:` is patch, but so are `chore:`, `ci:`,
+   `docs:`, `test:` and any commit with no conventional prefix at all: Homeboy
+   classifies them as `other`, which is patch-level
+   (`homeboy` `crates/homeboy-release/src/release/planning_semver.rs`). A
+   commit range containing only `ci:` commits therefore produces a patch
+   release, not a skip
+3. Skips only when Homeboy predicts no version at all — the `check` job runs a
+   release dry run and treats an empty predicted version as "nothing to
+   release". In practice that means an already-released HEAD (for example the
+   `release:` commit the workflow itself pushes), not a particular commit type
 4. Generates changelog entries via `homeboy changelog add`
 5. Bumps version targets (Cargo.toml, package.json, VERSION, etc.)
 6. Finalizes changelog (`[Next]` → `[VERSION] - DATE`)

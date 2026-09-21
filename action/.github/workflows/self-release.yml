@@ -18,8 +18,10 @@
 # directly for version targets and hooks.
 #
 # No human input needed — version is computed from commit types:
-#   fix: → patch, feat: → minor, BREAKING CHANGE → major
-#   chore:/ci:/docs:/test: → no release
+#   feat: → minor, BREAKING CHANGE → major, everything else → patch.
+# `fix:` is patch, and so are chore:/ci:/docs:/test: and unprefixed commits —
+# Homeboy classifies them as `other`, which is patch-level. A range of only
+# `ci:` commits cuts a patch release rather than skipping.
 
 name: Release
 
