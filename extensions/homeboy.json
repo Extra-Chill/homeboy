@@ -31,6 +31,7 @@
       "bash tests/settings-helper-smoke.sh",
       "bash tests/wordpress-install-command-smoke.sh",
       "bash tests/wordpress-release-artifact-version-smoke.sh",
+      "bash wordpress/tests/release-update-dependency-composer-smoke.sh",
       "bash tests/wordpress-runtime-helper-resolver-smoke.sh",
       "bash wordpress/scripts/test/test-shard-replay-smoke.sh",
       "bash wordpress/tests/node-test-result-parser-smoke.sh",
