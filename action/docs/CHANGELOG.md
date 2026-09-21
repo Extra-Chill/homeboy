@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.19.0] - 2026-09-21
+
+### Added
+- route native git commands through the operations path
+
 ## [2.18.4] - 2026-09-21
 
 ### Fixed
