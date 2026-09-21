@@ -122,7 +122,7 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
     let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &plan,
         &catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::process_local(),
     ) {
         Ok(plan) => plan,
         Err(error) => {
@@ -2926,7 +2926,7 @@ fn preflight_plan_provider_eligibility_with_catalog(
     let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         plan,
         catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::process_local(),
     )?;
     // Admission owns live route selection. These are the remaining static and
     // material checks for the selected route, not a second route derivation.
