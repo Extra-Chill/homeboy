@@ -44,7 +44,14 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
             GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
             GitCommandOutput::Patch(output) => ("patch", serde_json::to_value(output)),
-            GitCommandOutput::Subtree(output) => ("subtree", serde_json::to_value(output)),
+            // Serialize inside an object: this serializer tags every variant by
+            // inserting `variant`, which a bare sequence cannot carry. A `Vec`
+            // payload serialized to a JSON array and failed every invocation,
+            // preview included, with "payload must serialize as an object".
+            GitCommandOutput::Subtree(output) => (
+                "subtree",
+                serde_json::to_value(serde_json::json!({ "publications": output })),
+            ),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;
