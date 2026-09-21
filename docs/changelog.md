@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.382.0] - 2026-09-21
+
+### Added
+- add remote release coordinate resolution
+- durable Cook review feedback
+
+### Changed
+- centralize work supervision
+
+### Fixed
+- align auto preview with Lab admission
+- report unavailable shared cargo reclaim
+- preserve source build timeout state
+- preserve detached child diagnostics
+- project evidence for deferred workspaces
+- converge doctor repairs safely
+- share readiness cache across admission phases
+- publish detached handoff before runtime admission
+- stabilize authority locks and adoption replay fixtures
+- preserve promotion failure causes
+- bound Cook promotion admission waits
+
 ## [0.381.0] - 2026-09-21
 
 ### Added
