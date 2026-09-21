@@ -644,6 +644,16 @@ runs:
         echo "homeboy-observations=homeboy-observations-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
         echo "homeboy-phase-progress=homeboy-phase-progress-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
 
+        # Operations results are written into a job-scoped directory that every
+        # invocation shares, while the per-command index restarts at 1 each
+        # time. Two invocations in one job therefore wrote the same
+        # operations-1.json and the second silently destroyed the first's
+        # results. Same disambiguator as the artifact names above, bounded so
+        # the stem stays a legal filename.
+        operations_stem_suffix="$(printf '%s' "${artifact_suffix}" | cut -c1-64)"
+        operations_stem_suffix="${operations_stem_suffix%-}"
+        echo "operations-stem=operations-${operations_stem_suffix}" >> "${GITHUB_OUTPUT}"
+
     - name: Upload Homeboy CI results
       if: always()
       uses: actions/upload-artifact@v7
@@ -781,6 +791,7 @@ runs:
         OPERATIONS_COMMANDS: ${{ steps.resolve-commands.outputs.operations-commands }}
         EXTRA_ARGS: ${{ inputs.args }}
         RUN_GROUP_PREFIX: homeboy
+        OPERATIONS_OUTPUT_STEM: ${{ steps.artifact-names.outputs.operations-stem }}
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true

@@ -60,8 +60,15 @@ for CMD in "${CMD_ARRAY[@]}"; do
   # Passthrough operations prepend "homeboy" and preserve arguments as-is.
   FULL_CMD="homeboy ${CMD}"
 
-  # Add output file for structured results
-  OUTPUT_STEM="operations-${CMD_INDEX}"
+  # Add output file for structured results.
+  #
+  # The stem is unique per action invocation, not just per command. CMD_INDEX
+  # restarts at 1 on every invocation while HOMEBOY_OUTPUT_DIR is shared across
+  # the whole job, so a job that invokes this action twice used to have its
+  # second invocation overwrite the first's operations-1.json. Consumers that
+  # read the directory afterwards then saw only the last invocation's results —
+  # silently, because the file still existed and still parsed.
+  OUTPUT_STEM="${OPERATIONS_OUTPUT_STEM:-operations}-${CMD_INDEX}"
   OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   FULL_CMD="homeboy --output ${OUTPUT_JSON} ${CMD}"
 
