@@ -189,7 +189,7 @@ inputs:
     required: false
     default: 'squash'
 
-  # ── SSH (for fleet/deploy) ──
+  # ── SSH (for fleet/deploy/publish) ──
   ssh-key:
     description: 'SSH private key for fleet/deploy commands. Writes to ~/.ssh, starts ssh-agent, configures known_hosts. If empty, assumes SSH is pre-configured.'
     required: false
@@ -198,6 +198,10 @@ inputs:
     description: 'Extra known_hosts entries for SSH connections to your servers.'
     required: false
     default: ''
+  ssh-require-known-hosts:
+    description: 'Require SSH_KNOWN_HOSTS and strict host verification. Use for publisher credentials; legacy deploy behavior remains unchanged when false.'
+    required: false
+    default: 'false'
 
   config-dir:
     description: 'Repo-relative directory that IS a Homeboy config root — it contains projects/, servers/, and optionally components/ and fleets/. When set, HOMEBOY_CONFIG_ROOT is exported for every homeboy invocation in the run (homeboy#14783) so operations commands (deploy/fleet) resolve their target from checked-in config. Nothing is copied; the runner user''s real config is never read. Leave identity_file null in servers/*.json and supply the key via ssh-key. If empty, no config is injected.'
@@ -532,6 +536,7 @@ runs:
       env:
         SSH_KEY: ${{ inputs.ssh-key }}
         SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+        SSH_REQUIRE_KNOWN_HOSTS: ${{ inputs.ssh-require-known-hosts }}
       run: bash ${{ github.action_path }}/scripts/setup/setup-ssh.sh
 
     # ── Phase 5: Run commands ──
@@ -879,3 +884,11 @@ runs:
         name: ${{ steps.artifact-names.outputs.homeboy-phase-progress }}
         path: ${{ steps.phase-summary.outputs.phase-progress }}
         if-no-files-found: warn
+
+    - name: Clean up action SSH credentials
+      if: always() && steps.setup-ssh.outputs.ssh-key-owned == 'true'
+      shell: bash
+      env:
+        SSH_AGENT_OWNED: ${{ steps.setup-ssh.outputs.ssh-agent-owned }}
+        SSH_KEY_FILE: ${{ steps.setup-ssh.outputs.ssh-key-file }}
+      run: bash ${{ github.action_path }}/scripts/setup/cleanup-ssh.sh

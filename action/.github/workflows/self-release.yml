@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-root-${{ steps.release-check.outputs.tooling-identity }}
 
       - name: Decide whether to release
         id: check
@@ -169,7 +169,7 @@ jobs:
           path: ${{ runner.temp }}/homeboy-release-last-failed
           # Keyed by tooling identity so a later tooling fix produces a new
           # key and the prior failure no longer matches (homeboy-action#257).
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}
+          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-root-${{ needs.check.outputs.tooling-identity }}
 
   # ── Clear failure cache on success ──
   clear-failure:

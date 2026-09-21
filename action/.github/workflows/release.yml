@@ -57,12 +57,24 @@ on:
         description: 'Additional arguments passed to the Homeboy release command.'
         type: string
         default: ''
+      publisher-known-hosts:
+        description: 'Pinned SSH known_hosts entries for optional publisher credentials. Required when PUBLISH_SSH_KEY is supplied.'
+        type: string
+        default: ''
       extension:
         description: 'Single extension ID override.'
         type: string
         default: ''
       extension-ref:
         description: 'Optional git revision to install from the extension source.'
+        type: string
+        default: ''
+      component:
+        description: 'Component name or path override passed to the composite action.'
+        type: string
+        default: ''
+      prepared-ref:
+        description: 'Optional prepared consumer source ref. It must resolve to the current release-branch tip.'
         type: string
         default: ''
       php-version:
@@ -113,7 +125,10 @@ on:
         description: 'GitHub App private key for release credentials. Optional; falls back to the automatic token.'
         required: false
       DISPATCH_TOKEN:
-        description: 'Token with actions:write on dispatch-repo. Optional; when absent, a HOMEBOY_APP_* installation token scoped to dispatch-repo is used. GITHUB_TOKEN cannot dispatch cross-repo.'
+        description: 'Token with contents:write on dispatch-repo. Optional; when absent, a HOMEBOY_APP_* installation token scoped to dispatch-repo is used. GITHUB_TOKEN cannot dispatch cross-repo.'
+        required: false
+      PUBLISH_SSH_KEY:
+        description: 'Optional SSH private key for native Git publishing. Pair with publisher-known-hosts; the key is agent-loaded only during the action.'
         required: false
     outputs:
       released:
@@ -143,6 +158,12 @@ on:
       dispatch-repo:
         description: 'The owner/repo that was notified, or empty.'
         value: ${{ inputs.dispatch-repo }}
+      source-sha:
+        description: 'Resolved immutable source SHA selected by the check job.'
+        value: ${{ jobs.check.outputs.source-sha }}
+      released-source-sha:
+        description: 'Immutable source SHA revalidated and used by the release job.'
+        value: ${{ jobs.release.outputs.released-source-sha }}
 
 # A called workflow cannot request a permission the CALLER has not granted —
 # GitHub fails the whole run at startup, before any job, with no usable error
@@ -166,6 +187,7 @@ jobs:
       should-release: ${{ steps.check.outputs.should-release }}
       tooling-identity: ${{ steps.release-check.outputs.tooling-identity }}
       action-sha: ${{ steps.action-sha.outputs.sha }}
+      source-sha: ${{ steps.source-sha.outputs.source-sha }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -203,6 +225,23 @@ jobs:
           ref: ${{ steps.action-sha.outputs.sha }}
           path: .homeboy-action
 
+      - name: Resolve prepared source revision
+        id: source-sha
+        shell: bash
+        env:
+          PREPARED_REF: ${{ inputs.prepared-ref }}
+          RELEASE_BRANCH: ${{ inputs.release-branch || 'main' }}
+          SOURCE_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh
+
+      - name: Check out resolved prepared source revision
+        if: inputs.prepared-ref != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.source-sha.outputs.source-sha }}
+          fetch-depth: 0
+          clean: false
+
       # The nested action checkout is untracked in the consumer repository and
       # `homeboy release` treats untracked paths as a dirty working tree.
       # Exclude it per-clone (never a tracked change) so the gate stays honest
@@ -220,6 +259,7 @@ jobs:
           args: ${{ inputs.args }}
           extension: ${{ inputs.extension }}
           extension-ref: ${{ inputs.extension-ref }}
+          component: ${{ inputs.component }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
           execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
@@ -227,6 +267,8 @@ jobs:
           release-dry-run: 'true'
           release-skip-publish: 'true'
           release-skip-github-release: 'true'
+          ssh-known-hosts: ${{ inputs.publisher-known-hosts }}
+          ssh-require-known-hosts: 'false'
 
       # The failed-SHA marker is keyed by the resolved tooling identity, not
       # just the SHA, so a CI-side fix (new homeboy binary / extension) that
@@ -237,7 +279,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}
+          key: release-last-failed-${{ github.ref_name }}-${{ steps.source-sha.outputs.source-sha }}-${{ inputs.component || 'root' }}-${{ steps.release-check.outputs.tooling-identity }}
 
       - name: Decide whether to release
         id: check
@@ -282,6 +324,7 @@ jobs:
       release-bump-type: ${{ steps.release.outputs.release-bump-type }}
       skipped-reason: ${{ steps.release.outputs.skipped-reason }}
       component: ${{ steps.release.outputs.component }}
+      released-source-sha: ${{ steps.revalidate-source.outputs.source-sha }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -296,6 +339,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           token: ${{ steps.app-token.outputs.token || github.token }}
+          ref: ${{ needs.check.outputs.source-sha }}
 
       - name: Check out resolved action revision
         uses: actions/checkout@v6
@@ -303,6 +347,15 @@ jobs:
           repository: Extra-Chill/homeboy-action
           ref: ${{ needs.check.outputs.action-sha }}
           path: .homeboy-action
+
+      - name: Revalidate prepared source revision
+        id: revalidate-source
+        shell: bash
+        env:
+          PREPARED_REF: ${{ inputs.prepared-ref }}
+          RELEASE_BRANCH: ${{ inputs.release-branch || 'main' }}
+          SOURCE_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh
 
       # The nested action checkout is untracked in the consumer repository and
       # `homeboy release` treats untracked paths as a dirty working tree.
@@ -320,6 +373,7 @@ jobs:
           args: ${{ inputs.args }}
           extension: ${{ inputs.extension }}
           extension-ref: ${{ inputs.extension-ref }}
+          component: ${{ inputs.component }}
           php-version: ${{ inputs.php-version }}
           node-version: ${{ inputs.node-version }}
           execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
@@ -327,6 +381,9 @@ jobs:
           release-dry-run: ${{ inputs.dry-run }}
           release-skip-publish: ${{ inputs.release-skip-publish }}
           release-skip-github-release: ${{ inputs.release-skip-github-release }}
+          ssh-key: ${{ secrets.PUBLISH_SSH_KEY }}
+          ssh-known-hosts: ${{ inputs.publisher-known-hosts }}
+          ssh-require-known-hosts: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Post-release dispatch ──
@@ -372,6 +429,28 @@ jobs:
           owner: ${{ steps.target.outputs.owner }}
           repositories: ${{ steps.target.outputs.repo }}
 
+      - name: Check out released tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release.outputs.release-tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ github.token }}
+
+      - name: Resolve released tag SHA
+        id: tag-sha
+        shell: bash
+        env:
+          TAG: ${{ needs.release.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse --verify "${TAG}^{commit}")"
+          if [ -z "${tag_sha}" ]; then
+            echo "::error::Could not resolve released tag '${TAG}' to its commit SHA."
+            exit 1
+          fi
+          echo "sha=${tag_sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Send repository_dispatch
         shell: bash
         env:
@@ -383,6 +462,7 @@ jobs:
           VERSION: ${{ needs.release.outputs.release-version }}
           TAG: ${{ needs.release.outputs.release-tag }}
           BUMP: ${{ needs.release.outputs.release-bump-type }}
+          TAG_SHA: ${{ steps.tag-sha.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -393,7 +473,7 @@ jobs:
             token="${APP_TOKEN}"
             source="HOMEBOY_APP installation token scoped to ${DISPATCH_REPO}"
           else
-            echo "::error::No token can dispatch to ${DISPATCH_REPO}: GITHUB_TOKEN cannot send repository_dispatch cross-repo. Pass secrets.DISPATCH_TOKEN (actions:write on the target) or install the Homeboy App on the target repository."
+            echo "::error::No token can dispatch to ${DISPATCH_REPO}: GITHUB_TOKEN cannot send repository_dispatch cross-repo. Pass secrets.DISPATCH_TOKEN (contents:write on the target) or install the Homeboy App on the target repository."
             exit 1
           fi
 
@@ -403,7 +483,7 @@ jobs:
             --arg version "${VERSION}" \
             --arg tag "${TAG}" \
             --arg bump "${BUMP}" \
-            --arg sha "${GITHUB_SHA}" \
+            --arg sha "${TAG_SHA}" \
             --arg run_url "${RUN_URL}" \
             '{component:$component,repository:$repository,version:$version,tag:$tag,bump:$bump,sha:$sha,run_url:$run_url}' \
             > "${RUNNER_TEMP}/client_payload.json"
@@ -427,6 +507,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.check.outputs.source-sha }}
 
       - name: Save failed SHA
         run: git rev-parse HEAD > "${RUNNER_TEMP}/homeboy-release-last-failed"
@@ -437,19 +519,22 @@ jobs:
           path: ${{ runner.temp }}/homeboy-release-last-failed
           # Keyed by tooling identity so a later tooling fix produces a new
           # key and the prior failure no longer matches (homeboy-action#257).
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}
+          key: release-last-failed-${{ github.ref_name }}-${{ needs.check.outputs.source-sha }}-${{ inputs.component || 'root' }}-${{ needs.check.outputs.tooling-identity }}
 
   # ── Clear failure cache on success ──
   clear-failure:
     name: Clear failure cache
-    needs: release
+    needs:
+      - check
+      - release
     if: ${{ needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Clear failure cache
         env:
           GH_TOKEN: ${{ github.token }}
+          CACHE_PREFIX: release-last-failed-${{ github.ref_name }}-${{ needs.check.outputs.source-sha }}-${{ inputs.component || 'root' }}-
         run: |
-          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
+          gh cache list --json id,key | jq -r --arg prefix "${CACHE_PREFIX}" '.[] | select(.key | startswith($prefix)) | .id' | while read -r id; do
             gh cache delete "$id" 2>/dev/null || true
           done

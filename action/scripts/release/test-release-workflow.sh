@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/self-release.yml"
 REUSABLE_RELEASE="${ROOT_DIR}/.github/workflows/release.yml"
+PREPARED_REF_TEST="${ROOT_DIR}/scripts/release/test-resolve-prepared-ref.sh"
 RELEASE_CONSUMER_FIXTURE="${ROOT_DIR}/fixtures/reusable-release-minimal-consumer.yml"
 CI_WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
 SELF_TEST_WORKFLOW="${ROOT_DIR}/.github/workflows/self-test.yml"
@@ -137,8 +138,8 @@ assert_contains 'skipped-reason:' "${ROOT_DIR}/action.yml" "action exposes skipp
 assert_contains 'tooling-identity:' "${ROOT_DIR}/action.yml" "action exposes resolved tooling identity output"
 assert_contains "github.event_name == 'workflow_dispatch'" "${WORKFLOW}" "release workflow detects manual dispatch for the marker bypass"
 assert_contains 'IS_MANUAL_DISPATCH' "${WORKFLOW}" "release workflow gates the failed-SHA skip on non-dispatch runs"
-assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache restore key includes tooling identity"
-assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache save key includes tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-root-${{ steps.release-check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache restore key includes root component and tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-root-${{ needs.check.outputs.tooling-identity }}' "${WORKFLOW}" "failure-cache save key includes root component and tooling identity"
 assert_not_contains 'restore-keys:' "${WORKFLOW}" "failure cache no longer falls back to a stale-tooling marker via restore-keys"
 assert_contains 'git/ref/tags/${release_tag}' "${MAJOR_TAG_HOOK}" "post-release hook reads the pushed release tag ref"
 assert_contains 'release_ref_sha' "${MAJOR_TAG_HOOK}" "post-release hook points v2 at the pushed release tag target"
@@ -168,12 +169,52 @@ assert_contains ".homeboy-action/' >> .git/info/exclude" "${REUSABLE_RELEASE}" "
 assert_contains 'startsWith(github.event.head_commit.message' "${REUSABLE_RELEASE}" "reusable release workflow skips pushes of release commits"
 assert_contains "github.event_name == 'workflow_dispatch'" "${REUSABLE_RELEASE}" "reusable release workflow detects manual dispatch for the marker bypass"
 assert_contains 'IS_MANUAL_DISPATCH' "${REUSABLE_RELEASE}" "reusable release workflow gates the failed-SHA skip on non-dispatch runs"
-assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ steps.release-check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache restore key includes tooling identity"
-assert_contains 'release-last-failed-${{ github.ref_name }}-${{ github.sha }}-${{ needs.check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache save key includes tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ steps.source-sha.outputs.source-sha }}-${{ inputs.component || '\''root'\'' }}-${{ steps.release-check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache restore key includes source, component, and tooling identity"
+assert_contains 'release-last-failed-${{ github.ref_name }}-${{ needs.check.outputs.source-sha }}-${{ inputs.component || '\''root'\'' }}-${{ needs.check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release failure-cache save key includes source, component, and tooling identity"
 assert_not_contains 'restore-keys:' "${REUSABLE_RELEASE}" "reusable release failure cache never falls back to a stale-tooling marker via restore-keys"
 assert_contains 'persist-credentials: false' "${REUSABLE_RELEASE}" "reusable release checkout does not persist credentials"
 assert_contains 'value: ${{ jobs.release.outputs.release-version }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports the action release-version output"
 assert_contains 'value: ${{ jobs.check.outputs.tooling-identity }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports tooling-identity"
+assert_contains 'value: ${{ jobs.check.outputs.source-sha }}' "${REUSABLE_RELEASE}" "reusable release workflow exposes resolved source SHA"
+assert_contains 'value: ${{ jobs.release.outputs.released-source-sha }}' "${REUSABLE_RELEASE}" "reusable release workflow exposes released source SHA"
+assert_contains '      component:' "${REUSABLE_RELEASE}" "reusable release workflow exposes component selection"
+assert_contains '      prepared-ref:' "${REUSABLE_RELEASE}" "reusable release workflow exposes prepared source refs"
+assert_contains '      publisher-known-hosts:' "${REUSABLE_RELEASE}" "reusable release workflow exposes pinned publisher host input"
+assert_contains '      PUBLISH_SSH_KEY:' "${REUSABLE_RELEASE}" "reusable release workflow declares optional publisher key secret"
+assert_count 'component: ${{ inputs.component }}' '2' "${REUSABLE_RELEASE}" "component input reaches dry-run and release paths"
+assert_contains 'resolve-prepared-ref.sh' "${REUSABLE_RELEASE}" "prepared source refs use the canonical resolver"
+assert_contains 'source-sha: ${{ steps.source-sha.outputs.source-sha }}' "${REUSABLE_RELEASE}" "check job exports the resolved source SHA"
+assert_contains 'ref: ${{ needs.check.outputs.source-sha }}' "${REUSABLE_RELEASE}" "release job checks out the checked source SHA"
+assert_contains 'released-source-sha: ${{ steps.revalidate-source.outputs.source-sha }}' "${REUSABLE_RELEASE}" "release job exports its revalidated source SHA"
+assert_contains 'id: revalidate-source' "${REUSABLE_RELEASE}" "release job revalidates the prepared source before release"
+assert_contains 'SOURCE_TOKEN:' "${REUSABLE_RELEASE}" "prepared source resolution supports private repositories"
+assert_contains 'ssh-key: ${{ secrets.PUBLISH_SSH_KEY }}' "${REUSABLE_RELEASE}" "publisher key reaches only the real release action"
+assert_contains "ssh-require-known-hosts: 'true'" "${REUSABLE_RELEASE}" "publisher release requires strict host verification"
+assert_contains 'ssh-require-known-hosts:' "${ROOT_DIR}/action.yml" "composite action exposes strict SSH host verification"
+assert_contains 'cleanup-ssh.sh' "${ROOT_DIR}/action.yml" "composite action cleans publisher credentials"
+assert_not_contains 'SSH_AGENT_PID: ${{ env.SSH_AGENT_PID }}' "${ROOT_DIR}/action.yml" "SSH cleanup reads runtime agent state from GITHUB_ENV"
+assert_contains "inputs.component || 'root'" "${REUSABLE_RELEASE}" "failure cache preserves root compatibility while isolating components"
+assert_contains 'CACHE_PREFIX:' "${REUSABLE_RELEASE}" "failure cache cleanup receives a separate safe prefix value"
+assert_contains 'jq -r --arg prefix "${CACHE_PREFIX}"' "${REUSABLE_RELEASE}" "failure cache cleanup safely handles component paths"
+assert_contains 'TAG_SHA: ${{ steps.tag-sha.outputs.sha }}' "${REUSABLE_RELEASE}" "dispatch receives the released tag SHA"
+assert_contains 'ref: ${{ needs.release.outputs.release-tag }}' "${REUSABLE_RELEASE}" "dispatch checks out the released tag with repository credentials"
+assert_contains 'git rev-parse --verify "${TAG}^{commit}"' "${REUSABLE_RELEASE}" "dispatch resolves lightweight and annotated tags"
+assert_not_contains 'git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git"' "${REUSABLE_RELEASE}" "dispatch does not resolve private tags anonymously"
+assert_contains 'prepared-ref' "${ROOT_DIR}/scripts/release/test-resolve-prepared-ref.sh" "prepared-ref behavior has a focused test"
+
+python3 - "${REUSABLE_RELEASE}" <<'PY'
+import sys
+
+workflow = open(sys.argv[1]).read()
+action_checkout = workflow.index("path: .homeboy-action")
+resolver = workflow.index("run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh")
+source_checkout = workflow.index("ref: ${{ steps.source-sha.outputs.source-sha }}")
+if not action_checkout < resolver < source_checkout:
+    raise SystemExit("prepared resolver/action checkout ordering is unsafe")
+if "clean: false" not in workflow[source_checkout:workflow.index("# The nested action checkout", source_checkout)]:
+    raise SystemExit("consumer source checkout could remove the resolver checkout")
+print("PASS: prepared resolver remains available across consumer checkout ordering")
+PY
 
 # The canonical minimal release caller is release-gated with the workflow it
 # documents: this script runs in self-test, which gates every release.
@@ -194,6 +235,7 @@ assert_contains '  dispatch:' "${REUSABLE_RELEASE}" "reusable release workflow d
 assert_contains "needs.release.outputs.released == 'true' && inputs.dispatch-repo != '' && inputs.dry-run != true" "${REUSABLE_RELEASE}" "dispatch job is gated on a real successful release with a target and no dry-run"
 assert_contains '"repos/${DISPATCH_REPO}/dispatches"' "${REUSABLE_RELEASE}" "dispatch job posts a repository_dispatch to the target"
 assert_contains 'GITHUB_TOKEN cannot send repository_dispatch cross-repo' "${REUSABLE_RELEASE}" "dispatch job fails closed without a cross-repo-capable token"
+assert_contains 'contents:write on the target' "${REUSABLE_RELEASE}" "dispatch documentation uses contents write permission"
 assert_contains 'value: ${{ jobs.dispatch.result == '"'"'success'"'"' }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports dispatched"
 assert_contains 'component: ${{ steps.release.outputs.component }}' "${REUSABLE_RELEASE}" "release job exposes the portable component id for the payload"
 assert_contains 'dispatch-repo: example-org/example-deploy' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture sets a dispatch target"

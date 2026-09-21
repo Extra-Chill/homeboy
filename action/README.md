@@ -168,13 +168,35 @@ the caller did not grant before it schedules any jobs. The canonical minimal
 caller is maintained in
 [`fixtures/reusable-release-minimal-consumer.yml`](fixtures/reusable-release-minimal-consumer.yml).
 
-Available inputs: `dry-run`, `args`, `extension`, `extension-ref`,
+Available inputs: `dry-run`, `args`, `extension`, `extension-ref`, `component`,
+`prepared-ref`,
 `php-version`, `node-version`, `release-skip-publish`,
 `release-skip-github-release`, `release-branch`, `execution-timeout-seconds`,
-`dispatch-repo`, `dispatch-event`.
+`publisher-known-hosts`, `dispatch-repo`, `dispatch-event`.
 Workflow outputs mirror the composite action (`released`, `release-version`,
 `release-tag`, `release-bump-type`, `skipped-reason`, `tooling-identity`) so a
-post-release job can chain on the result.
+post-release job can chain on the result. The workflow also exposes
+`source-sha` and `released-source-sha` for prepared-source consumers.
+
+Publisher SSH credentials are optional. Map an existing consumer secret to the
+declared reusable-workflow secret and provide pinned host keys as a workflow
+input; the private key is loaded into an agent only for the real release and is
+removed before the action finishes:
+
+```yaml
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      publisher-known-hosts: |
+        publish.example.com ssh-ed25519 AAAA...pinned-host-key...
+    secrets:
+      PUBLISH_SSH_KEY: ${{ secrets.EXISTING_PUBLISHER_SSH_KEY }}
+```
+
+Do not use `ssh-keyscan` output for `publisher-known-hosts`. The dispatch
+payload's `sha` and `released-source-sha` identify the source repository commit;
+any publisher or mirror commit is a separate downstream identity.
 
 #### Release credentials
 
@@ -187,14 +209,26 @@ creation in the same repository. Pass `secrets: inherit` from the caller.
 #### Failed-release retry protection
 
 A failed release records its SHA in an Actions cache keyed by
-`release-last-failed-<branch>-<sha>-<tooling-identity>`. Unattended pushes of
-the same SHA with the same resolved tooling are then skipped — without this,
+`release-last-failed-<branch>-<source-sha>-<component>-<tooling-identity>`.
+Unattended pushes of the same source SHA, component, and resolved tooling are
+then skipped — without this,
 every push retriggers a doomed release in a loop. Because the key includes the
 resolved tooling identity, a fixed homeboy binary or extension revision
 produces a fresh key and a previously-blocked SHA self-heals
 (homeboy-action#257). Dispatching the caller workflow manually always
 bypasses the marker: a human dispatch is an explicit "retry this now". Pushes
 whose head commit is itself a `release:` commit skip the pipeline entirely.
+
+For dependency-preparation jobs, `prepared-ref` selects the source to release.
+The check job resolves it to an immutable SHA, requires it to equal the current
+`release-branch` tip, and checks out that same SHA for the real release. This
+validation is repeated in the real release job immediately before the action
+starts, preventing a stale prepared commit from releasing over newer branch
+state. Pass a branch such as `prepared-ref: main` when sequential monorepo jobs
+need the newest branch tip after an earlier component release commit; the
+workflow resolves that branch again and exposes `source-sha` plus
+`released-source-sha` for downstream callers. Empty `component` and
+`prepared-ref` preserve root-consumer behavior.
 
 Inside a reusable workflow `uses: ./` would resolve to the caller's checkout,
 so the workflow pins `Extra-Chill/homeboy-action` via an `action-ref` input
@@ -235,11 +269,13 @@ and reads `github.event.client_payload`:
 ```
 
 `component` is the Homeboy portable id from `homeboy.json`, not the repository
-name.
+name. The dispatch `sha` is the peeled commit SHA of the emitted tag, so it
+identifies the actual released source even when `prepared-ref` differs from the
+triggering event SHA.
 
 `GITHUB_TOKEN` cannot dispatch to another repository. The job uses
 `secrets.DISPATCH_TOKEN` when the caller provides one (a token with
-`actions: write` on the target), otherwise a `HOMEBOY_APP_*` installation
+`contents: write` on the target), otherwise a `HOMEBOY_APP_*` installation
 token scoped to exactly `dispatch-repo` — so the Homeboy App must be installed
 on the target repository. With neither, the job fails with an explicit error.
 Outputs `dispatched` and `dispatch-repo` are exported for chaining.
@@ -360,6 +396,7 @@ Use these outputs to gate downstream jobs:
 | `args` | No | | Extra arguments passed to each command |
 | `ssh-key` | No | | SSH private key for `deploy`/`fleet` operations commands. Starts an agent and loads it; if empty, SSH is assumed pre-configured. |
 | `ssh-known-hosts` | No | | Extra `known_hosts` entries for the servers those commands reach. |
+| `ssh-require-known-hosts` | No | `false` | Require pinned `ssh-known-hosts` and strict host verification; used by the reusable publisher credential handoff. |
 | `config-dir` | No | | Repo-relative Homeboy config root (`projects/`, `servers/`, `components/`, `fleets/`), exported as `HOMEBOY_CONFIG_ROOT` so operations commands can resolve checked-in targets. See [Deploy from CI](#deploy-from-ci). |
 | `rig` | No | | Bench rig pair/list passed to `homeboy bench --rig` |
 | `scenario` | No | | Bench scenario ID passed to `homeboy bench --scenario` |
