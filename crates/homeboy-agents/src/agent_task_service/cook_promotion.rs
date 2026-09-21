@@ -6977,6 +6977,7 @@ fn cook_recovery_actions_with_prefix(
         | "green_no_finalize"
         | "intentional_no_change"
         | "no_candidate"
+        | "cancelled"
         | "execution_budget_exhausted"
         | "retries_exhausted"
         | "pre_execution_failure" => false,
@@ -7079,6 +7080,7 @@ mod recovery_action_tests {
                 false,
                 vec!["status", "diagnose"],
             ),
+            ("cancelled", true, false, vec!["status", "diagnose"]),
             (
                 "pre_execution_failure",
                 true,
