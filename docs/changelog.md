@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.1] - 2026-09-21
+
+### Changed
+- establish release gate fixtures instead of sampling host state
+
+### Fixed
+- harvest committed changes behind an empty provider patch
+- reclaim squash and rebase merged task branches
+
 ## [0.383.0] - 2026-09-21
 
 ### Added
