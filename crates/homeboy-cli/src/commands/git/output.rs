@@ -1,5 +1,6 @@
 use serde::{Serialize, Serializer};
 
+use homeboy::core::git::subtree::SubtreePublicationEvidence;
 use homeboy::core::git::{
     GitOutput, GithubFindOutput, GithubIssueOutput, GithubPrFleetOutput, GithubPrOutput,
     GithubPrReadinessOutput, PatchPreservationEvidence, PrLandOutput,
@@ -20,6 +21,7 @@ pub enum GitCommandOutput {
     Fleet(GithubPrFleetOutput),
     Land(PrLandOutput),
     Patch(PatchPreservationEvidence),
+    Subtree(Vec<SubtreePublicationEvidence>),
 }
 
 impl Serialize for GitCommandOutput {
@@ -42,6 +44,7 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Fleet(output) => ("fleet", serde_json::to_value(output)),
             GitCommandOutput::Land(output) => ("land", serde_json::to_value(output)),
             GitCommandOutput::Patch(output) => ("patch", serde_json::to_value(output)),
+            GitCommandOutput::Subtree(output) => ("subtree", serde_json::to_value(output)),
         };
 
         let mut payload = payload.map_err(serde::ser::Error::custom)?;
