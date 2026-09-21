@@ -599,12 +599,27 @@ runs:
       env:
         PORTABLE_ID_VALUE: ${{ steps.read-config.outputs.portable-id }}
         COMMANDS_VALUE: ${{ steps.resolve-commands.outputs.resolved-commands }}
+        OPERATIONS_COMMANDS_VALUE: ${{ steps.resolve-commands.outputs.operations-commands }}
         PHP_VALUE: ${{ steps.detect-env.outputs.portable-php }}
         NODE_VALUE: ${{ steps.detect-env.outputs.portable-node }}
         JOB_VALUE: ${{ github.job }}
         RUNNER_OS_VALUE: ${{ runner.os }}
+        ACTION_INSTANCE_VALUE: ${{ github.action }}
       run: |
-        artifact_suffix="${PORTABLE_ID_VALUE}-${COMMANDS_VALUE}-${JOB_VALUE}-${RUNNER_OS_VALUE}"
+        # Artifact names must be unique per workflow run, so everything that
+        # can distinguish one invocation from another has to be in the suffix.
+        #
+        # `resolved-commands` alone is not enough: operations commands
+        # (deploy/fleet) are routed to `operations-commands` and leave it
+        # empty, so two operations invocations in one job — the documented
+        # "deploy then verify" shape — produced byte-identical suffixes and
+        # the second upload failed with a 409 (#483). The job reported failure
+        # even though every command in it succeeded.
+        #
+        # `github.action` is the step's generated instance id, unique per
+        # invocation within a job, so it disambiguates even when two
+        # invocations run the exact same command list.
+        artifact_suffix="${PORTABLE_ID_VALUE}-${COMMANDS_VALUE}-${OPERATIONS_COMMANDS_VALUE}-${JOB_VALUE}-${ACTION_INSTANCE_VALUE}-${RUNNER_OS_VALUE}"
         if [ -n "${PHP_VALUE}" ]; then
           artifact_suffix="${artifact_suffix}-php${PHP_VALUE}"
         fi
