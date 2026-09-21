@@ -19,6 +19,7 @@ mod primitives;
 mod primitives_query;
 pub mod release_download;
 mod remote_tracking_authority;
+pub mod subtree;
 mod transport;
 
 #[cfg(test)]

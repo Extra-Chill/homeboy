@@ -266,6 +266,41 @@ pub(super) fn execute_release_plan_step(
                 .map(Some)
             }
         }
+        "git.subtree.publish" => {
+            let publications = step.inputs.get("publications").cloned().ok_or_else(|| {
+                Error::internal_unexpected("git.subtree.publish missing publications")
+            })?;
+            let publications: Vec<homeboy_core::component::SubtreePublicationConfig> =
+                serde_json::from_value(publications).map_err(|error| {
+                    Error::validation_invalid_argument("subtree", error.to_string(), None, None)
+                })?;
+            let tag = context.state.tag.as_deref().ok_or_else(|| {
+                Error::internal_unexpected("git.subtree.publish requires the resolved release tag")
+            })?;
+            let preview = step
+                .inputs
+                .get("preview")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(context.options.dry_run);
+            let mut evidence = Vec::new();
+            for publication in publications {
+                evidence.push(homeboy_core::git::subtree::publish_subtree(
+                    Path::new(&context.component.local_path),
+                    &publication,
+                    &format!("refs/tags/{tag}"),
+                    Some(tag),
+                    preview,
+                )?);
+            }
+            Ok(Some(executor::step_success(
+                "git.subtree.publish",
+                "git.subtree.publish",
+                Some(serde_json::to_value(evidence).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some("subtree evidence".to_string()))
+                })?),
+                Vec::new(),
+            )))
+        }
         "github.release_pr" => executor::run_release_pr(step, context.component).map(Some),
         "github.release" => Ok(Some(
             executor::run_github_release(

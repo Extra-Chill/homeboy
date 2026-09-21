@@ -263,6 +263,26 @@ pub struct ComponentReleaseConfig {
     /// Per-ZIP source-to-archive coverage declarations for transformed packages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_coverage: Vec<PackageCoverageConfig>,
+    /// Git subtree split publications performed as part of a release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtree: Vec<SubtreePublicationConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubtreePublicationConfig {
+    /// Repository-relative source directory to split.
+    pub prefix: String,
+    /// Destination repository URL or configured remote name.
+    pub remote: String,
+    /// Destination branch, without the `refs/heads/` prefix.
+    pub branch: String,
+    /// Publish the exact release tag to the destination repository.
+    #[serde(default = "default_true")]
+    pub tag: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl ComponentReleaseConfig {
