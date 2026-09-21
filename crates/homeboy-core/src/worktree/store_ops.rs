@@ -2597,14 +2597,24 @@ fn commits_patch_equivalent_in_target_until(
         .all(|line| line.starts_with('-')))
 }
 
-/// Squash-merge fallback for `branch_content_merged_until`: builds a
-/// synthetic commit whose tree is `branch_ref`'s tip tree but whose sole
-/// parent is the merge-base of `branch_ref` and `target_ref`, so its
-/// patch-id is exactly the aggregate diff `branch_ref` introduces — the same
-/// shape as the single rewritten commit a GitHub squash merge writes onto
-/// the target. Reusing the per-commit patch-id probe on that one synthetic
-/// commit then detects a squash merge the same way a rebase merge is
-/// detected, regardless of how many commits the original branch had.
+/// Squash-merge fallback for `branch_content_merged_until`: every path the
+/// branch touched since its merge-base already has identical content in the
+/// target.
+///
+/// A squash merge collapses many commits into one rewritten commit, so no
+/// individual commit's patch-id lines up and the per-commit probe above
+/// cannot see it. Comparing content per path recognizes that without
+/// depending on commit shape at all.
+///
+/// This is deliberately read-only. An earlier form built a synthetic commit
+/// with `git commit-tree` so the aggregate diff could be patch-id compared,
+/// but that writes a commit object into the repository being inspected.
+/// Worktree inventory and cleanup must not mutate the object database of a
+/// checkout they are only reporting on.
+///
+/// Conservative by construction: if the target later changed one of those
+/// paths again, the contents differ and containment is not claimed, so the
+/// worktree is retained rather than reclaimed on a weaker signal.
 fn squash_diff_in_target_until(
     path: &Path,
     branch_ref: &str,
@@ -2621,34 +2631,24 @@ fn squash_diff_in_target_until(
     if merge_base.is_empty() {
         return Ok(false);
     }
-    let tree = run_inventory_git_until(
+    let changed = run_inventory_git_until(
         path,
-        &["rev-parse", &format!("{branch_ref}^{{tree}}")],
-        "git rev-parse branch tree",
+        &["diff", "--name-only", merge_base, branch_ref],
+        "git diff branch paths",
         deadline,
     )?;
-    let tree = tree.trim();
-    if tree.is_empty() {
+    let changed: Vec<&str> = changed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if changed.is_empty() {
         return Ok(false);
     }
-    let synthetic = run_inventory_git_until(
-        path,
-        &[
-            "commit-tree",
-            tree,
-            "-p",
-            merge_base,
-            "-m",
-            "homeboy worktree squash-merge containment probe",
-        ],
-        "git commit-tree squash probe",
-        deadline,
-    )?;
-    let synthetic = synthetic.trim();
-    if synthetic.is_empty() {
-        return Ok(false);
-    }
-    commits_patch_equivalent_in_target_until(path, synthetic, target_ref, deadline)
+
+    let mut args = vec!["diff", "--quiet", branch_ref, target_ref, "--"];
+    args.extend(changed.iter().copied());
+    Ok(run_inventory_git_until(path, &args, "git diff branch against target", deadline).is_ok())
 }
 
 pub(super) fn canonical_existing_path(path: &str) -> Result<PathBuf> {
