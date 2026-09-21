@@ -249,6 +249,37 @@ enum GitCommand {
         #[arg(long, value_name = "PATH")]
         path: Option<String>,
     },
+    /// Publish configured Git subtrees from an exact source ref.
+    ///
+    /// Defaults to preview. Pass `--apply` to mutate the destination; pass
+    /// `--branch-only` for dev-trunk synchronization without tag publication.
+    Subtree {
+        /// Component ID to resolve from the portable component manifest.
+        component_id: String,
+
+        /// Exact source ref to split, such as `origin/main` or `refs/tags/v1.2.3`.
+        source_ref: String,
+
+        /// Apply the publication. Without this flag the command is preview-only.
+        #[arg(long, conflicts_with = "preview")]
+        apply: bool,
+
+        /// Explicitly request preview mode.
+        #[arg(long)]
+        preview: bool,
+
+        /// Publish destination branches only, ignoring configured tag publication.
+        #[arg(long)]
+        branch_only: bool,
+
+        /// Release version used by configured destination tag templates.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+
+        /// Workspace path to operate on directly, including a nested component path.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+    },
     /// Manage GitHub issues for a component
     Issue(IssueArgs),
     /// Manage GitHub pull requests for a component
@@ -456,6 +487,74 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
             )?;
             let exit_code = output.exit_code;
             Ok((GitCommandOutput::Single(output), exit_code))
+        }
+        GitCommand::Subtree {
+            component_id,
+            source_ref,
+            apply,
+            preview,
+            branch_only,
+            version,
+            path,
+        } => {
+            if apply && preview {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "preview",
+                    "Choose either --apply or --preview, not both",
+                    None,
+                    None,
+                ));
+            }
+            let component = homeboy::core::component::resolve_effective(
+                Some(&component_id),
+                path.as_deref(),
+                None,
+            )?;
+            if component.release.subtree.is_empty() {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "subtree",
+                    "The resolved component has no release.subtree publications",
+                    None,
+                    Some(vec![
+                        "Declare release.subtree in homeboy.json before running `homeboy git subtree`.".to_string(),
+                    ]),
+                ));
+            }
+            let publications = component
+                .release
+                .subtree
+                .iter()
+                .cloned()
+                .map(|mut publication| {
+                    if branch_only {
+                        publication.tag = false;
+                    }
+                    publication
+                })
+                .collect::<Vec<_>>();
+            if !branch_only
+                && publications.iter().any(|publication| publication.tag)
+                && version.is_none()
+            {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "version",
+                    "A release version is required when configured subtree tags are enabled; use --branch-only for trunk synchronization",
+                    None,
+                    None,
+                ));
+            }
+            let checkout = path.as_deref().unwrap_or(&component.local_path);
+            let mut evidence = Vec::with_capacity(publications.len());
+            for publication in &publications {
+                evidence.push(homeboy::core::git::subtree::publish_subtree(
+                    std::path::Path::new(checkout),
+                    publication,
+                    &source_ref,
+                    version.as_deref(),
+                    !apply || preview,
+                )?);
+            }
+            Ok((GitCommandOutput::Subtree(evidence), 0))
         }
         GitCommand::Rebase {
             component_id,
