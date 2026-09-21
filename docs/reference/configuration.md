@@ -33,7 +33,7 @@ the higher-level system model and core/extension boundary, see
 - `triage` — Triage priority-label configuration.
 - `agent_task` — Default backend, secret sources, provider rotation policy, and optional independently signed acceptance verification for agent-task dispatch. `acceptance_verifier` uses controller-owned `trust: { kind: hmac_sha256, key_id, key_env }`; Homeboy removes `key_env` from the verifier subprocess, verifies its base64 HMAC-SHA-256 over the canonical verdict binding, and stores the signature plus key ID with the durable run record.
 - `notifications` — Notification delivery policy for route-less completed operations.
-- `github_hosts` — Host-scoped environment for `gh` subprocesses, keyed by GitHub hostname. Component-level `github.hosts` entries override these global defaults.
+- `github_hosts` — Host-scoped environment for `gh` and remote-capable Git subprocesses, keyed by hostname. Component-level `github.hosts` entries override these global defaults. Git applies matching host proxy/env only to the child process so stored remotes and persistent Git config stay unchanged.
 - `settings` — Generic extension and executor settings, addressed through `/settings/...`.
 - `release_gate` — Routing safety policy for release-gate hot commands.
 - `artifact_root` — Optional directory where persisted run artifacts are copied. Override per command with `homeboy --artifact-root <dir>` or per process with `HOMEBOY_ARTIFACT_ROOT`.
@@ -407,3 +407,20 @@ glob.
 - `requires`
 - `extra`
 - `extension_path`
+# Git transport policy isolation
+
+Git child processes select host policy from the operation's remote URL. Named
+remotes use Git's URL resolution, including push URLs for pushes. Worktree
+hydration uses configured promisor remotes rather than assuming `origin`.
+Process-wide proxy and helper policy is applied only when the resolved targets
+share one hostname; ambiguous multi-host operations receive no automatic host
+policy. Stored remote URLs, repository identity, and persistent Git configuration
+are not rewritten.
+
+Host environment precedence is global host configuration, then component host
+configuration, then explicit child environment; inherited environment remains the
+fallback. `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, and `GIT_CONFIG_VALUE_*` are one
+structured layer: supplying any of them replaces the lower layer's whole slot
+set. A layer without a count disables those slots; a count with missing slots
+is left for Git to reject rather than borrowing another policy's values.
+Credential values remain owned by the configured credential helper.

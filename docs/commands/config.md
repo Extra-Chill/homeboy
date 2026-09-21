@@ -172,12 +172,14 @@ Precedence is CLI flag, then environment variable, then global config, then the 
 
 ### GitHub Hosts
 
-Controls environment variables Homeboy adds to `gh` subprocesses for repositories on a specific GitHub host.
+Controls environment variables Homeboy adds to `gh` and remote-capable Git subprocesses for repositories on a specific host.
 
-- `github_hosts.<hostname>.env`: Environment variables applied to `gh` when the component remote host matches `<hostname>`.
+- `github_hosts.<hostname>.env`: Environment variables applied when the component remote host matches `<hostname>`. Operators can select HTTPS rewrite, proxy, and credential-helper settings here (for example `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`). Credentials stay helper-owned and are not copied into command diagnostics.
 - `github_hosts.<hostname>.proxy`: Convenience value for `HTTPS_PROXY`.
 - Component-owned `github.hosts.<hostname>` config overrides global `github_hosts.<hostname>` values.
-- `GH_HOST` is derived from the repository host and is not accepted from config.
+- Matching is host-scoped: unrelated remotes keep their default transport.
+- Git receives these values as process environment for fetch, push, pull, ls-remote, and `worktree add` (which may lazily fetch missing objects in a partial clone). Persistent Git config and stored remote URLs are not mutated.
+- `GH_HOST` is derived from the repository host for `gh` and is not accepted from config.
 
 ### Install Methods
 

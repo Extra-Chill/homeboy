@@ -19,6 +19,7 @@ mod primitives;
 mod primitives_query;
 pub mod release_download;
 mod remote_tracking_authority;
+mod transport;
 
 #[cfg(test)]
 mod operation_tests;
@@ -108,6 +109,10 @@ pub use primitives_query::{
     status_porcelain_scoped, toplevel, BoundedGitRead, DEFAULT_GIT_READ_PROBE_TIMEOUT,
 };
 pub use remote_tracking_authority::with_remote_tracking_authority_until;
+pub use transport::{
+    git_transport_env, git_transport_env_for_command, git_transport_env_for_remote,
+    git_transport_env_for_repo,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -115,7 +120,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn execute_git(path: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
-    Command::new("git").args(args).current_dir(path).output()
+    let mut command = Command::new("git");
+    command.args(args).current_dir(path);
+    transport::apply_configured_transport(&mut command, Path::new(path), args, &[]);
+    command.output()
 }
 
 /// Well-known bot identity for CI commits.
@@ -320,21 +328,7 @@ fn git_config(path: &str, args: &[&str]) -> crate::error::Result<String> {
 }
 
 fn remote_host(remote: &str) -> Option<String> {
-    let authority = remote
-        .trim()
-        .strip_prefix("https://")
-        .or_else(|| remote.trim().strip_prefix("http://"))
-        .or_else(|| remote.trim().strip_prefix("ssh://"))
-        .or_else(|| remote.trim().split_once('@').map(|(_, value)| value))?;
-    let host = authority
-        .split('@')
-        .next_back()?
-        .split('/')
-        .next()?
-        .split(':')
-        .next()?
-        .trim();
-    (!host.is_empty()).then(|| host.to_string())
+    transport::remote_host(remote)
 }
 
 fn identity_error(message: &str, details: serde_json::Value) -> crate::error::Error {

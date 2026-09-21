@@ -539,6 +539,16 @@ fn create_with_store_unlocked(
         ..TargetSpec::default()
     })?;
     let source_checkout = source_checkout_for_worktree(&target)?;
+    let git_transport = git::git_transport_env_for_command(
+        &source_checkout,
+        &["fetch", "origin"],
+        &target.component.github,
+    );
+    let hydration_transport = git::git_transport_env_for_command(
+        &source_checkout,
+        &["worktree", "add"],
+        &target.component.github,
+    );
 
     let parent = source_checkout.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -578,7 +588,7 @@ fn create_with_store_unlocked(
         .unwrap_or("HEAD");
     let handoff_observation = options
         .require_handoff_freshness
-        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref))
+        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref, &git_transport))
         .transpose()?;
     if worktree_path.exists() {
         let record = existing.ok_or_else(|| {
@@ -646,7 +656,7 @@ fn create_with_store_unlocked(
         }
         let previous = create_evidence(&record, "missing".to_string())?;
         let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
-        git::run_git(
+        git::run_git_with_env(
             &source_checkout,
             &[
                 "worktree",
@@ -655,6 +665,7 @@ fn create_with_store_unlocked(
                 &options.branch,
             ],
             "git worktree add restore",
+            &hydration_transport,
         )?;
         ownership::normalize_created_path(
             &worktree_path,
@@ -682,7 +693,7 @@ fn create_with_store_unlocked(
         &source_checkout,
         &options.from.unwrap_or_else(|| "HEAD".to_string()),
     )?;
-    git::run_git(
+    git::run_git_with_env(
         &source_checkout,
         &[
             "worktree",
@@ -693,6 +704,7 @@ fn create_with_store_unlocked(
             &base_ref,
         ],
         "git worktree add",
+        &hydration_transport,
     )?;
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
     pin_worktree_identity(&worktree_path)?;
@@ -736,20 +748,24 @@ struct PendingHandoffFreshness {
     remote_default_sha: String,
 }
 
-fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
+fn prepare_handoff_freshness(
+    source: &Path,
+    base_ref: &str,
+    git_transport: &[(String, String)],
+) -> Result<PendingHandoffFreshness> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     git::fetch_remote_tracking_refs_until(
         source,
         &["fetch", "origin"],
         "git fetch origin for worktree handoff",
-        &[],
+        git_transport,
         std::time::Instant::now() + TIMEOUT,
     )?;
     let advertised = git::run_git_with_env_timeout(
         source,
         &["ls-remote", "--symref", "origin", "HEAD"],
         "git ls-remote origin HEAD for worktree handoff",
-        &[],
+        git_transport,
         TIMEOUT,
     )?;
     let remote_head = advertised.lines().find_map(|line| {
