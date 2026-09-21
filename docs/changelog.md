@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.2] - 2026-09-21
+
+### Fixed
+- route source changes to the tests that own them
+
 ## [0.383.1] - 2026-09-21
 
 ### Changed
