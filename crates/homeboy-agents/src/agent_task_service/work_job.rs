@@ -90,12 +90,12 @@ struct WorkJobResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkJobInvocation {
+pub(crate) enum WorkJobInvocation {
     Execute,
     Resume,
 }
 
-pub enum WorkJobStep {
+pub(crate) enum WorkJobStep {
     Continue {
         checkpoint: Value,
         progress: Value,
@@ -104,11 +104,8 @@ pub enum WorkJobStep {
     Complete(Value),
 }
 
-/// Domain behavior behind the one generic orchestration lifecycle driver.
-///
-/// Implementations receive only [`WorkJobHandle`], so they can publish domain
-/// checkpoints and progress but cannot mutate generic controller-job state.
-pub trait WorkJobHandler: Send + Sync {
+/// Built-in orchestration adapter behind the generic lifecycle driver.
+pub(crate) trait WorkJobHandler: Send + Sync {
     fn work_type(&self) -> &'static str;
     fn version(&self) -> u32;
     fn public_request(&self, request: &Value) -> Result<Value>;
@@ -117,14 +114,15 @@ pub trait WorkJobHandler: Send + Sync {
     fn validate_secret_references(&self, request: &Value) -> Result<()>;
     fn prepare(&self, request: Value) -> Result<Value>;
     fn initial_progress(&self, checkpoint: &Value) -> Result<Value>;
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>>;
     fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep>;
-    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep>;
+    fn cancelled(&self, checkpoint: Value) -> Result<Value>;
     fn cancel(&self, checkpoint: &Value) -> Result<()>;
 }
 
-/// The bounded event surface available to domain handlers.
+/// Internal projection surface used by the shared driver.
 #[derive(Clone)]
-pub struct WorkJobHandle {
+pub(crate) struct WorkJobHandle {
     inner: ControllerJobHandle,
     work_type: &'static str,
     work_version: u32,
@@ -139,15 +137,11 @@ impl WorkJobHandle {
         }
     }
 
-    pub fn is_cancelled(&self) -> bool {
+    fn is_cancelled(&self) -> bool {
         self.inner.is_cancelled()
     }
 
-    pub fn job_id(&self) -> String {
-        self.inner.job_id()
-    }
-
-    pub fn progress(&self, progress: Value) -> Result<()> {
+    fn progress(&self, progress: Value) -> Result<()> {
         self.inner.progress(to_value(WorkJobProgress {
             schema: WORK_JOB_PROGRESS_SCHEMA.to_string(),
             work_type: self.work_type.to_string(),
@@ -156,7 +150,7 @@ impl WorkJobHandle {
         })?)
     }
 
-    pub fn checkpoint(&self, checkpoint: Value) -> Result<()> {
+    fn checkpoint(&self, checkpoint: Value) -> Result<()> {
         self.inner.checkpoint(to_value(WorkJobCheckpoint {
             schema: WORK_JOB_CHECKPOINT_SCHEMA.to_string(),
             work_type: self.work_type.to_string(),
@@ -174,7 +168,7 @@ fn handlers() -> &'static WorkJobHandlers {
     HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn register_work_job_handler(handler: Arc<dyn WorkJobHandler>) -> Result<()> {
+pub(crate) fn register_work_job_handler(handler: Arc<dyn WorkJobHandler>) -> Result<()> {
     let key = (handler.work_type().to_string(), handler.version());
     let mut registry = handlers().lock().expect("work job handler lock");
     if registry.contains_key(&key) {
@@ -284,31 +278,32 @@ impl WorkJobDriver {
     ) -> Result<Value> {
         let checkpoint = parse_checkpoint(prepared)?;
         let handler = handler(&checkpoint.work_type, checkpoint.work_version)?;
+        if let Some(result) = handler.terminal_result(&checkpoint.checkpoint)? {
+            return to_value(WorkJobResult {
+                schema: WORK_JOB_RESULT_SCHEMA.to_string(),
+                work_type: handler.work_type().to_string(),
+                work_version: handler.version(),
+                result,
+            });
+        }
         let work_handle = WorkJobHandle::versioned(handle, handler.as_ref());
         let mut checkpoint = checkpoint.checkpoint;
+        let mut progress = handler.initial_progress(&checkpoint)?;
         work_handle.checkpoint(checkpoint.clone())?;
-        work_handle.progress(handler.initial_progress(&checkpoint)?)?;
+        work_handle.progress(progress.clone())?;
         loop {
             if work_handle.is_cancelled() {
                 handler.cancel(&checkpoint)?;
-                return match handler.cancelled(checkpoint)? {
-                    WorkJobStep::Complete(result) => {
-                        work_handle.progress(result.clone())?;
-                        to_value(WorkJobResult {
-                            schema: WORK_JOB_RESULT_SCHEMA.to_string(),
-                            work_type: handler.work_type().to_string(),
-                            work_version: handler.version(),
-                            result,
-                        })
-                    }
-                    WorkJobStep::Continue { .. } => {
-                        Err(invalid_work_job("cancelled work did not terminalize"))
-                    }
-                };
+                let result = handler.cancelled(checkpoint)?;
+                return to_value(WorkJobResult {
+                    schema: WORK_JOB_RESULT_SCHEMA.to_string(),
+                    work_type: handler.work_type().to_string(),
+                    work_version: handler.version(),
+                    result,
+                });
             }
-            match handler.advance(checkpoint, invocation)? {
+            match handler.advance(checkpoint.clone(), invocation)? {
                 WorkJobStep::Complete(result) => {
-                    work_handle.progress(result.clone())?;
                     return to_value(WorkJobResult {
                         schema: WORK_JOB_RESULT_SCHEMA.to_string(),
                         work_type: handler.work_type().to_string(),
@@ -318,12 +313,17 @@ impl WorkJobDriver {
                 }
                 WorkJobStep::Continue {
                     checkpoint: next,
-                    progress,
+                    progress: next_progress,
                     wait,
                 } => {
-                    work_handle.checkpoint(next.clone())?;
-                    work_handle.progress(progress)?;
+                    if next != checkpoint {
+                        work_handle.checkpoint(next.clone())?;
+                    }
+                    if next_progress != progress {
+                        work_handle.progress(next_progress.clone())?;
+                    }
                     checkpoint = next;
+                    progress = next_progress;
                     std::thread::sleep(wait);
                 }
             }
@@ -339,7 +339,7 @@ pub fn register_work_job_driver() {
     });
 }
 
-pub fn work_job_submission(
+pub(crate) fn work_job_submission(
     handler: &dyn WorkJobHandler,
     idempotency_key: String,
     request: Value,

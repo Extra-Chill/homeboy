@@ -381,6 +381,14 @@ impl WorkJobHandler for CookBatchWorkHandler {
         Ok(job.progress_projection())
     }
 
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>> {
+        let job = AgentTaskCookBatchJob::parse(checkpoint.clone())?;
+        job.phase
+            .eq(&WorkJobPhase::Completed)
+            .then(|| job.completed_result())
+            .transpose()
+    }
+
     fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskCookBatchJob::parse(checkpoint)?;
         if job.phase == WorkJobPhase::Completed {
@@ -389,9 +397,9 @@ impl WorkJobHandler for CookBatchWorkHandler {
         self.observe(&mut job, invocation)
     }
 
-    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep> {
+    fn cancelled(&self, checkpoint: Value) -> Result<Value> {
         let mut job = AgentTaskCookBatchJob::parse(checkpoint)?;
-        Ok(WorkJobStep::Complete(job.observe_terminal()?))
+        job.observe_terminal()
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -772,16 +780,31 @@ mod tests {
         assert_eq!(first["children_terminal"], 2);
     }
 
-    /// A checkpoint whose coordinator is gone resolves to observation, never to
-    /// a re-execution.
     #[test]
-    fn resume_observes_rather_than_restarts_a_dead_coordinator() {
-        let mut job =
-            AgentTaskCookBatchJob::parse(request_of("fanout-dead", 4242)).expect("parse request");
-        job.phase = WorkJobPhase::Supervising;
-        // u32::MAX is not a live pid, and the recorded start identity cannot
-        // match, so liveness is provably false.
-        job.request.child_pid = u32::MAX;
+    fn resume_observes_a_dead_coordinator_through_the_driver() {
+        with_isolated_home(|_| {
+            let batch_id = "fanout-dead";
+            persist_batch(batch_id, &["a"]);
+            let request = work_request_of(batch_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare batch job");
+
+            let result = driver
+                .resume(prepared, harness.handle())
+                .expect("observe dead coordinator without redispatch");
+
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["terminal_state"], "partial_failure");
+            assert_eq!(
+                harness
+                    .checkpoint()
+                    .expect("read checkpoint")
+                    .expect("checkpoint persisted")["checkpoint"]["phase"],
+                "supervising"
+            );
+        });
     }
 
     #[test]

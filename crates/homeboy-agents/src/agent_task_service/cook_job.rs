@@ -309,6 +309,14 @@ impl WorkJobHandler for CookWorkHandler {
         Ok(AgentTaskCookJob::parse(checkpoint.clone())?.progress_projection())
     }
 
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>> {
+        let job = AgentTaskCookJob::parse(checkpoint.clone())?;
+        job.phase
+            .eq(&WorkJobPhase::Completed)
+            .then(|| job.completed_result())
+            .transpose()
+    }
+
     fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskCookJob::parse(checkpoint)?;
         if job.phase == WorkJobPhase::Completed {
@@ -317,9 +325,9 @@ impl WorkJobHandler for CookWorkHandler {
         self.observe(&mut job, invocation)
     }
 
-    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep> {
+    fn cancelled(&self, checkpoint: Value) -> Result<Value> {
         let mut job = AgentTaskCookJob::parse(checkpoint)?;
-        Ok(WorkJobStep::Complete(job.observe_terminal(None)?))
+        job.observe_terminal(None)
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -1049,16 +1057,35 @@ mod tests {
         assert_eq!(first["run_id"], "cook-complete-attempt-1");
     }
 
-    /// A checkpoint whose child is gone resolves to observation, never to a
-    /// re-execution. PID 0 is never live, so this is deterministic.
     #[test]
-    fn resume_observes_rather_than_restarts_a_dead_child() {
-        let mut job =
-            AgentTaskCookJob::parse(request_of("cook-dead-child", 4242)).expect("parse request");
-        job.phase = WorkJobPhase::Supervising;
-        // u32::MAX is not a live pid, and the recorded start identity cannot
-        // match, so liveness is provably false.
-        job.request.child_pid = u32::MAX;
+    fn resume_observes_a_dead_child_through_the_driver() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-dead-child";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            let request = work_request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare cook job");
+
+            let result = driver
+                .resume(prepared, harness.handle())
+                .expect("observe dead child without redispatch");
+
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["terminal_state"], "failed");
+            assert_eq!(
+                harness
+                    .checkpoint()
+                    .expect("read checkpoint")
+                    .expect("checkpoint persisted")["checkpoint"]["phase"],
+                "supervising"
+            );
+        });
     }
 
     #[test]

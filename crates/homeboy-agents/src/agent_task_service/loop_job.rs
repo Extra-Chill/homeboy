@@ -168,6 +168,14 @@ impl WorkJobHandler for LoopWorkHandler {
         Ok(AgentTaskLoopJob::parse(checkpoint.clone())?.result())
     }
 
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>> {
+        let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
+        job.phase
+            .eq(&WorkJobPhase::Completed)
+            .then(|| Ok(job.result()))
+            .transpose()
+    }
+
     fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskLoopJob::parse(checkpoint)?;
         if job.phase == WorkJobPhase::Completed {
@@ -176,12 +184,9 @@ impl WorkJobHandler for LoopWorkHandler {
         self.observe(&mut job, invocation)
     }
 
-    fn cancelled(&self, checkpoint: Value) -> Result<WorkJobStep> {
+    fn cancelled(&self, checkpoint: Value) -> Result<Value> {
         let mut job = AgentTaskLoopJob::parse(checkpoint)?;
-        Ok(WorkJobStep::Complete(terminalize_interrupted(
-            &mut job,
-            AgentTaskLoopControllerState::Abandoned,
-        )?))
+        terminalize_interrupted(&mut job, AgentTaskLoopControllerState::Abandoned)
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -380,6 +385,9 @@ mod tests {
                 .expect("construct work harness");
             let mut checkpoint = driver.prepare(request).expect("prepare loop work");
             checkpoint["checkpoint"]["phase"] = json!("completed");
+            harness
+                .request_cancellation("cancel racing terminal replay")
+                .expect("request cancellation");
 
             let first = driver
                 .resume(checkpoint.clone(), harness.handle())
@@ -390,6 +398,71 @@ mod tests {
 
             assert_eq!(first, second);
             assert_eq!(first["result"]["controller_state"], "completed");
+            assert_eq!(
+                agent_task_loop_controller::load_controller("loop-complete")
+                    .expect("read terminal controller")
+                    .state,
+                AgentTaskLoopControllerState::Completed
+            );
+        });
+    }
+
+    #[test]
+    fn idle_ticks_do_not_repeat_checkpoint_or_progress_writes() {
+        with_isolated_home(|_| {
+            agent_task_loop_controller::create_controller("loop-idle", "repair", "v1")
+                .expect("create controller");
+            let child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let request = loop_work_job_submission("loop-idle", child.id(), &identity)
+                .expect("build submission")["request"]
+                .clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = Arc::new(
+                ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                    .expect("construct work harness"),
+            );
+            let prepared = driver.prepare(request).expect("prepare loop work");
+            let thread_harness = Arc::clone(&harness);
+            let thread_driver = Arc::clone(&driver);
+            let execution = std::thread::spawn(move || {
+                thread_driver
+                    .execute(prepared, thread_harness.handle())
+                    .expect("execute idle loop");
+            });
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while harness.events().expect("read events").len() < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "initial events missing"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let initial_events = harness.events().expect("read initial events").len();
+            std::thread::sleep(Duration::from_millis(650));
+            assert_eq!(
+                harness.events().expect("read idle events").len(),
+                initial_events
+            );
+
+            harness
+                .request_cancellation("stop idle loop")
+                .expect("request cancellation");
+            driver
+                .cancel(
+                    &harness
+                        .checkpoint()
+                        .expect("read checkpoint")
+                        .expect("checkpoint"),
+                )
+                .expect("cancel coordinator");
+            execution.join().expect("join loop execution");
         });
     }
 
