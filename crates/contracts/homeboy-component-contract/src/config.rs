@@ -279,6 +279,36 @@ pub struct SubtreePublicationConfig {
     /// Publish the exact release tag to the destination repository.
     #[serde(default = "default_true")]
     pub tag: bool,
+    /// Destination tag template. `{version}` is replaced with the release version.
+    /// Defaults to `v{version}` when tag publication is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_template: Option<String>,
+    /// How an existing destination branch may change.
+    #[serde(default)]
+    pub branch_policy: SubtreeBranchPolicy,
+}
+
+impl Default for SubtreePublicationConfig {
+    fn default() -> Self {
+        Self {
+            prefix: String::new(),
+            remote: String::new(),
+            branch: String::new(),
+            tag: true,
+            tag_template: None,
+            branch_policy: SubtreeBranchPolicy::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubtreeBranchPolicy {
+    /// Update only when the split commit is a fast-forward of the destination.
+    #[default]
+    FastForward,
+    /// Never update the destination branch; publish the release tag only.
+    TagOnly,
 }
 
 fn default_true() -> bool {

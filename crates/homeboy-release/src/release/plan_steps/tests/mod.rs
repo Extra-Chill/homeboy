@@ -122,6 +122,7 @@ fn subtree_publication_is_ordered_after_git_push_and_skipped_with_skip_publish()
         remote: "https://example.test/repo.git".to_string(),
         branch: "main".to_string(),
         tag: true,
+        ..Default::default()
     });
     let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
     let mut warnings = Vec::new();

@@ -288,7 +288,7 @@ pub(super) fn execute_release_plan_step(
                     Path::new(&context.component.local_path),
                     &publication,
                     &format!("refs/tags/{tag}"),
-                    Some(tag),
+                    context.state.version.as_deref(),
                     preview,
                 )?);
             }
@@ -1109,7 +1109,9 @@ mod tests {
     use crate::release::types::{
         ReleaseOptions, ReleasePipelineOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
-    use homeboy_core::component::{Component, ComponentScriptsConfig, VersionTarget};
+    use homeboy_core::component::{
+        Component, ComponentScriptsConfig, SubtreePublicationConfig, VersionTarget,
+    };
     use homeboy_core::deps::{DependencyCommandResult, DependencyInstallResult};
     use homeboy_core::plan::PlanStep;
     use homeboy_extension_contract::ExtensionManifest;
@@ -1207,6 +1209,82 @@ mod tests {
                 "disabled publication must not invoke its action"
             );
             assert!(!context.publish_failed);
+        });
+    }
+
+    #[test]
+    fn subtree_release_step_dispatches_from_nested_component_checkout() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("repo");
+            let remote = tempfile::tempdir().expect("remote");
+            run_in(remote.path(), &["git", "init", "--bare", "-q"]);
+            run_in(root.path(), &["git", "init", "-q", "-b", "main"]);
+            configure_git_user(root.path());
+            std::fs::create_dir_all(root.path().join("packages/example")).expect("component");
+            std::fs::create_dir_all(root.path().join("packages/other")).expect("sibling");
+            std::fs::write(root.path().join("packages/example/file"), "included")
+                .expect("component file");
+            std::fs::write(root.path().join("packages/other/file"), "excluded")
+                .expect("sibling file");
+            run_in(root.path(), &["git", "add", "."]);
+            run_in(root.path(), &["git", "commit", "-qm", "release"]);
+            run_in(root.path(), &["git", "tag", "source-v1"]);
+
+            let mut component = Component {
+                id: "fixture".to_string(),
+                local_path: root
+                    .path()
+                    .join("packages/example")
+                    .to_string_lossy()
+                    .to_string(),
+                ..Component::default()
+            };
+            component.release.subtree.push(SubtreePublicationConfig {
+                prefix: "packages/example".to_string(),
+                remote: remote.path().display().to_string(),
+                branch: "main".to_string(),
+                tag: false,
+                ..Default::default()
+            });
+            let options = ReleaseOptions::default();
+            let extensions = Vec::new();
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                roots: test_roots(),
+                state: ReleaseState {
+                    tag: Some("source-v1".to_string()),
+                    version: Some("1".to_string()),
+                    ..Default::default()
+                },
+                publish_failed: false,
+            };
+            let step = PlanStep::ready_labeled(
+                "git.subtree.publish",
+                "git.subtree.publish",
+                "Publish configured Git subtrees",
+                Vec::new(),
+                homeboy_core::plan::PlanValues::new()
+                    .json("publications", &component.release.subtree)
+                    .bool("preview", false),
+            );
+
+            let result = execute_release_plan_step(&step, &mut context)
+                .expect("subtree release dispatch")
+                .expect("subtree result");
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert!(result
+                .data
+                .as_ref()
+                .and_then(|data| data[0].get("source_commit"))
+                .and_then(serde_json::Value::as_str)
+                .is_some());
+            run_in(
+                remote.path(),
+                &["git", "show-ref", "--verify", "refs/heads/main"],
+            );
         });
     }
 
