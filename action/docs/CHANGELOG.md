@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.19.1] - 2026-09-21
+
+### Fixed
+- give each invocation its own operations result file
+
 ## [2.19.0] - 2026-09-21
 
 ### Added
