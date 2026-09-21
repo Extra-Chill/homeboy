@@ -199,6 +199,11 @@ impl WorkJobHandler for LoopWorkHandler {
         {
             return Ok(());
         }
+        if controller_state_is_terminal(
+            agent_task_loop_controller::controller_status(&job.request.loop_id)?.state,
+        ) {
+            return Ok(());
+        }
         homeboy_core::process::terminate_process_tree(job.request.child_pid).map(|_| ())
     }
 }
@@ -404,6 +409,52 @@ mod tests {
                     .state,
                 AgentTaskLoopControllerState::Completed
             );
+        });
+    }
+
+    #[test]
+    fn cancellation_preserves_a_controller_that_terminalized_while_child_lives() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-cancel-racing-terminal";
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let request = loop_work_job_submission(loop_id, child.id(), &identity)
+                .expect("build submission")["request"]
+                .clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct work harness");
+            let prepared = driver.prepare(request).expect("prepare loop work");
+
+            record.state = AgentTaskLoopControllerState::Completed;
+            agent_task_loop_controller::write_controller(&record).expect("complete controller");
+            harness
+                .request_cancellation("cancel racing terminal controller")
+                .expect("request cancellation");
+
+            driver
+                .cancel(&prepared)
+                .expect("authoritative cancel recheck");
+            let result = driver
+                .resume(prepared, harness.handle())
+                .expect("preserve terminal controller outcome");
+
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["controller_state"], "completed");
+            assert!(matches!(
+                homeboy_core::process::process_identity_state(child.id(), None),
+                ProcessIdentityState::Live
+            ));
+
+            homeboy_core::process::terminate_process_tree(child.id()).expect("clean fixture child");
+            let _ = child.wait();
         });
     }
 
