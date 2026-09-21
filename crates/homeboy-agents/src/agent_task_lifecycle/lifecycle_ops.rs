@@ -461,6 +461,35 @@ pub fn submit_plan_in_store(
     )
 }
 
+/// Persist a controller-owned placeholder without waiting for runtime admission.
+///
+/// Detached launchers use this for their handoff parent: the parent is only a
+/// discoverability and cancellation anchor, not executable work. The eventual
+/// Cook attempt still goes through [`submit_plan_in_store`] and therefore retains
+/// the normal runtime admission contract.
+pub fn submit_plan_without_runtime_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = submit_plan_with_runtime_admission_in_store(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        None,
+        None,
+        None,
+        |_| Ok(Value::Null),
+    )?;
+    record
+        .metadata
+        .as_object_mut()
+        .expect("lifecycle metadata is an object")
+        .remove(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
+    lifecycle_store.write_record(&record)?;
+    Ok(record)
+}
+
 /// Persist a detached Cook's handoff parent inside an explicitly rooted store.
 ///
 /// Both admission guards read the store the parent is written into. The alias
@@ -497,7 +526,8 @@ pub fn record_detached_cook_handoff_parent_in_store(
     }
 
     let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
-    let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&cook_id))?;
+    let mut record =
+        submit_plan_without_runtime_admission_in_store(lifecycle_store, &plan, Some(&cook_id))?;
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
         "admission_state": "pre_supervisor",

@@ -2894,7 +2894,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_past_the_handoff_window_keeps_follow_commands_resolvable() {
+    fn delayed_child_is_discoverable_and_cancelled_exactly_once() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-slow-preparation";
             agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
@@ -2925,11 +2925,21 @@ mod tests {
                     .as_str(),
                 cook_id
             );
+            let first_cancel = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("pending cancel command resolves");
+            let second_cancel = agent_task_lifecycle::cancel_run(cook_id, None)
+                .expect("repeated pending cancel remains idempotent");
+            assert_eq!(first_cancel.run_id, cook_id);
+            assert_eq!(second_cancel.run_id, cook_id);
+            let cancelled = agent_task_lifecycle::exact_record(cook_id)
+                .expect("cancelled pending handoff remains discoverable");
             assert_eq!(
-                agent_task_lifecycle::cancel_run(cook_id, None)
-                    .expect("pending cancel command resolves")
-                    .run_id,
-                cook_id
+                cancelled.state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            assert_eq!(
+                cancelled.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
+                "cancelled"
             );
             child.kill().expect("stop slow preparation fixture");
             child.wait().expect("reap slow preparation fixture");
