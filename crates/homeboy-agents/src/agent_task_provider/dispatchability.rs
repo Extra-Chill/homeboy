@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    effective_provider_config, executor::effective_provider_for_request,
+    capacity_readiness::{capacity_readiness_from_probe_result, capacity_readiness_unknown},
+    effective_provider_config,
+    executor::effective_provider_for_request,
     provider_credential_readiness, resolve_provider_for_backend,
     runtime_readiness::provider_requires_live_auth_validation,
-    validate_provider_immediate_failure_patterns, AgentTaskProviderCatalog, ProviderResolution,
-    ProviderRuntimeReadinessCache,
+    validate_provider_immediate_failure_patterns, AgentTaskProviderCapacityReadiness,
+    AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
 };
 use crate::agent_task_scheduler::{
     AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
@@ -87,6 +89,12 @@ pub struct AgentTaskProviderRuntimeEvidence {
     pub cache_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_identity: Option<String>,
+    /// Per-connected-account capacity this probe observed, typed distinctly
+    /// from a generic runtime failure (#14858). Always present: a route that
+    /// was never probed carries `Unknown` with the reason it was not probed,
+    /// rather than omitting the field.
+    #[serde(default)]
+    pub capacity: AgentTaskProviderCapacityReadiness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -407,6 +415,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                                 &serde_json::to_vec(&verdict.identity).unwrap_or_default(),
                             )
                         }),
+                        capacity: capacity_readiness_from_probe_result(&verdict),
                     };
                     (
                         AgentTaskProviderDispatchabilityCheck {
@@ -430,6 +439,11 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                                 "probe_error".to_string()
                             },
                             retryable: !deadline_exhausted,
+                            capacity: capacity_readiness_unknown(if deadline_exhausted {
+                                "the provider readiness probe timed out before capacity could be observed"
+                            } else {
+                                "the provider readiness probe failed to run"
+                            }),
                             ..Default::default()
                         }),
                     )
@@ -461,6 +475,14 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         && runtime_evidence
             .as_ref()
             .is_some_and(|evidence| evidence.classification == "account");
+    // Capacity exhaustion is orthogonal to `provider_owned_auth`: a provider
+    // with perfectly valid, non-provider-owned credentials can still be out
+    // of capacity, so this check does not gate on it the way
+    // `credentials_rejected`/`account_blocked` do (#14858).
+    let capacity_exhausted = !runtime.ready
+        && runtime_evidence
+            .as_ref()
+            .is_some_and(|evidence| evidence.capacity.is_exhausted());
     let (credential_status, credential_reason) = if !credentials.dispatchable {
         (AgentTaskProviderCredentialStatus::Missing, None)
     } else if credentials_verified {
@@ -559,6 +581,12 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider-owned authentication or its runtime is revoked or unusable",
         )
+    } else if capacity_exhausted {
+        (
+            "capacity_exhausted",
+            false,
+            "the connected account has no capacity remaining right now",
+        )
     } else if probe_runtime && !runtime.ready {
         (
             "runtime_unavailable",
@@ -581,6 +609,15 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             "runtime_unavailable: {}",
             runtime.reason.as_deref().unwrap_or(reason)
         )
+    } else if state == "capacity_exhausted" {
+        let detail = runtime.reason.as_deref().unwrap_or(reason);
+        match runtime_evidence
+            .as_ref()
+            .and_then(|evidence| evidence.capacity.reset_at())
+        {
+            Some(reset_at) => format!("capacity_exhausted: {detail} (resets at {reset_at})"),
+            None => format!("capacity_exhausted: {detail}"),
+        }
     } else {
         reason.to_string()
     };
@@ -1004,6 +1041,9 @@ fn unavailable_request_dispatchability(
             remediation: remediation.map(str::to_string),
             cache_identity: None,
             provider_identity: None,
+            capacity: capacity_readiness_unknown(
+                "the provider route did not resolve, so capacity was not evaluated",
+            ),
         }),
         diagnostic_data: None,
         dispatchability: AgentTaskProviderDispatchability {
@@ -2360,5 +2400,150 @@ mod tests {
         assert!(!serde_json::to_string(&verdict)
             .expect("serialized verdict")
             .contains("fallback-account"));
+    }
+
+    /// #14858 acceptance: known capacity. A provider's readiness invocation
+    /// can report remaining/limit capacity for a route that is otherwise
+    /// ready, and that evidence is observable before dispatch through the
+    /// same shared verdict `providers --validate-readiness` renders.
+    #[test]
+    fn a_ready_route_with_known_capacity_reports_it_before_dispatch() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("readiness.js");
+        let count = root.path().join("count");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'k',identity:{},capacity:{remaining:42,limit:100,unit:'requests'}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "test",
+            None,
+            None,
+            &json!({}),
+            true,
+            &mut cache,
+        );
+
+        assert!(verdict.ready, "{verdict:?}");
+        let evidence = verdict
+            .readiness
+            .live_inference
+            .evidence
+            .as_ref()
+            .expect("live probe ran");
+        assert_eq!(
+            evidence.capacity,
+            AgentTaskProviderCapacityReadiness::Known {
+                remaining: Some(Value::from(42)),
+                limit: Some(Value::from(100)),
+                unit: Some("requests".to_string()),
+                reset_at: None,
+            }
+        );
+    }
+
+    /// #14858 acceptance: exhausted-with-reset. A `classification: "capacity"`
+    /// readiness result is a distinct typed `capacity_exhausted` state, not
+    /// the generic `runtime_unavailable` bucket every other failed probe
+    /// falls into, and its reset instant is exposed structurally rather than
+    /// only embedded in free text.
+    #[test]
+    fn an_exhausted_route_is_a_distinct_typed_state_carrying_its_reset_instant() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("readiness.js");
+        let count = root.path().join("count");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'wait for the reset window',reason:'5-hour usage limit reached',cache_key:'k',identity:{},capacity:{remaining:0,reset_at:'2026-08-27T12:37:03Z'}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "test",
+            None,
+            None,
+            &json!({}),
+            true,
+            &mut cache,
+        );
+
+        assert!(!verdict.ready);
+        assert_eq!(
+            verdict.state, "capacity_exhausted",
+            "capacity exhaustion must not collapse into the generic runtime_unavailable bucket: {verdict:?}"
+        );
+        assert!(
+            verdict.reason.contains("2026-08-27") && verdict.reason.contains("12:37:03"),
+            "the reset instant must be legible in the human-facing reason: {}",
+            verdict.reason
+        );
+        let evidence = verdict
+            .readiness
+            .live_inference
+            .evidence
+            .as_ref()
+            .expect("live probe ran");
+        assert_eq!(
+            evidence.capacity,
+            AgentTaskProviderCapacityReadiness::Exhausted {
+                reset_at: Some("2026-08-27T12:37:03+00:00".to_string()),
+                reason: "5-hour usage limit reached".to_string(),
+            }
+        );
+        assert!(evidence.capacity.is_exhausted());
+    }
+
+    /// #14858 acceptance: unknown capacity. A provider that declares a
+    /// readiness invocation but never fills in `capacity` publishes nothing —
+    /// that is reported as `Unknown` with a reason, and the route stays
+    /// exactly as dispatchable as its other checks already say (it must not
+    /// be silently treated as available, nor blocked for staying silent).
+    #[test]
+    fn a_provider_that_never_publishes_capacity_stays_dispatchable_and_reports_unknown() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("readiness.js");
+        let count = root.path().join("count");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'k',identity:{}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "test",
+            None,
+            None,
+            &json!({}),
+            true,
+            &mut cache,
+        );
+
+        assert!(
+            verdict.ready,
+            "silence about capacity must never block dispatch: {verdict:?}"
+        );
+        let evidence = verdict
+            .readiness
+            .live_inference
+            .evidence
+            .as_ref()
+            .expect("live probe ran");
+        assert_eq!(
+            evidence.capacity,
+            AgentTaskProviderCapacityReadiness::Unknown {
+                reason: "the provider's readiness invocation does not report capacity".to_string(),
+            }
+        );
     }
 }
