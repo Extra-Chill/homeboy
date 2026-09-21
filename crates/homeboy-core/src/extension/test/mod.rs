@@ -601,11 +601,39 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
                 );
                 continue;
             };
+
+            // A derived module filter must be known to match at least one
+            // test before it is used. A plain `src/**` module whose own file
+            // declares no test functions (e.g. `worktree/store_ops.rs`) most
+            // often keeps its tests in a sibling `tests.rs` mounted by the
+            // directory's owning module (`worktree::tests`, from
+            // `worktree/mod.rs`). Filtering to the source module itself would
+            // match zero tests, and the runner fails closed on "ran 0 tests".
+            // Route to the sibling test module when it is determinable, or
+            // fall back to the full suite rather than emit a filter known to
+            // match nothing. Unreadable files (already deleted, or a caller
+            // supplying paths that were never checked out) keep the prior
+            // file-name-derived routing rather than guess. (#14867)
+            let effective_module =
+                if source_file_declares_own_tests(component, test_file) == Some(false) {
+                    sibling_test_module_path(component, &routing_file, &module_path)
+                } else {
+                    Some(module_path.clone())
+                };
+
+            let Some(effective_module) = effective_module else {
+                fallback_message = Some(
+                    "Changed Rust source module declares no test functions and its owning test module is not determinable; running the full test command."
+                        .to_string(),
+                );
+                continue;
+            };
+
             candidates.insert((
                 package,
                 "lib".to_string(),
                 target,
-                Some(module_path),
+                Some(effective_module),
                 test_file.clone(),
             ));
         }
@@ -785,6 +813,117 @@ fn is_inline_test_support_file(component: &Component, test_file: &str, routing_f
 /// `drift` and both callers share it.
 fn file_declares_test_function(contents: &str) -> bool {
     drift::declares_test_function(contents)
+}
+
+/// Whether a changed Rust file's own contents declare a `#[test]` (or
+/// `#[<path>::test]`) function.
+///
+/// Returns `None` when the file cannot be read (already deleted, or a caller
+/// supplied a path that was never checked out into the working tree), so
+/// callers keep the prior file-name-derived routing rather than guess from a
+/// file they cannot inspect.
+fn source_file_declares_own_tests(component: &Component, test_file: &str) -> Option<bool> {
+    let path = component_source_path(component).join(test_file);
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|contents| file_declares_test_function(&contents))
+}
+
+/// Resolves the sibling `tests` module that owns a changed source module's
+/// tests when the module itself declares none.
+///
+/// `worktree/store_ops.rs` (module `worktree::store_ops`) has no `#[test]`
+/// functions of its own; its tests live in the sibling `worktree/tests.rs`,
+/// mounted as `worktree::tests` by the directory's owning module file
+/// (`worktree/mod.rs`, or the 2018-style `worktree.rs` sibling to the
+/// directory). A filter for `worktree::store_ops` matches zero tests, and the
+/// runner fails closed on "ran 0 tests". Route to the sibling module that
+/// actually owns the tests instead.
+///
+/// Returns `None` when no sibling test module is determinable — no
+/// `tests.rs` sibling exists, it declares no test functions itself, or
+/// neither owning module file plainly mounts it as `mod tests;` (a `#[path]`
+/// override on that name would point somewhere else) — so the caller falls
+/// back to the full suite rather than emit a filter known to match nothing.
+/// (#14867)
+fn sibling_test_module_path(
+    component: &Component,
+    routing_file: &str,
+    module_path: &str,
+) -> Option<String> {
+    let dir = routing_file.rsplit_once('/').map(|(dir, _)| dir)?;
+
+    let sibling_routing = format!("{dir}/tests.rs");
+    let sibling_contents =
+        std::fs::read_to_string(component_source_path(component).join(&sibling_routing)).ok()?;
+    if !file_declares_test_function(&sibling_contents) {
+        return None;
+    }
+
+    // The directory's owning module file is `<dir>/mod.rs` in the classic
+    // layout, or the 2018-style `<dir>.rs` sibling to the directory. At the
+    // crate root (`dir == "src"`) it is `src/lib.rs` or `src/main.rs`
+    // instead, since there is no `src.rs`.
+    let mut declaring_candidates = vec![format!("{dir}/mod.rs")];
+    if dir == "src" {
+        declaring_candidates.push("src/lib.rs".to_string());
+        declaring_candidates.push("src/main.rs".to_string());
+    } else {
+        declaring_candidates.push(format!("{dir}.rs"));
+    }
+
+    let mounted = declaring_candidates.iter().any(|declaring_routing| {
+        std::fs::read_to_string(component_source_path(component).join(declaring_routing))
+            .map(|contents| plain_mod_declared(&contents, "tests"))
+            .unwrap_or(false)
+    });
+    if !mounted {
+        return None;
+    }
+
+    let parent_module = module_path
+        .rsplit_once("::")
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    Some(if parent_module.is_empty() {
+        "tests".to_string()
+    } else {
+        format!("{parent_module}::tests")
+    })
+}
+
+/// True when `contents` declares `mod <module_name>;` without a preceding
+/// `#[path = "..."]` attribute overriding where it resolves.
+///
+/// A `#[path]` override on that module name means the file conventionally
+/// implied by the name is not necessarily the one actually mounted there, so
+/// treating a same-named sibling file as "the" module would be a guess, not
+/// a determined fact.
+fn plain_mod_declared(contents: &str, module_name: &str) -> bool {
+    let mut path_attr_pending = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[path") {
+            path_attr_pending = true;
+            continue;
+        }
+        if let Some(ident) = parse_mod_declaration_ident(trimmed) {
+            let plain = ident == module_name && !path_attr_pending;
+            path_attr_pending = false;
+            if plain {
+                return true;
+            }
+            continue;
+        }
+        if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+            continue;
+        }
+        path_attr_pending = false;
+    }
+    false
 }
 
 /// Resolves the module path a test file is actually mounted at when a sibling
@@ -1528,7 +1667,7 @@ mod tests {
             fs::write(crate_dir.join("src/lib.rs"), "pub fn value() {}").expect("lib target");
             fs::write(
                 crate_dir.join(format!("src/{module}.rs")),
-                "#[cfg(test)] mod tests { #[test] fn runs() {} }",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn runs() {}\n}\n",
             )
             .expect("inline tests");
         }
@@ -1633,6 +1772,164 @@ mod tests {
             &env,
             &["homeboy-lab-runner::lib::homeboy_lab_runner::lab::offload::hydration"],
         );
+    }
+
+    /// Regression for #14867: `worktree/store_ops.rs` declares no tests of
+    /// its own; they live in the sibling `worktree/tests.rs`, mounted as
+    /// `mod tests` by `worktree/mod.rs`. Filtering to `worktree::store_ops`
+    /// would match zero tests and fail the runner closed on "ran 0 tests".
+    /// The filter must route to the sibling `worktree::tests` module, which
+    /// actually runs tests, instead. Without the fix this test fails because
+    /// the routing keeps `worktree::store_ops` as the module filter, which
+    /// selects nothing.
+    #[test]
+    fn rust_cargo_changed_routing_routes_to_sibling_tests_module_when_source_has_no_own_tests() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src/worktree")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "mod worktree;").expect("lib target");
+        std::fs::write(
+            dir.path().join("src/worktree/mod.rs"),
+            "mod store_ops;\n\n#[cfg(test)]\nmod tests;\n",
+        )
+        .expect("owning module declares the sibling test module");
+        std::fs::write(
+            dir.path().join("src/worktree/store_ops.rs"),
+            "pub fn cleanup() {}\n",
+        )
+        .expect("source module with no tests of its own");
+        std::fs::write(
+            dir.path().join("src/worktree/tests.rs"),
+            "#[test]\nfn cleanup_removes_entries() { assert!(true); }\n",
+        )
+        .expect("sibling test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env =
+            rust_cargo_changed_test_env(&component, &["src/worktree/store_ops.rs".to_string()]);
+
+        assert_union_candidates(&env, &["fixture::lib::fixture::worktree::tests"]);
+    }
+
+    /// A changed source module that declares its own inline
+    /// `#[cfg(test)] mod tests` must keep selecting its own module, even when
+    /// a sibling `tests.rs` also exists in the same directory for a different
+    /// module. The source module's own tests are known to exist, so no
+    /// redirection is warranted.
+    #[test]
+    fn rust_cargo_changed_routing_keeps_own_module_despite_sibling_tests_file() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src/worktree")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "mod worktree;").expect("lib target");
+        std::fs::write(
+            dir.path().join("src/worktree/mod.rs"),
+            "mod reaping;\n\n#[cfg(test)]\nmod tests;\n",
+        )
+        .expect("owning module declares the sibling test module");
+        std::fs::write(
+            dir.path().join("src/worktree/reaping.rs"),
+            "pub fn reap() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn reaps() {}\n}\n",
+        )
+        .expect("source module with its own inline tests");
+        std::fs::write(
+            dir.path().join("src/worktree/tests.rs"),
+            "#[test]\nfn unrelated() { assert!(true); }\n",
+        )
+        .expect("sibling test module for a different source file");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &["src/worktree/reaping.rs".to_string()]);
+
+        assert_union_candidates(&env, &["fixture::lib::fixture::worktree::reaping"]);
+    }
+
+    /// A changed source module with no tests of its own and no determinable
+    /// owning test module (no sibling `tests.rs`, and nothing declares one)
+    /// must fall back to the full suite rather than emit a filter known to
+    /// match zero tests.
+    #[test]
+    fn rust_cargo_changed_routing_falls_back_when_no_owning_test_module_is_determinable() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("src/util")).expect("source directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(dir.path().join("src/lib.rs"), "mod util;").expect("lib target");
+        std::fs::write(dir.path().join("src/util/mod.rs"), "mod strings;\n")
+            .expect("owning module with no test module declared");
+        std::fs::write(
+            dir.path().join("src/util/strings.rs"),
+            "pub fn trim(value: &str) -> &str { value.trim() }\n",
+        )
+        .expect("source module with no tests of its own and no sibling tests module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &["src/util/strings.rs".to_string()]);
+
+        assert!(
+            env.contains(&("HOMEBOY_TEST_SCOPE_KIND".to_string(), "full".to_string())),
+            "env: {env:?}"
+        );
+        assert!(!env.iter().any(|(key, _)| key == "HOMEBOY_TEST_RUNNER_ARGS"));
+    }
+
+    /// A changed integration test under `tests/` is unaffected by the
+    /// sibling-module routing added for #14867: integration tests are routed
+    /// before the `src/**` module-filter path is ever reached.
+    #[test]
+    fn rust_cargo_changed_routing_leaves_integration_tests_unaffected_by_sibling_routing() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        std::fs::create_dir_all(dir.path().join("tests")).expect("test directory");
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest");
+        std::fs::write(
+            dir.path().join("tests/worktree_scope.rs"),
+            "#[test]\nfn runs() {}\n",
+        )
+        .expect("integration test");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(&component, &["tests/worktree_scope.rs".to_string()]);
+
+        assert_union_candidates(&env, &["fixture::test::worktree_scope::"]);
     }
 
     #[test]
