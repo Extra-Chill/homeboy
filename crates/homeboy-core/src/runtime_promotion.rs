@@ -303,6 +303,33 @@ pub fn protect_runtime_selection_with_status(
     )
 }
 
+/// Try shared controller-selection admission without waiting or mutating
+/// durable operation state. Upgrade inspection paths use this when a live
+/// promotion must be reported immediately rather than queued behind it.
+pub fn try_protect_runtime_selection_with_status(
+    operation: &str,
+    target: impl Into<String>,
+    owner_status: RuntimePromotionOwnerStatus,
+) -> Result<RuntimeSelectionGuard> {
+    let root = paths::runtime_promotion_dir()?;
+    fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
+    let admission_lock = open_admission_lock(&root)?;
+    match FileExt::try_lock_shared(&admission_lock) {
+        Ok(true) => publish_selection_guard(
+            operation,
+            target.into(),
+            owner_status,
+            admission_lock,
+            &root,
+        ),
+        Ok(false) => {
+            let owner = admission_lock_owner(&root.join(LEASE_DIR))?;
+            Err(blocked_error(&owner, false))
+        }
+        Err(error) => Err(io("inspect runtime promotion admission")(error)),
+    }
+}
+
 fn publish_selection_guard(
     operation: &str,
     target: String,
