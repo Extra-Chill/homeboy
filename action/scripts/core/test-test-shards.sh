@@ -386,9 +386,9 @@ printf 'PASS: missing, mismatched, failed, and timed-out shards fail closed\n'
 
 grep -F 'needs: [reconcile, reconcile-test-shards, plan]' "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy does not wait for the sharded Test verdict and pinned plan\n'; exit 1; }
 grep -F "needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: policy can bypass the inventory-routed Test verdict\n'; exit 1; }
-# Every terminal upstream result must reach the final PR-state guard. It then
-# suppresses only closed or merged PRs; active cancellations fail closed.
-grep -F 'always() && needs.plan.outputs.test-shards-enabled' "${WORKFLOW}" >/dev/null || { printf 'FAIL: sharded Test reconciliation skips active cancellation handling\n'; exit 1; }
+# Ordinary upstream failures still reach reconciliation, while cancellation
+# stops stale runs from admitting a new finalizer job.
+grep -F '!cancelled() && needs.plan.outputs.test-shards-enabled' "${WORKFLOW}" >/dev/null || { printf 'FAIL: sharded Test reconciliation remains cancellation-blind\n'; exit 1; }
 if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 2 ]; then
   printf 'FAIL: Rust candidate plan/replay jobs do not all install cargo-nextest\n'; exit 1
 fi
@@ -461,7 +461,7 @@ grep -F 'resolve-run-artifact.sh homeboy-test-archive' "${WORKFLOW}" >/dev/null 
 grep -F 'name: ${{ steps.test-plan-artifact.outputs.artifact-name }}' "${WORKFLOW}" >/dev/null || { printf 'FAIL: shard jobs do not consume the resolved plan artifact\n'; exit 1; }
 grep -F "needs.candidate-test-plan.result == 'success'" "${WORKFLOW}" >/dev/null || { printf 'FAIL: candidate shard work can start without a successful inventory plan\n'; exit 1; }
 aggregate_condition="$(grep -A3 '^  candidate-test-result:' "${WORKFLOW}" | grep '^    if:')"
-printf '%s\n' "${aggregate_condition}" | grep -q 'always()' || { printf 'FAIL: candidate shard aggregation does not run after a failed producing shard\n'; exit 1; }
+printf '%s\n' "${aggregate_condition}" | grep -q '!cancelled()' || { printf 'FAIL: candidate shard aggregation does not run after a failed producing shard\n'; exit 1; }
 if printf '%s\n' "${aggregate_condition}" | grep -q 'needs.candidate-test-shards.result'; then
   printf 'FAIL: candidate shard aggregation is gated on the producing shard result\n'
   exit 1

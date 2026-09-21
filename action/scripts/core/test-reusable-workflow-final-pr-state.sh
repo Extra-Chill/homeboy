@@ -77,7 +77,7 @@ for job_name in ("reconcile", "reconcile-test-shards"):
     if steps[probe].get("id") != "final-pr-state":
         problems.append(f"{job_name} final PR state probe lacks its output id")
     if "always()" not in steps[probe].get("if", ""):
-        problems.append(f"{job_name} final PR state probe does not run after cancelled dependencies")
+        problems.append(f"{job_name} final PR state probe does not run after failed dependencies")
     if steps[probe].get("env", {}).get("GH_TOKEN") != "${{ github.token }}":
         problems.append(f"{job_name} final PR state probe lacks an authenticated GitHub state lookup")
     for step in steps[probe + 1:]:
@@ -100,13 +100,13 @@ if problems:
     sys.exit(1)
 PY
 
-# `always()` is intentional: immutable artifacts must reconcile even if the PR
-# closes while jobs are completing. Active and closed PRs both fail closed when
-# the evidence is missing or malformed; only PR publication is skipped.
-grep -F "if: \${{ !inputs.contract-probe && always() && needs.plan.outputs.non-test-commands-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
-  || { printf 'FAIL: active non-Test cancellation can bypass reconciliation\n'; exit 1; }
-grep -F "if: \${{ !inputs.contract-probe && always() && needs.plan.outputs.test-shards-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
-  || { printf 'FAIL: active sharded Test cancellation can bypass reconciliation\n'; exit 1; }
+# `!cancelled()` allows immutable evidence to reconcile after ordinary upstream
+# failures, but prevents stale runs from admitting new jobs after concurrency
+# cancellation. A cancelled run is not a verdict and cannot pass.
+grep -F "if: \${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.non-test-commands-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
+  || { printf 'FAIL: non-Test reconciliation remains cancellation-blind\n'; exit 1; }
+grep -F "if: \${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}" "${WORKFLOW}" >/dev/null \
+  || { printf 'FAIL: sharded Test reconciliation remains cancellation-blind\n'; exit 1; }
 grep -F "if: needs.candidate-test-plan.result != 'success'" "${WORKFLOW}" >/dev/null \
   || { printf 'FAIL: closed-PR Test inventory failure is not terminal\n'; exit 1; }
 grep -F "if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'" "${WORKFLOW}" >/dev/null \

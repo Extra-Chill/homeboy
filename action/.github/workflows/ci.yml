@@ -485,7 +485,7 @@ jobs:
   candidate:
     name: Candidate ${{ matrix.title }}
     needs: [binary, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -611,7 +611,7 @@ jobs:
   baseline:
     name: Baseline ${{ matrix.title }}
     needs: [binary, plan, candidate]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -723,7 +723,7 @@ jobs:
   candidate-test-plan:
     name: Plan candidate Test shards
     needs: [binary, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       test-matrix: ${{ steps.plan.outputs.matrix }}
@@ -891,7 +891,7 @@ jobs:
   candidate-test-shards:
     name: Candidate Test shard ${{ matrix.shard_id }}
     needs: [binary, plan, candidate-test-plan]
-    if: ${{ !inputs.contract-probe && always() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1018,7 +1018,7 @@ jobs:
   candidate-test-result:
     name: Aggregate candidate Test shards
     needs: [candidate-test-shards, candidate-test-plan, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1073,10 +1073,9 @@ jobs:
   reconcile-test-shards:
     name: Test
     needs: [candidate-test-result, candidate-test-plan, plan]
-    # Reconcile every terminal upstream result. The final PR state probe below
-    # suppresses synthetic verdicts only after a PR is closed or merged; an active
-    # PR must still fail closed when a dependency is unexpectedly cancelled.
-    if: ${{ !inputs.contract-probe && always() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    # Reconcile terminal upstream results for active runs. Cancellation must stop
+    # admission here so stale runs do not outlive the caller's concurrency group.
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -1142,7 +1141,7 @@ jobs:
     # This is the sole verdict and retains the established required-check name.
     name: ${{ matrix.title }}
     needs: [candidate, baseline, plan]
-    if: ${{ !inputs.contract-probe && always() && needs.plan.outputs.non-test-commands-enabled == 'true' }}
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.non-test-commands-enabled == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1218,7 +1217,7 @@ jobs:
   policy:
     name: PR Policy
     needs: [reconcile, reconcile-test-shards, plan]
-    if: ${{ !inputs.contract-probe && always() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
+    if: ${{ !inputs.contract-probe && !cancelled() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

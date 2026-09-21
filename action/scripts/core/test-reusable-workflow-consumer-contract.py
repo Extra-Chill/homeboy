@@ -42,6 +42,7 @@ NORMAL_JOBS = {
     "reconcile",
     "policy",
 }
+CANCELLATION_GUARDED_JOBS = NORMAL_JOBS - {"binary", "plan"}
 NON_TEST_MATRIX_JOBS = {"candidate", "baseline", "reconcile"}
 PERMISSION_LEVELS = {"none": 0, "read": 1, "write": 2}
 
@@ -138,6 +139,12 @@ for job_name in NORMAL_JOBS:
     condition = callee["jobs"].get(job_name, {}).get("if", "")
     if "inputs.contract-probe" not in condition:
         fail(f"normal job {job_name!r} can run during the bounded contract probe")
+    if job_name not in CANCELLATION_GUARDED_JOBS:
+        continue
+    if "!cancelled()" not in condition:
+        fail(f"normal job {job_name!r} is admitted after workflow cancellation")
+    if "always()" in condition:
+        fail(f"normal job {job_name!r} uses cancellation-blind always() admission")
 
 plan_script = callee["jobs"]["plan"]["steps"][-1]["run"]
 plan_outputs = callee["jobs"]["plan"].get("outputs", {})
