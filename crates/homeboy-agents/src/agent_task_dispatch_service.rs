@@ -129,6 +129,9 @@ pub struct DispatchCoreInputs {
     pub allow_command: Vec<String>,
     /// Operator explanation returned to the agent with every refusal.
     pub command_policy_reason: Option<String>,
+    /// Explicit operator acknowledgement that a requested model may displace
+    /// configured model routes.
+    pub acknowledge_model_override: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +204,7 @@ fn dispatch_with_provider_catalog(
     executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
+    require_model_override_acknowledgement(&request)?;
     let backend_selection = request.backend_selection.clone();
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
@@ -238,11 +242,83 @@ fn dispatch_with_provider_catalog(
     )
 }
 
+/// An explicit model is a spend-affecting selection when configured model
+/// routes exist. Keep this check before provider admission so an unacknowledged
+/// override cannot probe or invoke a paid provider.
+pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest) -> Result<()> {
+    let Some(selected_model) = request.model.as_deref().filter(|model| !model.is_empty()) else {
+        return Ok(());
+    };
+    let mut configured_models = std::collections::BTreeSet::new();
+    if let Some(policy) = request.core.resolved_provider_policy.as_ref() {
+        if let Some(model) = policy.model.as_deref().filter(|model| !model.is_empty()) {
+            configured_models.insert(model.to_string());
+        }
+        if let Some(rotation) = policy.rotation.as_ref() {
+            configured_models.extend(
+                rotation
+                    .entries
+                    .iter()
+                    .filter_map(|entry| entry.model.as_deref())
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    } else {
+        if let Some(model) = homeboy_core::defaults::load_config()
+            .settings
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+        {
+            configured_models.insert(model.to_string());
+        }
+        if let Some(rotation) = configured_rotation_policy() {
+            configured_models.extend(
+                rotation
+                    .entries
+                    .iter()
+                    .filter_map(|entry| entry.model.as_deref())
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    if configured_models.is_empty() || configured_models.contains(selected_model) {
+        return Ok(());
+    }
+    if request.core.acknowledge_model_override {
+        return Ok(());
+    }
+    let configured_models = configured_models.into_iter().collect::<Vec<_>>();
+    let mut error = Error::validation_invalid_argument(
+        "model",
+        format!(
+            "explicit model `{selected_model}` differs from configured model route(s); explicit acknowledgement is required before dispatch"
+        ),
+        Some(selected_model.to_string()),
+        Some(vec![format!(
+            "Replay with --acknowledge-model-override to authorize `{selected_model}` over configured model route(s): {}",
+            configured_models.join(", ")
+        )]),
+    );
+    error.details["schema"] =
+        Value::String("homeboy/agent-task-model-override-confirmation-required/v1".to_string());
+    error.details["confirmation_required"] = Value::Bool(true);
+    error.details["selected_model"] = Value::String(selected_model.to_string());
+    error.details["configured_models"] =
+        serde_json::to_value(configured_models).expect("model route list serializes");
+    error.details["acknowledgement_flag"] =
+        Value::String("--acknowledge-model-override".to_string());
+    Err(error)
+}
+
 /// Validate the reachable provider routes needed to dispatch this request.
 pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
+    require_model_override_acknowledgement(request)?;
     let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
@@ -930,6 +1006,75 @@ mod tests {
         );
     }
 
+    fn model_override_request(model: &str, acknowledged: bool) -> AgentTaskDispatchRequest {
+        AgentTaskDispatchRequest {
+            prompt: Some("run".to_string()),
+            prompt_is_literal: true,
+            tasks: Vec::new(),
+            cwd: None,
+            workspace: None,
+            repo: None,
+            component: None,
+            task_url: None,
+            backend: "test".to_string(),
+            selector: None,
+            model: Some(model.to_string()),
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            concurrency: 1,
+            run_id: None,
+            task_id: None,
+            core: DispatchCoreInputs {
+                acknowledge_model_override: acknowledged,
+                resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
+                    backend: "test".to_string(),
+                    selector: None,
+                    model: None,
+                    rotation: Some(AgentTaskProviderRotationPolicy {
+                        entries: vec![
+                            crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
+                                model: Some("configured-model".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }),
+                    rotation_starts_with_first_entry: false,
+                    retry: Default::default(),
+                    liveness_timeout_ms: None,
+                    runtime_identity: None,
+                }),
+                ..Default::default()
+            },
+            backend_selection: None,
+        }
+    }
+
+    #[test]
+    fn explicit_model_override_requires_acknowledgement_without_running_provider() {
+        let error = require_model_override_acknowledgement(&model_override_request(
+            "operator-model",
+            false,
+        ))
+        .expect_err("an unacknowledged model override must be refused");
+
+        assert_eq!(
+            error.details["schema"],
+            "homeboy/agent-task-model-override-confirmation-required/v1"
+        );
+        assert_eq!(error.details["confirmation_required"], true);
+        assert_eq!(error.details["selected_model"], "operator-model");
+        assert_eq!(error.details["configured_models"][0], "configured-model");
+    }
+
+    #[test]
+    fn acknowledged_or_exact_configured_model_is_admitted() {
+        require_model_override_acknowledgement(&model_override_request("operator-model", true))
+            .expect("explicit acknowledgement admits the override");
+        require_model_override_acknowledgement(&model_override_request("configured-model", false))
+            .expect("matching a configured model needs no acknowledgement");
+    }
+
     #[test]
     fn dispatch_does_not_credential_gate_a_provider_that_declares_nothing() {
         let providers = vec![serde_json::from_value(serde_json::json!({
@@ -1144,6 +1289,7 @@ mod tests {
                 run_id: Some(run_id.clone()),
                 task_id: None,
                 core: DispatchCoreInputs {
+                    acknowledge_model_override: true,
                     resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
                         backend: "test".to_string(),
                         selector: Some("test.primary".to_string()),

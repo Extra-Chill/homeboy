@@ -96,6 +96,7 @@ pub(crate) fn fanout_with_placement(
                 backend,
                 selector,
                 model,
+                acknowledge_model_override,
                 ..
             } = plan_args;
             let load_args = AgentTaskFanoutInputArgs {
@@ -104,6 +105,7 @@ pub(crate) fn fanout_with_placement(
                 backend,
                 selector,
                 model,
+                acknowledge_model_override,
             };
             // A private controller artifact is accepted only from its owned path,
             // then immediately projected before this read-only response renders.
@@ -4913,6 +4915,8 @@ struct BatchCookSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(default)]
+    acknowledge_model_override: bool,
+    #[serde(default)]
     secret_env: Vec<String>,
     // Absent means "unspecified", so the dispatch-plan layer can resolve the
     // budget against the configured provider rotation (#11082). An explicit
@@ -5027,6 +5031,7 @@ impl BatchCookSpec {
         if self.model.is_none() {
             self.model = args.model.clone();
         }
+        self.acknowledge_model_override |= args.acknowledge_model_override;
         if self.protected_branches.is_empty() {
             self.protected_branches = super::review::default_protected_branches();
         }
@@ -5121,6 +5126,7 @@ impl BatchCookSpec {
                 deny_command: Vec::new(),
                 allow_command: Vec::new(),
                 command_policy_reason: None,
+                acknowledge_model_override: self.acknowledge_model_override,
             },
         };
         let title = self
@@ -5413,6 +5419,7 @@ fn build_cook_batch_plan_with_profiles(
             backend: args.backend.clone(),
             selector: args.selector.clone(),
             model: args.model.clone(),
+            acknowledge_model_override: args.acknowledge_model_override,
             secret_env: args.secret_env.clone(),
             attempts: None,
             same_provider_retries: None,
@@ -6855,6 +6862,7 @@ mod tests {
                     backend: None,
                     selector: None,
                     model: None,
+                    acknowledge_model_override: false,
                 },
                 true,
             )
@@ -6955,6 +6963,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
+                acknowledge_model_override: false,
             };
             let loaded = load_batch_cook_fanout_plan(&args, true).expect("load private plan");
             assert_eq!(loaded.cooks[0].private_verify, vec![sentinel]);
@@ -7030,6 +7039,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
+                acknowledge_model_override: false,
             };
             let execution =
                 load_batch_cook_fanout_plan(&args, true).expect("trusted execution load");
@@ -7054,6 +7064,7 @@ mod tests {
                 backend: None,
                 selector: None,
                 model: None,
+                acknowledge_model_override: false,
             };
             assert!(load_batch_cook_fanout_plan(&args, true).is_err());
         });
@@ -7923,6 +7934,7 @@ fi
             backend: Some("test".to_string()),
             selector: Some("fixture".to_string()),
             model: None,
+            acknowledge_model_override: false,
         }
     }
 
@@ -8102,6 +8114,7 @@ fi
             backend: Some("sandbox".to_string()),
             selector: Some("sample.executor-provider".to_string()),
             model: Some("gpt-5.5".to_string()),
+            acknowledge_model_override: false,
             provider_profile: None,
             // No secret is declared: planning and execution share one admission,
             // so a credential the fixture cannot supply would be checked for real.
@@ -9420,6 +9433,7 @@ fi
                     backend: None,
                     selector: None,
                     model: None,
+                    acknowledge_model_override: false,
                 },
                 true,
             )

@@ -65,6 +65,8 @@ pub fn controller_request_dispatch_command(
             deny_command: optional_string_array(dispatch, "deny_command")?,
             allow_command: optional_string_array(dispatch, "allow_command")?,
             command_policy_reason: optional_string(dispatch, "command_policy_reason"),
+            acknowledge_model_override: optional_bool(dispatch, "acknowledge_model_override")
+                .unwrap_or(false),
         },
     };
 
