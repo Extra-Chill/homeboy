@@ -704,6 +704,48 @@ fn report_cook_progress_with_activity(
     Ok(())
 }
 
+fn admit_cook_runtime_generation(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimeGenerationPinGuard> {
+    let pin_run_id = run_id.to_string();
+    let pin_cook_id = cook_id.to_string();
+    homeboy_core::runtime_promotion::pin_cook_generation_waiting(
+        run_id,
+        Duration::from_secs(30),
+        || {
+            lifecycle_store
+                .read_record(&pin_run_id)
+                .ok()
+                .is_some_and(|record| {
+                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                })
+        },
+        |event| {
+            let detail = format!(
+                "waiting {}ms/{}ms for runtime promotion owner pid {} operation `{}` target `{}` generation `{}`",
+                event.waited_ms,
+                event.wait_timeout_ms,
+                event.owner_pid,
+                event.owner_operation,
+                event.target,
+                event.owner_generation,
+            );
+            let _ = report_cook_progress(
+                lifecycle_store,
+                durable_observer,
+                &pin_cook_id,
+                &pin_run_id,
+                "runtime_promotion_wait",
+                1,
+                Some(&detail),
+            );
+        },
+    )
+}
+
 /// Run one controller startup phase while keeping its already-admitted Cook
 /// observable. Startup work can block on Git, filesystem capacity, or a shared
 /// base-capture lock, so it receives a bounded durable heartbeat before any
@@ -6656,15 +6698,6 @@ fn run_cook_spine(
             &plan,
         )?;
     }
-    report_cook_progress(
-        lifecycle_store,
-        durable_observer,
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        "provider_ready",
-        1,
-        None,
-    )?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
@@ -6683,8 +6716,48 @@ fn run_cook_spine(
     }
     // The initial attempt is the durable status/activity owner. Pin it rather
     // than the stable cook ID, which may not itself name a lifecycle record.
-    let _runtime_generation =
-        homeboy_core::runtime_promotion::pin_cook_generation(&options.identity.initial_run_id)?;
+    // Runtime promotion admission is before provider-ready: a queued Cook must
+    // not advertise a resumable provider phase while it is still waiting for
+    // the shared flock.
+    let pin_run_id = options.identity.initial_run_id.clone();
+    let pin_cook_id = options.identity.cook_id.clone();
+    let _runtime_generation = match admit_cook_runtime_generation(
+        lifecycle_store,
+        durable_observer,
+        &pin_cook_id,
+        &pin_run_id,
+    ) {
+        Ok(pin) => pin,
+        Err(error)
+            if lifecycle_store
+                .read_record(&pin_run_id)
+                .ok()
+                .is_some_and(|record| {
+                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                }) =>
+        {
+            return Ok(cook_report(CookReportInput {
+                cook_id: pin_cook_id,
+                status: CookStatus::Cancelled.as_str(),
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(error.to_string()),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&pin_run_id),
+            }));
+        }
+        Err(error) => return Err(error),
+    };
+    report_cook_progress(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "provider_ready",
+        1,
+        None,
+    )?;
     let max_attempts = options.retry_policy.max_attempts.max(1);
     let mut attempts = Vec::new();
     // A retry may already be durably dispatched when this controller resumes.

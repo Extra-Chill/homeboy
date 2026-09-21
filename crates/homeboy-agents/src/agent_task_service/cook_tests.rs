@@ -4884,6 +4884,180 @@ impl AgentTaskCookAttemptDispatcher for PinOrderingDispatcher {
     }
 }
 
+#[test]
+fn cook_runtime_admission_projects_waiting_owner_and_rejects_duplicate_resume() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-runtime-admission-wait",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let lifecycle_store = test_lifecycle_store();
+        agent_task_lifecycle::submit_plan(
+            &options.identity.initial_plan,
+            Some(&options.identity.initial_run_id),
+        )
+        .expect("materialize Cook lifecycle record");
+        let mut owner = runtime_admission_owner_process();
+        let (event_tx, event_rx) = mpsc::channel();
+        let observer = move |event: &CookProgressEvent<'_>| {
+            if event.phase == "runtime_promotion_wait" {
+                event_tx
+                    .send((event.phase.to_string(), event.detail.map(str::to_string)))
+                    .expect("report runtime admission wait");
+            }
+            Ok(())
+        };
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                admit_cook_runtime_generation(
+                    &lifecycle_store,
+                    Some(&observer),
+                    &options.identity.cook_id,
+                    &options.identity.initial_run_id,
+                )
+            });
+            let (phase, detail) = event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("Cook publishes a durable runtime admission wait");
+            assert_eq!(phase, "runtime_promotion_wait");
+            assert!(detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("process promotion owner")));
+            let record = lifecycle_store
+                .read_record(&options.identity.initial_run_id)
+                .expect("read waiting Cook record");
+            assert_eq!(
+                record.metadata["cook_progress"]["phase"],
+                "runtime_promotion_wait"
+            );
+            assert!(record.metadata["cook_progress"]["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("pid")));
+
+            let duplicate = admit_cook_runtime_generation(
+                &lifecycle_store,
+                None,
+                &options.identity.cook_id,
+                &options.identity.initial_run_id,
+            )
+            .expect_err("a live Cook waiter refuses duplicate resume");
+            assert_eq!(
+                duplicate.details["queue_state"],
+                "duplicate_cook_admission_refused"
+            );
+
+            let release = homeboy_core::paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join("runtime-admission-test-release");
+            std::fs::write(release, b"release").expect("release runtime owner");
+            first
+                .join()
+                .expect("first Cook admission joins")
+                .expect("first Cook admission succeeds after release");
+        });
+        owner.wait().expect("runtime owner exits");
+    });
+}
+
+#[test]
+fn cook_runtime_admission_cancellation_stops_wait_before_provider_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-runtime-admission-cancel",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let lifecycle_store = test_lifecycle_store();
+        agent_task_lifecycle::submit_plan(
+            &options.identity.initial_plan,
+            Some(&options.identity.initial_run_id),
+        )
+        .expect("materialize Cook lifecycle record");
+        let mut owner = runtime_admission_owner_process();
+        let (event_tx, event_rx) = mpsc::channel();
+        let observer = move |event: &CookProgressEvent<'_>| {
+            if event.phase == "runtime_promotion_wait" {
+                event_tx.send(()).expect("report cancellation wait");
+            }
+            Ok(())
+        };
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                admit_cook_runtime_generation(
+                    &lifecycle_store,
+                    Some(&observer),
+                    &options.identity.cook_id,
+                    &options.identity.initial_run_id,
+                )
+            });
+            event_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("Cook reaches cancellable runtime wait");
+            agent_task_lifecycle::cancel_run_in_store(
+                &lifecycle_store,
+                &options.identity.initial_run_id,
+                Some("test cancellation during runtime admission"),
+            )
+            .expect("cancel waiting Cook");
+            let error = first
+                .join()
+                .expect("cancelled Cook admission joins")
+                .expect_err("cancelled Cook does not acquire a generation pin");
+            assert_eq!(
+                error.details["queue_state"],
+                "cancelled_waiting_for_admission_lock"
+            );
+            assert_eq!(
+                lifecycle_store
+                    .read_record(&options.identity.initial_run_id)
+                    .expect("cancelled Cook record")
+                    .state,
+                AgentTaskRunState::Cancelled
+            );
+            let release = homeboy_core::paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join("runtime-admission-test-release");
+            std::fs::write(release, b"release").expect("release runtime owner");
+        });
+        owner.wait().expect("runtime owner exits");
+    });
+}
+
+fn runtime_admission_owner_process() -> std::process::Child {
+    let child = Command::new(std::env::current_exe().expect("resolve test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "agent_task_service::cook::tests::runtime_admission_owner_process_child",
+        ])
+        .spawn()
+        .expect("start runtime admission owner");
+    let lease = homeboy_core::paths::runtime_promotion_dir()
+        .expect("runtime promotion directory")
+        .join("promotion.lock");
+    for _ in 0..100 {
+        if lease.exists() {
+            return child;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("runtime admission owner did not acquire lease");
+}
+
+#[test]
+#[ignore = "invoked by runtime Cook admission test"]
+fn runtime_admission_owner_process_child() {
+    let _lease = homeboy_core::runtime_promotion::acquire("process promotion owner", "controller")
+        .expect("runtime owner acquires lease");
+    let release = homeboy_core::paths::runtime_promotion_dir()
+        .expect("runtime promotion directory")
+        .join("runtime-admission-test-release");
+    while !release.exists() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 impl AgentTaskCookAttemptDispatcher for FlakyPreparationDispatcher {
     fn durable_recipe(&self) -> Result<Value> {
         Ok(serde_json::json!({ "kind": "test-flaky-preparation" }))
