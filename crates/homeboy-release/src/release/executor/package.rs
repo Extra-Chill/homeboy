@@ -1166,7 +1166,8 @@ mod package_failure_message_tests {
                       [BUILD] Checking build dependencies...\n\
                       [SUCCESS] All build dependencies found\n\
                       [BUILD] Detecting project type...\n";
-        let stderr = "webpack: ERROR in ./src/index.js\nModule not found: Can't resolve './missing'\n";
+        let stderr =
+            "webpack: ERROR in ./src/index.js\nModule not found: Can't resolve './missing'\n";
 
         let error = package_command_failure_error(255, stdout, stderr);
         let message = error.to_string();
@@ -1215,11 +1216,15 @@ mod package_failure_message_tests {
         let lines = relevant_package_error_lines(&stdout, "");
 
         assert!(
-            lines.iter().any(|line| line.contains("final distinguishing line")),
+            lines
+                .iter()
+                .any(|line| line.contains("final distinguishing line")),
             "the tail must survive: {lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line.contains("Universal WordPress Build Script")),
+            !lines
+                .iter()
+                .any(|line| line.contains("Universal WordPress Build Script")),
             "the banner is identical on success and tells nobody anything: {lines:?}"
         );
     }
