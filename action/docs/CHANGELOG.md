@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.18.4] - 2026-09-21
+
+### Fixed
+- support component-scoped prepared refs
+
 ## [2.18.3] - 2026-09-21
 
 ### Fixed
