@@ -424,6 +424,14 @@ pub fn build_dispatch_plan_with_provider_requirements(
         "client_context": client_context,
         "task_url": request.task_url,
         "runtime_dependency_graph": runtime_dependency_graph_evidence,
+        "model_override_confirmation": request.core.acknowledge_model_override.then(|| {
+            serde_json::json!({
+                "schema": "homeboy/agent-task-model-override-confirmation/v1",
+                "acknowledged": true,
+                "selected_model": request.model,
+                "authority": "operator",
+            })
+        }),
     });
     plan.workspace_identity = workspace_target
         .as_ref()
@@ -2310,6 +2318,7 @@ mod tests {
                 deny_command: overrides.core.deny_command,
                 allow_command: overrides.core.allow_command,
                 command_policy_reason: overrides.core.command_policy_reason,
+                acknowledge_model_override: overrides.core.acknowledge_model_override,
             },
             backend_selection: None,
         }

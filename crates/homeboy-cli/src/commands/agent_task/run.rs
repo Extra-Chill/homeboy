@@ -384,6 +384,13 @@ pub(crate) fn preview_cook(
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
+    let preview_request =
+        dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    dispatch_service::require_model_override_acknowledgement_with_catalog(
+        &preview_request,
+        &catalog,
+    )?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -6542,6 +6549,32 @@ pub(crate) fn preflight_cook_execution_request(
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    confirm_model_override(args)?;
+    Ok(())
+}
+
+fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if args.dispatch.core.acknowledge_model_override {
+        return Ok(());
+    }
+    let dispatch = resolved_dispatch_args_for_cook(args)?;
+    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    if let Err(error) =
+        dispatch_service::require_model_override_acknowledgement_with_catalog(&request, &catalog)
+    {
+        if !crate::commands::utils::tty::require_tty_for_interactive() {
+            return Err(error);
+        }
+        let answer = crate::commands::utils::tty::prompt(&format!(
+            "{} Continue with this model? [y/N] ",
+            error.message
+        ))?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(error);
+        }
+        args.dispatch.core.acknowledge_model_override = true;
+    }
     Ok(())
 }
 
@@ -7374,6 +7407,7 @@ mod prompt_input_tests {
                 deny_command: Vec::new(),
                 allow_command: Vec::new(),
                 command_policy_reason: None,
+                acknowledge_model_override: false,
             },
         }
     }
