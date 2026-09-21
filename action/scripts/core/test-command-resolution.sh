@@ -94,7 +94,24 @@ assert_equals "true" "$(get_output "${bare_test_output}" "has-test")" "bare test
 contest_output="$(run_resolve "contest,review latest")"
 assert_equals "false" "$(get_output "${contest_output}" "has-test")" "unrelated commands containing test do not enable the test budget"
 
+git_output="$(run_resolve "git subtree php-transformer abc123 --apply --branch-only")"
+assert_equals "git subtree php-transformer abc123 --apply --branch-only" "$(get_output "${git_output}" "operations-commands")" "native git commands preserve their argv in the operations bucket"
+assert_equals "" "$(get_output "${git_output}" "resolved-commands")" "native git commands stay out of the quality bucket"
+assert_equals "" "$(get_output "${git_output}" "release-commands")" "native git commands stay out of the release bucket"
+
+git_with_quality_output="$(run_resolve "review lint,git subtree php-transformer abc123 --apply")"
+assert_equals "review lint" "$(get_output "${git_with_quality_output}" "resolved-commands")" "quality commands remain routed beside a native git command"
+assert_equals "git subtree php-transformer abc123 --apply" "$(get_output "${git_with_quality_output}" "operations-commands")" "a native git command routes to operations beside quality commands"
+
+for inferred_context in pr push cron manual; do
+  inferred_output="$(run_resolve "" "${inferred_context}")"
+  assert_equals "" "$(get_output "${inferred_output}" "operations-commands")" "${inferred_context} context never infers an operations command"
+done
+
 enforce_output="$(RESULTS='{}' COMMANDS='' OPERATIONS_RESULTS='' PR_ACTIVE='' bash "${ENFORCE_STATUS}")"
 assert_contains "No quality gate commands to enforce" "${enforce_output}" "release-only final status skips quality enforcement"
+
+git_failure_output="$(RESULTS='{}' COMMANDS='' OPERATIONS_RESULTS='{"git subtree php-transformer abc123 --apply":"fail"}' PR_ACTIVE='' bash "${ENFORCE_STATUS}" || true)"
+assert_contains "One or more operations commands failed" "${git_failure_output}" "a failed native git operation fails the final status"
 
 printf 'All command resolution checks passed.\n'

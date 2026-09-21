@@ -113,7 +113,7 @@ fi
 # Check operations command results
 if [ -n "${OPERATIONS_RESULTS}" ] && [ "${OPERATIONS_RESULTS}" != "{}" ]; then
   if printf '%s\n' "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
-    echo "::error::One or more operations commands (fleet/deploy) failed"
+    echo "::error::One or more operations commands failed"
     FAILED=true
   fi
   if printf '%s\n' "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "timeout")' > /dev/null; then

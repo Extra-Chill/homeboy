@@ -531,7 +531,7 @@ runs:
 
     - name: Setup SSH
       id: setup-ssh
-      if: contains(steps.resolve-commands.outputs.operations-commands, 'fleet') || contains(steps.resolve-commands.outputs.operations-commands, 'deploy') || inputs.ssh-key != ''
+      if: steps.resolve-commands.outputs.operations-commands != '' || inputs.ssh-key != ''
       shell: bash
       env:
         SSH_KEY: ${{ inputs.ssh-key }}

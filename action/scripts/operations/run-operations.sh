@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Run fleet and deploy commands.
+# Run passthrough operations commands.
 #
-# Unlike quality-gate commands (audit/lint/test), fleet and deploy are
-# "operations" commands that talk to remote servers via SSH. They use
-# their own argument structure and don't take component/workspace/scope
-# flags from the action — the full command is passed through as-is.
+# Unlike quality-gate commands (audit/lint/test), fleet, deploy, and native git
+# commands are passthrough operations. They use their own argument structure
+# and don't take component/workspace/scope flags from the action — the full
+# command is passed through as-is.
 #
 # Commands are specified as the full homeboy invocation after the base
 # command, e.g.:
@@ -13,6 +13,7 @@
 #   deploy my-project --all
 #   deploy data-machine --fleet production
 #   fleet check my-fleet
+#   git subtree publish --prefix packages/engine
 #   fleet status my-fleet
 #
 # Env vars:
@@ -21,7 +22,7 @@
 #   RUN_GROUP_PREFIX    — log group prefix (default: homeboy)
 #
 # Outputs (GITHUB_OUTPUT):
-#   results — JSON object { "fleet exec ...": "pass"|"fail"|"timeout", ... }
+#   results — JSON object { "git subtree ...": "pass"|"fail"|"timeout", ... }
 #   any-failed — true|false
 
 set -euo pipefail
@@ -56,7 +57,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   CMD_INDEX=$((CMD_INDEX + 1))
 
   # Build the full command
-  # Fleet and deploy commands are passthrough — we prepend "homeboy" and pass as-is
+  # Passthrough operations prepend "homeboy" and preserve arguments as-is.
   FULL_CMD="homeboy ${CMD}"
 
   # Add output file for structured results
