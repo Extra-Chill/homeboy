@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.381.0] - 2026-09-21
+
+### Added
+- hand off authoritative GitHub checks
+
+### Changed
+- cover terminal owner pid projection
+
+### Fixed
+- reject invalid gates before provider remediation
+- preserve daemon bootstrap diagnostics
+- route configured transport during hydration
+- add provider_ci to CookFinalization fixtures
+- resolve first, then branch — checkout-less components work in every mode
+- keep live promotion observable and refuse overlapping continuation
+
 ## [0.380.0] - 2026-09-20
 
 ### Added
