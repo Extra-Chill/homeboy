@@ -366,21 +366,6 @@ pub(crate) fn preview_cook(
         }
     }
     bind_cook_preview_lifecycle(&mut args);
-    // Static selection consent must be evaluated even when backend resolution
-    // is deferred to the unresolved-backend preview projection.
-    validate_cook_request_with_provenance(&args, provenance)?;
-    match dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())
-    {
-        Ok(preview_request) => {
-            let catalog = provider::AgentTaskProviderCatalog::discover();
-            dispatch_service::require_model_override_acknowledgement_with_catalog(
-                &preview_request,
-                &catalog,
-            )?;
-        }
-        Err(error) if is_missing_default_backend_policy_error(&error) => {}
-        Err(error) => return Err(error),
-    }
     if let Some((provider, replay)) = unresolved_cook_backend_preview(&args)? {
         return Ok((
             cook_preview_result(
@@ -396,6 +381,16 @@ pub(crate) fn preview_cook(
             0,
         ));
     }
+    // Source policy is a static validation and must apply to preview exactly as
+    // it applies before an execution route can inspect the destination.
+    validate_cook_request_with_provenance(&args, provenance)?;
+    let preview_request =
+        dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    dispatch_service::require_model_override_acknowledgement_with_catalog(
+        &preview_request,
+        &catalog,
+    )?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {

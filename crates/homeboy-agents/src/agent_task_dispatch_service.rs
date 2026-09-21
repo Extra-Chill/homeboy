@@ -204,7 +204,12 @@ fn dispatch_with_provider_catalog(
     executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<AgentTaskRunResult<AgentTaskDispatchReport>> {
-    require_model_override_acknowledgement_with_catalog(&request, catalog)?;
+    let mut readiness_cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
+    require_model_override_acknowledgement_with_catalog_and_cache(
+        &request,
+        catalog,
+        &mut readiness_cache,
+    )?;
     let backend_selection = request.backend_selection.clone();
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
@@ -213,7 +218,7 @@ fn dispatch_with_provider_catalog(
         match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &plan,
             catalog,
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            &mut readiness_cache,
         ) {
             Ok(plan) => {
                 validate_selected_execution_plan(&plan, catalog)?;
@@ -346,10 +351,44 @@ pub fn require_model_override_acknowledgement(request: &AgentTaskDispatchRequest
 /// dispatchable. Readiness is a provider-owned, non-inference probe; an
 /// unavailable configured route must not create confirmation friction or spend
 /// paid inference before the operator has acknowledged an override.
+///
+/// The live readiness probe only runs when [`require_model_override_acknowledgement`]
+/// has already flagged a real, unacknowledged conflict. This keeps the common
+/// no-override and already-acknowledged dispatch paths free of any additional
+/// provider round-trip, and avoids probing a route the caller's own admission
+/// is about to probe again for an unrelated request.
+///
+/// Callers that immediately perform their own provider admission afterward
+/// (dispatch, batch preflight) must thread their admission cache through
+/// [`require_model_override_acknowledgement_with_catalog_and_cache`] instead of
+/// this function, so a genuine conflict's probe is not repeated against a live
+/// (or fixture) provider for one caller-visible request.
 pub fn require_model_override_acknowledgement_with_catalog(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
+    let mut cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
+    require_model_override_acknowledgement_with_catalog_and_cache(request, catalog, &mut cache)
+}
+
+/// Cache-threading variant of [`require_model_override_acknowledgement_with_catalog`].
+/// Reuses `cache` so a caller that goes on to admit the same route via
+/// [`crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers`]
+/// observes a cache hit for this probe instead of a second live/fixture call.
+pub fn require_model_override_acknowledgement_with_catalog_and_cache(
+    request: &AgentTaskDispatchRequest,
+    catalog: &AgentTaskProviderCatalog,
+    cache: &mut crate::agent_task_provider::ProviderRuntimeReadinessCache,
+) -> Result<()> {
+    let conflict = match require_model_override_acknowledgement(request) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    // A real, unacknowledged conflict exists. Before surfacing it, confirm the
+    // configured primary route is actually reachable: if it is not, the
+    // operator's explicit selection cannot be displacing a spend the system
+    // would otherwise make on its own, and this probe is the first live I/O
+    // performed for this request.
     let Some(policy) = request.core.resolved_provider_policy.clone().or_else(|| {
         configured_rotation_policy().map(|rotation| ResolvedAgentTaskProviderPolicy {
             backend: request.backend.clone(),
@@ -362,7 +401,7 @@ pub fn require_model_override_acknowledgement_with_catalog(
             runtime_identity: None,
         })
     }) else {
-        return require_model_override_acknowledgement(request);
+        return Err(conflict);
     };
     let first = policy
         .rotation
@@ -384,17 +423,16 @@ pub fn require_model_override_acknowledgement_with_catalog(
         .filter(|config| config.is_object())
         .unwrap_or_else(|| serde_json::json!({}));
     if crate::agent_task_provider::is_fixture_backend(backend) {
-        return require_model_override_acknowledgement(request);
+        return Err(conflict);
     }
-    let mut cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
     if preflight_provider_dispatchability_with_config(
-        catalog, backend, selector, model, &config, &mut cache,
+        catalog, backend, selector, model, &config, cache,
     )
     .is_err()
     {
         return Ok(());
     }
-    require_model_override_acknowledgement(request)
+    Err(conflict)
 }
 
 /// Validate the reachable provider routes needed to dispatch this request.
@@ -402,14 +440,19 @@ pub fn preflight_dispatch_provider_admission(
     request: &AgentTaskDispatchRequest,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<()> {
-    require_model_override_acknowledgement_with_catalog(request, catalog)?;
+    let mut readiness_cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
+    require_model_override_acknowledgement_with_catalog_and_cache(
+        request,
+        catalog,
+        &mut readiness_cache,
+    )?;
     let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
     let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
         &plan,
         catalog,
-        &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+        &mut readiness_cache,
     ) {
         Ok(plan) => plan,
         Err(error) => {

@@ -10905,14 +10905,15 @@ fi
             assert_eq!(value["schema"], "homeboy/agent-task-cook-batch/v1");
             assert_eq!(value["status"], "ready");
             assert_eq!(value["summary"]["issues"], 2);
+            // Preview projects the selected route per compiled cook, not a
+            // single flat `provider_selection.executor` (that shape belongs to
+            // the live, non-preview preflight): assert the durable plan each
+            // child will actually dispatch with.
+            assert_eq!(value["plan"]["cooks"][0]["backend"], "sandbox");
+            assert_eq!(value["plan"]["cooks"][0]["model"], "gpt-5.5");
             assert_eq!(
-                value["preflight"]["provider_selection"]["executor"]["backend"],
-                "sandbox"
-            );
-            assert_eq!(value["preflight"]["provider_selection"]["model"], "gpt-5.5");
-            assert_eq!(
-                value["preflight"]["provider_selection"]["provider_config"],
-                "provided"
+                value["plan"]["cooks"][0]["provider_config"],
+                r#"{"runtime":"opencode"}"#
             );
             assert_eq!(value["worktrees"]["dry_run"], true);
             assert_eq!(value["worktrees"]["rows"][0]["status"], "would_create");
@@ -12385,22 +12386,17 @@ fi
 
     #[test]
     fn cook_batch_does_not_warn_for_specific_backend_names_in_core() {
-        with_materialized_cook_batch_worktrees(|| {
-            let mut args = cook_batch_args();
-            // Planning and execution share admission, so this has to name an
-            // installed backend. `sandbox` is specific; the assertion is that
-            // a concrete name is not itself a warning.
-            args.backend = Some("sandbox".to_string());
-            args.provider_config = None;
+        let mut args = cook_batch_args();
+        // The assertion is that naming a concrete, installed backend is not
+        // itself a warning. `provider_selection_warnings` is the exact
+        // function this behavior lives in — it only warns about an
+        // undeclared `--provider-profile`, never about a specific backend
+        // name — so exercise it directly rather than through the full batch
+        // preview response, whose schema does not surface a `warnings` field.
+        args.backend = Some("sandbox".to_string());
+        args.provider_config = None;
 
-            let (value, exit_code) = cook_batch(args).expect("cook batch dry run");
-
-            assert_eq!(exit_code, 0, "{value}");
-            assert!(value["preflight"]["provider_selection"]["warnings"]
-                .as_array()
-                .expect("warnings")
-                .is_empty());
-        });
+        assert!(provider_selection_warnings(&args).is_empty());
     }
 
     #[test]
