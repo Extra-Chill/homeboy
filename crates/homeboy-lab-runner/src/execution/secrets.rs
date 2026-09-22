@@ -436,7 +436,7 @@ fn provider_secret_sources_from_plan(
                     name: source.name.clone(),
                     field: source.field.clone(),
                     fallback_fields: source.fallback_fields.clone(),
-                    value: source.fallback_value.clone(),
+                    value: source.fallback_value.map(|value| value.to_string()),
                 },
             )
         })

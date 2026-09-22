@@ -109,9 +109,7 @@ pub fn provider_secret_credential_mappings_for_plan_with_providers(
                         name: source.name,
                         field: source.field,
                         fallback_fields: source.fallback_fields,
-                        fallback_value: source
-                            .value
-                            .filter(|value| matches!(value.as_str(), "true" | "false")),
+                        fallback_value: source.value.and_then(|value| value.parse::<bool>().ok()),
                     },
                 )
             })
