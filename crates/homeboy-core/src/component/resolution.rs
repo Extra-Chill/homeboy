@@ -639,7 +639,13 @@ pub fn local_path_is_relative(raw: &str) -> bool {
 /// Detect component ID from current working directory.
 fn detect_from_cwd(config_root: Option<&Path>) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let components = inventory_at(config_root).ok()?;
+    // Answering "which component am I standing in?" needs only the registered
+    // id and local path. The full inventory additionally runs portable
+    // discovery for every component, and that reaches a git remote probe with
+    // sleep-based retries — so asking the cheap question through the expensive
+    // path made every release subcommand hang (#14874). Read the registered
+    // base instead: same ids and local paths, no subprocesses.
+    let components = crate::component::inventory::registered_base_at(config_root).ok()?;
 
     for component in components {
         let expanded = shellexpand::tilde(&component.local_path);
