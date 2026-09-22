@@ -1142,15 +1142,22 @@ mod tests {
                 },
                 "interrupted child admission",
             );
+            agent_task_loop_controller::stamp_loop_runtime_metadata(
+                &mut record.metadata,
+                true,
+                None,
+                true,
+            )?;
             agent_task_loop_controller::write_controller(&record).expect("write controller");
             let provider: crate::agent_task_provider::AgentTaskExecutorProvider =
                 serde_json::from_value(json!({
                 "id": "interrupted-fixture",
                 "backend": "interrupted-fixture",
                 "command_argv": [
-                    "sh", "-c",
-                    format!(
-                        "printf x >> {}; printf '%s' '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"fixture\",\"status\":\"succeeded\"}}'",
+                        "sh", "-c",
+                        format!(
+                        "printf x >> {}; task_id=$(cat | sed -n 's/.*\"task_id\":\"\\([^\"]*\\)\".*/\\1/p'); printf '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"%s\",\"status\":\"succeeded\",\"artifacts\":[{{\"id\":\"patch\",\"kind\":\"patch\",\"name\":\"patch\",\"path\":\"{}\"}}]}}' \"$task_id\"",
+                        marker.path().display(),
                         marker.path().display()
                     )
                 ],
@@ -1185,13 +1192,28 @@ mod tests {
                 .expect("prepared checkpoint");
             assert!(checkpoint["checkpoint"]["resume"].is_null());
 
-            let mut recovered = agent_task_loop_controller::load_controller(
+            let recovered = agent_task_loop_controller::load_controller(
                 "loop-interrupted-admission",
             )?;
-            recovered.state = AgentTaskLoopControllerState::Completed;
-            agent_task_loop_controller::write_controller(&recovered)?;
-            let result = driver.resume(checkpoint, harness.handle())?;
-            assert_eq!(result["result"]["controller_state"], "completed");
+            assert_eq!(recovered.state, AgentTaskLoopControllerState::Running);
+            let recovered_job = checkpoint["checkpoint"].clone();
+            let step = LoopWorkHandler.advance(recovered_job, WorkJobInvocation::Resume)?;
+            assert!(matches!(step, WorkJobStep::Continue { .. }));
+            let recovered = agent_task_loop_controller::load_controller(
+                "loop-interrupted-admission",
+            )?;
+            assert_eq!(
+                recovered.next_actions[0].status,
+                agent_task_loop_controller::AgentTaskLoopActionStatus::Completed,
+                "recovered controller: {recovered:#?}"
+            );
+            assert!(recovered
+                .dedupe_keys
+                .contains_key("interrupted-child-admission"));
+            assert_eq!(
+                recovered.metadata["runtime"]["revolutions"],
+                json!(1)
+            );
             assert_eq!(
                 std::fs::read(marker.path()).expect("provider marker after recovery").len(),
                 1
