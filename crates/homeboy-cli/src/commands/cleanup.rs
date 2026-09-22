@@ -4323,10 +4323,10 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
 
     if let Some(next) = payload.get("next_command").and_then(Value::as_str) {
         lines.push(format!("Next safe command: {next}"));
-    } else if scan_complete {
+    } else if scan_complete && remaining_count == 0 {
         lines.push("Cleanup complete: no eligible candidates remain.".to_string());
     } else {
-        lines.push("Cleanup inventory is partial; eligible artifacts may remain.".to_string());
+        lines.push("Cleanup incomplete; eligible artifacts may remain.".to_string());
     }
     lines.push(String::new());
 
@@ -6284,6 +6284,31 @@ mod tests {
         assert!(summary.contains("Reclaimed: 3.0 KiB\n"));
         assert!(summary.contains("Cleanup complete: no eligible candidates remain.\n"));
         assert!(!summary.contains("Next safe command:"));
+    }
+
+    #[test]
+    fn cleanup_artifacts_summary_does_not_claim_completion_with_remaining_candidates() {
+        let payload = json!({
+            "command": "cleanup.artifacts",
+            "mode": "dry_run",
+            "root": "/tmp/homeboy",
+            "candidate_count": 18,
+            "inspected_count": 18,
+            "scan_complete": true,
+            "skipped_count": 0,
+            "applied_count": 0,
+            "remaining_count": 18,
+            "estimated_bytes": 1024,
+            "reclaimed_bytes": 0,
+            "skipped": []
+        });
+
+        let summary = render_artifact_cleanup_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Inventory: complete (18 artifact paths inspected)\n"));
+        assert!(summary.contains("Remaining candidates: 18\n"));
+        assert!(summary.contains("Cleanup incomplete; eligible artifacts may remain.\n"));
+        assert!(!summary.contains("Cleanup complete: no eligible candidates remain."));
     }
 
     #[test]
