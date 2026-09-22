@@ -3795,6 +3795,21 @@ fn remediation_tool_policy_error(request: &crate::agent_task::AgentTaskRequest) 
     })
 }
 
+fn cook_remediation_same_provider(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    durable_provider_executions: Option<&Value>,
+    follow_up: &crate::agent_task::AgentTaskExecutor,
+) -> Option<bool> {
+    // A gate result authenticates the durable candidate and identifies this as
+    // same-provider gate remediation, even when a timed-out provider omitted
+    // its terminal executor identity.
+    promotion.status.gate_failed().then_some(true).or_else(|| {
+        terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
+    })
+}
+
 fn follow_up_budget_scope(
     source_request: &crate::agent_task::AgentTaskRequest,
     follow_up_request: &crate::agent_task::AgentTaskRequest,
@@ -4023,20 +4038,21 @@ pub(crate) fn dispatch_cook_follow_up(
             reason: "max_provider_executions".to_string(),
         });
     };
+    let durable_provider_executions = lifecycle_store
+        .read_record(source_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("provider_executions").cloned())
+        .filter(|executions| {
+            executions
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        });
     let same_provider = (known_same_executor
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
         .or_else(|| {
-            let durable_provider_executions = lifecycle_store
-                .read_record(source_run_id)
-                .ok()
-                .and_then(|record| record.metadata.get("provider_executions").cloned())
-                .filter(|executions| {
-                    executions
-                        .as_array()
-                        .is_some_and(|executions| !executions.is_empty())
-                });
-            terminal_executor_matches(
+            cook_remediation_same_provider(
+                promotion,
                 aggregate,
                 plan,
                 durable_provider_executions.as_ref(),
