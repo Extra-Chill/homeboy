@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.12] - 2026-09-22
+
+### Changed
+- preserve gate events in cancel replay
+
+### Fixed
+- prefer typed provider timeout diagnostics
+- reject incomplete connected runner status
+
 ## [0.383.11] - 2026-09-22
 
 ### Fixed
