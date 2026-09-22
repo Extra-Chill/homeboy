@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.8] - 2026-09-22
+
+### Fixed
+- synthesize default PHPUnit suite for managed bootstrap with no config
+
 ## [3.48.7] - 2026-09-22
 
 ### Fixed
