@@ -876,12 +876,7 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
         return AgentTaskFailureClassification::Capacity;
     }
-    if matches!(
-        error.code,
-        homeboy_core::ErrorCode::InternalIoError
-            | homeboy_core::ErrorCode::InternalJsonError
-            | homeboy_core::ErrorCode::StorageExhausted
-    ) {
+    if is_controller_infrastructure_failure(error) {
         return AgentTaskFailureClassification::ExecutionFailed;
     }
     if error.retryable == Some(true) {
@@ -896,13 +891,16 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
 /// repairs the backing store, while the existing retry reservation still
 /// prevents duplicate active attempts.
 fn pre_execution_failure_is_retryable(error: &Error) -> bool {
-    error.retryable == Some(true)
-        || matches!(
-            error.code,
-            homeboy_core::ErrorCode::InternalIoError
-                | homeboy_core::ErrorCode::InternalJsonError
-                | homeboy_core::ErrorCode::StorageExhausted
-        )
+    error.retryable == Some(true) || is_controller_infrastructure_failure(error)
+}
+
+fn is_controller_infrastructure_failure(error: &Error) -> bool {
+    matches!(
+        error.code,
+        homeboy_core::ErrorCode::InternalIoError
+            | homeboy_core::ErrorCode::InternalJsonError
+            | homeboy_core::ErrorCode::StorageExhausted
+    )
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch

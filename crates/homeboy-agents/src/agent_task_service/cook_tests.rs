@@ -9938,6 +9938,51 @@ fn non_retryable_pre_execution_failure_does_not_advertise_a_cook_losing_retry() 
 }
 
 #[test]
+fn wrapped_storage_failure_is_retryable_and_guidance_advertises_the_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-wrapped-storage-recovery";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.tasks[0].executor.backend = "homeboy-lab".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options).expect("materialize attempt");
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+            record.metadata["runner_generation"] = serde_json::json!("generation-a");
+        })
+        .expect("seed Lab identity");
+
+        let error = Error::internal_json(
+            "staging record schema is invalid",
+            Some("daemon request failed".to_string()),
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            "lab_staging_submission",
+            &error,
+        )
+        .expect("record wrapped storage failure");
+
+        assert!(
+            crate::agent_task_service::retry_admission(&options.identity.initial_run_id).is_ok()
+        );
+        let context = super::super::cook_failure_context(
+            &options.identity.cook_id,
+            Some(&options.identity.initial_run_id),
+            "pre_execution_failure",
+        )
+        .expect("Cook failure context");
+        assert!(context.next_actions.iter().any(|action| action.command
+            == format!(
+                "homeboy agent-task retry {} --run",
+                options.identity.initial_run_id
+            )));
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently() {
     homeboy_core::test_support::with_isolated_home(|_| {
         // Simulate a lifecycle retry that crashed after its durable retry proof
