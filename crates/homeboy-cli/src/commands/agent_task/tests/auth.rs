@@ -35,6 +35,7 @@ fn write_legacy_secrets_file(
                     scope: None,
                     name: None,
                     field: None,
+                    fallback_fields: Vec::new(),
                     value: None,
                 },
             )

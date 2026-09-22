@@ -943,6 +943,10 @@ pub struct SecretEnvCredentialSource {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1132,6 +1136,8 @@ mod tests {
                         name: Some("example-oauth".to_string()),
                         field: Some("refresh_token".to_string()),
                         env_var: None,
+                        fallback_fields: Vec::new(),
+                        fallback_value: None,
                     },
                 )]),
             },
