@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.10] - 2026-09-22
+
+### Fixed
+- keep Lab execution off hot controller
+- migrate staging retention records
+- accept detached default tip
+
 ## [0.383.9] - 2026-09-22
 
 ### Changed
