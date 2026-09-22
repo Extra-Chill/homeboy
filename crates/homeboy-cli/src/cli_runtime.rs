@@ -151,6 +151,19 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
         .spawn()
         .ok()?;
     let stderr = child.stderr.take()?;
+    // Both pipes must be drained while the child runs. A pipe holds about 64 KiB
+    // before a write blocks, and release output is far larger: `release
+    // changelog` emits roughly 480 KB. Reading stdout only after the child exits
+    // therefore deadlocks -- the child blocks writing, the parent blocks waiting,
+    // and the deadline fires against a command that had already finished its
+    // work. Buffer it on a thread and print it only on success, so a timeout
+    // still emits one clean envelope instead of partial output.
+    let mut child_stdout = child.stdout.take()?;
+    let stdout_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = child_stdout.read_to_end(&mut bytes);
+        bytes
+    });
     let stage = Arc::new(Mutex::new(String::from("startup")));
     let stage_for_reader = Arc::clone(&stage);
     let stderr_thread = thread::spawn(move || {
@@ -187,13 +200,9 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     let timed_out = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().and_then(|mut output| {
-                    let mut bytes = Vec::new();
-                    output.read_to_end(&mut bytes).ok().map(|_| bytes)
-                });
                 let _ = stderr_thread.join();
-                if let Some(stdout) = stdout {
-                    let _ = std::io::stdout().write_all(&stdout);
+                if let Ok(bytes) = stdout_thread.join() {
+                    let _ = std::io::stdout().write_all(&bytes);
                     let _ = std::io::stdout().flush();
                 }
                 return Some(std::process::ExitCode::from(
@@ -210,6 +219,9 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
         let _ = child.kill();
         let _ = child.wait();
         let _ = stderr_thread.join();
+        // Discard buffered stdout: a timeout emits its own envelope, and partial
+        // output ahead of it would hand the caller two conflicting results.
+        let _ = stdout_thread.join();
         let stalled_stage = stage
             .lock()
             .map(|current| current.clone())
@@ -233,6 +245,7 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     let _ = child.kill();
     let _ = child.wait();
     let _ = stderr_thread.join();
+    let _ = stdout_thread.join();
     None
 }
 
