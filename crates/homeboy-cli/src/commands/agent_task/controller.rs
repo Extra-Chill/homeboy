@@ -337,9 +337,7 @@ fn submit_loop_resume(
 /// envelope. Keep caller-supplied provider configuration in the private data
 /// root and persist only its reference; credentials are resolved by the runner
 /// secret contract when the WorkJob executes.
-fn materialize_private_resume_provider_config(
-    parameters: &mut Value,
-) -> homeboy::core::Result<()> {
+fn materialize_private_resume_provider_config(parameters: &mut Value) -> homeboy::core::Result<()> {
     let Some(raw) = parameters
         .get("provider_config")
         .and_then(Value::as_str)

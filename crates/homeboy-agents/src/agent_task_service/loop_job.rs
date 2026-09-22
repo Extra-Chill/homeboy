@@ -300,13 +300,17 @@ impl LoopWorkHandler {
             return Ok(WorkJobStep::Complete(job.result()));
         }
         if job.request.child_pid.is_none() {
-            let executor: SharedAgentTaskExecutor =
-                std::sync::Arc::new(ExtensionProviderAgentTaskExecutor::from_catalog(
-                    job.request.provider_catalog.clone(),
-                ));
+            let mut catalog = job.request.provider_catalog.clone();
+            apply_admitted_environment(
+                &mut catalog,
+                &job.request.dispatch_defaults["env_materialization"],
+            )?;
+            let executor: SharedAgentTaskExecutor = std::sync::Arc::new(
+                ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
+            );
             let dispatch = LoopDispatchHook {
                 executor: executor.clone(),
-                catalog: job.request.provider_catalog.clone(),
+                catalog,
                 defaults: ControllerDispatchOverrides {
                     backend: job.request.dispatch_defaults["backend"]
                         .as_str()
@@ -381,6 +385,43 @@ impl LoopWorkHandler {
             wait: SUPERVISION_POLL,
         })
     }
+}
+
+/// Apply the caller's public environment projection to provider declarations.
+/// The command runner then uses its normal launch-context path, which clears
+/// ambient variables before spawning and resolves secret names separately via
+/// `SecretEnvPlan`. Unlisted names are rejected instead of becoming authority
+/// through the daemon environment.
+fn apply_admitted_environment(catalog: &mut AgentTaskProviderCatalog, value: &Value) -> Result<()> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let mut plan: homeboy_core::env_materialization_plan::EnvMaterializationPlan =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            invalid_loop_job(&format!(
+                "invalid loop environment materialization plan: {error}"
+            ))
+        })?;
+    plan.normalize();
+    for (name, value) in &plan.public_env {
+        let mut declared = false;
+        for provider in &mut catalog.providers {
+            for env in &mut provider.invocation.env {
+                if env.name == *name {
+                    env.source = Some("value".to_string());
+                    env.value = Some(value.clone());
+                    env.redacted = Some(false);
+                    declared = true;
+                }
+            }
+        }
+        if !declared {
+            return Err(invalid_loop_job(&format!(
+                "loop environment materialization names undeclared provider variable `{name}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -525,7 +566,7 @@ mod tests {
 
     use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
     use homeboy_core::process::ProcessIdentityState;
-    use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
+    use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness, EnvVarGuard};
 
     use super::*;
     use crate::agent_task_service::work_job::{
@@ -611,6 +652,84 @@ mod tests {
             command.core.provider_config.as_deref(),
             Some("@provider-configs/caller-a")
         );
+    }
+
+    #[test]
+    fn loop_work_job_provider_receives_caller_environment_and_private_config_reference() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-caller-environment-a";
+            let observed = tempfile::NamedTempFile::new().expect("observed provider output");
+            let config = tempfile::NamedTempFile::new().expect("private provider config");
+            std::fs::write(config.path(), r#"{"account":"caller-a"}"#)
+                .expect("write caller config");
+            let _daemon = EnvVarGuard::set("HOMEBOY_FIXTURE_AUTHORITY", "daemon-b");
+            let mut record = agent_task_loop_controller::create_controller(
+                loop_id,
+                "repair",
+                "v1",
+            )
+            .expect("create controller");
+            record.record_action(
+                crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "caller-environment-provider".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": { "backend": "caller-fixture", "prompt": "observe" }
+                    }),
+                },
+                "caller environment handoff fixture",
+            );
+            agent_task_loop_controller::write_controller(&record).expect("write controller");
+            let provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+                serde_json::from_value(json!({
+                    "id": "caller-fixture",
+                    "backend": "caller-fixture",
+                    "command_argv": [
+                        "sh", "-c",
+                        format!(
+                            "printf '%s\\n%s' $HOMEBOY_FIXTURE_AUTHORITY $HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON > {}; printf '%s' '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"fixture\",\"status\":\"succeeded\"}}'",
+                            observed.path().display()
+                        )
+                    ],
+                    "invocation": { "env": [{
+                        "name": "HOMEBOY_FIXTURE_AUTHORITY",
+                        "source": "env",
+                        "required": true
+                    }] },
+                    "capabilities": ["structured_outcome"]
+                }))
+                .expect("provider fixture");
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            };
+            let mut job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: loop_id.to_string(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
+                child_pid: None,
+                child_start_identity: None,
+                generation: "generation-caller-a".to_string(),
+                dispatch_defaults: json!({
+                    "backend": "caller-fixture",
+                    "provider_config_ref": config.path().display().to_string(),
+                    "env_materialization": {
+                        "schema": "homeboy/env-materialization-plan/v1",
+                        "public_env": { "HOMEBOY_FIXTURE_AUTHORITY": "caller-a" }
+                    }
+                }),
+                provider_catalog: catalog,
+            })?;
+
+            let _ = LoopWorkHandler.observe(&mut job, WorkJobInvocation::Execute)?;
+            let observed = std::fs::read_to_string(observed.path()).expect("provider ran");
+            assert!(observed.starts_with("caller-a\n"), "observed={observed}");
+            assert!(observed.contains(r#""account":"caller-a""#));
+            assert!(!observed.contains("daemon-b"));
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("caller environment handoff converges");
     }
 
     #[test]
