@@ -843,7 +843,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner doctor lab --scope lab-offload`".to_string()
+            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref bbbbbbbbbbbb --reconnect`".to_string()
         }
     );
 }
@@ -1268,6 +1268,49 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
         .any(|suggestion| suggestion
             .as_str()
             .is_some_and(|value| value.contains("homeboy runner connect lab"))));
+}
+
+#[test]
+fn lab_runner_preparation_falls_back_when_connected_status_has_no_session() {
+    let selection = LabRunnerSelection {
+        runner_id: "lab".to_string(),
+        source: LabRunnerSelectionSource::Default,
+        mode: RunnerTunnelMode::DirectSsh,
+    };
+
+    let prepared = prepare_lab_runner_for_offload_with(
+        &selection,
+        |runner_id| {
+            Ok(RunnerStatusReport {
+                runner_id: runner_id.to_string(),
+                connected: true,
+                state: super::super::RunnerSessionState::Connected,
+                session: None,
+                stale_daemon: None,
+                configured_job_binary_build_identity: None,
+                daemon_freshness: None,
+                active_jobs: Vec::new(),
+                active_runner_jobs: Vec::new(),
+                active_job_count: 0,
+                stale_runner_jobs: Vec::new(),
+                stale_runner_job_count: 0,
+                active_job_state: RunnerActiveJobState::NotQueried,
+                active_job_source: None,
+                active_job_error: None,
+                active_job_recovery_evidence: None,
+                session_path: "/tmp/lab.json".to_string(),
+            })
+        },
+        |_| panic!("an incomplete connected status must not reconnect during preflight"),
+    )
+    .expect("automatic placement should fall back");
+
+    assert_eq!(
+        prepared,
+        LabRunnerPreparation::FallBackLocal {
+            reason: "connected runner `lab` has no connected daemon session; reconnect it with `homeboy runner connect lab`".to_string()
+        }
+    );
 }
 
 #[test]

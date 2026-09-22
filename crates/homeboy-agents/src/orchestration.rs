@@ -9465,26 +9465,36 @@ mod tests {
                 first
             );
             let durable_events = service.events(&run, None).expect("durable action events");
-            let action_events = durable_events
+            let event_kinds = durable_events
                 .events
                 .iter()
-                .filter(|event| event.kind.starts_with("action."))
+                .map(|event| event.kind.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(
-                action_events
+                &event_kinds[..3],
+                ["gate.started", "gate.result", "gate.completed"]
+            );
+            assert_eq!(
+                event_kinds
                     .iter()
-                    .map(|event| event.kind.as_str())
+                    .copied()
+                    .filter(|kind| kind.starts_with("action."))
                     .collect::<Vec<_>>(),
                 vec!["action.accepted", "action.already_satisfied"]
             );
-            assert_eq!(action_events[0].data["actor"], "test");
-            assert_eq!(action_events[0].data["confirmed"], true);
+            let accepted_event = durable_events
+                .events
+                .iter()
+                .find(|event| event.kind == "action.accepted")
+                .expect("accepted action event");
+            assert_eq!(accepted_event.data["actor"], "test");
+            assert_eq!(accepted_event.data["confirmed"], true);
             assert_eq!(
-                action_events[0].data["expected_updated_at"],
+                accepted_event.data["expected_updated_at"],
                 "2026-01-01T00:01:00Z"
             );
             assert_eq!(
-                action_events[0].data["acknowledgement"],
+                accepted_event.data["acknowledgement"],
                 first.acknowledgement
             );
             let logs =
@@ -9513,10 +9523,8 @@ mod tests {
                     .events(&run, None)
                     .expect("conflict does not append events")
                     .events
-                    .iter()
-                    .filter(|event| event.kind.starts_with("action."))
-                    .count(),
-                2
+                    .len(),
+                durable_events.events.len()
             );
 
             let stale = ControlPlaneActionRequest {
@@ -9535,10 +9543,8 @@ mod tests {
                     .events(&run, None)
                     .expect("stale fence does not append events")
                     .events
-                    .iter()
-                    .filter(|event| event.kind.starts_with("action."))
-                    .count(),
-                2
+                    .len(),
+                durable_events.events.len()
             );
 
             let reconcile = ControlPlaneActionRequest {
