@@ -8030,9 +8030,15 @@ pub fn record_promotion_in_store(
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
-        // A promoted patch blocked by deterministic gates is still the durable
-        // candidate, but it cannot be reported as a successful completed run.
-        if promotion.get("status").and_then(Value::as_str) == Some("gate_failed") {
+        // A candidate that has not completed controller-owned verification is
+        // recoverable evidence, not a successful completed run. In particular,
+        // the verification-pending checkpoint is written before gates start;
+        // leaving the provider's Succeeded state in place made Cook report
+        // success while the destination was still unverified (#14315).
+        if matches!(
+            promotion.get("status").and_then(Value::as_str),
+            Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
+        ) {
             set_run_state(record, AgentTaskRunState::CandidateRecoverable);
         }
         if let Some(acceptance) = record.acceptance.as_mut() {

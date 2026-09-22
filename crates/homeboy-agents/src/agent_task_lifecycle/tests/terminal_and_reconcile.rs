@@ -2835,6 +2835,7 @@ fn acceptance_is_created_after_green_promotion_and_persists_verifier_provenance(
         }),
     )
     .expect("pending promotion recorded");
+    assert_eq!(before_gates.state, AgentTaskRunState::CandidateRecoverable);
     assert!(before_gates.acceptance.is_none());
 
     let pending = record_promotion_in_store(
