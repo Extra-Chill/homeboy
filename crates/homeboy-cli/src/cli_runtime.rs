@@ -6596,6 +6596,36 @@ mod tests {
     }
 
     #[test]
+    fn local_provider_readiness_stays_controller_owned_without_runner_pin() {
+        for (args, expected) in [
+            (
+                vec!["homeboy", "--placement", "local", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec![
+                    "homeboy",
+                    "--placement",
+                    "lab-or-local",
+                    "agent-task",
+                    "providers",
+                ],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec!["homeboy", "--placement", "lab", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::Ordinary,
+            ),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let cli = Cli::parse_from(args.clone());
+            let input = resource_policy::parsed_command_preflight_input(&cli, &args);
+
+            assert_eq!(input.controller_execution, expected);
+        }
+    }
+
+    #[test]
     fn pinned_cook_continuation_command_quotes_the_executable_and_cook_id() {
         assert_eq!(
             pinned_cook_continue_command(
