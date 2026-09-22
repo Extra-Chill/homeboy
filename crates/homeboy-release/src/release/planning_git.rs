@@ -419,6 +419,7 @@ mod tests {
         run_git(&seed, &["push", "-q", "origin", "main"]);
 
         run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
         run_git(&checkout, &["checkout", "-q", "--detach", "origin/main~1"]);
         let old_revision = git_revision(&checkout, "HEAD");
         let default_revision = git_revision(&checkout, "origin/main");
