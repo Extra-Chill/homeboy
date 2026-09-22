@@ -70,7 +70,7 @@ pub(crate) fn parsed_command_preflight_input(
                 Commands::AgentTask(agent_task::AgentTaskArgs {
                     command: agent_task::AgentTaskCommand::Providers(_),
                 })
-            ) || (cli.runner.is_none() && cli.placement == Placement::Auto)))
+            ) || (cli.runner.is_none() && cli.placement != Placement::Lab)))
         || is_local_registry_management(&cli.command)
     {
         ControllerExecution::ControllerOnly
