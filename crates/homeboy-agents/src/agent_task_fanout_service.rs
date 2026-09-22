@@ -1,26 +1,20 @@
 //! Agent-owned fanout resume policy and effects.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent_task_batch::{self as batch, BatchProviderWorktreeFinalization};
+use crate::agent_task_batch as batch;
 use crate::agent_task_dependency_actions::{
     execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
     DependencyResolution,
 };
-use crate::agent_task_dependency_graph::{dependency_graph_readiness, AgentTaskDependencyNode};
 use crate::agent_task_fanout_supervisor as supervisor;
 use crate::agent_task_lifecycle;
-use crate::agent_task_provider::{self as provider, AgentTaskProviderCatalog};
 use crate::agent_task_service;
-use crate::agent_task_service::{CookProviderTransport, CookRequest};
 use crate::orchestration::{
     FanoutBatchResumeActionResult, FanoutResumeDispatcherFactory,
     FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA,

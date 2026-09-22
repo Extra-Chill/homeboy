@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -25,7 +23,6 @@ pub struct ProviderRuntimeReadinessCache {
     shared: Arc<ProviderRuntimeReadinessCacheShared>,
 }
 
-#[cfg(not(test))]
 static PROCESS_READINESS_CACHE: OnceLock<Arc<ProviderRuntimeReadinessCacheShared>> =
     OnceLock::new();
 static PROCESS_PROBE_GATE: OnceLock<Arc<ProviderReadinessProbeGate>> = OnceLock::new();
@@ -37,14 +34,6 @@ fn process_probe_gate() -> Arc<ProviderReadinessProbeGate> {
             changed: Condvar::new(),
         })
     }))
-}
-
-// Test threads represent independent callers. Keeping their process-local
-// cache separate prevents one parallel test from reusing another test's
-// readiness evidence while preserving cross-phase sharing within a test.
-#[cfg(test)]
-thread_local! {
-    static TEST_PROCESS_READINESS_CACHE: RefCell<Option<Arc<ProviderRuntimeReadinessCacheShared>>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug)]
@@ -104,26 +93,6 @@ impl ProviderRuntimeReadinessCache {
     /// request identity still includes credential value hashes, so refreshed
     /// credentials cannot reuse old readiness evidence.
     pub fn process_local() -> Self {
-        #[cfg(test)]
-        {
-            return Self {
-                shared: TEST_PROCESS_READINESS_CACHE.with(|cache| {
-                    let mut cache = cache.borrow_mut();
-                    Arc::clone(cache.get_or_insert_with(|| {
-                        Arc::new(ProviderRuntimeReadinessCacheShared {
-                            state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
-                            changed: Condvar::new(),
-                            probe_gate: Arc::new(ProviderReadinessProbeGate {
-                                active: Mutex::new(0),
-                                changed: Condvar::new(),
-                            }),
-                        })
-                    }))
-                }),
-            };
-        }
-
-        #[cfg(not(test))]
         Self {
             shared: Arc::clone(PROCESS_READINESS_CACHE.get_or_init(|| {
                 Arc::new(ProviderRuntimeReadinessCacheShared {
@@ -857,6 +826,19 @@ mod tests {
     };
     use homeboy_core::command_invocation::CommandInvocation;
 
+    fn test_cache() -> ProviderRuntimeReadinessCache {
+        ProviderRuntimeReadinessCache {
+            shared: Arc::new(ProviderRuntimeReadinessCacheShared {
+                state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                changed: Condvar::new(),
+                probe_gate: Arc::new(ProviderReadinessProbeGate {
+                    active: Mutex::new(0),
+                    changed: Condvar::new(),
+                }),
+            }),
+        }
+    }
+
     fn provider(script: &std::path::Path, count: &std::path::Path) -> AgentTaskExecutorProvider {
         let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "runtime.provider",
@@ -917,7 +899,7 @@ mod tests {
             let verdict = readiness_verdict(
                 &provider,
                 &json!({ "model": classification }),
-                &mut ProviderRuntimeReadinessCache::default(),
+                &mut test_cache(),
             )
             .expect("readiness result");
             assert_eq!(verdict.ready, ready, "{classification}");
@@ -938,12 +920,8 @@ mod tests {
         .expect("readiness script");
         let provider = provider(&script, &count);
 
-        let verdict = readiness_verdict(
-            &provider,
-            &json!({ "model": "test" }),
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .expect("readiness result");
+        let verdict = readiness_verdict(&provider, &json!({ "model": "test" }), &mut test_cache())
+            .expect("readiness result");
 
         assert_eq!(verdict.classification, "auth_failure");
         assert!(verdict.retryable);
@@ -955,7 +933,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         let config = json!({ "model": "ready" });
 
         let first = readiness_verdict(&provider, &config, &mut cache).expect("first verdict");
@@ -971,26 +949,27 @@ mod tests {
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
         let config = json!({ "model": "ready" });
+        let mut cache = ProviderRuntimeReadinessCache::process_local();
 
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("first phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("same-credential phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "rotated".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("rotated-credential phase verdict");
 
@@ -1002,7 +981,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for account in ["first", "second"] {
             assert!(
@@ -1027,7 +1006,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for (cook_id, to_worktree) in [("first", "homeboy@first"), ("second", "homeboy@second")] {
             assert!(
@@ -1064,7 +1043,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for cook_id in ["first", "second"] {
             assert!(
@@ -1129,7 +1108,7 @@ mod tests {
         let error = preflight_plan_provider_runtime_readiness_with_providers(
             &plan,
             &[provider],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
         )
         .expect_err("provider-owned auth requires a live probe");
 
@@ -1159,7 +1138,7 @@ mod tests {
             .command
             .argv
             .push(recovered.display().to_string());
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         let config = json!({ "model": "recovering" });
 
         assert!(
@@ -1206,7 +1185,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 let provider = provider.clone();
@@ -1240,7 +1219,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         let long_provider = provider.clone();
         let mut long_cache = cache.clone();
         let long = std::thread::spawn(move || {
@@ -1317,7 +1296,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         let short_deadline = crate::agent_task_timeout::now_unix_ms() + 300;
         let short_provider = provider.clone();
@@ -1383,7 +1362,7 @@ mod tests {
             .command
             .argv
             .push(root.path().display().to_string());
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for model in ["a", "b"] {
                 let provider = provider.clone();
@@ -1420,7 +1399,7 @@ mod tests {
             .command
             .argv
             .push(probes.display().to_string());
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for index in (0..65).chain(std::iter::once(0)) {
                 let provider = provider.clone();
@@ -1490,7 +1469,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         for _ in 0..2 {
             assert!(readiness_verdict(&provider, &json!({"model":"error"}), &mut cache).is_err());
         }
@@ -1595,7 +1574,7 @@ mod tests {
             &provider,
             &json!({"model":"ready"}),
             &[],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1)),
         )
         .expect_err("expired deadline stops before probing");
@@ -1622,7 +1601,7 @@ mod tests {
             &provider,
             &json!({"model":"slow"}),
             &[],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms() + 100),
         )
         .expect_err("absolute deadline interrupts readiness");
