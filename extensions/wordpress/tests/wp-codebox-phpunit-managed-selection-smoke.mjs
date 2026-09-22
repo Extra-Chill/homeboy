@@ -202,7 +202,16 @@ try {
   assert.match(discovery.stdout, /wp-codebox\/phpunit-discovery\/v1/);
   const discoveryRecipeOptions = JSON.parse(await readFile(discoveryOptions, 'utf8'));
   assert.deepEqual(discoveryRecipeOptions.preloadFiles || [], [], 'discovery must not preload a harness file that is not mounted');
-  assert.deepEqual(discoveryRecipeOptions.mounts || [], [], 'discovery must not mount the managed harness');
+  // `sample-plugin` declares managed bootstrap with no phpunit.xml(.dist), so
+  // discovery reaches the same synthesized default suite a real run does: its
+  // generated config must still be mounted, or discovery would have nothing
+  // to read the suite's membership from. Only the vendor harness and WP-CLI
+  // bootstrap mounts -- unneeded for listing files -- must stay absent.
+  assert.deepEqual(
+    (discoveryRecipeOptions.mounts || []).map((entry) => entry.target),
+    [discoveryRecipeOptions.phpunitXml],
+    'discovery must mount only the synthesized default suite config, not the managed harness',
+  );
 
   const managedSource = path.join(root, 'managed-runtime', 'source');
   const managedCli = path.join(managedSource, 'packages', 'cli', 'dist', 'index.js');

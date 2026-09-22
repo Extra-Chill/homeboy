@@ -28,6 +28,15 @@ const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-sele
 // a `const` sited next to its helper is still in its temporal dead zone when
 // that top-level await reaches it.
 const RUNTIME_SERVICE_PREEXECUTION_FAILURES = new Set(['provider-unavailable', 'provision-failed', 'readiness-failed', 'interrupted']);
+// The plugin-relative test directory `synthesizeManagedDefaultSuite` scans.
+// `resolvePhpunitSuites` only ever leaves a suite's `config` empty for the
+// single implicit suite it returns when neither wp_codebox_phpunit_config nor
+// wp_codebox_phpunit_suites is declared -- every explicitly declared suite
+// always carries one. Consumers that already declare either setting never
+// reach that function, so they are unaffected by construction. Declared here,
+// with the module's other top-level constants, for the same reason as
+// RUNTIME_SERVICE_PREEXECUTION_FAILURES above.
+const MANAGED_DEFAULT_SUITE_TEST_DIRECTORY = 'tests';
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
@@ -56,6 +65,11 @@ const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
 // hand-roll in a shell step outside the managed runner.
 const PHPUNIT_SUITE_RUNTIMES = ['sandbox', 'host'];
 
+// Created before suite resolution so a synthesized default suite (see
+// `synthesizeManagedDefaultSuite` below) has somewhere to host its generated
+// config file for the rest of this run.
+const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-'));
+
 // Discovery reports the component's test files by asking the sandbox, so it
 // must resolve against a sandbox suite. A component may declare a host suite
 // first, and a host suite's config describes an environment the sandbox does
@@ -71,6 +85,13 @@ if (sandboxSuites.length === 0) {
   throw new Error('wp_codebox_phpunit_suites must declare at least one sandbox suite; discovery has no environment to resolve against otherwise.');
 }
 const activeSuite = sandboxSuites[0];
+// A managed-bootstrap component that declares neither wp_codebox_phpunit_config
+// nor wp_codebox_phpunit_suites, and ships no phpunit.xml(.dist), used to reach
+// WP Codebox with an empty config and silently execute nothing. Resolving that
+// here -- before anything sandbox-related is prepared -- means a component that
+// ships tests just runs, and one that does not fails immediately with a named
+// cause instead of a shape-of-success zero.
+const managedDefaultSuiteMount = await synthesizeManagedDefaultSuite(activeSuite, pluginSourceDirectory, settings, slug, directory);
 const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug, activeSuite.config);
 const phpunitBootstrap = resolvePhpunitBootstrap(settings, phpunitProfile);
 const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
@@ -79,7 +100,6 @@ if (!discoveryOnly) {
   requireDatabaseServiceCapability(databaseService);
   runPrepareSteps(settings.wp_codebox_prepare_steps, pluginSourceDirectory);
 }
-const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-'));
 const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
@@ -171,7 +191,7 @@ const options = clean({
   projectBootstrap: phpunitBootstrap.projectBootstrap,
   multisite: discoveryOnly ? false : topology.multisite,
   preloadFiles: managedPreloadFiles(phpunitBootstrap.mode, activeSuite.preloadFiles === null ? settings.wp_codebox_phpunit_preload_files : activeSuite.preloadFiles),
-  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(!discoveryOnly ? [
+  mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), ...(managedDefaultSuiteMount ? [managedDefaultSuiteMount] : []), ...(!discoveryOnly ? [
     { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' },
     { source: wpCliBootstrapSource, target: wpCliBootstrapTarget, mode: 'readonly' },
   ] : [])],
@@ -1696,7 +1716,12 @@ async function phpunitExecutionDiagnosis(artifactDirectory, results, execution, 
       return {
         cause: 'recipe_run_no_executions',
         detail: 'The recipe-run payload parsed but declared no execution steps, so no sandbox step ran and PHPUnit never started.',
-        remediation: 'Inspect artifact://files/recipe-run-steps.json and logs/recipe-run.stderr.log for why the recipe dispatched no steps.',
+        // artifact://files/recipe-run-steps.json is an empty ledger by
+        // definition here -- there is no step to inspect in it -- so it names
+        // the symptom, not the cause. What explains why WP Codebox dispatched
+        // no step at all lives in the raw recipe-run output, not its parsed
+        // step list.
+        remediation: 'Read logs/recipe-run.stdout.log and logs/recipe-run.stderr.log for why WP Codebox dispatched no step; artifact://files/recipe-run-steps.json will be an empty ledger by definition.',
       };
     }
     const failedRecipeStep = (recipeRunSteps?.executions || []).find((step) => Number.isInteger(step.exit_code) && step.exit_code !== 0);
@@ -2133,6 +2158,113 @@ function resolvePhpunitSuites(configuration) {
     }
     return { name, config, runtime, preloadFiles };
   });
+}
+
+// Synthesize a default suite for a managed-bootstrap component that declares
+// no PHPUnit config at all.
+//
+// Before this, an empty `suite.config` reached WP Codebox with nothing to
+// probe but the component's own phpunit.xml(.dist) -- absent here by
+// definition, since a discoverable one is handled below -- so discovery found
+// no members, the recipe dispatched no steps, and the run reported a
+// zero-test pass. A component that ships tests under the conventional tests/
+// directory and declares managed bootstrap has everything needed to run
+// without a config file duplicated into every such consumer; a component that
+// ships neither a config nor discoverable tests has nothing to run and must
+// fail here, before any sandbox work begins, naming exactly why.
+//
+// Returns the mount this run must add so the generated config is readable
+// inside the sandbox at the path this function assigns to `suite.config`, or
+// null when no synthesis applies (explicit config, discoverable
+// phpunit.xml(.dist), or non-managed bootstrap).
+async function synthesizeManagedDefaultSuite(suite, pluginDirectory, configuration, componentSlug, workDirectory) {
+  if (suite.config || (configuration.wp_codebox_phpunit_bootstrap_mode || 'auto') !== 'managed') {
+    return null;
+  }
+  for (const candidate of ['phpunit.xml', 'phpunit.xml.dist']) {
+    try {
+      await access(path.join(pluginDirectory, candidate));
+      return null; // Discoverable already; resolvePhpunitProfile's own probe picks it up.
+    } catch {}
+  }
+  // Reuses `suiteDeclaresFile` -- the same rule a real <directory suffix="Test.php">
+  // config entry would produce -- instead of a second membership implementation.
+  // Plugin-relative here because `findDeclaredTestFiles` walks the plugin
+  // source tree directly.
+  const pluginRelativeMembership = {
+    known: true,
+    files: [],
+    directories: [{ path: MANAGED_DEFAULT_SUITE_TEST_DIRECTORY, suffix: 'Test.php', prefix: '' }],
+    excludes: [],
+  };
+  const discovered = await findDeclaredTestFiles(pluginDirectory, pluginRelativeMembership);
+  if (discovered.length === 0) {
+    throw new Error(
+      `wp_codebox_phpunit_bootstrap_mode is "managed" for "${componentSlug}" but no PHPUnit config (phpunit.xml, phpunit.xml.dist) exists and no ${MANAGED_DEFAULT_SUITE_TEST_DIRECTORY}/**/*Test.php files were found under ${pluginDirectory}. `
+      + `Declare wp_codebox_phpunit_config or wp_codebox_phpunit_suites, or add PHPUnit tests under ${MANAGED_DEFAULT_SUITE_TEST_DIRECTORY}/ so the managed runner has something to execute.`,
+    );
+  }
+  const sandboxRoot = sandboxPluginDirectory(componentSlug);
+  const configFileName = 'wp-codebox-managed-phpunit-default.xml';
+  const hostConfigPath = path.join(workDirectory, configFileName);
+  await writeFile(hostConfigPath, [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<phpunit>',
+    '  <testsuites>',
+    '    <testsuite name="default">',
+    `      <directory suffix="Test.php">${MANAGED_DEFAULT_SUITE_TEST_DIRECTORY}</directory>`,
+    '    </testsuite>',
+    '  </testsuites>',
+    '</phpunit>',
+    '',
+  ].join('\n'));
+  const sandboxConfigPath = `${sandboxRoot}/${configFileName}`;
+  // Mutates the shared suite object so every later consumer -- the recipe
+  // profile, the artifact provenance -- sees exactly the same config a
+  // declared suite would carry. `resolveSuiteConfigHostPath` still treats this
+  // as a config to try reading from the host filesystem, where it does not
+  // exist (it is sandbox-mounted, not plugin-relative); that failure is caught
+  // there exactly as an unreadable declared config already is, so
+  // `readSuiteMembership` falls through to its existing `known: false`
+  // passthrough unchanged. That is deliberate: this suite's changed-file scope
+  // keeps behaving exactly as it did with no config at all, which is the
+  // dimension this fix does not touch.
+  suite.config = sandboxConfigPath;
+  return { source: hostConfigPath, target: sandboxConfigPath, mode: 'readonly' };
+}
+
+// Walk `pluginDirectory` for the files a membership rule declares, using the
+// exact matcher `suiteDeclaresFile` already applies to changed-file scoping,
+// so "does this suite have anything to run" and "does this suite declare this
+// file" never disagree.
+async function findDeclaredTestFiles(pluginDirectory, membership) {
+  const matches = [];
+  async function walk(currentDirectory) {
+    let entries;
+    try {
+      entries = await readdir(currentDirectory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const relative = path.relative(pluginDirectory, entryPath).split(path.sep).join('/');
+      if (suiteDeclaresFile(membership, relative)) {
+        matches.push(relative);
+      }
+    }
+  }
+  for (const directoryRule of membership.directories) {
+    await walk(path.join(pluginDirectory, directoryRule.path));
+  }
+  return matches;
 }
 
 // Decide whether a bootstrap actually loads WordPress.
