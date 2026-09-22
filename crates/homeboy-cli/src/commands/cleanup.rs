@@ -2000,6 +2000,7 @@ fn cleanup_inventory_with_deadline(
                     cleanup_category_action_deadline(deadline),
                     args.cursor.as_deref(),
                     policy.scan_limit(),
+                    args.limit.and_then(|limit| usize::try_from(limit).ok()),
                 )
                 .map(|category| vec![category])
             },
@@ -3449,11 +3450,15 @@ fn repo_artifacts_category(
     deadline: Option<SystemTime>,
     cursor: Option<&str>,
     limit: usize,
+    command_limit: Option<usize>,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     let cursor = cursor
         .map(cleanup::parse_artifact_cleanup_cursor)
         .transpose()?;
-    let configured_roots: Vec<PathBuf> = homeboy::core::component::registered()
+    // Cleanup needs only persisted local paths. Full component resolution can
+    // enrich checkout-less releases through the network, which is unrelated to
+    // artifact inventory and can consume the entire bounded category wall.
+    let configured_roots: Vec<PathBuf> = homeboy::core::component::registered_base()
         .unwrap_or_default()
         .into_iter()
         .map(|component| PathBuf::from(component.local_path))
@@ -3512,7 +3517,7 @@ fn repo_artifacts_category(
         .any(|output| !output.scan_complete);
     Ok(CleanupInventoryCategory {
         category: REPO_ARTIFACTS_METADATA.category.to_string(),
-        canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        canonical_cleanup_command: repo_artifacts_command(apply, command_limit),
         specialist_command: REPO_ARTIFACTS_METADATA
             .specialist_command(apply)
             .to_string(),
@@ -3552,8 +3557,12 @@ fn repo_artifacts_category(
         elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
-        continuation_command: repo_artifact_continuation_command(apply, &output.diagnostics)
-            .unwrap_or_else(|| REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply)),
+        continuation_command: repo_artifact_continuation_command(
+            apply,
+            command_limit,
+            &output.diagnostics,
+        )
+        .unwrap_or_else(|| repo_artifacts_command(apply, command_limit)),
         cleanup_run_ref: None,
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
@@ -3572,6 +3581,7 @@ fn repo_artifacts_category(
 
 fn repo_artifact_continuation_command(
     apply: bool,
+    command_limit: Option<usize>,
     diagnostics: &[RepoArtifactRootDiagnostic],
 ) -> Option<String> {
     let cursor = diagnostics
@@ -3581,9 +3591,17 @@ fn repo_artifact_continuation_command(
     let cursor = serde_json::to_string(cursor).ok()?;
     Some(format!(
         "{} --cursor {}",
-        REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        repo_artifacts_command(apply, command_limit),
         quote_arg(&cursor)
     ))
+}
+
+fn repo_artifacts_command(apply: bool, command_limit: Option<usize>) -> String {
+    let mut command = REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply);
+    if let Some(limit) = command_limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    command
 }
 
 struct RepoArtifactRootsCleanup {
