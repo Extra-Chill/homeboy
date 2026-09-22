@@ -7550,7 +7550,7 @@ mod tests {
                     .iter()
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
-                vec!["action.accepted", "action.succeeded"]
+                vec!["action.accepted", "run.cancelled", "action.succeeded"]
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
