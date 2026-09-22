@@ -365,6 +365,7 @@ fn submit_loop_resume(
         limit,
         true,
     )?;
+    record.updated_at = chrono::Utc::now().to_rfc3339();
     homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
     let resumed_loop_id = loop_id.clone();
     let (value, exit_code) = detach_loop_coordinator(loop_id, defaults)?;
@@ -381,10 +382,16 @@ fn submit_loop_resume(
 }
 
 fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let (record, work) = homeboy::agents::agent_task_loop_controller::stop_loop(
+    let (record, acknowledgement) = homeboy::agents::agent_task_loop_controller::stop_loop(
         &args.loop_id,
         "agent-task loop stop requested",
     )?;
+    let work = acknowledgement
+        .result
+        .data
+        .get("work")
+        .cloned()
+        .unwrap_or(Value::Null);
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-stop-result/v1",

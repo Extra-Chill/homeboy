@@ -5660,6 +5660,7 @@ mod loop_control_plane_tests {
         control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
         stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
+    use homeboy_control_plane_contract::ControlPlaneActionOutcome;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
 
@@ -5692,6 +5693,43 @@ mod loop_control_plane_tests {
     }
 
     #[test]
+    fn legacy_controller_status_is_read_only_and_stop_prepares_its_resource() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
+                "legacy/read",
+                "repair",
+                "v1",
+            );
+            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
+                .expect("path");
+            std::fs::create_dir_all(path.parent().expect("controller parent")).expect("parent");
+            homeboy_core::engine::local_files::write_json_file(&path, &record)
+                .expect("legacy controller");
+            let before = std::fs::read(&path).expect("legacy bytes");
+            crate::agent_task_loop_controller::controller_status_report(&record.loop_id)
+                .expect("legacy status");
+            assert_eq!(before, std::fs::read(&path).expect("legacy bytes"));
+            assert!(homeboy_core::control_plane::run(
+                &control_plane_run_id(&record.loop_id).expect("canonical id")
+            )
+            .is_err());
+
+            let (stopped, acknowledgement) =
+                stop_loop(&record.loop_id, "legacy stop").expect("legacy stop");
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert!(homeboy_core::control_plane::run(
+                &control_plane_run_id(&record.loop_id).expect("canonical id")
+            )
+            .is_ok());
+        });
+    }
+
+    #[test]
     fn loop_runtime_projection_preserves_legacy_defaults_without_writing() {
         let metadata = json!({ "legacy": true });
         assert_eq!(loop_runtime_metadata(&metadata)["on"], true);
@@ -5704,6 +5742,63 @@ mod loop_control_plane_tests {
             control_plane_run_id("legacy/a").expect("slash id"),
             control_plane_run_id("legacy_a").expect("underscore id")
         );
+    }
+
+    #[test]
+    fn loop_alias_collision_fails_in_the_authoritative_store() {
+        with_isolated_home(|_| {
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation");
+            let projection =
+                |resource_id: &str| homeboy_core::observation::ControlPlaneResourceProjection {
+                    resource_type:
+                        crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE
+                            .to_string(),
+                    resource_id: resource_id.to_string(),
+                    version: "v1".to_string(),
+                    state: "running".to_string(),
+                    aliases: vec!["legacy-alias".to_string()],
+                    eligibility: json!({}),
+                    provenance: json!({}),
+                };
+            store
+                .upsert_control_plane_resource_projection(&projection("loop:one"))
+                .expect("first alias");
+            assert!(store
+                .upsert_control_plane_resource_projection(&projection("loop:two"))
+                .is_err());
+        });
+    }
+
+    #[test]
+    fn loop_stop_persists_off_before_unavailable_work_failure() {
+        with_isolated_home(|_| {
+            super::register();
+            let mut record =
+                create_controller("loop/unavailable", "repair", "v1").expect("created");
+            record.metadata = json!({ "work_job": { "job_id": "missing-active-job" } });
+            write_controller(&record).expect("work identity");
+
+            let error = stop_loop(&record.loop_id, "stop unavailable work")
+                .expect_err("unavailable cancellation must fail");
+            assert!(error.message.contains("could not be observed"));
+            let persisted = crate::agent_task_loop_controller::load_controller(&record.loop_id)
+                .expect("persisted controller");
+            assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], false);
+            let effect = homeboy_core::control_plane::effect_status(
+                &control_plane_run_id(&record.loop_id).expect("canonical id"),
+                &homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    control_plane_run_id(&record.loop_id).expect("canonical id"),
+                    record.updated_at
+                )),
+            )
+            .expect("failed effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Failed
+            );
+        });
     }
 
     #[test]
@@ -5725,18 +5820,20 @@ mod loop_control_plane_tests {
             let direct_before = homeboy_core::control_plane::run(&canonical).expect("direct read");
             assert_eq!(direct_before.run, canonical);
 
-            let (stopped, first_work) = stop_loop(&record.loop_id, "test stop").expect("stop");
+            let (stopped, first_ack) = stop_loop(&record.loop_id, "test stop").expect("stop");
             assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
-            assert_eq!(first_work, serde_json::Value::Null);
+            assert_eq!(first_ack.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(first_ack.result.data["work"], serde_json::Value::Null);
 
             let mut resumed = stopped.clone();
             stamp_loop_runtime_metadata(&mut resumed.metadata, true, None, true).expect("resume");
             resumed.updated_at = chrono::Utc::now().to_rfc3339();
             write_controller(&resumed).expect("persist new generation");
-            let (replayed, second_work) =
+            let (replayed, second_ack) =
                 stop_loop(&record.loop_id, "test stop").expect("second stop");
             assert_eq!(loop_runtime_metadata(&replayed.metadata)["on"], false);
-            assert_eq!(second_work, first_work);
+            assert_eq!(second_ack.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(second_ack.result.data["work"], serde_json::Value::Null);
 
             let store =
                 crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()

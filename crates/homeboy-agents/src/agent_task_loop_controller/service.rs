@@ -3,9 +3,9 @@ use crate::agent_task::AgentTaskEvidenceRef;
 use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-    ControlPlaneActionRequest, RunId, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
-    CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, RunId,
+    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{
     register_control_plane_action_delegate as register_core_action_delegate,
@@ -55,8 +55,18 @@ pub fn control_plane_run_id(loop_id: &str) -> Result<RunId> {
 }
 
 /// Adapt the CLI stop request to the canonical action service.
-pub fn stop_loop(loop_id: &str, reason: &str) -> Result<(AgentTaskLoopControllerRecord, Value)> {
+pub fn stop_loop(
+    loop_id: &str,
+    reason: &str,
+) -> Result<(
+    AgentTaskLoopControllerRecord,
+    ControlPlaneActionAcknowledgement,
+)> {
     let record = load_controller(loop_id)?;
+    // Legacy controller JSON predates the SQLite resource projection. Stop is
+    // the explicit mutation boundary that may rebuild that projection; status
+    // remains a pure JSON read.
+    prepare_control_plane_loop(&record)?;
     let run = control_plane_run_id(&record.loop_id)?;
     let generation = record.updated_at.clone();
     let request = ControlPlaneActionRequest {
@@ -85,16 +95,15 @@ pub fn stop_loop(loop_id: &str, reason: &str) -> Result<(AgentTaskLoopController
             }
             _ => Error::internal_unexpected(error.message),
         })?;
-    let record = load_controller(loop_id)?;
-    Ok((
-        record,
-        acknowledgement
-            .result
-            .data
-            .get("work")
-            .cloned()
-            .unwrap_or(Value::Null),
-    ))
+    if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
+        return Err(Error::internal_unexpected(
+            acknowledgement
+                .message
+                .clone()
+                .unwrap_or_else(|| "loop stop action failed".to_string()),
+        ));
+    }
+    Ok((load_controller(loop_id)?, acknowledgement))
 }
 
 fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Result<Value> {
@@ -177,32 +186,10 @@ impl LoopActionDelegate {
             homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
         })?;
         let already_off = loop_runtime_metadata(&record.metadata)["on"] == false;
-        let existing_work = loop_work_status(&record.metadata);
-        if existing_work
-            .get("status")
-            .is_some_and(|status| status == "unavailable")
-        {
-            return Err(
-                homeboy_control_plane_contract::ControlPlaneError::unavailable(
-                    "loop work cancellation could not be observed",
-                ),
-            );
-        }
-        let work = if already_off {
-            if existing_work.is_null() || work_job_is_terminal(&existing_work) {
-                existing_work
-            } else {
-                cancel_work_job(
-                    &record,
-                    request.parameters.data["reason"]
-                        .as_str()
-                        .unwrap_or("loop stop requested"),
-                )
-                .map_err(|error| {
-                    homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
-                })?
-            }
-        } else {
+        let mut performed_cancellation = false;
+        // Persist the off marker before inspecting or touching the daemon. A
+        // wedged daemon must not leave the controller advertising that it runs.
+        if !already_off {
             let limit = loop_runtime_metadata(&record.metadata)
                 .get("revolution_limit")
                 .and_then(Value::as_u64)
@@ -216,6 +203,22 @@ impl LoopActionDelegate {
             write_controller(&record).map_err(|error| {
                 homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
             })?;
+        }
+        let existing_work = loop_work_status(&record.metadata);
+        if existing_work
+            .get("status")
+            .is_some_and(|status| status == "unavailable")
+        {
+            return Err(
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                    "loop work cancellation could not be observed; loop remains off",
+                ),
+            );
+        }
+        let work = if existing_work.is_null() || work_job_is_terminal(&existing_work) {
+            existing_work
+        } else {
+            performed_cancellation = true;
             cancel_work_job(
                 &record,
                 request.parameters.data["reason"]
@@ -227,7 +230,9 @@ impl LoopActionDelegate {
             })?
         };
         Ok(ControlPlaneActionDelegateResult {
-            outcome: if already_off || recovering {
+            outcome: if performed_cancellation {
+                ControlPlaneActionOutcome::Succeeded
+            } else if already_off || recovering {
                 ControlPlaneActionOutcome::AlreadySatisfied
             } else {
                 ControlPlaneActionOutcome::Succeeded
@@ -1130,6 +1135,12 @@ pub fn list_controllers() -> Result<Vec<AgentTaskLoopControllerRecord>> {
 
 pub fn write_controller(record: &AgentTaskLoopControllerRecord) -> Result<()> {
     write_json(&controller_path(&record.loop_id)?, record)?;
+    publish_control_plane_loop(record)
+}
+
+/// Rebuild the SQLite projection for a legacy or partially published JSON
+/// controller. This is intentionally explicit and never called by status.
+pub fn prepare_control_plane_loop(record: &AgentTaskLoopControllerRecord) -> Result<()> {
     publish_control_plane_loop(record)
 }
 
