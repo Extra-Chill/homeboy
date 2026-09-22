@@ -1440,8 +1440,20 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             record.metadata["queue_quarantine"]["error_code"],
             "validation.invalid_argument"
         );
-        assert!(record.metadata["queue_quarantine"].get("details").is_none());
-        assert!(record.metadata["queue_quarantine"].get("reason").is_none());
+        assert_eq!(
+            record.metadata["queue_quarantine"]["actor"],
+            "fleet-reconciler"
+        );
+        assert_eq!(
+            record.metadata["queue_quarantine"]["reason"],
+            "queued run failed admission preflight"
+        );
+        assert!(record.metadata["queue_quarantine"]["timestamp"].is_string());
+        assert!(record.metadata["queue_quarantine"]["recovery_action"].is_string());
+        assert!(logs.events.iter().any(|event| {
+            event.kind == "run.quarantined"
+                && event.data["provenance"]["cause"] == "admission_preflight_failed"
+        }));
         for leak in LEAKS {
             assert!(
                 !rendered.contains(leak),

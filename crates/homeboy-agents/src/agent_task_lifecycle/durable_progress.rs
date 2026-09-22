@@ -248,6 +248,32 @@ pub(crate) fn prepared_progress_events(
     for request in gate_lifecycle_requests(record)? {
         events.push(prepare_request(&run, record, request)?);
     }
+    if let Some(provenance) = record
+        .metadata
+        .get("queue_quarantine")
+        .and_then(Value::as_object)
+    {
+        events.push(prepare_provenance_event(
+            &run,
+            record,
+            "run.quarantined",
+            "quarantine",
+            provenance,
+        )?);
+    }
+    if let Some(provenance) = record
+        .metadata
+        .get("cancellation_provenance")
+        .and_then(Value::as_object)
+    {
+        events.push(prepare_provenance_event(
+            &run,
+            record,
+            "run.cancelled",
+            "cancellation",
+            provenance,
+        )?);
+    }
     Ok(events)
 }
 
@@ -564,6 +590,51 @@ fn prepare_request(
 ) -> Result<PreparedControlPlaneEventAppend> {
     crate::orchestration::prepare_control_plane_event_append(run, record, &request)
         .map_err(map_append_error)
+}
+
+fn prepare_provenance_event(
+    run: &RunId,
+    record: &AgentTaskRunRecord,
+    kind: &str,
+    identity: &str,
+    provenance: &serde_json::Map<String, Value>,
+) -> Result<PreparedControlPlaneEventAppend> {
+    let actor = provenance
+        .get("actor")
+        .and_then(Value::as_str)
+        .unwrap_or("controller");
+    let timestamp = provenance
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    prepare_request(
+        run,
+        record,
+        ControlPlaneEventAppendRequest {
+            schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+            idempotency_key: crate::orchestration::progress_event_idempotency_key(
+                kind,
+                &format!("{identity}\0{}", record.run_id),
+            ),
+            actor: actor.to_string(),
+            kind: kind.to_string(),
+            source: ControlPlaneEventSource {
+                component: "agent-task".to_string(),
+                instance: None,
+            },
+            occurred_at: timestamp,
+            task: None,
+            attempt: None,
+            execution: None,
+            data: json!({
+                "state": if kind == "run.cancelled" { AgentTaskState::Cancelled } else { AgentTaskState::Queued },
+                "message": provenance.get("reason").and_then(Value::as_str).unwrap_or(kind),
+                "provenance": provenance,
+            }),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        },
+    )
 }
 
 fn provider_execution_request(
