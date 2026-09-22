@@ -682,6 +682,13 @@ pub fn loop_runtime_metadata(metadata: &Value) -> Value {
     })
 }
 
+fn loop_runtime_stop_epoch(runtime: &Value) -> u64 {
+    runtime
+        .get("stop_epoch")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
 pub fn stamp_loop_runtime_metadata(
     metadata: &mut Value,
     on: bool,
@@ -710,6 +717,15 @@ pub fn stamp_loop_runtime_metadata(
         .get("revolutions")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // Each stop advances the epoch. A writer whose record predates the stop
+    // carries an older epoch, and `write_controller` keeps the stopped runtime.
+    if !on {
+        let epoch = loop_runtime_stop_epoch(&Value::Object(runtime.clone()));
+        runtime.insert(
+            "stop_epoch".to_string(),
+            Value::Number(serde_json::Number::from(epoch + 1)),
+        );
+    }
     runtime.insert("on".to_string(), Value::Bool(on));
     runtime.insert(
         "state".to_string(),
@@ -1547,9 +1563,49 @@ pub fn list_controllers() -> Result<Vec<AgentTaskLoopControllerRecord>> {
     Ok(records)
 }
 
+/// Persist a controller record under the loop's write lock.
+///
+/// Stop and the loop's daemon work both read, modify, and write this record.
+/// A writer that loaded the record before a stop carries an older stop epoch;
+/// its runtime section is replaced by the persisted stopped runtime, so a
+/// concurrent WorkJob can never turn a stopped loop back on. Its other
+/// changes still apply.
 pub fn write_controller(record: &AgentTaskLoopControllerRecord) -> Result<()> {
-    write_json(&controller_path(&record.loop_id)?, record)?;
-    publish_control_plane_loop(record)
+    let path = controller_path(&record.loop_id)?;
+    let _lock = lock_controller(&path)?;
+    let mut merged = record.clone();
+    if let Ok(persisted) = read_json::<AgentTaskLoopControllerRecord>(&path) {
+        let persisted_runtime = loop_runtime_metadata(&persisted.metadata);
+        if loop_runtime_stop_epoch(&persisted_runtime)
+            > loop_runtime_stop_epoch(&loop_runtime_metadata(&merged.metadata))
+        {
+            if !merged.metadata.is_object() {
+                merged.metadata = serde_json::json!({});
+            }
+            merged.metadata["runtime"] = persisted_runtime;
+        }
+    }
+    write_json(&path, &merged)?;
+    publish_control_plane_loop(&merged)
+}
+
+fn lock_controller(controller: &Path) -> Result<fs::File> {
+    let lock_path = controller.with_file_name("controller.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(parent.display().to_string()))
+        })?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(lock_path.display().to_string()))
+        })?;
+    homeboy_core::config::lock_exclusive_bounded(&file, &lock_path, "loop controller write")?;
+    Ok(file)
 }
 
 fn publish_control_plane_loop(record: &AgentTaskLoopControllerRecord) -> Result<()> {

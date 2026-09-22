@@ -1170,3 +1170,37 @@ fn verify_commands_are_reusable_gate_bundle_checks() {
     assert_eq!(bundle.checks[0].input["command"], json!("cargo test --lib"));
     assert!(bundle.checks[0].retryable);
 }
+
+#[test]
+fn stale_writer_cannot_turn_a_stopped_loop_back_on() {
+    with_isolated_home(|_| {
+        let record = create_controller("stale-writer", "repair", "v1").expect("created");
+        // The loop's work job loaded this copy before the stop landed.
+        let mut stale = load_controller(&record.loop_id).expect("stale copy");
+
+        let mut stopped = load_controller(&record.loop_id).expect("fresh copy");
+        stamp_loop_runtime_metadata(&mut stopped.metadata, false, None, false)
+            .expect("stop runtime");
+        write_controller(&stopped).expect("persist stop");
+
+        stale.phase = "work-progress".to_string();
+        stamp_loop_runtime_metadata(&mut stale.metadata, true, None, true)
+            .expect("stale revolution");
+        write_controller(&stale).expect("stale write");
+
+        let persisted = load_controller(&record.loop_id).expect("persisted");
+        assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], false);
+        assert_eq!(
+            persisted.phase, "work-progress",
+            "non-runtime changes apply"
+        );
+
+        // Resume reloads the stopped record, so it legitimately turns the loop on.
+        let mut resumed = load_controller(&record.loop_id).expect("resume copy");
+        stamp_loop_runtime_metadata(&mut resumed.metadata, true, None, false)
+            .expect("resume runtime");
+        write_controller(&resumed).expect("persist resume");
+        let persisted = load_controller(&record.loop_id).expect("resumed");
+        assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], true);
+    });
+}

@@ -636,12 +636,8 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     crate::runner::register_runner_continuation_provider();
 }
 
-/// Register every provider hook the CLI wires after the startup terminal-run
-/// reconcile.
-///
-/// Takes the agent-task config rather than loading it so the completeness test
-/// can drive the full registration sequence without touching the ambient home
-/// directory.
+/// Resolve a fanout batch's admitted provider catalog into the executor and
+/// dispatcher its resume must use; no ambient provider discovery.
 fn fanout_resume_execution_context(
     authority: &serde_json::Value,
 ) -> homeboy::core::Result<(
@@ -671,6 +667,12 @@ fn fanout_resume_execution_context(
     ))
 }
 
+/// Register every provider hook the CLI wires after the startup terminal-run
+/// reconcile.
+///
+/// Takes the agent-task config rather than loading it so the completeness test
+/// can drive the full registration sequence without touching the ambient home
+/// directory.
 fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
     capabilities: &[&dyn CliCapability],
