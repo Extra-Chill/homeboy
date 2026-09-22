@@ -392,7 +392,7 @@ fn lab_dispatch_selected_route_keeps_declared_credentials_runner_owned() {
         metadata["runner_deferred_secret_env"],
         serde_json::json!([{
             "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
-            "source": "runner"
+            "source": "json-file"
         }])
     );
 }
@@ -628,12 +628,66 @@ fn hydrate_agent_task_secret_env_defers_provider_default_run_plan_secrets_to_run
             serde_json::json!([
                 {
                     "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
-                    "source": "runner"
+                    "source": "json-file"
                 }
             ])
         );
         assert!(!diagnostics.to_string().contains("controller-access-token"));
     });
+}
+
+#[test]
+fn run_plan_codex_route_preserves_provider_source_delivery_for_luna_model() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "opencode-luna-codex-route",
+            "tasks": [{
+                "schema": "homeboy/agent-task-request/v1",
+                "task_id": "luna",
+                "executor": {
+                    "backend": "opencode",
+                    "model": "openai/gpt-5.6-luna",
+                    "config": { "provider": "codex" }
+                },
+                "instructions": "Use the selected provider account."
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write plan");
+
+    let mut provider = fixture_provider_with_example_defaults();
+    provider.id = "opencode.agent-task-executor".to_string();
+    provider.backend = "opencode".to_string();
+    let default = provider
+        .provider_defaults
+        .remove("example-oauth")
+        .expect("fixture account");
+    provider
+        .provider_defaults
+        .insert("codex".to_string(), default);
+
+    let mut env = HashMap::new();
+    let metadata = hydrate_agent_task_secret_env_with_providers(
+        &run_plan_args(&plan_path),
+        &mut env,
+        std::slice::from_ref(&provider),
+    )
+    .expect("explicit Codex route should use its declared source");
+
+    assert_eq!(
+        metadata["runner_deferred_secret_env"][0]["source"],
+        "json-file"
+    );
+    assert_eq!(
+        metadata["runner_deferred_secret_env"][0]["name"],
+        "EXAMPLE_PROVIDER_ACCESS_TOKEN"
+    );
+    assert!(env.is_empty());
 }
 
 #[test]
@@ -705,7 +759,7 @@ fn provider_run_plan_credential_handoff_uses_runner_ref_without_serializing_valu
             serde_json::json!([
                 {
                     "name": "EXAMPLE_PROVIDER_ACCESS_TOKEN",
-                    "source": "runner"
+                    "source": "json-file"
                 }
             ])
         );
