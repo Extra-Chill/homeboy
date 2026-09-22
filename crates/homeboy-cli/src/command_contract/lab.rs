@@ -13,7 +13,7 @@ pub struct LabCommandRouteSupport {
 
 const LAB_CLI_ARGUMENT_IDS: &[&str] = &[
     "placement",
-    "detach_after_handoff",
+    "wait",
     "artifact_root",
     "runner",
     "allow_dirty_lab_workspace",

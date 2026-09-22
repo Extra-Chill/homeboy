@@ -1,7 +1,7 @@
 //! `homeboy runs watch <run-id>` — block until a run reaches a terminal state.
 //!
 //! An offloaded `homeboy bench` / `runner exec` either buffers remote output
-//! with no progress visibility or, when detached with `--detach-after-handoff`,
+//! with no progress visibility or, when returning after durable handoff,
 //! becomes a ghost: nothing tells the operator it finished. `runs watch` closes
 //! that gap. It polls the persisted observation store — the same mirrored record
 //! `runs show` reads, so it works for both attached and detached/offloaded runs

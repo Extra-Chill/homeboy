@@ -9,7 +9,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -442,9 +442,31 @@ impl WatchPoller for StatusPoller {
     }
 }
 
-fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
-    let interval = parse_duration("--interval", &args.interval)?;
+fn watch_status(args: StatusArgs) -> CmdResult<Value> {
     let timeout = parse_duration("--timeout", &args.timeout)?;
+    watch_status_with_timeout(args, Some(timeout))
+}
+
+/// Global `--wait` observes durable ownership until terminal completion rather
+/// than treating acceptance or the ordinary bounded watch timeout as success.
+pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
+    watch_status_with_timeout(
+        StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            // A successful --no-finalize run may still offer Promote. Its
+            // available follow-up actions do not make terminal execution fail.
+            strict_subject_exit: false,
+            watch: true,
+            interval: "1s".to_string(),
+            timeout: "30m".to_string(),
+        },
+        None,
+    )
+}
+
+fn watch_status_with_timeout(mut args: StatusArgs, timeout: Option<Duration>) -> CmdResult<Value> {
+    let interval = parse_duration("--interval", &args.interval)?;
     args.watch = false;
     let poller = StatusPoller { args: args.clone() };
     let started = Instant::now();
@@ -452,10 +474,7 @@ fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
     let result = watch_loop(
         &poller,
         &args.run_id,
-        &WatchConfig {
-            interval,
-            timeout: Some(timeout),
-        },
+        &WatchConfig { interval, timeout },
         std::thread::sleep,
         || started.elapsed(),
         |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),

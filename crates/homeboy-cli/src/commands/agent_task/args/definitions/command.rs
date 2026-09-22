@@ -65,20 +65,17 @@ pub enum AgentTaskCommand {
     /// WAIT POLICY: Cook always persists a durable run id before materialization,
     /// so a returned command is not by itself proof of a completed cook.
     ///
-    /// By default Cook observes until the lifecycle is terminal and returns the
-    /// terminal Cook report.
-    ///
-    /// `--detach-after-handoff` returns once the controller durably owns the
+    /// By default Cook returns once the controller durably owns the
     /// run. Its submission result reports `accepted` after executable-attempt
     /// materialization or `pending` while a live supervised child is still
     /// preparing. It is honored on every placement: with `--placement local`
     /// the Cook is re-executed in its own session, so it survives a client that
     /// is interrupted or times out.
     ///
-    /// Do not infer the wait policy from client interactivity. An orchestration
-    /// client that needs the detached contract should pass
-    /// `--detach-after-handoff` rather than rely on the default, and read the
-    /// terminal outcome from `agent-task status <run-id>` in either case.
+    /// Pass global `--wait` to observe until terminal completion and return the
+    /// terminal exit status. Placement and durable ownership are independent of
+    /// this wait policy. Inspect with `agent-task status <run-id>` or follow with
+    /// `runs watch <run-id>`. Preview remains synchronous and executes no work.
     #[command(
         after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
