@@ -187,6 +187,7 @@ mod offload_metadata;
 mod origin_refs;
 mod progress;
 pub mod readonly_probe;
+mod remote_error;
 mod resource_metrics;
 mod rig_materialization;
 mod rolling_generation;

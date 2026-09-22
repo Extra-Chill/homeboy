@@ -43,13 +43,11 @@ pub(crate) fn post_json(
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::new(
-            homeboy_core::ErrorCode::InternalUnexpected,
-            format!(
-                "broker request failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ),
-            json!({ "http_status": status_code, "path": path }),
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "broker request failed",
+            Some(status_code),
+            path,
         ));
     }
     let data = envelope
@@ -74,10 +72,12 @@ pub(crate) fn get_json(
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "broker request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "broker request failed",
+            Some(status_code),
+            path,
+        ));
     }
     let data = envelope
         .data

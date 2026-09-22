@@ -843,10 +843,12 @@ fn daemon_file_post_json(
         )
     })?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "runner file daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "runner file daemon request failed",
+            Some(status_code),
+            path,
+        ));
     }
     let data = envelope
         .data
@@ -879,10 +881,12 @@ fn daemon_file_get_json(
         )
     })?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "runner file daemon capability request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "runner file daemon capability request failed",
+            Some(status_code),
+            path,
+        ));
     }
     envelope
         .data
