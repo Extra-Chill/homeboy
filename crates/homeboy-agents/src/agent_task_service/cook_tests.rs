@@ -16537,6 +16537,82 @@ fn promotion_with_existing_path(run_id: &str, path: &std::path::Path) -> AgentTa
 }
 
 #[test]
+fn cook_remediation_classifies_gate_failure_without_provider_identity() {
+    let options = compile_options("timeout-gate-remediation");
+    let plan = options.identity.initial_plan;
+    let aggregate = review_form_aggregate(&plan);
+    let mut promotion = promotion("timeout-gate-remediation-run");
+    promotion.status = AgentTaskPromotionStatus::GateFailed;
+
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a failed deterministic gate is same-provider remediation even without timeout identity"
+    );
+    assert_eq!(
+        reserve_remediation_budget(
+            &crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 1, 0),
+            true,
+        )
+        .expect("remaining attempt is reserved")
+        .same_provider_retries,
+        1
+    );
+}
+
+#[test]
+fn cook_remediation_preserves_provider_identity_and_no_gate_requirements() {
+    let options = compile_options("provider-remediation-classification");
+    let plan = options.identity.initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        "executor": { "backend": "fixture", "selector": null, "model": null }
+    });
+    let mut promotion = promotion("provider-remediation-classification-run");
+    promotion.deterministic_gates.clear();
+    promotion.gate_results.clear();
+
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a normal provider failure keeps identity-based same-provider remediation"
+    );
+
+    let mut rotated = plan.tasks[0].executor.clone();
+    rotated.backend = "rotated".to_string();
+    assert_eq!(
+        cook_remediation_same_provider(&promotion, &aggregate, &plan, None, &rotated),
+        Some(false),
+        "a normal provider failure can still classify provider rotation"
+    );
+
+    aggregate.outcomes[0].metadata = serde_json::json!({});
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        None,
+        "without a gate result or terminal identity remediation stays unclassified"
+    );
+}
+
+#[test]
 fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evidence() {
     let mut green = promotion("canonical-green");
     green.patch_artifact.sha256 = Some("canonical-sha".to_string());
