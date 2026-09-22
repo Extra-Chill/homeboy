@@ -335,6 +335,10 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '', env
 	// Homeboy owns durable task identity, so OpenCode must not create a competing
 	// provider session title from an ambient or run-scoped configuration layer.
 	content.agent.title = { ...objectValue(content.agent.title), disable: true };
+	// Homeboy owns the task worktree, its diff, and its rollback, so OpenCode's
+	// shadow-git snapshots add nothing. Building one indexes the whole worktree at
+	// startup, which stalls past the liveness window on very large repositories.
+	content.snapshot = false;
 	const externalDirectoryPatterns = opencodeExternalDirectoryPatterns(request, config);
 	const workspaceReadPatterns = opencodeWorkspaceReadPatterns(request, config);
 	if (externalDirectoryPatterns.length > 0) {

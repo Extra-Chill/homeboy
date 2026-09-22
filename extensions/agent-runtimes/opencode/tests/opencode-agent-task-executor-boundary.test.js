@@ -255,6 +255,7 @@ if (instruction === 'Prove two attached runtime tools without leaking secrets.')
 }
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
 assert.equal(config.agent.title.disable, true);
+assert.equal(config.snapshot, false);
 assert.equal(config.permission.external_directory['*'], 'deny');
 assert.equal(config.permission.external_directory[${JSON.stringify(concretePath(executorWorkspace))}], 'allow');
 assert.equal(config.agent.build.permission.external_directory['*'], 'deny');
@@ -363,6 +364,7 @@ assert.equal(config.agent.build.model, 'opencode-go/kimi-k2.7-code');
 assert.equal(config.small_model, 'zai-coding-plan/glm-5.2');
 assert.equal(config.agent.title.disable, true);
 	assert.equal(config.agent.title.model, 'ambient-title-model-must-not-change');
+	assert.equal(config.snapshot, false, 'an ambient snapshot setting must not re-enable shadow-git snapshots');
 	assert.deepEqual(config.mcp, { example: { type: 'local' } });
 	assert.equal(Object.hasOwn(config, 'agents'), false);
 	assert.deepEqual(config.permission, {
@@ -427,6 +429,7 @@ assert.equal(config.agent.title.disable, true);
 						},
 						agents: { build: { model: 'invalid-plural-key/must-not-survive' } },
 						agent: { title: { disable: false, model: 'ambient-title-model-must-not-change' } },
+						snapshot: true,
 					}),
 				},
 				small_model: 'zai-coding-plan/glm-5.2',
