@@ -611,21 +611,43 @@ fn batch_resume_locked(
     args: AgentTaskFanoutBatchStatusArgs,
     placement: Placement,
 ) -> CmdResult<Value> {
-    let result = agent_task_service::resume_cook_batch(
+    let canonical = homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
+    let idempotency_key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| format!("fanout-resume:{}", args.batch_id));
+    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.batch_id,
-        Arc::new(provider::ExtensionProviderAgentTaskExecutor::discover()),
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        &homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "cli",
+                &args.batch_id,
+                "resume",
+                &idempotency_key,
+            ),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+            idempotency_key,
+            actor: "homeboy-cli".to_string(),
+            expected_updated_at: canonical.updated_at.clone(),
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        },
     )?;
+    let result = acknowledgement.result.data.clone();
+    let subject_exit_code = i32::from(
+        acknowledgement.outcome
+            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
+    );
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
     // Portfolio publication can add durable PR evidence. Reconcile it before a
     // RemoveOnSuccess provider is allowed to destroy the source workspace.
     reconcile_fanout_pr_states(&args.batch_id, true)?;
-    finalize_resumed_native_worktrees(&args.batch_id, Some(&result.value))?;
-    let subject_exit_code = result.exit_code;
+    finalize_resumed_native_worktrees(&args.batch_id, Some(&result))?;
     Ok(batch_resume_result(
-        result.value,
+        result,
         subject_exit_code,
         &args.batch_id,
         Some(portfolio),
@@ -1616,7 +1638,7 @@ fn git_candidate_state(
 }
 
 fn batch_resume_result(
-    report: agent_task_service::AgentTaskCookBatchReport,
+    report: Value,
     subject_exit_code: i32,
     batch_id: &str,
     portfolio: Option<supervisor::AgentTaskFanoutPortfolioRunReport>,
@@ -1625,19 +1647,19 @@ fn batch_resume_result(
     (
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch-resume/v1",
-            "batch_id": report.batch_id,
-            "status": report.status,
+            "batch_id": report.get("batch_id").cloned().unwrap_or(Value::Null),
+            "status": report.get("status").cloned().unwrap_or(Value::Null),
             "exit_code": subject_exit_code,
             "summary": {
-                "total": report.total,
-                "queued": report.queued,
-                "running": report.running,
-                "succeeded": report.succeeded,
-                "failed": report.failed,
-                "cancelled": report.cancelled,
-                "timed_out": report.timed_out,
+                "total": report.get("total").cloned().unwrap_or(Value::Null),
+                "queued": report.get("queued").cloned().unwrap_or(Value::Null),
+                "running": report.get("running").cloned().unwrap_or(Value::Null),
+                "succeeded": report.get("succeeded").cloned().unwrap_or(Value::Null),
+                "failed": report.get("failed").cloned().unwrap_or(Value::Null),
+                "cancelled": report.get("cancelled").cloned().unwrap_or(Value::Null),
+                "timed_out": report.get("timed_out").cloned().unwrap_or(Value::Null),
             },
-            "cooks": report.cooks,
+            "cooks": report.get("cooks").cloned().unwrap_or(Value::Array(Vec::new())),
             "portfolio": portfolio,
             "commands": {
                 "status": fanout_command(placement, "status", batch_id),
@@ -2073,10 +2095,7 @@ fn native_worktree_disposition(
     }
 }
 
-fn finalize_resumed_native_worktrees(
-    batch_id: &str,
-    resumed: Option<&agent_task_service::AgentTaskCookBatchReport>,
-) -> Result<()> {
+fn finalize_resumed_native_worktrees(batch_id: &str, resumed: Option<&Value>) -> Result<()> {
     let batch = batch::read_batch_record(batch_id)?;
     for child in &batch.child_runs {
         let result = (|| {
@@ -2094,18 +2113,22 @@ fn finalize_resumed_native_worktrees(
             {
                 return Ok(());
             }
-            let resumed_cell = resumed.and_then(|report| {
-                report
-                    .cooks
-                    .iter()
-                    .find(|cook| cook.initial_run_id == child.run_id && cook.lifecycle().terminal)
-            });
+            let resumed_cell = resumed
+                .and_then(|report| report.get("cooks"))
+                .and_then(Value::as_array)
+                .and_then(|cooks| {
+                    cooks.iter().find(|cook| {
+                        cook.get("initial_run_id").and_then(Value::as_str)
+                            == Some(child.run_id.as_str())
+                            && cook.get("exit_code").and_then(Value::as_i64).is_some()
+                    })
+                });
             let state = live
                 .as_ref()
                 .map(|record| record.state)
                 .or_else(|| {
                     resumed_cell.map(|cook| {
-                        if cook.exit_code == 0 {
+                        if cook.get("exit_code").and_then(Value::as_i64) == Some(0) {
                             agent_task_lifecycle::AgentTaskRunState::Succeeded
                         } else {
                             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -2137,7 +2160,7 @@ fn finalize_resumed_native_worktrees(
                     .and_then(|finalization| finalization.get("status"))
                     .and_then(Value::as_str)
                     .or(live_terminal_status),
-                None => resumed_cell.map(|cell| cell.status.as_str()),
+                None => resumed_cell.and_then(|cell| cell.get("status").and_then(Value::as_str)),
             };
             let disposition = match state {
                 agent_task_lifecycle::AgentTaskRunState::Succeeded => {

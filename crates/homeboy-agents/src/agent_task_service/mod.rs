@@ -10,7 +10,7 @@ mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;
 /// Daemon-owned durable lifecycle for a locally-placed detached cook batch.
-mod cook_batch_job;
+pub(crate) mod cook_batch_job;
 mod cook_budget;
 /// Daemon-owned durable lifecycle for a locally-placed detached Cook.
 mod cook_job;

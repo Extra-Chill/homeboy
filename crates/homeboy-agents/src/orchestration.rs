@@ -48,11 +48,15 @@ use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
     ControlPlaneRetryParameters,
 };
-use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use homeboy_core::control_plane::{
+    register_control_plane_action_delegate, register_control_plane_provider,
+    ControlPlaneActionDelegate, ControlPlaneActionDelegateResult, ControlPlaneProvider,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::agent_task_batch::{
@@ -90,6 +94,24 @@ const INTERNAL_ACTION_EVENT_KEY_PREFIX: &str = "homeboy-internal-action:";
 const INTERNAL_PROGRESS_EVENT_KEY_PREFIX: &str = "homeboy-internal-progress:";
 const RUN_CURSOR_BOUND: usize = 1024;
 
+pub type FanoutResumeDispatcherFactory = fn(
+    &Value,
+) -> homeboy_core::Result<
+    Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+>;
+
+static FANOUT_RESUME_DISPATCHER_FACTORY: OnceLock<RwLock<Option<FanoutResumeDispatcherFactory>>> =
+    OnceLock::new();
+
+/// Supply the runtime's durable runner-context reconstruction without making
+/// the domain service depend on a transport or CLI module.
+pub fn register_fanout_resume_dispatcher(factory: FanoutResumeDispatcherFactory) {
+    *FANOUT_RESUME_DISPATCHER_FACTORY
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("fanout resume dispatcher registry poisoned") = Some(factory);
+}
+
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
 pub struct RunSnapshot {
@@ -101,6 +123,11 @@ pub struct RunSnapshot {
 mod fanout_batch_read_tests {
     use super::FanoutBatchDomainService;
     use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
+    use homeboy_control_plane_contract::{
+        action_effect_id, ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    };
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
     use std::fs;
@@ -215,6 +242,60 @@ mod fanout_batch_read_tests {
                 .unavailable_child_runs
                 .iter()
                 .any(|child| child.run_id == "batch-parity-missing"));
+        });
+    }
+
+    #[test]
+    fn batch_cancel_uses_marker_first_and_replays_the_canonical_ack() {
+        with_isolated_home(|_| {
+            super::register();
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "cancel-action-batch",
+                    "cancel-action-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "unstarted".to_string(),
+                        run_id: "cancel-action-child".to_string(),
+                    }],
+                    serde_json::json!({}),
+                )
+                .expect("persist batch");
+            let requested = RunId::new("cancel-action-batch").expect("batch id");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id("test", "cancel-action-batch", "cancel", "same"),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "same".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: serde_json::json!({ "reason": "test" }),
+                },
+                confirmed: true,
+            };
+            let mut stale = request.clone();
+            stale.expected_updated_at = Some("stale-version".to_string());
+            assert!(homeboy_core::control_plane::execute_action(&requested, &stale).is_err());
+            let first = homeboy_core::control_plane::execute_action(&requested, &request)
+                .expect("cancel action");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert!(store.coordinator_is_cancelled("cancel-action-batch"));
+            let replay = homeboy_core::control_plane::execute_action(&requested, &request)
+                .expect("replay cancel action");
+            assert_eq!(first, replay);
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Post,
+                path: "/v1/control-plane/runs/cancel-action-batch/actions".to_string(),
+                body: Some(serde_json::to_value(&request).expect("action request JSON")),
+            })
+            .expect("HTTP replay");
+            assert_eq!(http.status, 200);
+            assert_eq!(
+                http.body["resource"],
+                serde_json::to_value(first).expect("ack JSON")
+            );
         });
     }
 }
@@ -731,6 +812,88 @@ impl<L: RunLookup> OrchestrationService<L> {
 pub struct FanoutBatchDomainService {
     batch_store: AgentTaskBatchStore,
     lifecycle: AgentTaskLifecycleStore,
+}
+
+struct FanoutBatchActionDelegate;
+
+impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
+    fn run_kind(&self) -> &'static str {
+        "agent-task-fanout"
+    }
+
+    fn execute(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        self.execute_inner(run, request)
+    }
+
+    fn recover(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        self.execute_inner(run, request)
+    }
+}
+
+impl FanoutBatchActionDelegate {
+    fn execute_inner(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        let batch_id = run.id.as_str();
+        match request.action {
+            ControlPlaneAction::Resume => {
+                let result = crate::agent_task_service::resume_cook_batch(
+                    batch_id,
+                    std::sync::Arc::new(
+                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    ),
+                    |recipe| {
+                        FANOUT_RESUME_DISPATCHER_FACTORY
+                            .get_or_init(|| RwLock::new(None))
+                            .read()
+                            .expect("fanout resume dispatcher registry poisoned")
+                            .as_ref()
+                            .map(|factory| factory(recipe))
+                            .unwrap_or_else(|| Ok(None))
+                    },
+                )
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                Ok(ControlPlaneActionDelegateResult {
+                    outcome: if result.exit_code == 0 {
+                        ControlPlaneActionOutcome::Succeeded
+                    } else {
+                        ControlPlaneActionOutcome::Failed
+                    },
+                    result: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                        data: serde_json::to_value(result.value)
+                            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+                    },
+                    message: None,
+                })
+            }
+            ControlPlaneAction::Cancel => {
+                crate::agent_task_service::cook_batch_job::cancel_batch_children(batch_id)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                Ok(ControlPlaneActionDelegateResult {
+                    outcome: ControlPlaneActionOutcome::Succeeded,
+                    result: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+                        data: serde_json::json!({ "batch_id": batch_id }),
+                    },
+                    message: None,
+                })
+            }
+            _ => Err(ControlPlaneError::invalid_argument(
+                "agent-task fanout supports only cancel and resume",
+            )),
+        }
+    }
 }
 
 pub struct FanoutBatchDomainProjection {
@@ -4140,6 +4303,22 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if AgentTaskBatchStore::from_current_data_root()?
+        .batch_path(run_id)
+        .exists()
+    {
+        register();
+        return homeboy_core::control_plane::execute_action(&requested, request)
+            .map_err(control_plane_error_to_homeboy);
+    }
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
@@ -6025,6 +6204,70 @@ impl ControlPlaneProvider for RegisteredProvider {
         let observation = store
             .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
+        if batch_resource_from_current_environment(requested_id)?.is_some() {
+            let batch_store = AgentTaskBatchStore::from_current_data_root()
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            let record = batch_store
+                .read_batch_record(requested_id.as_str())
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            // Batch admission predates the observation store. Materialize the
+            // canonical action identity once, immediately before the first
+            // action, so the outbox foreign key and later HTTP/CLI replays use
+            // the same durable run identity without changing batch files.
+            if observation
+                .get_run(&record.batch_id)
+                .map_err(map_lifecycle_error)?
+                .is_none()
+            {
+                observation
+                    .start_run_with_id(
+                        homeboy_core::observation::NewRunRecord::builder("agent-task-fanout")
+                            .metadata(serde_json::json!({ "batch_id": record.batch_id }))
+                            .build(),
+                        record.batch_id.clone(),
+                    )
+                    .map_err(map_lifecycle_error)?;
+            }
+            let synthetic = homeboy_core::observation::RunRecord {
+                id: record.batch_id.clone(),
+                kind: "agent-task-fanout".to_string(),
+                started_at: record.submitted_at.clone(),
+                status: format!("{:?}", record.state).to_lowercase(),
+                metadata_json: serde_json::json!({ "batch_id": record.batch_id }),
+                ..Default::default()
+            };
+            let version = record
+                .updated_at
+                .clone()
+                .unwrap_or(record.submitted_at.clone());
+            let available = matches!(
+                request.action,
+                ControlPlaneAction::Resume | ControlPlaneAction::Cancel
+            ) && !matches!(
+                record.state,
+                crate::agent_task_batch::AgentTaskBatchState::Succeeded
+                    | crate::agent_task_batch::AgentTaskBatchState::Cancelled
+            );
+            return homeboy_core::control_plane::execute_delegated_action(
+                &observation,
+                &synthetic,
+                request,
+                "fanout_batch",
+                &version,
+                available,
+                (!available).then(|| "fanout batch action is not currently available".to_string()),
+                || {
+                    batch_resource_from_current_environment(requested_id)?.ok_or_else(|| {
+                        ControlPlaneError::not_found("fanout batch resource disappeared")
+                    })
+                },
+            )?
+            .ok_or_else(|| {
+                ControlPlaneError::invalid_argument(
+                    "fanout batch action delegate is not registered",
+                )
+            });
+        }
         let resolved_id = observation
             .control_plane_resource_projection(
                 crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
@@ -6139,6 +6382,10 @@ impl ControlPlaneProvider for RegisteredProvider {
 
 /// Register the orchestration service as the HTTP control-plane provider.
 pub fn register() {
+    static BATCH_REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BATCH_REGISTERED.get_or_init(|| {
+        register_control_plane_action_delegate(std::sync::Arc::new(FanoutBatchActionDelegate));
+    });
     crate::agent_task_loop_controller::register_control_plane_action_delegate();
     register_control_plane_provider(Box::new(RegisteredProvider));
 }

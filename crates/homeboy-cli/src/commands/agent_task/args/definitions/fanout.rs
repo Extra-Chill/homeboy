@@ -402,6 +402,9 @@ pub struct AgentTaskFanoutSubmitBatchArgs {
 pub struct AgentTaskFanoutBatchStatusArgs {
     /// Durable fanout batch ID whose status, resume result, or artifacts to read.
     pub batch_id: String,
+    /// Stable action identity used when resuming the same batch operation.
+    #[arg(long = "idempotency-key")]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

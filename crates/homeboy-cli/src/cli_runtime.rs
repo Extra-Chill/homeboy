@@ -708,6 +708,9 @@ fn register_startup_providers_after_reconcile(
     // Register the orchestration service behind daemon HTTP control-plane
     // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
+    crate::agents::orchestration::register_fanout_resume_dispatcher(
+        crate::commands::route::reconstruct_cook_attempt_dispatcher,
+    );
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.

@@ -411,7 +411,7 @@ impl WorkJobHandler for CookBatchWorkHandler {
         if job.phase == WorkJobPhase::Completed {
             return Ok(());
         }
-        stop_batch(&job.request.batch_id)
+        cancel_batch_children(&job.request.batch_id)
     }
 }
 
@@ -426,7 +426,7 @@ impl WorkJobHandler for CookBatchWorkHandler {
 /// make the job refuse to cancel over a startup race. Supervision calls this
 /// again once it notices the cancellation, by which point the record exists —
 /// that second call is what actually stops a wave cancelled during startup.
-fn stop_batch(batch_id: &str) -> Result<()> {
+pub fn cancel_batch_children(batch_id: &str) -> Result<()> {
     let Ok(record) = agent_task_batch::read_batch_record(batch_id) else {
         return Ok(());
     };
