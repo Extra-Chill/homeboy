@@ -18,15 +18,26 @@ use crate::agent_task_provider::{AgentTaskProviderCatalog, ExtensionProviderAgen
 use crate::agent_task_scheduler::SharedAgentTaskExecutor;
 
 pub const AGENT_TASK_LOOP_JOB_TYPE: &str = "agent-task-loop";
-pub const AGENT_TASK_LOOP_JOB_VERSION: u32 = 1;
-const AGENT_TASK_LOOP_JOB_SCHEMA: &str = "homeboy/agent-task-loop-job/v1";
+pub const AGENT_TASK_LOOP_JOB_VERSION: u32 = 2;
+const AGENT_TASK_LOOP_JOB_SCHEMA: &str = "homeboy/agent-task-loop-job/v2";
+const LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA: &str = "homeboy/agent-task-loop-job/v1";
 const SUPERVISION_POLL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskLoopJobKind {
+    #[default]
+    LegacyChild,
+    DaemonExecution,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentTaskLoopJobRequest {
     pub schema: String,
     pub loop_id: String,
+    #[serde(default)]
+    pub kind: AgentTaskLoopJobKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,7 +68,11 @@ pub struct AgentTaskLoopJob {
 
 impl AgentTaskLoopJob {
     fn new(request: AgentTaskLoopJobRequest) -> Result<Self> {
-        if request.schema != AGENT_TASK_LOOP_JOB_SCHEMA || request.loop_id.trim().is_empty() {
+        if !matches!(
+            request.schema.as_str(),
+            AGENT_TASK_LOOP_JOB_SCHEMA | LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA
+        ) || request.loop_id.trim().is_empty()
+        {
             return Err(invalid_loop_job(
                 "loop jobs require a recognized schema and durable loop id",
             ));
@@ -70,6 +85,23 @@ impl AgentTaskLoopJob {
         if request.child_pid.is_some() != request.child_start_identity.is_some() {
             return Err(invalid_loop_job(
                 "loop jobs require both coordinator pid and start identity",
+            ));
+        }
+        if request.kind == AgentTaskLoopJobKind::DaemonExecution
+            && request.generation.trim().is_empty()
+        {
+            return Err(invalid_loop_job(
+                "daemon loop executions require a non-empty generation",
+            ));
+        }
+        if request.kind == AgentTaskLoopJobKind::DaemonExecution && request.child_pid.is_some() {
+            return Err(invalid_loop_job(
+                "daemon loop executions cannot carry a legacy child identity",
+            ));
+        }
+        if request.kind == AgentTaskLoopJobKind::LegacyChild && request.child_pid.is_none() {
+            return Err(invalid_loop_job(
+                "legacy loop jobs require a coordinator process identity",
             ));
         }
         Ok(Self {
@@ -87,8 +119,16 @@ impl AgentTaskLoopJob {
     }
 
     fn parse(value: Value) -> Result<Self> {
-        let job: Self = serde_json::from_value(value)
+        let mut job: Self = serde_json::from_value(value)
             .map_err(|error| invalid_loop_job(&format!("invalid durable loop job: {error}")))?;
+        // Old queued jobs remain readable, but every resumed checkpoint is
+        // rewritten with the explicit v2 execution-kind contract.
+        if job.schema == LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA {
+            job.schema = AGENT_TASK_LOOP_JOB_SCHEMA.to_string();
+        }
+        if job.request.schema == LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA {
+            job.request.schema = AGENT_TASK_LOOP_JOB_SCHEMA.to_string();
+        }
         let expected = Self::new(job.request.clone())?;
         if job.schema != AGENT_TASK_LOOP_JOB_SCHEMA
             || job.idempotency_key != expected.idempotency_key
@@ -124,6 +164,7 @@ impl AgentTaskLoopJob {
             "idempotency_key": self.idempotency_key,
             "phase": self.phase,
             "loop_id": self.request.loop_id,
+            "kind": self.request.kind,
             "controller_state": self.controller_state,
             "generation": self.request.generation,
         })
@@ -220,6 +261,10 @@ impl WorkJobHandler for LoopWorkHandler {
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
         let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
         let Some(child_pid) = job.request.child_pid else {
+            agent_task_loop_controller::cancel_owned_provider_runs(
+                &job.request.loop_id,
+                "controller work job cancelled",
+            )?;
             return Ok(());
         };
         let Some(child_start_identity) = job.request.child_start_identity.as_ref() else {
@@ -255,11 +300,10 @@ impl LoopWorkHandler {
             return Ok(WorkJobStep::Complete(job.result()));
         }
         if job.request.child_pid.is_none() {
-            let executor: SharedAgentTaskExecutor = std::sync::Arc::new(
-                ExtensionProviderAgentTaskExecutor::from_catalog(
+            let executor: SharedAgentTaskExecutor =
+                std::sync::Arc::new(ExtensionProviderAgentTaskExecutor::from_catalog(
                     job.request.provider_catalog.clone(),
-                ),
-            );
+                ));
             let dispatch = LoopDispatchHook {
                 executor: executor.clone(),
                 catalog: job.request.provider_catalog.clone(),
@@ -276,7 +320,7 @@ impl LoopWorkHandler {
                     provider_config: None,
                 },
             };
-            let report = crate::agent_task_controller_service::resume_with_options(
+            let report = match crate::agent_task_controller_service::resume_with_options(
                 &job.request.loop_id,
                 executor,
                 &dispatch,
@@ -284,10 +328,24 @@ impl LoopWorkHandler {
                     max_actions: 1,
                     stop_on_terminal: true,
                 },
-            )?;
-            job.resume_result = Some(serde_json::to_value(report.value).map_err(|error| {
-                homeboy_core::Error::internal_json(error.to_string(), None)
-            })?);
+            ) {
+                Ok(report) => report,
+                Err(error) => {
+                    job.refresh_controller_state();
+                    if job
+                        .controller_state
+                        .is_some_and(controller_state_is_terminal)
+                    {
+                        job.phase = WorkJobPhase::Completed;
+                        return Ok(WorkJobStep::Complete(job.result()));
+                    }
+                    return Err(error);
+                }
+            };
+            job.resume_result =
+                Some(serde_json::to_value(report.value).map_err(|error| {
+                    homeboy_core::Error::internal_json(error.to_string(), None)
+                })?);
             job.refresh_controller_state();
             if job
                 .controller_state
@@ -389,6 +447,7 @@ pub fn loop_work_job_submission(
     let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
         schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
         loop_id: loop_id.to_string(),
+        kind: AgentTaskLoopJobKind::LegacyChild,
         child_pid: Some(child_pid),
         child_start_identity: Some(child_start_identity.clone()),
         generation: String::new(),
@@ -409,10 +468,16 @@ pub fn loop_work_job_execution_submission(
     dispatch_defaults: Value,
     provider_catalog: AgentTaskProviderCatalog,
 ) -> Result<Value> {
+    if generation.trim().is_empty() {
+        return Err(invalid_loop_job(
+            "new loop executions require a non-empty generation",
+        ));
+    }
     let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults)?;
     let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
         schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
         loop_id: loop_id.to_string(),
+        kind: AgentTaskLoopJobKind::DaemonExecution,
         child_pid: None,
         child_start_identity: None,
         generation: generation.to_string(),
@@ -427,11 +492,17 @@ pub fn loop_work_job_execution_submission(
 }
 
 fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
-    let object = value.as_object().ok_or_else(|| {
-        invalid_loop_job("dispatch defaults must be an object")
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_loop_job("dispatch defaults must be an object"))?;
     let mut admitted = serde_json::Map::new();
-    for key in ["backend", "selector", "model"] {
+    for key in [
+        "backend",
+        "selector",
+        "model",
+        "provider_config_ref",
+        "provider_account",
+    ] {
         if let Some(value) = object.get(key) {
             admitted.insert(key.to_string(), value.clone());
         }
@@ -511,6 +582,7 @@ mod tests {
         let request = serde_json::to_value(AgentTaskLoopJobRequest {
             schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
             loop_id: "loop-invalid-identity".to_string(),
+            kind: AgentTaskLoopJobKind::LegacyChild,
             child_pid: Some(4242),
             child_start_identity: None,
             generation: String::new(),
@@ -529,6 +601,202 @@ mod tests {
     }
 
     #[test]
+    fn new_execution_requires_a_generation_and_preserves_provider_config_reference() {
+        let error = loop_work_job_execution_submission(
+            "loop-missing-generation",
+            "",
+            json!({
+                "backend": "fixture",
+                "provider_config_ref": "provider-configs/primary"
+            }),
+            AgentTaskProviderCatalog::default(),
+        )
+        .expect_err("execution generation is required");
+        assert!(format!("{error:?}").contains("generation"));
+
+        let submission = loop_work_job_execution_submission(
+            "loop-config-reference",
+            "generation-1",
+            json!({
+                "backend": "fixture",
+                "provider_config_ref": "provider-configs/primary"
+            }),
+            AgentTaskProviderCatalog::default(),
+        )
+        .expect("reference-only config is admitted");
+        assert_eq!(
+            submission["request"]["request"]["request"]["dispatch_defaults"]["provider_config_ref"],
+            "provider-configs/primary"
+        );
+    }
+
+    #[test]
+    fn cancelling_new_execution_cancels_owned_run_instead_of_returning_immediately() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-cancel-execution";
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            record.state = AgentTaskLoopControllerState::Running;
+            record.task_lineage.push(
+                crate::agent_task_loop_controller::AgentTaskLoopTaskLineage {
+                    run_id: "owned-provider-run".to_string(),
+                    task_id: None,
+                    parent_run_id: None,
+                    parent_task_id: None,
+                    entity_id: None,
+                    dedupe_key: Some("dispatch".to_string()),
+                    artifact_refs: Vec::new(),
+                    inputs: Value::Null,
+                    outputs: Value::Null,
+                },
+            );
+            agent_task_loop_controller::write_controller(&record).expect("write controller");
+            let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: loop_id.to_string(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
+                child_pid: None,
+                child_start_identity: None,
+                generation: "generation-1".to_string(),
+                dispatch_defaults: json!({}),
+                provider_catalog: AgentTaskProviderCatalog::default(),
+            })?;
+
+            LoopWorkHandler.cancel(&job.to_checkpoint()?)?;
+            assert_eq!(
+                agent_task_loop_controller::load_controller(loop_id)?.state,
+                AgentTaskLoopControllerState::Abandoned
+            );
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("new execution cancellation converges");
+    }
+
+    #[test]
+    fn active_provider_execution_is_cancelled_through_the_work_job_harness() {
+        with_isolated_home(|_| {
+            register_loop_work_job_handler();
+            let loop_id = "loop-active-provider-cancel";
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            record.state = AgentTaskLoopControllerState::Running;
+            record.record_action(
+                crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "long-provider".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": { "backend": "long-provider", "prompt": "wait" }
+                    }),
+                },
+                "active provider cancellation fixture",
+            );
+            agent_task_loop_controller::write_controller(&record).expect("write controller");
+            let provider_marker = tempfile::tempdir().expect("provider marker directory");
+            let marker_path = provider_marker.path().join("started");
+            let provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+                serde_json::from_value(json!({
+                    "id": "long-provider",
+                    "backend": "long-provider",
+                    "command_argv": [
+                        "sh",
+                        "-c",
+                        format!("touch {}; exec sleep 30", marker_path.display())
+                    ],
+                    "capabilities": ["structured_outcome"]
+                }))
+                .expect("long provider fixture");
+            let catalog = AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            };
+            let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: loop_id.to_string(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
+                child_pid: None,
+                child_start_identity: None,
+                generation: "generation-1".to_string(),
+                dispatch_defaults: json!({ "backend": "long-provider" }),
+                provider_catalog: catalog,
+            })?;
+            let submission = work_job_submission(
+                &LoopWorkHandler,
+                job.idempotency_key.clone(),
+                job.to_checkpoint()?,
+            )?;
+            let work_request = submission["request"].clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = Arc::new(
+                ControllerJobHarness::new(Arc::clone(&driver), work_request.clone())
+                    .expect("construct provider harness"),
+            );
+            let prepared = driver.prepare(work_request).expect("prepare provider job");
+            let thread_driver = Arc::clone(&driver);
+            let thread_harness = Arc::clone(&harness);
+            let started = std::time::Instant::now();
+            let execution = std::thread::spawn(move || {
+                thread_driver
+                    .execute(prepared, thread_harness.handle())
+                    .expect("provider execution returns after cancellation")
+            });
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let _provider_run_id = loop {
+                let active = agent_task_loop_controller::load_controller(loop_id)
+                    .expect("controller exists")
+                    .metadata
+                    .get("active_provider_runs")
+                    .and_then(Value::as_array)
+                    .and_then(|runs| runs.first())
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                if let Some(run_id) = active
+                    .filter(|run_id| !homeboy_agents_run_is_not_running(run_id))
+                    .filter(|_| marker_path.exists())
+                {
+                    break run_id;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "provider admission missing"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            harness
+                .request_cancellation("cancel active provider")
+                .expect("request cancellation");
+            driver
+                .cancel(
+                    &harness
+                        .checkpoint()
+                        .expect("read checkpoint")
+                        .expect("checkpoint exists"),
+                )
+                .expect("cancel active provider");
+            let result = execution.join().expect("join provider execution");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "provider cancellation did not interrupt the active execution"
+            );
+            assert_eq!(result["result"]["controller_state"], "abandoned");
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("active provider cancellation converges");
+    }
+
+    fn homeboy_agents_run_is_not_running(run_id: &str) -> bool {
+        let Ok(store) =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        else {
+            return true;
+        };
+        !store.read_record(run_id).is_ok_and(|record| {
+            record.state == crate::agent_task_lifecycle::AgentTaskRunState::Running
+        })
+    }
+
+    #[test]
     fn waiting_execution_stays_resumable_instead_of_becoming_completed() {
         with_isolated_home(|_| {
             let mut record = agent_task_loop_controller::create_controller(
@@ -542,9 +810,10 @@ mod tests {
             let mut job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
                 schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
                 loop_id: record.loop_id.clone(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
                 child_pid: None,
                 child_start_identity: None,
-                generation: String::new(),
+                generation: "generation-1".to_string(),
                 dispatch_defaults: json!({}),
                 provider_catalog: AgentTaskProviderCatalog::default(),
             })?;

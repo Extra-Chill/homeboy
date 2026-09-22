@@ -191,6 +191,50 @@ fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Resu
     Ok(serde_json::json!({ "job_id": job_id, "status": job.status }))
 }
 
+/// Cancel provider runs already owned by a loop before the WorkJob reaches its
+/// terminal projection. The lifecycle store is the scheduler's cancellation
+/// authority; setting only the loop state would leave a provider child alive.
+pub fn cancel_owned_provider_runs(loop_id: &str, reason: &str) -> Result<()> {
+    let mut record = load_controller(loop_id)?;
+    let mut run_ids = record
+        .task_lineage
+        .iter()
+        .map(|lineage| lineage.run_id.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(active) = record
+        .metadata
+        .get("active_provider_runs")
+        .and_then(Value::as_array)
+    {
+        run_ids.extend(active.iter().filter_map(Value::as_str).map(str::to_string));
+    }
+    for run_id in run_ids {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match crate::agent_task_lifecycle::cancel_run(&run_id, Some(reason)) {
+                Ok(_) => break,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    if !matches!(
+        record.state,
+        AgentTaskLoopControllerState::HumanReady
+            | AgentTaskLoopControllerState::Completed
+            | AgentTaskLoopControllerState::Abandoned
+            | AgentTaskLoopControllerState::Escalated
+            | AgentTaskLoopControllerState::Failed
+    ) {
+        record.state = AgentTaskLoopControllerState::Abandoned;
+        write_controller(&record)?;
+    }
+    Ok(())
+}
+
 fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value) -> Result<Value> {
     let provider_catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
     let submission = crate::agent_task_service::loop_work_job_execution_submission(
@@ -438,9 +482,12 @@ impl LoopActionDelegate {
                 .get("dispatch_defaults")
                 .cloned()
                 .unwrap_or(Value::Null);
-            let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults).map_err(|error| {
-                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
-            })?;
+            let dispatch_defaults =
+                admitted_dispatch_defaults(dispatch_defaults).map_err(|error| {
+                    homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                        error.to_string(),
+                    )
+                })?;
             stamp_loop_runtime_metadata(&mut record.metadata, true, limit, true).map_err(
                 |error| {
                     homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)

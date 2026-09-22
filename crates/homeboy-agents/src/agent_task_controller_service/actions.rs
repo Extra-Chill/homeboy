@@ -926,8 +926,21 @@ where
         "dispatch" => {
             let request =
                 request_with_controller_dispatch_identity(record, action, dedupe_key, request);
+            // Publish the deterministic run identity before entering the
+            // provider boundary. WorkJob cancellation can then reach the
+            // lifecycle cancellation watcher even if dispatch is interrupted
+            // before this action returns its result.
+            if let Some(run_id) = request.get("run_id").and_then(Value::as_str).or_else(|| {
+                request
+                    .get("dispatch")
+                    .and_then(|dispatch| dispatch.get("run_id"))
+                    .and_then(Value::as_str)
+            }) {
+                record_dispatch_admission(record, run_id)?;
+            }
             let (value, exit_code) = dispatch.dispatch(&request)?;
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
+                clear_dispatch_admission(record, run_id);
                 record_controller_spawn(record, action, dedupe_key, entity_id, run_id, &request)?;
                 record_controller_result_evidence(record, entity_id, run_id, &value)?;
             }
@@ -947,6 +960,41 @@ where
                 "Supported modes: run_plan, submit, run, resume, run_next, dispatch".to_string(),
             ]),
         )),
+    }
+}
+
+fn record_dispatch_admission(
+    record: &mut AgentTaskLoopControllerRecord,
+    run_id: &str,
+) -> Result<()> {
+    if !record.metadata.is_object() {
+        record.metadata = serde_json::json!({});
+    }
+    let active = record
+        .metadata
+        .as_object_mut()
+        .expect("controller metadata object")
+        .entry("active_provider_runs")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !active.as_array().is_some_and(|runs| {
+        runs.iter()
+            .any(|candidate| candidate.as_str() == Some(run_id))
+    }) {
+        active
+            .as_array_mut()
+            .expect("active provider runs array")
+            .push(Value::String(run_id.to_string()));
+    }
+    controller::write_controller(record)
+}
+
+fn clear_dispatch_admission(record: &mut AgentTaskLoopControllerRecord, run_id: &str) {
+    if let Some(runs) = record
+        .metadata
+        .get_mut("active_provider_runs")
+        .and_then(Value::as_array_mut)
+    {
+        runs.retain(|candidate| candidate.as_str() != Some(run_id));
     }
 }
 
