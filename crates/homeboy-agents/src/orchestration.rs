@@ -5554,8 +5554,11 @@ impl ControlPlaneProvider for RegisteredProvider {
             if record.kind != "agent-task" {
                 if record.kind == "agent-task-loop" {
                     let resource = generic_observation_run(&observation, &record)?;
-                    let available = request.action == ControlPlaneAction::Cancel
-                        && resource.action_eligibility.as_ref().is_some_and(|report| {
+                    let available =
+                        matches!(
+                            request.action,
+                            ControlPlaneAction::Cancel | ControlPlaneAction::Resume
+                        ) && resource.action_eligibility.as_ref().is_some_and(|report| {
                             report.actions.iter().any(|eligibility| {
                                 eligibility.action == request.action
                                     && eligibility.availability
@@ -5573,7 +5576,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                             .and_then(Value::as_str)
                             .unwrap_or(&record.started_at),
                         available,
-                        (!available).then(|| "loop stop is not currently available".to_string()),
+                        (!available).then(|| "loop action is not currently available".to_string()),
                         || {
                             let current = observation
                                 .get_run(&record.id)
@@ -5658,7 +5661,7 @@ pub fn register() {
 mod loop_control_plane_tests {
     use crate::agent_task_loop_controller::{
         control_plane_run_id, create_controller, loop_read, loop_runtime_metadata,
-        loop_work_status, stamp_loop_runtime_metadata, stop_loop, write_controller,
+        loop_work_status, resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
     use homeboy_control_plane_contract::ControlPlaneActionOutcome;
     use homeboy_core::test_support::with_isolated_home;
@@ -5940,6 +5943,33 @@ mod loop_control_plane_tests {
             assert_eq!(
                 stale_error.class,
                 homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+            );
+        });
+    }
+
+    #[test]
+    fn loop_resume_uses_canonical_ack_for_revolution_limit() {
+        with_isolated_home(|_| {
+            super::register();
+            let mut record =
+                create_controller("loop/resume-limit", "repair", "v1").expect("created");
+            stamp_loop_runtime_metadata(&mut record.metadata, true, Some(1), true)
+                .expect("runtime");
+            write_controller(&record).expect("persist runtime");
+            let acknowledgement =
+                resume_loop(&record.loop_id, Some(1), json!({ "backend": "fixture" }))
+                    .expect("resume acknowledgement");
+            assert_eq!(
+                acknowledgement.action,
+                homeboy_control_plane_contract::ControlPlaneAction::Resume
+            );
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            assert_eq!(
+                acknowledgement.result.data["stopped_reason"],
+                "revolution_limit_reached"
             );
         });
     }

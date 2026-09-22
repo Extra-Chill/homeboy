@@ -2,7 +2,6 @@
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
 use serde_json::Value;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -314,56 +313,26 @@ fn submit_loop_resume(
     revolution_limit: Option<u32>,
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
-    let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&loop_id)?;
-    let runtime =
-        homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(&record.metadata);
-    if !runtime["on"].as_bool().unwrap_or(true) {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "loop_id",
-            "agent-task loop resume requires an on loop; run `agent-task loop define --on` or update the loop state first",
-            Some(loop_id),
-            None,
-        ));
-    }
-    let limit = revolution_limit.or_else(|| {
-        runtime["revolution_limit"]
-            .as_u64()
-            .map(|value| value as u32)
-    });
-    let current = runtime["revolutions"].as_u64().unwrap_or(0) as u32;
-    if limit.is_some_and(|limit| current >= limit) {
-        return Ok((
-            serde_json::json!({
-                "schema": "homeboy/agent-task-loop-resume-result/v1",
-                "loop_id": record.loop_id,
-                "claimed": false,
-                "stopped_reason": "revolution_limit_reached",
-                "runtime": runtime,
-                "controller": record,
-            }),
-            0,
-        ));
-    }
-
-    homeboy::agents::agent_task_loop_controller::stamp_loop_runtime_metadata(
-        &mut record.metadata,
-        true,
-        limit,
-        true,
+    let acknowledgement = homeboy::agents::agent_task_loop_controller::resume_loop(
+        &loop_id,
+        revolution_limit,
+        defaults.to_resume_parameters(),
     )?;
-    record.updated_at = chrono::Utc::now().to_rfc3339();
-    homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
-    let resumed_loop_id = loop_id.clone();
-    let (value, exit_code) = detach_loop_coordinator(loop_id, defaults)?;
+    let record = homeboy::agents::agent_task_loop_controller::load_controller(&loop_id)?;
+    let result = acknowledgement.result.data;
+    let stopped_reason = result.get("stopped_reason").cloned();
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-resume-result/v1",
-            "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
-                &homeboy::agents::agent_tasks::loop_controller::load_controller(&resumed_loop_id)?.metadata,
-            ),
-            "resume": value,
+            "loop_id": record.loop_id,
+            "claimed": stopped_reason.is_none(),
+            "stopped_reason": stopped_reason,
+            "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(&record.metadata),
+            "controller": record,
+            "resume": result,
+            "action_outcome": acknowledgement.outcome,
         }),
-        exit_code,
+        0,
     ))
 }
 
@@ -1145,6 +1114,15 @@ impl ControllerDispatchDefaults {
         }
     }
 
+    fn to_resume_parameters(&self) -> Value {
+        serde_json::json!({
+            "backend": self.backend,
+            "selector": self.selector,
+            "model": self.model,
+            "provider_config": self.provider_config,
+        })
+    }
+
     fn apply_to_spec(&self, spec: &mut AgentTaskRepoLoopSpec) {
         if self.is_empty() {
             return;
@@ -1324,7 +1302,7 @@ fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
     if std::env::var(LOOP_COORDINATOR_ENV).ok().as_deref() == Some(args.loop_id.as_str()) {
         return run_loop_coordinator(args.loop_id, defaults);
     }
-    detach_loop_coordinator(args.loop_id, defaults)
+    submit_loop_resume(args.loop_id, None, defaults)
 }
 
 #[cfg(test)]
@@ -1414,128 +1392,6 @@ fn run_loop_coordinator(loop_id: String, defaults: ControllerDispatchDefaults) -
     }
 }
 
-fn detach_loop_coordinator(
-    loop_id: String,
-    defaults: ControllerDispatchDefaults,
-) -> CmdResult<Value> {
-    let controller_path =
-        homeboy::agents::agent_task_loop_controller::controller_record_path(&loop_id)?;
-    let loop_root = controller_path.parent().ok_or_else(|| {
-        homeboy::core::Error::internal_unexpected("loop controller record has no parent directory")
-    })?;
-    std::fs::create_dir_all(loop_root).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(loop_root.display().to_string()))
-    })?;
-    let log_path = loop_root.join("coordinator.log");
-    let ready_path = loop_root.join("coordinator.ready");
-    if let Err(error) = std::fs::remove_file(&ready_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some(ready_path.display().to_string()),
-            ));
-        }
-    }
-    let log = std::fs::File::create(&log_path).map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
-    })?;
-    let log_err = log.try_clone().map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
-    })?;
-    let executable = std::env::current_exe().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable for loop coordinator".to_string()),
-        )
-    })?;
-    let mut command = Command::new(executable);
-    command
-        .args(loop_coordinator_args(&loop_id, &defaults))
-        .env(LOOP_COORDINATOR_ENV, &loop_id)
-        .env(LOOP_COORDINATOR_READY_ENV, &ready_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    homeboy::core::process::detach_from_caller_session(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some("spawn detached loop coordinator".to_string()),
-        )
-    })?;
-    let start_identity = match homeboy::core::process::process_start_identity(child.id()) {
-        Ok(Some(identity)) => identity,
-        Ok(None) => {
-            let _ = homeboy::core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(homeboy::core::Error::internal_unexpected(
-                "detached loop coordinator has no verifiable process identity",
-            ));
-        }
-        Err(error) => {
-            let _ = homeboy::core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(homeboy::core::Error::internal_io(
-                error,
-                Some("inspect detached loop coordinator identity".to_string()),
-            ));
-        }
-    };
-    let submission = homeboy::agents::agent_task_service::loop_work_job_submission(
-        &loop_id,
-        child.id(),
-        &start_identity,
-    )?;
-    let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
-    let job = match client.submit(submission) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = homeboy::core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
-    let job_id = job.id.to_string();
-    if let Err(error) = persist_loop_work_identity(&loop_id, &job_id) {
-        let _ = client.cancel(&job_id, "loop work identity could not be persisted");
-        let _ = homeboy::core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        return Err(error);
-    }
-    if let Err(error) = client.start(&job_id) {
-        let _ = client.cancel(&job_id, "loop coordinator could not start supervision");
-        let _ = homeboy::core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        return Err(error);
-    }
-    if let Err(error) = std::fs::write(&ready_path, format!("{job_id}\n")) {
-        let _ = client.cancel(
-            &job_id,
-            "loop coordinator launch gate could not be released",
-        );
-        let _ = homeboy::core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        return Err(homeboy::core::Error::internal_io(
-            error.to_string(),
-            Some(ready_path.display().to_string()),
-        ));
-    }
-    Ok((
-        command_json_value(serde_json::json!({
-            "schema": "homeboy/agent-task-loop-work-submission/v1",
-            "loop_id": loop_id,
-            "job_id": job_id,
-            "state": "submitted",
-            "log_path": log_path,
-            "commands": {
-                "status": format!("homeboy agent-task controller status {loop_id}"),
-                "cancel": format!("homeboy agent-task loop stop {loop_id}"),
-            },
-        }))?,
-        0,
-    ))
-}
-
 fn wait_for_loop_coordinator_release() -> homeboy::core::Result<()> {
     let Some(path) = std::env::var_os(LOOP_COORDINATOR_READY_ENV) else {
         return Ok(());
@@ -1552,43 +1408,6 @@ fn wait_for_loop_coordinator_release() -> homeboy::core::Result<()> {
     Err(homeboy::core::Error::internal_unexpected(
         "loop coordinator was not released by its durable Work owner",
     ))
-}
-
-fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> homeboy::core::Result<()> {
-    let mut record = homeboy::agents::agent_task_loop_controller::load_controller(loop_id)?;
-    if !record.metadata.is_object() {
-        record.metadata = serde_json::json!({});
-    }
-    record.metadata["work_job"] = serde_json::json!({
-        "schema": "homeboy/agent-task-loop-work-ref/v1",
-        "job_id": job_id,
-        "state": "submitted",
-    });
-    homeboy::agents::agent_task_loop_controller::write_controller(&record)
-}
-
-fn loop_coordinator_args(loop_id: &str, defaults: &ControllerDispatchDefaults) -> Vec<String> {
-    let mut args = vec![
-        "agent-task".to_string(),
-        "controller".to_string(),
-        "resume".to_string(),
-        loop_id.to_string(),
-    ];
-    for (flag, value) in [
-        ("--dispatch-backend", defaults.backend.as_deref()),
-        ("--dispatch-selector", defaults.selector.as_deref()),
-        ("--dispatch-model", defaults.model.as_deref()),
-        (
-            "--dispatch-provider-config",
-            defaults.provider_config.as_deref(),
-        ),
-    ] {
-        if let Some(value) = value {
-            args.push(flag.to_string());
-            args.push(value.to_string());
-        }
-    }
-    args
 }
 
 #[cfg(test)]
@@ -1658,34 +1477,19 @@ mod tests {
     }
 
     #[test]
-    fn loop_coordinator_child_carries_dispatch_defaults() {
-        let args = loop_coordinator_args(
-            "loop-dispatch",
-            &ControllerDispatchDefaults {
-                backend: Some("backend".to_string()),
-                selector: Some("selector".to_string()),
-                model: Some("model".to_string()),
-                provider_config: Some(r#"{"runtime":"pinned"}"#.to_string()),
-            },
-        );
+    fn loop_resume_parameters_carry_dispatch_defaults() {
+        let parameters = ControllerDispatchDefaults {
+            backend: Some("backend".to_string()),
+            selector: Some("selector".to_string()),
+            model: Some("model".to_string()),
+            provider_config: Some(r#"{"runtime":"pinned"}"#.to_string()),
+        }
+        .to_resume_parameters();
 
-        assert_eq!(
-            args,
-            vec![
-                "agent-task",
-                "controller",
-                "resume",
-                "loop-dispatch",
-                "--dispatch-backend",
-                "backend",
-                "--dispatch-selector",
-                "selector",
-                "--dispatch-model",
-                "model",
-                "--dispatch-provider-config",
-                r#"{"runtime":"pinned"}"#,
-            ]
-        );
+        assert_eq!(parameters["backend"], "backend");
+        assert_eq!(parameters["selector"], "selector");
+        assert_eq!(parameters["model"], "model");
+        assert_eq!(parameters["provider_config"], r#"{"runtime":"pinned"}"#);
     }
 
     #[test]

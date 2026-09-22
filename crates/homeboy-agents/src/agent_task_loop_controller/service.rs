@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// A bounded read of the shared detached work owner. Errors are deliberately
 /// represented as unavailable data: a failed daemon inspection is not success.
@@ -106,6 +107,56 @@ pub fn stop_loop(
     Ok((load_controller(loop_id)?, acknowledgement))
 }
 
+/// Adapt loop resume to the canonical action service. The CLI supplies only
+/// dispatch defaults; generation fencing and WorkJob submission stay here.
+pub fn resume_loop(
+    loop_id: &str,
+    revolution_limit: Option<u32>,
+    dispatch_defaults: Value,
+) -> Result<ControlPlaneActionAcknowledgement> {
+    let record = load_controller(loop_id)?;
+    let run = control_plane_run_id(&record.loop_id)?;
+    let request = ControlPlaneActionRequest {
+        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        effect_id: homeboy_control_plane_contract::EffectId(format!(
+            "loop-resume:{}:{}",
+            run, record.updated_at
+        )),
+        action: ControlPlaneAction::Resume,
+        idempotency_key: format!("loop-resume:{}:{}", run, record.updated_at),
+        actor: "homeboy-agent-task-loop".to_string(),
+        expected_updated_at: Some(record.updated_at.clone()),
+        parameters: ControlPlaneActionPayload {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_RESUME_PARAMETERS_SCHEMA
+                .to_string(),
+            data: serde_json::json!({
+                "revolution_limit": revolution_limit,
+                "dispatch_defaults": dispatch_defaults,
+            }),
+        },
+        confirmed: true,
+    };
+    let acknowledgement =
+        homeboy_core::control_plane::execute_action(&run, &request).map_err(|error| match error
+            .class
+        {
+            homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+            | homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound => {
+                Error::validation_invalid_argument("loop_id", error.message, None, None)
+            }
+            _ => Error::internal_unexpected(error.message),
+        })?;
+    if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
+        return Err(Error::internal_unexpected(
+            acknowledgement
+                .message
+                .clone()
+                .unwrap_or_else(|| "loop resume action failed".to_string()),
+        ));
+    }
+    Ok(acknowledgement)
+}
+
 fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Result<Value> {
     let Some(job_id) = record
         .metadata
@@ -117,6 +168,148 @@ fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Resu
     let job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
         .cancel(job_id, reason)?;
     Ok(serde_json::json!({ "job_id": job_id, "status": job.status }))
+}
+
+fn launch_loop_coordinator(loop_id: &str, dispatch_defaults: &Value) -> Result<Value> {
+    let controller_path = controller_record_path(loop_id)?;
+    let loop_root = controller_path.parent().ok_or_else(|| {
+        Error::internal_unexpected("loop controller record has no parent directory")
+    })?;
+    fs::create_dir_all(loop_root).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(loop_root.display().to_string()))
+    })?;
+    let log_path = loop_root.join("coordinator.log");
+    let ready_path = loop_root.join("coordinator.ready");
+    match fs::remove_file(&ready_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(ready_path.display().to_string()),
+            ))
+        }
+    }
+    let log = fs::File::create(&log_path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let log_err = log.try_clone().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
+    })?;
+    let executable = std::env::var_os("HOMEBOY_AGENT_TASK_LOOP_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_exe().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve loop coordinator executable".to_string()),
+            )
+        })?);
+    let mut command = Command::new(executable);
+    command
+        .args(loop_coordinator_args(loop_id, dispatch_defaults))
+        .env("HOMEBOY_AGENT_TASK_LOOP_COORDINATOR", loop_id)
+        .env("HOMEBOY_AGENT_TASK_LOOP_COORDINATOR_READY", &ready_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    homeboy_core::process::detach_from_caller_session(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("spawn detached loop coordinator".to_string()),
+        )
+    })?;
+    let start_identity = match homeboy_core::process::process_start_identity(child.id()) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(Error::internal_unexpected(
+                "detached loop coordinator has no verifiable process identity",
+            ));
+        }
+        Err(error) => {
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(Error::internal_io(
+                error,
+                Some("inspect detached loop coordinator identity".to_string()),
+            ));
+        }
+    };
+    let submission =
+        crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &start_identity)?;
+    let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?;
+    let job = match client.submit(submission) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let job_id = job.id.to_string();
+    if let Err(error) = persist_loop_work_identity(loop_id, &job_id) {
+        let _ = client.cancel(&job_id, "loop work identity could not be persisted");
+        let _ = homeboy_core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = client.start(&job_id) {
+        let _ = client.cancel(&job_id, "loop coordinator could not start supervision");
+        let _ = homeboy_core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        return Err(error);
+    }
+    fs::write(&ready_path, format!("{job_id}\n")).map_err(|error| {
+        let _ = client.cancel(
+            &job_id,
+            "loop coordinator launch gate could not be released",
+        );
+        let _ = homeboy_core::process::terminate_process_tree(child.id());
+        let _ = child.wait();
+        Error::internal_io(error.to_string(), Some(ready_path.display().to_string()))
+    })?;
+    Ok(serde_json::json!({
+        "schema": "homeboy/agent-task-loop-work-submission/v1",
+        "loop_id": loop_id,
+        "job_id": job_id,
+        "state": "submitted",
+    }))
+}
+
+fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> Result<()> {
+    let mut record = load_controller(loop_id)?;
+    if !record.metadata.is_object() {
+        record.metadata = serde_json::json!({});
+    }
+    record.metadata["work_job"] = serde_json::json!({
+        "schema": "homeboy/agent-task-loop-work-ref/v1",
+        "job_id": job_id,
+        "state": "submitted",
+    });
+    write_controller(&record)
+}
+
+fn loop_coordinator_args(loop_id: &str, defaults: &Value) -> Vec<String> {
+    let mut args = vec![
+        "agent-task".to_string(),
+        "controller".to_string(),
+        "resume".to_string(),
+        loop_id.to_string(),
+    ];
+    for (key, flag) in [
+        ("backend", "--dispatch-backend"),
+        ("selector", "--dispatch-selector"),
+        ("model", "--dispatch-model"),
+        ("provider_config", "--dispatch-provider-config"),
+    ] {
+        if let Some(value) = defaults.get(key).and_then(Value::as_str) {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    args
 }
 
 fn work_job_is_terminal(work: &Value) -> bool {
@@ -141,7 +334,15 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
-        self.stop(run, request, false)
+        match request.action {
+            ControlPlaneAction::Cancel => self.stop(run, request, false),
+            ControlPlaneAction::Resume => self.resume(run, request),
+            _ => Err(
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                    "agent-task loop supports only cancel and resume",
+                ),
+            ),
+        }
     }
 
     fn recover(
@@ -152,7 +353,15 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
-        self.stop(run, request, true)
+        match request.action {
+            ControlPlaneAction::Cancel => self.stop(run, request, true),
+            ControlPlaneAction::Resume => self.resume(run, request),
+            _ => Err(
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                    "agent-task loop supports only cancel and resume",
+                ),
+            ),
+        }
     }
 }
 
@@ -240,6 +449,93 @@ impl LoopActionDelegate {
             result: ControlPlaneActionPayload {
                 schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
                 data: serde_json::json!({ "loop_id": loop_id, "work": work }),
+            },
+            message: None,
+        })
+    }
+
+    fn resume(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> std::result::Result<
+        ControlPlaneActionDelegateResult,
+        homeboy_control_plane_contract::ControlPlaneError,
+    > {
+        let loop_id = run
+            .metadata_json
+            .get("loop_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                    "loop resource has no persisted loop identity",
+                )
+            })?;
+        let mut record = load_controller(loop_id).map_err(|error| {
+            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        })?;
+        let runtime = loop_runtime_metadata(&record.metadata);
+        if !runtime["on"].as_bool().unwrap_or(true) {
+            return Err(
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                    "agent-task loop resume requires an on loop",
+                ),
+            );
+        }
+        let limit = request
+            .parameters
+            .data
+            .get("revolution_limit")
+            .and_then(Value::as_u64)
+            .map(|value| value as u32)
+            .or_else(|| {
+                runtime["revolution_limit"]
+                    .as_u64()
+                    .map(|value| value as u32)
+            });
+        let current = runtime["revolutions"].as_u64().unwrap_or(0) as u32;
+        if limit.is_some_and(|limit| current >= limit) {
+            return Ok(ControlPlaneActionDelegateResult {
+                outcome: ControlPlaneActionOutcome::AlreadySatisfied,
+                result: ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RESUME_RESULT_SCHEMA
+                        .to_string(),
+                    data: serde_json::json!({
+                        "aggregate": { "claimed": false },
+                        "exit_code": 0,
+                        "stopped_reason": "revolution_limit_reached",
+                    }),
+                },
+                message: None,
+            });
+        }
+        stamp_loop_runtime_metadata(&mut record.metadata, true, limit, true).map_err(|error| {
+            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        })?;
+        record.updated_at = Utc::now().to_rfc3339();
+        write_controller(&record).map_err(|error| {
+            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        })?;
+        let work = launch_loop_coordinator(
+            loop_id,
+            request
+                .parameters
+                .data
+                .get("dispatch_defaults")
+                .unwrap_or(&Value::Null),
+        )
+        .map_err(|error| {
+            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        })?;
+        Ok(ControlPlaneActionDelegateResult {
+            outcome: ControlPlaneActionOutcome::Succeeded,
+            result: ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RESUME_RESULT_SCHEMA
+                    .to_string(),
+                data: serde_json::json!({
+                    "aggregate": { "loop_id": loop_id, "work": work },
+                    "exit_code": 0,
+                }),
             },
             message: None,
         })
@@ -1207,18 +1503,26 @@ fn publish_control_plane_loop(record: &AgentTaskLoopControllerRecord) -> Result<
     let metadata = serde_json::json!({
         "loop_id": record.loop_id,
         "controller": record,
-        "control_plane": {
-            "phase": record.phase,
-            "actions": [{
-                "action": "cancel",
-                "availability": if status == "running" { "available" } else { "unavailable" },
+            "control_plane": {
+                "phase": record.phase,
+                "actions": [{
+                    "action": "cancel",
+                    "availability": if status == "running" { "available" } else { "unavailable" },
                 "reason": if status == "running" { "loop can be stopped" } else { "loop is terminal" },
                 "confirmation": "required",
                 "idempotent": true,
-                "requires_revalidation": true,
-                "result_resource_type": "agent_task_loop"
-            }]
-        }
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_loop"
+                }, {
+                    "action": "resume",
+                    "availability": if status == "running" { "available" } else { "unavailable" },
+                    "reason": if status == "running" { "loop can be resumed" } else { "loop is terminal" },
+                    "confirmation": "required",
+                    "idempotent": true,
+                    "requires_revalidation": true,
+                    "result_resource_type": "agent_task_loop"
+                }]
+            }
     });
     let run = RunRecord {
         id: run_id.to_string(),

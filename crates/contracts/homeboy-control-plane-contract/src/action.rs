@@ -11,6 +11,8 @@ pub const CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA: &str =
     "homeboy/control-plane-action-acknowledgement/v1";
 pub const CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA: &str =
     "homeboy/control-plane-empty-action-payload/v1";
+pub const CONTROL_PLANE_RESUME_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-resume-parameters/v1";
 pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-cancel-parameters/v1";
 pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
@@ -302,7 +304,7 @@ impl ControlPlaneActionRequest {
             ControlPlaneAction::Reconcile => {
                 ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
             }
-            ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
+            ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_RESUME_PARAMETERS_SCHEMA),
             ControlPlaneAction::PlacementUpdate => (
                 "placement_update",
                 CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
@@ -313,10 +315,19 @@ impl ControlPlaneActionRequest {
             }
             ControlPlaneAction::Rearm => ("rearm", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
         };
-        if self.parameters.schema != expected_schema {
+        let resume_legacy_empty = self.action == ControlPlaneAction::Resume
+            && self.parameters.schema == CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA;
+        if self.parameters.schema != expected_schema && !resume_legacy_empty {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
                 "{name} requires parameters schema {expected_schema}"
             )));
+        }
+        if self.action == ControlPlaneAction::Resume && !resume_legacy_empty {
+            if !self.parameters.data.is_object() {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "resume parameters must be an object",
+                ));
+            }
         }
         if self.action == ControlPlaneAction::Cancel {
             let parameters: ControlPlaneCancelParameters =
