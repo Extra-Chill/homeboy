@@ -196,7 +196,6 @@ pub(crate) fn prepare_runner_process(
             &request.command,
             &secret_env_plan.secret_env_names(),
             &request.env,
-            Some(&secret_env_plan),
         )?;
     }
     validate_runner_policy(

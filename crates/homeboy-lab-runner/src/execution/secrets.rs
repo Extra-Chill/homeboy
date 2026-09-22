@@ -128,14 +128,12 @@ pub(super) fn provision_provider_file_secret_sources_for_runner(
     command: &[String],
     required_names: &[String],
     request_env: &HashMap<String, String>,
-    secret_env_plan: Option<&SecretEnvPlan>,
 ) -> Result<()> {
     if !is_agent_task_run_plan_command(command) || required_names.is_empty() {
         return Ok(());
     }
     let fallback_sources = provider_secret_sources_for_discovered_providers();
-    let provisions =
-        provider_file_secret_source_provisions(required_names, &fallback_sources, secret_env_plan);
+    let provisions = provider_file_secret_source_provisions(required_names, &fallback_sources);
     if provisions.is_empty() {
         return Ok(());
     }
@@ -186,21 +184,9 @@ pub(super) struct ProviderFileSecretSourceProvision {
 pub(super) fn provider_file_secret_source_provisions(
     required_names: &[String],
     fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-    secret_env_plan: Option<&SecretEnvPlan>,
 ) -> Vec<ProviderFileSecretSourceProvision> {
     let mut by_path: HashMap<String, Vec<String>> = HashMap::new();
     for name in required_names {
-        if secret_env_plan.is_some_and(|plan| {
-            plan.env_materialization
-                .as_ref()
-                .is_some_and(|materialization| {
-                    materialization.secret_refs.iter().any(|reference| {
-                        reference.name == *name && reference.owner.as_deref() == Some("runner")
-                    })
-                })
-        }) {
-            continue;
-        }
         let Some(source) = fallback_sources.get(name) else {
             continue;
         };
