@@ -2944,17 +2944,12 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         "store.get(job_id).expect( job ).status == JobStatus::Running",
         || store.get(job_id).expect("job").status == JobStatus::Running,
     );
-    wait_for("daemon exec child pid file", || child_pid_file.exists());
-    let child_pid = std::fs::read_to_string(&child_pid_file)
-        .expect("child pid fixture")
-        .trim()
-        .parse::<u32>()
-        .expect("numeric child pid");
+    let child_pid = wait_for_pid_file(&child_pid_file);
     store
         .cancel(job_id, "test cancellation")
         .expect("cancel job");
     wait_for("cancelled daemon exec child to exit", || {
-        !crate::process::pid_is_running(child_pid)
+        !crate::process::pid_is_running(child_pid as u32)
     });
 
     assert_eq!(store.get(job_id).expect("job").status, JobStatus::Cancelled);
@@ -2987,15 +2982,31 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
 
 #[cfg(unix)]
 fn wait_for_pid_file(path: &std::path::Path) -> libc::pid_t {
+    wait_for_pid_file_with(path, |_| {})
+}
+
+#[cfg(unix)]
+fn wait_for_pid_file_with(
+    path: &std::path::Path,
+    mut on_incomplete: impl FnMut(&str),
+) -> libc::pid_t {
     let deadline = Instant::now() + Duration::from_secs(2);
-    while !path.exists() && Instant::now() < deadline {
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if contents.ends_with('\n') {
+                if let Ok(pid) = contents.trim().parse() {
+                    return pid;
+                }
+            }
+            on_incomplete(&contents);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for complete numeric child PID publication at {}",
+            path.display()
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
-    std::fs::read_to_string(path)
-        .expect("child pid fixture")
-        .trim()
-        .parse()
-        .expect("numeric child pid")
 }
 
 #[cfg(unix)]
@@ -3008,6 +3019,41 @@ fn assert_pid_exits(pid: libc::pid_t) {
         !crate::process::pid_is_running(pid as u32),
         "process {pid} remained live"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn pid_file_reader_rejects_empty_and_partial_publication() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pid_file = temp.path().join("descendant.pid");
+    std::fs::write(&pid_file, b"").expect("create empty PID file");
+
+    let (incomplete_tx, incomplete_rx) = mpsc::channel();
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let reader_path = pid_file.clone();
+    let reader = std::thread::spawn(move || {
+        wait_for_pid_file_with(&reader_path, |contents| {
+            incomplete_tx
+                .send(contents.to_string())
+                .expect("reader remains alive");
+            continue_rx.recv().expect("test releases PID reader");
+        })
+    });
+
+    assert_eq!(
+        incomplete_rx.recv().expect("empty publication observed"),
+        ""
+    );
+    std::fs::write(&pid_file, b"12345").expect("publish partial PID");
+    continue_tx.send(()).expect("release empty publication");
+    assert_eq!(
+        incomplete_rx.recv().expect("partial publication observed"),
+        "12345"
+    );
+    std::fs::write(&pid_file, b"12345\n").expect("complete PID publication");
+    continue_tx.send(()).expect("release partial publication");
+
+    assert_eq!(reader.join().expect("PID reader completed"), 12345);
 }
 
 #[cfg(unix)]
