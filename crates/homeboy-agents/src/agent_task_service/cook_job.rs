@@ -683,6 +683,7 @@ pub fn cook_job_submission_for_launcher(
     child_pid: u32,
     child_start_identity: &ProcessStartIdentity,
 ) -> Result<Value> {
+    register_cook_work_handler();
     let job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
         schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
         cook_id: cook_id.to_string(),
@@ -709,6 +710,7 @@ pub fn cook_retry_job_submission(
     child_start_identity: &ProcessStartIdentity,
     child_session_ref: &str,
 ) -> Result<Value> {
+    register_cook_work_handler();
     let job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
         schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
         cook_id: cook_id.to_string(),
