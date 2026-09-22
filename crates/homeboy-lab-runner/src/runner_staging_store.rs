@@ -423,6 +423,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             .transpose()?;
         let _lock = self.admission_lock()?;
         let mut state = self.load()?;
+        self.migrate_legacy_retention(&mut state)?;
         let key = &envelope.handoff.idempotency_key;
         if let Some(existing) = state.stages.get(key) {
             if existing.envelope != *envelope {
@@ -513,6 +514,46 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 Some(format!("parse {}", self.path.display())),
             )
         })
+    }
+
+    /// Publish only a retention migration, and only while the admission lock
+    /// is held by the caller. Formatting/default differences are intentionally
+    /// not treated as migrations.
+    fn migrate_legacy_retention(&self, state: &mut StagingStoreState) -> Result<()> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", self.path.display())),
+                ))
+            }
+        };
+        let raw: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse {}", self.path.display())),
+            )
+        })?;
+        let has_legacy_retention = ["stages", "intents"].into_iter().any(|section| {
+            raw.get(section)
+                .and_then(serde_json::Value::as_object)
+                .into_iter()
+                .flat_map(|records| records.values())
+                .any(|record| {
+                    record
+                        .get("envelope")
+                        .and_then(|envelope| envelope.get("handoff"))
+                        .and_then(|handoff| handoff.get("recipe"))
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|recipe| recipe.contains_key("preserve_workspace_on_failure"))
+                })
+        });
+        if has_legacy_retention {
+            self.persist(state)?;
+        }
+        Ok(())
     }
 
     fn persist(&self, state: &StagingStoreState) -> Result<()> {
@@ -1225,6 +1266,140 @@ mod tests {
         assert_eq!(disconnected.store.materializer.calls, 0);
     }
 
+    #[test]
+    fn opens_and_canonicalizes_legacy_retention_records_without_losing_active_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        initial.store.stage_durable(&request).expect("stage");
+
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+        let staged_envelope = stored["stages"]
+            .as_object()
+            .expect("stages")
+            .values()
+            .next()
+            .expect("stage")
+            .get("envelope")
+            .expect("envelope")
+            .clone();
+        let legacy_recipe = staged_envelope["handoff"]["recipe"].clone();
+        let mut legacy_recipe = legacy_recipe.as_object().cloned().expect("recipe object");
+        let delete = legacy_recipe
+            .remove("delete_workspace_on_failure")
+            .expect("current retention field");
+        legacy_recipe.insert(
+            "preserve_workspace_on_failure".to_string(),
+            serde_json::Value::Bool(!delete.as_bool().expect("delete bool")),
+        );
+        let legacy_recipe = serde_json::Value::Object(legacy_recipe);
+        let mut delete_on_failure_recipe = legacy_recipe.clone();
+        delete_on_failure_recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(false);
+        assert!(
+            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
+                delete_on_failure_recipe
+            )
+            .expect("legacy delete policy")
+            .delete_workspace_on_failure
+        );
+
+        let stage = stored["stages"]
+            .as_object_mut()
+            .expect("stages")
+            .values_mut()
+            .next()
+            .expect("stage");
+        stage["envelope"]["handoff"]["recipe"] = legacy_recipe.clone();
+        let mut active_envelope = staged_envelope;
+        active_envelope["handoff"]["recipe"] = legacy_recipe.clone();
+        stored["intents"] = serde_json::json!({
+            "active-intent": {
+                "envelope": active_envelope,
+                "source_artifact": null,
+                "state": "job_submitted",
+                "runner_job_id": "runner-job-active"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&stored).expect("legacy bytes")).expect("legacy store");
+
+        let mut reopened = transport(&path);
+        reopened
+            .store
+            .stage_durable(&request)
+            .expect("migrate and replay");
+        assert_eq!(reopened.store.materializer.calls, 0);
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("canonical state")).expect("json");
+        let canonical_text = canonical.to_string();
+        assert!(!canonical_text.contains("preserve_workspace_on_failure"));
+        assert!(canonical_text.contains("delete_workspace_on_failure"));
+        assert!(canonical["intents"].get("active-intent").is_some());
+        assert_eq!(
+            canonical["intents"]["active-intent"]["envelope"]["handoff"]["recipe"]
+                ["delete_workspace_on_failure"],
+            delete
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_or_conflicting_retention_fields() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        initial.store.stage_durable(&request).expect("stage");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+        let recipe = stored["stages"]
+            .as_object_mut()
+            .expect("stages")
+            .values_mut()
+            .next()
+            .expect("stage")
+            .get_mut("envelope")
+            .expect("envelope")
+            .get_mut("handoff")
+            .expect("handoff")
+            .get_mut("recipe")
+            .expect("recipe");
+        recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(true);
+        assert!(recipe.get("delete_workspace_on_failure").is_some());
+        let conflicting_recipe = recipe.clone();
+        let parse_error =
+            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
+                conflicting_recipe.clone(),
+            )
+            .expect_err("conflicting retention fields must fail");
+        assert!(parse_error
+            .to_string()
+            .contains("both preserve_workspace_on_failure"));
+        fs::write(
+            &path,
+            serde_json::to_vec(&stored).expect("conflicting bytes"),
+        )
+        .expect("conflicting store");
+        let error = match RunnerStagingStore::open(path, "runner-1", Materializer::default()) {
+            Ok(_) => panic!("conflicting retention fields must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, homeboy_core::ErrorCode::InternalJsonError);
+
+        let mut unknown_recipe = conflicting_recipe;
+        unknown_recipe
+            .as_object_mut()
+            .expect("unknown recipe object")
+            .remove("preserve_workspace_on_failure");
+        unknown_recipe["unknown_retention_policy"] = serde_json::Value::Bool(true);
+        let unknown_error =
+            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
+                unknown_recipe,
+            )
+            .expect_err("unknown retention fields must fail");
+        assert!(unknown_error.to_string().contains("unknown field"));
+    }
+
     #[derive(Clone)]
     struct ConcurrentMaterializer {
         calls: Arc<AtomicUsize>,
@@ -1250,7 +1425,55 @@ mod tests {
     fn concurrent_admission_materializes_once_and_replays_one_receipt() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
-        let request = envelope();
+        let legacy = envelope();
+        let mut seed = transport(&path);
+        seed.store.stage_durable(&legacy).expect("seed stage");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("seed state")).expect("json");
+        let recipe = stored["stages"]
+            .as_object_mut()
+            .expect("stages")
+            .values_mut()
+            .next()
+            .expect("stage")
+            .get_mut("envelope")
+            .expect("envelope")
+            .get_mut("handoff")
+            .expect("handoff")
+            .get_mut("recipe")
+            .expect("recipe");
+        let delete = recipe
+            .get("delete_workspace_on_failure")
+            .and_then(serde_json::Value::as_bool)
+            .expect("delete policy");
+        recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(!delete);
+        recipe
+            .as_object_mut()
+            .expect("recipe object")
+            .remove("delete_workspace_on_failure");
+        let stage_key = stored["stages"]
+            .as_object()
+            .expect("stages")
+            .keys()
+            .next()
+            .expect("stage key")
+            .clone();
+        let stage = stored["stages"][&stage_key].clone();
+        stored["stages"] = serde_json::json!({});
+        let mut intents = serde_json::Map::new();
+        intents.insert(
+            stage_key,
+            serde_json::json!({
+                "envelope": stage["envelope"].clone(),
+                "source_artifact": stage["receipt"]["artifacts"]["source_artifact"].clone(),
+                "state": "job_submitted",
+                "runner_job_id": stage["receipt"]["handoff"]["runner_job_id"].clone()
+            }),
+        );
+        stored["intents"] = serde_json::Value::Object(intents);
+        fs::write(&path, serde_json::to_vec(&stored).expect("legacy state")).expect("write legacy");
+
+        let request = legacy;
         let calls = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(2));
         let mut workers = Vec::new();
@@ -1271,6 +1494,10 @@ mod tests {
         let second = workers.remove(0).join().expect("second worker");
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("final state")).expect("json");
+        assert_eq!(state["stages"].as_object().expect("stages").len(), 1);
+        assert!(!state.to_string().contains("preserve_workspace_on_failure"));
     }
 
     #[test]

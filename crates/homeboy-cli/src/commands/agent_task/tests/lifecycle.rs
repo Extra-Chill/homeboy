@@ -3403,7 +3403,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             .contains("[REDACTED]"));
         assert_eq!(
             value["next_commands"][0],
-            "homeboy --placement local agent-task status run-cli-diagnose-evidence"
+            "homeboy --placement local agent-task diagnose run-cli-diagnose-evidence --full"
         );
     });
 }
@@ -3456,7 +3456,9 @@ fn diagnose_hydrates_and_redacts_structured_provider_runtime_errors() {
         assert_eq!(value["root_cause"]["details"]["retryable"], false);
         assert_eq!(
             value["root_cause"]["details"]["failure_classification"],
-            "provider_account_blocked"
+            // Explicit spending-limit/credit exhaustion is billing state. A
+            // generic account block remains distinct for other 401/403 causes.
+            "provider_billing_blocked"
         );
         assert!(value["hydrated_evidence"][0]["summary"]["stdout_excerpt"]
             .as_str()
@@ -3978,7 +3980,9 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(
             value["next_commands"],
             json!([
-                format!("homeboy --placement local agent-task status {run_id}"),
+                // Diagnose is the evidence-first recovery verb; --full is the
+                // bounded command needed to inspect all retained evidence.
+                format!("homeboy --placement local agent-task diagnose {run_id} --full"),
                 format!("homeboy --placement local agent-task artifacts {run_id}"),
                 format!("homeboy --placement local agent-task review {run_id}"),
             ])

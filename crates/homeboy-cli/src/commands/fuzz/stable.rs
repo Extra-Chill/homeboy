@@ -128,8 +128,8 @@ fn append_common_run_options(command: &mut Vec<String>, args: &FuzzStablePlanArg
         command.push("--artifact-root".to_string());
         command.push(artifact_root.to_string_lossy().to_string());
     }
-    if args.detach_after_handoff {
-        command.push("--detach-after-handoff".to_string());
+    if !args.detach_after_handoff {
+        command.push("--wait".to_string());
     }
 }
 
@@ -362,7 +362,7 @@ mod tests {
             artifact_root: None,
             run_id_prefix: Some("stable-demo".to_string()),
             tracker_refs: vec!["issue:1".to_string()],
-            detach_after_handoff: true,
+            detach_after_handoff: false,
             component: Some("component-a".to_string()),
             since: "7d".to_string(),
             limit: 5,
@@ -390,7 +390,7 @@ mod tests {
                 "stable-workload:api",
                 "--runner",
                 "lab",
-                "--detach-after-handoff",
+                "--wait",
                 "--max-duration",
                 "60s",
                 "--tracker-ref",

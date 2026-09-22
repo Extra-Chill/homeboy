@@ -1193,7 +1193,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Do not run or report verification commands: Homeboy runs the declared deterministic gates itself after harvest and records the authoritative verification evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Bounded checks are allowed when they reproduce the reported behavior, test a hypothesis, or help develop a regression; describe those as observations, never as authoritative final gate results. Homeboy runs the declared deterministic gates itself after harvest and records that evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
         let form_timeout_ms = review_form_timeout_ms(request);
@@ -1233,7 +1233,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
     }
 
     let mut instructions = vec![
-        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate: use this attempt entirely for the source change, not for running or improvising your own verification.".to_string(),
+        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate. Use this attempt for the source change and, when useful, bounded checks to reproduce behavior, test a hypothesis, or develop regression coverage. Treat those results as observations for this attempt, not as authoritative final gate results.".to_string(),
     ];
     if !public_gates.is_empty() {
         instructions.push(format!(
@@ -1247,7 +1247,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
         ));
     }
     instructions.push(
-        "Do not run or report a verification command yourself; Homeboy records the authoritative gate evidence separately after harvest."
+        "Do not claim a focused check is a final gate result. Homeboy records the authoritative gate evidence separately after harvest."
             .to_string(),
     );
     let contract = instructions.join("\n");
@@ -3801,6 +3801,21 @@ fn remediation_tool_policy_error(request: &crate::agent_task::AgentTaskRequest) 
     })
 }
 
+fn cook_remediation_same_provider(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    durable_provider_executions: Option<&Value>,
+    follow_up: &crate::agent_task::AgentTaskExecutor,
+) -> Option<bool> {
+    // A gate result authenticates the durable candidate and identifies this as
+    // same-provider gate remediation, even when a timed-out provider omitted
+    // its terminal executor identity.
+    promotion.status.gate_failed().then_some(true).or_else(|| {
+        terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
+    })
+}
+
 fn follow_up_budget_scope(
     source_request: &crate::agent_task::AgentTaskRequest,
     follow_up_request: &crate::agent_task::AgentTaskRequest,
@@ -4029,20 +4044,21 @@ pub(crate) fn dispatch_cook_follow_up(
             reason: "max_provider_executions".to_string(),
         });
     };
+    let durable_provider_executions = lifecycle_store
+        .read_record(source_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("provider_executions").cloned())
+        .filter(|executions| {
+            executions
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        });
     let same_provider = (known_same_executor
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
         .or_else(|| {
-            let durable_provider_executions = lifecycle_store
-                .read_record(source_run_id)
-                .ok()
-                .and_then(|record| record.metadata.get("provider_executions").cloned())
-                .filter(|executions| {
-                    executions
-                        .as_array()
-                        .is_some_and(|executions| !executions.is_empty())
-                });
-            terminal_executor_matches(
+            cook_remediation_same_provider(
+                promotion,
                 aggregate,
                 plan,
                 durable_provider_executions.as_ref(),

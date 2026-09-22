@@ -64,7 +64,13 @@ pub(crate) fn parsed_command_preflight_input(
         });
     let controller_execution = if is_controller_owned_fanout_coordination(&cli.command)
         || is_plan_only_command(&cli.command)
-        || is_bounded_agent_task_metadata_read(&cli.command)
+        || (is_bounded_agent_task_metadata_read(&cli.command)
+            && (!matches!(
+                &cli.command,
+                Commands::AgentTask(agent_task::AgentTaskArgs {
+                    command: agent_task::AgentTaskCommand::Providers(_),
+                })
+            ) || (cli.runner.is_none() && cli.placement != Placement::Lab)))
         || is_local_registry_management(&cli.command)
     {
         ControllerExecution::ControllerOnly

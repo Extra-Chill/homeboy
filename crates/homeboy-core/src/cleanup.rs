@@ -590,6 +590,9 @@ pub struct ArtifactCleanupOutput {
     /// sizes. Dependency trees are dominated by small files, so allocated bytes
     /// are what an operator watching free space actually gets back.
     pub estimated_allocated_bytes: u64,
+    /// Inventory candidates are provisional until apply rechecks durable
+    /// controller-runtime pins at the deletion boundary.
+    pub candidate_eligibility: &'static str,
     /// Measured allocation for inspected artifacts, or the same observed
     /// filesystem availability delta for pressure-bypassed removals.
     pub reclaimed_allocated_bytes: u64,
@@ -789,6 +792,15 @@ impl ProtectedControllerExecutables {
     fn resolve() -> Result<Self> {
         Ok(Self {
             paths: crate::controller_runtime::protected_executables()?
+                .into_iter()
+                .map(|path| canonical_or_owned(&path))
+                .collect(),
+        })
+    }
+
+    fn resolve_for_inventory() -> Result<Self> {
+        Ok(Self {
+            paths: crate::controller_runtime::active_generation_executables()?
                 .into_iter()
                 .map(|path| canonical_or_owned(&path))
                 .collect(),
@@ -1510,7 +1522,10 @@ fn cleanup_artifacts_in_worktrees(
     let mut inspected_count = 0;
     let mut scan_complete = inspection_limit.is_none() || !worktrees.is_empty();
     let mut active = ActiveWorktrees::resolve();
-    let protected = ProtectedControllerExecutables::resolve()?;
+    // Durable pin references are resolved again at the apply boundary. The
+    // full lifecycle-store read is deliberately excluded from inventory so a
+    // bounded page cannot spend its entire deadline before its first cursor.
+    let protected = ProtectedControllerExecutables::resolve_for_inventory()?;
     if !registry_quarantines.is_empty() {
         active.available = false;
     }
@@ -1735,6 +1750,7 @@ fn cleanup_artifacts_in_worktrees(
         reclaimed_bytes,
         estimated_allocated_bytes,
         reclaimed_allocated_bytes,
+        candidate_eligibility: "provisional_apply_recheck",
         size_estimates_complete,
         observed_filesystem_available_delta_bytes,
         next_command: (!scan_complete || (options.apply && remaining_count > 0))

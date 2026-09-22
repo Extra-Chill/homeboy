@@ -102,6 +102,17 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         return Ok(());
     }
     if verified_pre_provider_cancellation(&reconciled, snapshot) {
+        let now = now_timestamp();
+        reconciled.ensure_metadata_object().insert(
+            "cancellation_provenance".to_string(),
+            json!({
+                "actor": "runner",
+                "cause": "pre_provider_cancellation",
+                "reason": "runner job was cancelled before provider execution",
+                "timestamp": now,
+                "recovery_action": "rearm the exact queued run after confirming the cancellation cause",
+            }),
+        );
         project_terminal_runner_job_snapshot(&mut reconciled, snapshot);
         lifecycle_store.write_record(&reconciled)?;
         *record = reconciled;
@@ -363,6 +374,19 @@ fn project_terminal_runner_job_snapshot(
     }
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
     let metadata = record.ensure_metadata_object();
+    if snapshot.job.status == homeboy_core::api_jobs::JobStatus::Cancelled {
+        metadata
+            .entry("cancellation_provenance".to_string())
+            .or_insert_with(|| {
+                json!({
+                    "actor": "runner",
+                    "cause": "runner_job_cancelled",
+                    "reason": "runner job was cancelled",
+                    "timestamp": now_timestamp(),
+                    "recovery_action": "inspect retained runner cancellation evidence",
+                })
+            });
+    }
     metadata.insert("phase".to_string(), json!(phase));
     metadata.insert(
         "phase_activity".to_string(),

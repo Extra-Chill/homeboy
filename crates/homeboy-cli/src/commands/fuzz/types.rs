@@ -527,8 +527,8 @@ pub(crate) struct FuzzStablePlanArgs {
     #[arg(long = "tracker-ref", value_name = "KIND:ID")]
     pub(crate) tracker_refs: Vec<String>,
 
-    /// Return after the Lab daemon accepts each run.
-    #[arg(long = "detach-after-handoff")]
+    /// Observe each Lab run until terminal completion.
+    #[arg(long = "wait", id = "wait", action = clap::ArgAction::SetFalse)]
     pub(crate) detach_after_handoff: bool,
 
     /// Optional component id for comparison commands.

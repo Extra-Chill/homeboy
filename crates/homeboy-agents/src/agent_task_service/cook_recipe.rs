@@ -780,6 +780,15 @@ fn compatible_existing_recipe(
         // Harvest transport belongs to the original controller execution. A
         // replay must use that persisted context rather than ambient state.
         expected.harvest_context = existing.harvest_context.clone();
+        // Base capture can finish between two concurrent initial admissions.
+        // A request that has not captured a base yet must adopt the durable
+        // recipe boundary instead of superseding the recipe another controller
+        // is already continuing.
+        if existing.finalization["task_base_sha"].is_string()
+            && expected.finalization["task_base_sha"].is_null()
+        {
+            expected.finalization["task_base_sha"] = existing.finalization["task_base_sha"].clone();
+        }
         let requested_attempt = recipe
             .attempts
             .first()
@@ -4869,6 +4878,29 @@ mod tests {
         assert!(store
             .record_recipe_attempt("cook", 2, "run-2", &conflicting)
             .is_err());
+    }
+
+    #[test]
+    fn initial_admission_reuses_a_recipe_that_captured_base_during_a_peer_admission() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let options = reconstruct_options(&recipe()).expect("canonical options");
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist initial recipe");
+
+        let mut captured = store.load_recipe("cook").expect("load initial recipe");
+        captured.finalization["task_base_sha"] = Value::String("captured-base".to_string());
+        store
+            .persist_recipe(&captured)
+            .expect("persist captured base");
+
+        let materialization = store
+            .persist_initial_recipe_with_outcome(&options)
+            .expect("peer admission adopts captured base");
+        assert!(!materialization.created);
+        assert_eq!(materialization.recipe, captured);
+        assert_eq!(materialization.recipe.attempts.len(), 1);
     }
 
     #[test]

@@ -5489,6 +5489,10 @@ pub fn project_record(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
+    // Status reads must expose a dead adoption owner without persisting the
+    // interruption; the reconcile action remains the mutating path.
+    let projected_record = project_dead_candidate_adoption(record);
+    let record = &projected_record;
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(format!("durable run id: {error}")))?;
     let identities = identities_for_record(record)?;
@@ -5528,6 +5532,34 @@ pub fn project_record(
     resource.evidence = evidence_refs(record);
     resource.artifacts = artifact_refs(record);
     Ok(resource)
+}
+
+fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
+    let mut projected = record.clone();
+    let Some(adoption) = projected.candidate_adoption.as_mut() else {
+        return projected;
+    };
+    if adoption.state != "verification_running"
+        || homeboy_core::process::pid_is_running(adoption.owner_pid)
+    {
+        return projected;
+    }
+    adoption.state = "interrupted".to_string();
+    adoption.phase = if adoption.gate_process_group.is_some_and(|pgid| {
+        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+    }) {
+        "gate_orphaned"
+    } else {
+        "owner_stale"
+    }
+    .to_string();
+    adoption.terminal_error = Some(if adoption.phase == "gate_orphaned" {
+        "adoption controller stopped while its gate process group remains live; cancel the adoption before resuming"
+    } else {
+        "adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume"
+    }
+    .to_string());
+    projected
 }
 
 /// Apply one opaque resume cursor and a fixed page bound to an ordered stream.
@@ -5768,6 +5800,36 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
     if !decision.is_valid() {
         return None;
     }
+    // Detached Cook admission creates a controller-local submission stamp
+    // before its executable plan exists. The immutable admission binding has
+    // already selected the Lab runner, so expose that selection instead of
+    // reporting the transport placeholder as controller execution.
+    if decision.is_submission_stamp() {
+        if let Some(runner_id) = record
+            .metadata
+            .pointer("/unmaterialized_cook_admission/binding/placement/runner_ref")
+            .and_then(Value::as_str)
+            .filter(|runner_id| !runner_id.trim().is_empty())
+        {
+            let requested = match record
+                .metadata
+                .pointer("/unmaterialized_cook_admission/binding/placement/requested")
+                .and_then(Value::as_str)
+            {
+                Some("lab") => ControlPlaneRunPlacementRequested::Runner,
+                Some("lab_or_local") => ControlPlaneRunPlacementRequested::LabOrLocal,
+                _ => ControlPlaneRunPlacementRequested::Automatic,
+            };
+            return ControlPlaneRunPlacement::new(
+                format!("unmaterialized-cook-{}", record.run_id),
+                requested,
+                ControlPlaneRunPlacementSelected::Runner,
+                None,
+                Some(runner_id.to_string()),
+            )
+            .ok();
+        }
+    }
     let selected = match decision.selected {
         EffectiveExecutionPlacement::Local if decision.runner.is_none() => {
             ControlPlaneRunPlacementSelected::Controller
@@ -5793,7 +5855,8 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
         match decision.requested {
             Placement::Auto => ControlPlaneRunPlacementRequested::Automatic,
             Placement::Local => ControlPlaneRunPlacementRequested::Controller,
-            Placement::Lab | Placement::LabOrLocal => ControlPlaneRunPlacementRequested::Runner,
+            Placement::Lab => ControlPlaneRunPlacementRequested::Runner,
+            Placement::LabOrLocal => ControlPlaneRunPlacementRequested::LabOrLocal,
         },
         selected,
         outcome.map(|outcome| match outcome.effective {
@@ -5966,12 +6029,13 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
         let message = quarantine
             .get("reason")
             .and_then(|value| value.as_str())
+            .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
             .unwrap_or("run is quarantined");
         return Some(ControlPlaneBlocker {
             code: Some("quarantine".to_string()),
             message: redacted_bounded(message, MESSAGE_BOUND),
             state: None,
-            reason: None,
+            reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
         });
     }
@@ -9881,7 +9945,7 @@ mod tests {
                     .iter()
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
-                vec!["action.accepted", "action.succeeded"]
+                vec!["action.accepted", "run.cancelled", "action.succeeded"]
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
@@ -10543,6 +10607,50 @@ mod tests {
     }
 
     #[test]
+    fn placement_projects_ready_lab_admission_before_cook_materialization() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+            "v1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "controller-local".to_string(),
+                workspace: "controller-local".to_string(),
+                task: "detached-cook".to_string(),
+                candidate: None,
+                base: None,
+            },
+            homeboy_lab_runner_contract::Placement::Auto,
+        );
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "binding": {
+                "placement": {
+                    "requested": "auto",
+                    "runner_ref": "homeboy-lab"
+                }
+            }
+        });
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "automatic");
+        assert_eq!(value["placement"]["selected"], "runner");
+        assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
+        assert!(value["placement"].get("effective").is_none());
+    }
+
+    #[test]
+    fn placement_preserves_lab_or_local_request() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::LabOrLocal, true);
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "lab_or_local");
+        assert_eq!(value["placement"]["selected"], "runner");
+    }
+
+    #[test]
     fn placement_projects_a_correlated_runner_outcome() {
         let mut record = record(AGENT_TASK_RUN);
         let decision =
@@ -10836,6 +10944,52 @@ mod tests {
         let resource = project_record(&record, None).expect("project completed run");
         assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
         assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
+    fn dead_candidate_adoption_owner_is_projected_interrupted_without_writing() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.candidate_adoption = Some(
+            serde_json::from_value(json!({
+                "candidate_sha": "candidate-sha",
+                "ai_model": "openai/gpt-5.6-terra",
+                "state": "verification_running",
+                "phase": "verification",
+                "active_gate": "cargo test",
+                "started_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "owner_pid": u32::MAX,
+                "heartbeat_at": "2026-01-01T00:00:00Z"
+            }))
+            .expect("candidate adoption"),
+        );
+
+        let resource = project_record(&record, None).expect("project stale adoption");
+        assert_eq!(resource.candidate.expect("candidate").state, "interrupted");
+        assert_eq!(
+            record.candidate_adoption.expect("durable adoption").state,
+            "verification_running"
+        );
+        let actions = resource
+            .action_eligibility
+            .expect("action eligibility")
+            .actions;
+        let reconcile = actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Reconcile)
+            .expect("reconcile action");
+        assert_eq!(
+            reconcile.availability,
+            ControlPlaneActionAvailability::Available
+        );
+        let resume = actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Available
+        );
     }
 
     #[test]

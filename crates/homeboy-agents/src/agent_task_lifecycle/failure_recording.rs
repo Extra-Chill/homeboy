@@ -503,7 +503,7 @@ fn record_pre_execution_failure_locked(
 
     let task_count = plan.tasks.len();
     let failed = task_count;
-    let retryable = error.retryable == Some(true);
+    let retryable = pre_execution_failure_is_retryable(error);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
@@ -776,7 +776,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
     phase: &str,
     error: &Error,
 ) -> AgentTaskOutcome {
-    let retryable = error.retryable == Some(true);
+    let retryable = pre_execution_failure_is_retryable(error);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
@@ -876,11 +876,31 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
         return AgentTaskFailureClassification::Capacity;
     }
+    if is_controller_infrastructure_failure(error) {
+        return AgentTaskFailureClassification::ExecutionFailed;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {
         AgentTaskFailureClassification::InvalidInput
     }
+}
+
+/// Internal persistence failures are controller-owned infrastructure failures,
+/// not invalid caller input. They may be retried manually after the operator
+/// repairs the backing store, while the existing retry reservation still
+/// prevents duplicate active attempts.
+fn pre_execution_failure_is_retryable(error: &Error) -> bool {
+    error.retryable == Some(true) || is_controller_infrastructure_failure(error)
+}
+
+fn is_controller_infrastructure_failure(error: &Error) -> bool {
+    matches!(
+        error.code,
+        homeboy_core::ErrorCode::InternalIoError
+            | homeboy_core::ErrorCode::InternalJsonError
+            | homeboy_core::ErrorCode::StorageExhausted
+    )
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch

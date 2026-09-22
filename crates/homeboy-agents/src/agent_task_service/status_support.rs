@@ -599,10 +599,7 @@ pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<V
     // error persisted at execution time. Surface it through the same stream
     // channel so the diagnostic chain still sees the provider's terminal
     // error even when the raw runtime log is no longer hydratable.
-    if let Some(error) = redacted
-        .get("structured_error")
-        .and_then(normalized_structured_error)
-    {
+    if let Some(error) = find_normalized_structured_error(&redacted, 0) {
         let already_surfaced = streams.as_array().is_some_and(|streams| {
             streams
                 .iter()
@@ -632,6 +629,27 @@ pub fn hydrate_evidence_diagnostics(evidence: &AgentTaskEvidenceRef) -> Option<V
         },
         "truncation": budget.projection(),
     }))
+}
+
+fn find_normalized_structured_error(value: &Value, depth: usize) -> Option<Value> {
+    if depth > EVIDENCE_DIAGNOSTIC_MAX_DEPTH {
+        return None;
+    }
+    if let Some(error) = value
+        .get("structured_error")
+        .and_then(normalized_structured_error)
+    {
+        return Some(error);
+    }
+    match value {
+        Value::Object(values) => values
+            .values()
+            .find_map(|value| find_normalized_structured_error(value, depth + 1)),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_normalized_structured_error(value, depth + 1)),
+        _ => None,
+    }
 }
 
 /// Which provider runtime stream an evidence ref points at, if any. Matches
@@ -1352,6 +1370,40 @@ mod tests {
         assert_eq!(streams[0]["status"], "unavailable");
         assert_eq!(streams[0]["error"], "untrusted_path");
         assert!(streams[0].get("excerpt").is_none());
+    }
+
+    #[test]
+    fn nested_runtime_index_error_is_hydrated_into_diagnose_streams() {
+        let directory = tempfile::tempdir().expect("evidence directory");
+        let evidence = directory.path().join("executor-result.json");
+        fs::write(
+            &evidence,
+            serde_json::to_vec(&json!({
+                "provider_response": {
+                    "structured_error": {
+                        "schema": "homeboy/provider-structured-error/v1",
+                        "message": "account quota exhausted",
+                        "status_code": 403,
+                        "retryable": false,
+                        "failure_classification": "provider_quota_exhausted"
+                    }
+                }
+            }))
+            .expect("evidence JSON"),
+        )
+        .expect("write evidence");
+
+        let hydrated = hydrate_evidence_diagnostics(&AgentTaskEvidenceRef {
+            kind: "provider-result".to_string(),
+            uri: format!("file://{}", evidence.display()),
+            label: None,
+        })
+        .expect("diagnostic evidence");
+
+        assert_eq!(
+            hydrated["process_streams"][0]["structured_error"]["message"],
+            "account quota exhausted"
+        );
     }
 
     #[test]

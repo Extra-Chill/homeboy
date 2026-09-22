@@ -462,12 +462,20 @@ pub(super) fn intercept_local_cook_retry(
         );
         return Err(error);
     }
+    if !cli.detach_after_handoff {
+        let (output, exit_code) =
+            crate::commands::agent_task::status::wait_for_terminal_status(&run_id)?;
+        println!("{}", serde_json::to_string(&output).unwrap_or_default());
+        return Ok(Some(exit_code));
+    }
     println!(
         "{}",
         serde_json::to_string(&json!({
             "run_id": run_id,
             "controller_job": controller_job.projection(),
             "state": "accepted",
+            "status_command": format!("homeboy agent-task status {run_id}"),
+            "watch_command": format!("homeboy agent-task status {run_id} --watch"),
         }))
         .unwrap_or_default()
     );
@@ -550,6 +558,9 @@ fn retry_child_args(normalized_args: &[String], run_id: &str) -> Vec<String> {
     // Only a run-id flag before the bare separator is Homeboy's own. Stripping one
     // past it would rewrite a forwarded argument instead of this retry (#11577).
     let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
+    if !normalized_args[..owned].iter().any(|arg| arg == "--wait") {
+        args.push("--wait".to_string());
+    }
     let mut index = usize::from(
         normalized_args
             .first()
@@ -592,8 +603,11 @@ fn is_unsupervised_local_cook(cli: &Cli) -> bool {
 fn local_cook_needs_supervision(cli: &Cli, provider_placement: Option<&str>) -> bool {
     matches!(
         cli.placement,
-        homeboy::cli_surface::Placement::Auto | homeboy::cli_surface::Placement::Local
-    ) && provider_placement == Some("local")
+        homeboy::cli_surface::Placement::Auto
+            | homeboy::cli_surface::Placement::Local
+            | homeboy::cli_surface::Placement::LabOrLocal
+    ) && (provider_placement == Some("local")
+        || (cli.placement.allows_local_fallback() && provider_placement == Some("lab")))
         && matches!(
             &cli.command,
             Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
@@ -679,14 +693,12 @@ fn local_cook_supervision_supported() -> bool {
 }
 
 /// Re-execute a local Cook in its own session after durable daemon ownership
-/// exists. `--detach-after-handoff` only changes whether the caller waits for a
-/// handoff acknowledgement or continues observing that durable work.
+/// exists. By default return its handoff acknowledgement; `--wait` continues
+/// observing that same durable work until terminal completion.
 ///
 /// `runner_side` is true when this process is a Lab offload subprocess, a
-/// managed-runner placement, or a runner-resident execution. There the request
-/// is genuinely unserveable: the process is already the runner's owned
-/// execution of one attempt and has no controller lifecycle to hand off, so
-/// detaching would orphan work the runner believes it owns.
+/// managed-runner placement, or a runner-resident execution. Those children
+/// complete the attempt under their existing owner without another handoff.
 pub(super) fn intercept_local_detached_cook(
     cli: &Cli,
     normalized_args: &[String],
@@ -715,6 +727,10 @@ pub(super) fn intercept_local_detached_cook(
             ))
         };
     }
+    // Runner-owned attempts must complete in their existing owner's process.
+    if runner_side {
+        return Ok(None);
+    }
     let durable_local_ownership = local_cook_needs_supervision(cli, provider_placement);
     if !is_unsupervised_local_cook(cli) && !durable_local_ownership {
         return Ok(None);
@@ -727,13 +743,6 @@ pub(super) fn intercept_local_detached_cook(
                 None,
                 None,
             ))
-        } else {
-            Ok(None)
-        };
-    }
-    if runner_side {
-        return if cli.detach_after_handoff || durable_local_ownership {
-            Err(runner_side_detach_error())
         } else {
             Ok(None)
         };
@@ -1031,37 +1040,22 @@ fn submit_cook_retry_controller_job(
     })
 }
 
-/// The one context where local detachment stays a rejection.
-fn runner_side_detach_error() -> Error {
-    Error::validation_invalid_argument(
-        "detach-after-handoff",
-        "agent-task cook cannot detach after handoff with --placement local inside a runner-owned execution because the runner already owns this attempt",
-        None,
-        Some(vec![
-            "Detach from the controller that dispatches the attempt, not from the runner process executing it.".to_string(),
-        ]),
-    )
-}
-
 /// The argv the detached cook executes.
 ///
-/// It is the caller's own argv with two edits: the detach request is consumed
-/// by the launcher, and the cook id is pinned so the launcher can name the run
-/// it just handed off. Dropping `--detach-after-handoff` is what makes the child
-/// observe its own lifecycle to a terminal report, because observing is the
-/// default. The parent is the only process authorized to detach; the child must
-/// not infer a handoff policy from its noninteractive stdio. Everything else is
-/// preserved byte for byte.
+/// Explicit `--wait` makes the child execute to terminal completion. Pin the
+/// Cook identity and keep forwarded arguments untouched; the launcher alone
+/// owns the handoff acknowledgement and its output file.
 fn detached_cook_child_args(
     normalized_args: &[String],
     cook_id: &str,
     has_explicit_cook_id: bool,
     consume_output: bool,
 ) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut values = normalized_args.iter().skip(1);
+    let mut args = vec!["--wait".to_string()];
+    let owned_args = crate::command_capability::homeboy_owned_args(normalized_args);
+    let mut values = owned_args.iter().skip(1);
     while let Some(arg) = values.next() {
-        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
+        if arg == "--wait" {
             continue;
         }
         // The launcher writes the handoff envelope to both destinations. The
@@ -1079,10 +1073,11 @@ fn detached_cook_child_args(
         args.push("--run-id".to_string());
         args.push(cook_id.to_string());
     }
+    args.extend_from_slice(&normalized_args[owned_args.len()..]);
     args
 }
 
-fn stream_attached_cook_log(
+pub(super) fn stream_attached_cook_log(
     child: &mut std::process::Child,
     log_path: &Path,
 ) -> homeboy::core::Result<std::process::ExitStatus> {
@@ -1516,7 +1511,7 @@ fn durable_attempt_id(cook_id: &str, supervisor_job_id: Option<&str>) -> Option<
 
 fn empty_detached_plan_error(job_id: Option<&str>, problem: &str) -> Error {
     let mut error = Error::validation_invalid_argument(
-        "detach-after-handoff",
+        "handoff",
         problem,
         None,
         Some(vec![
@@ -1524,7 +1519,7 @@ fn empty_detached_plan_error(job_id: Option<&str>, problem: &str) -> Error {
         ]),
     );
     error.details = json!({
-        "field": "detach-after-handoff",
+        "field": "handoff",
         "problem": problem,
         "classification": "empty_detached_plan",
         "controller_job_id": job_id,
@@ -1555,7 +1550,7 @@ fn detached_child_pre_admission_error(
         Err(reason) => (problem.to_string(), None, Some(reason)),
     };
     let mut error = Error::validation_invalid_argument(
-        "detach-after-handoff",
+        "handoff",
         message,
         None,
         Some({
@@ -1570,7 +1565,7 @@ fn detached_child_pre_admission_error(
         }),
     );
     error.details = json!({
-        "field": "detach-after-handoff",
+        "field": "handoff",
         "problem": problem,
         "classification": "detached_cook_pre_admission_failure",
         "controller_job": {
@@ -1724,6 +1719,7 @@ fn handoff_envelope(
         // through its durable cook record.
         "controller_job": controller_job.projection(),
         "status_command": format!("homeboy agent-task status {cook_id}"),
+        "watch_command": format!("homeboy agent-task status {cook_id} --watch"),
         "logs_command": format!("homeboy agent-task logs {cook_id}"),
         "cancel_command": format!("homeboy agent-task cancel {cook_id}"),
         "output_file_owner": "handoff_launcher",
@@ -1779,7 +1775,6 @@ mod tests {
         let (cli, _) = cook_cli(&[
             "--placement",
             "local",
-            "--detach-after-handoff",
             "--notification-transport",
             "extension.run-completion",
             "--notification-route",
@@ -1813,7 +1808,7 @@ mod tests {
     fn a_detached_cook_never_propagates_half_a_route() {
         assert!(homeboy::core::notification_route::child_env(None).is_empty());
 
-        let (cli, _) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
+        let (cli, _) = cook_cli(&["--placement", "local"]);
 
         let propagated =
             homeboy::core::notification_route::child_env(detached_route(&cli).as_ref());
@@ -1823,26 +1818,14 @@ mod tests {
         );
     }
 
-    /// The rejection this replaces was unconditional. Preserving it inside a
-    /// runner-owned execution is the whole reason `runner_side` exists.
     #[test]
-    fn a_runner_owned_execution_still_refuses_to_detach() {
-        let (cli, normalized) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
+    fn a_runner_owned_execution_completes_without_recursive_detachment() {
+        let (cli, normalized) = cook_cli(&["--placement", "local"]);
 
-        let error = intercept_local_detached_cook(&cli, &normalized, None, true, None, None)
-            .expect_err("a runner-owned execution cannot detach");
-
-        assert!(
-            error
-                .message
-                .contains("cannot detach after handoff with --placement local"),
-            "{}",
-            error.message
-        );
-        assert!(
-            error.message.contains("runner-owned execution"),
-            "{}",
-            error.message
+        assert_eq!(
+            intercept_local_detached_cook(&cli, &normalized, None, true, Some("local"), None)
+                .expect("runner retains execution ownership"),
+            None
         );
     }
 
@@ -1853,6 +1836,7 @@ mod tests {
     fn local_cook_ownership_is_not_optional() {
         let normalized = args(&[
             "homeboy",
+            "--wait",
             "--placement",
             "local",
             "agent-task",
@@ -1887,7 +1871,11 @@ mod tests {
         assert!(!is_unsupervised_local_cook(&preview));
         assert!(!local_cook_needs_supervision(&preview, Some("local")));
 
-        let (auto, normalized) = cook_cli(&["--placement", "auto"]);
+        let (fallback, _) = cook_cli(&["--placement", "lab-or-local", "--wait"]);
+        assert!(local_cook_needs_supervision(&fallback, Some("local")));
+        assert!(local_cook_needs_supervision(&fallback, Some("lab")));
+
+        let (auto, normalized) = cook_cli(&["--placement", "auto", "--wait"]);
         assert!(!is_unsupervised_local_cook(&auto));
         assert!(local_cook_needs_supervision(&auto, Some("local")));
         assert_eq!(
@@ -1900,7 +1888,7 @@ mod tests {
     #[test]
     fn detachment_owns_the_controller_for_auto_lab_and_local_placement() {
         for placement in ["auto", "lab", "local", "lab-or-local"] {
-            let (cli, _) = cook_cli(&["--placement", placement, "--detach-after-handoff"]);
+            let (cli, _) = cook_cli(&["--placement", placement]);
             assert!(is_unsupervised_local_cook(&cli), "{placement}");
         }
     }
@@ -1915,7 +1903,7 @@ mod tests {
 
     #[test]
     fn ambient_launch_token_values_do_not_bypass_supervision() {
-        let (cli, _) = cook_cli(&["--placement", "local", "--detach-after-handoff"]);
+        let (cli, _) = cook_cli(&["--placement", "local"]);
 
         assert!(is_unsupervised_local_cook(&cli));
         assert!(!consume_local_cook_launch_token_at(
@@ -2074,7 +2062,6 @@ mod tests {
             "homeboy",
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--prompt",
@@ -2086,6 +2073,7 @@ mod tests {
         assert_eq!(
             child,
             args(&[
+                "--wait",
                 "--placement",
                 "local",
                 "agent-task",
@@ -2102,7 +2090,6 @@ mod tests {
     fn child_args_preserve_an_explicit_cook_id_without_duplicating_it() {
         let normalized = args(&[
             "homeboy",
-            "--detach-after-handoff",
             "--placement",
             "local",
             "agent-task",
@@ -2127,6 +2114,7 @@ mod tests {
         assert_eq!(
             child,
             args(&[
+                "--wait",
                 "--placement",
                 "local",
                 "agent-task",
@@ -2144,7 +2132,6 @@ mod tests {
         let child = detached_cook_child_args(
             &args(&[
                 "homeboy",
-                "--detach-after-handoff",
                 "--output",
                 "/tmp/handoff.json",
                 "agent-task",
@@ -2192,7 +2179,6 @@ mod tests {
             "homeboy",
             "--placement",
             "local",
-            "--detach-after-handoff",
             "--allow-dirty-lab-workspace",
             "agent-task",
             "cook",

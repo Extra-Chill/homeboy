@@ -210,7 +210,7 @@ pub(super) fn strip_rig_source_management_local_wrapper_flags(command: &[String]
         ("--placement", true),
         ("--allow-local-fallback", false),
         ("--allow-dirty-lab-workspace", false),
-        ("--detach-after-handoff", false),
+        ("--wait", false),
     ];
 
     let mut stripped = Vec::with_capacity(command.len());

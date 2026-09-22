@@ -142,7 +142,7 @@ fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPrefligh
             "placement": placement,
             "runner_id": explicit_runner_id,
             "global_flags": {
-                "detach_after_handoff": argv.iter().any(|arg| arg == "--detach-after-handoff"),
+                "detach_after_handoff": !argv.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == "--wait"),
                 "allow_dirty_lab_workspace": argv.iter().any(|arg| arg == "--allow-dirty-lab-workspace"),
                 "skip_deps_hydration": argv.iter().any(|arg| arg == "--skip-deps-hydration"),
                 "runner_env": runner_env,

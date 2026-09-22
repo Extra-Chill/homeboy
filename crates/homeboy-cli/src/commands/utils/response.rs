@@ -776,12 +776,55 @@ fn failure_diagnostics_for_data(
             "/resolved/workspace",
         ));
     }
+    if let Some(failure) = cook_failure_context_diagnostics(data) {
+        return Some(declared_failure_diagnostics(
+            exit_code,
+            failure,
+            "/failure_context/diagnostic",
+        ));
+    }
 
     let failure_digest = failure_digest_for_data(data).or_else(|| {
         run.as_ref()
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+/// Cook reports retain controller and continuation refusals under the durable
+/// failure context. Promote that causal record before the generic exit fallback
+/// can erase it from the command envelope.
+fn cook_failure_context_diagnostics(data: &Value) -> Option<DeclaredFailure> {
+    let context = data.get("failure_context")?.as_object()?;
+    let diagnostic = context.get("diagnostic")?.as_object()?;
+    let message = diagnostic.get("message").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let details = diagnostic
+        .get("details")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let next_actions = context
+        .get("next_actions")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    Some(DeclaredFailure {
+        code: diagnostic
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .unwrap_or("agent_task.cook_failure")
+            .to_string(),
+        message: message.to_string(),
+        details,
+        stdout_tail: None,
+        stderr_tail: None,
+        next_actions,
+        retryable: diagnostic.get("retryable").and_then(Value::as_bool),
+    })
 }
 
 /// Promote the blocker already computed by `runner reconcile` into the command
@@ -2372,6 +2415,38 @@ mod tests {
 
         let succeeded = json!({ "status": "succeeded" });
         assert_eq!(status_for_result(Some(&succeeded), 0), "succeeded");
+    }
+
+    #[test]
+    fn cook_continuation_refusal_preserves_typed_failure_context() {
+        let payload = json!({
+            "status": "durable_failure",
+            "failure_context": {
+                "diagnostic": {
+                    "code": "validation.invalid_argument",
+                    "message": "Cook-owned run is not eligible for a durable Cook retry",
+                    "details": { "field": "run_id" }
+                },
+                "next_actions": [{
+                    "label": "Inspect exact attempt",
+                    "command": "homeboy agent-task status cook-attempt-1"
+                }]
+            }
+        });
+
+        let envelope =
+            cli_response_for_json_result_for_command(&Ok(payload), 1, "agent-task", None);
+        assert!(!envelope.success);
+        let diagnostics = envelope.diagnostics.expect("typed Cook refusal");
+        assert_eq!(diagnostics.code, "validation.invalid_argument");
+        assert_eq!(
+            diagnostics.message,
+            "Cook-owned run is not eligible for a durable Cook retry"
+        );
+        assert_eq!(
+            diagnostics.failure_digest.unwrap().next_actions[0].command,
+            "homeboy agent-task status cook-attempt-1"
+        );
     }
 
     #[test]
