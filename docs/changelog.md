@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.7] - 2026-09-22
+
+### Fixed
+- classify gate remediation without provider identity
+- align continuation recovery admission
+- reclaim terminal controller scratch
+
 ## [0.383.6] - 2026-09-22
 
 ### Fixed
