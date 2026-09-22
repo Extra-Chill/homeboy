@@ -4,12 +4,6 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
-## Unreleased
-
-### Fixed
-- require admitted fanout resume authority and distinguish successful, partial, and infrastructure outcomes before applying portfolio effects
-- use the canonical durable fanout batch revision for resume idempotency
-
 ## [0.383.3] - 2026-09-21
 
 ### Fixed

@@ -1345,3 +1345,38 @@ pub fn finalize_fanout_native_worktree(
         | batch::BatchProviderWorktreeFinalization::NotFound => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::observe_pr_state;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn terminal_pr_observation_uses_the_low_level_hermetic_gh_fixture() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let gh = root.path().join("gh");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '{\"state\":\"MERGED\",\"mergedAt\":\"2026-09-22T00:00:00Z\",\"reviewDecision\":\"APPROVED\",\"mergeStateStatus\":\"CLEAN\",\"mergeCommit\":{\"oid\":\"merge-sha\"},\"baseRefName\":\"main\",\"headRefOid\":\"head-sha\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("write gh fixture");
+        let mut permissions = fs::metadata(&gh).expect("gh metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&gh, permissions).expect("make gh fixture executable");
+        let path = format!(
+            "{}:{}",
+            root.path().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", path);
+
+        let observation = observe_pr_state("https://github.com/fixture/repo/pull/7")
+            .expect("read hermetic PR observation");
+        assert_eq!(observation.verdict(), "merged");
+        assert_eq!(
+            observation.merge_commit.expect("merge commit").oid,
+            "merge-sha"
+        );
+    }
+}
