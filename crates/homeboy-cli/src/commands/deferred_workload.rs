@@ -723,6 +723,13 @@ fn argv_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 fn child_args(record: &deferred_workload::DeferredWorkload, runner_id: &str) -> Vec<String> {
     let mut args = record.args.clone();
     let mut overrides = vec!["--runner".to_string(), runner_id.to_string()];
+    // A replay worker reports terminal success/failure to its durable owner.
+    if !crate::command_capability::homeboy_owned_args(&args)
+        .iter()
+        .any(|arg| arg == "--wait")
+    {
+        overrides.push("--wait".to_string());
+    }
     for (name, value) in &record.job_overrides.env {
         overrides.extend(["--runner-env".to_string(), format!("{name}={value}")]);
     }

@@ -199,16 +199,23 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
     });
 }
 
-/// #13702: reading a batch that failed before admission is a *successful
-/// read*. The command exits zero so the recovery path Homeboy itself prints
-/// survives `set -e`; the failed subject state stays in `data`, and the
-/// envelope carries a human summary.
+/// #13702 direction 2: a coordinator failure recorded before any child was
+/// admitted keeps the batch `queued` and `resumable`, reported through
+/// `admission_blocker`, rather than a terminal `failed` subject state — the
+/// coordinator has not executed a child yet, so the same fanout identity must
+/// stay claimable (`record_fanout_run_batch_failure_in_store`). This mirrors
+/// the lib-level coverage in
+/// `commands::agent_task::fanout::tests::pre_admission_status_is_retryable_and_preserves_declared_tracker_identity`
+/// through the actual CLI binary. The command still exits zero — reading a
+/// blocked batch is a successful read — and its human summary still names the
+/// blocker.
 #[test]
 fn fanout_status_reports_a_pre_child_coordinator_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let batch_id = "pre-admission-coordinator-blocker";
         persist_fanout_run_batch(
-            "failed-before-admission",
-            "failed-before-admission",
+            batch_id,
+            batch_id,
             &[FanoutRunBatchChild {
                 task_id: "child".to_string(),
                 run_id: "missing-child-record".to_string(),
@@ -216,11 +223,11 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
             serde_json::json!({}),
         )
         .expect("persist fanout batch");
-        let claim_id = claim_fanout_run_batch("failed-before-admission")
+        let claim_id = claim_fanout_run_batch(batch_id)
             .expect("claim batch")
             .expect("coordinator claim");
         record_fanout_run_batch_failure(
-            "failed-before-admission",
+            batch_id,
             &claim_id,
             "worktree_preflight",
             serde_json::json!({ "message": "fixture failure before first child" }),
@@ -228,7 +235,7 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
         .expect("persist coordinator failure");
 
         let output = Command::new(homeboy_bin())
-            .args(["agent-task", "fanout", "status", "failed-before-admission"])
+            .args(["agent-task", "fanout", "status", batch_id])
             .env("HOMEBOY_NO_UPDATE_CHECK", "1")
             .output()
             .expect("run Homeboy fanout status");
@@ -244,7 +251,8 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
         assert_eq!(output["exit_code"], 0);
         assert_eq!(output["status"], "succeeded");
         assert!(output.get("subject_state").is_none());
-        assert_eq!(output["data"]["batch"]["status"], "failed");
+        assert_eq!(output["data"]["batch"]["status"], "queued");
+        assert_eq!(output["data"]["batch"]["resumable"], true);
         assert_eq!(
             output["data"]["batch"]["admission_blocker"]["stage"],
             "worktree_preflight"
@@ -254,14 +262,17 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
             serde_json::json!({
                 "expected": 1,
                 "admitted": 0,
-                "rejected": 1,
-                "absent": 0,
+                "rejected": 0,
+                "absent": 1,
             })
         );
         let summary = output["presentation"]["stdout"]
             .as_str()
-            .expect("failed subject states still get a human summary");
-        assert!(summary.contains("failed"), "summary: {summary}");
+            .expect("a queued-but-blocked batch still gets a human summary");
+        assert!(
+            summary.contains("Blocked before admission"),
+            "summary names the pre-admission block: {summary}"
+        );
         assert!(
             summary.contains("worktree_preflight"),
             "summary names the blocker: {summary}"

@@ -461,6 +461,24 @@ pub fn submit_plan_in_store(
     )
 }
 
+/// Persist a controller-owned placeholder without waiting for runtime admission.
+///
+/// Detached launchers use this for their handoff parent: the parent is only a
+/// discoverability and cancellation anchor, not executable work. The eventual
+/// Cook attempt still goes through [`submit_plan_in_store`] and therefore retains
+/// the normal runtime admission contract.
+fn submit_detached_handoff_placeholder_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
+    submit_plan_with_runtime_admission_in_store_without_runtime(
+        lifecycle_store,
+        &plan,
+        Some(cook_id),
+    )
+}
+
 /// Persist a detached Cook's handoff parent inside an explicitly rooted store.
 ///
 /// Both admission guards read the store the parent is written into. The alias
@@ -496,8 +514,7 @@ pub fn record_detached_cook_handoff_parent_in_store(
         ));
     }
 
-    let plan = AgentTaskPlan::new(format!("detached-cook-handoff-{cook_id}"), Vec::new());
-    let mut record = submit_plan_in_store(lifecycle_store, &plan, Some(&cook_id))?;
+    let mut record = submit_detached_handoff_placeholder_in_store(lifecycle_store, &cook_id)?;
     record.metadata["detached_cook_handoff"] = json!({
         "state": "pending",
         "admission_state": "pre_supervisor",
@@ -507,7 +524,7 @@ pub fn record_detached_cook_handoff_parent_in_store(
         "cook_id": cook_id,
         "cancellation_fence": { "state": "open" },
     });
-    lifecycle_store.write_record(&record)?;
+    lifecycle_store.write_record_without_events(&record)?;
     record_cook_progress_in_store(
         lifecycle_store,
         &record.run_id,
@@ -2917,6 +2934,46 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
+    submit_plan_with_runtime_admission_in_store_optional(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        execution_runner_id,
+        submission_metadata,
+        admission_status,
+        Some(admit_runtime),
+    )
+}
+
+fn submit_plan_with_runtime_admission_in_store_without_runtime(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    submit_plan_with_runtime_admission_in_store_optional::<fn(&str) -> Result<Value>, Value>(
+        lifecycle_store,
+        plan,
+        requested_run_id,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+fn submit_plan_with_runtime_admission_in_store_optional<F, A>(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    execution_runner_id: Option<String>,
+    submission_metadata: Option<serde_json::Map<String, Value>>,
+    admission_status: Option<&dyn Fn(&str) -> Option<Value>>,
+    admit_runtime: Option<F>,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
     let workspace_claim_store = lifecycle_store.workspace_claim_store();
     let mut normalized_plan = plan.clone();
     if normalized_plan.workspace_identity.is_none() {
@@ -3234,10 +3291,16 @@ where
 
     // The queue is durable independently of this foreground controller. Status
     // and cancellation can therefore resolve a waiter after a restart.
-    if let Some(admission) = admission_status.and_then(|project| project(&run_id)) {
-        record.metadata["controller_admission"] = admission;
-        lifecycle_store.write_record(&record)?;
+    if admit_runtime.is_some() {
+        if let Some(admission) = admission_status.and_then(|project| project(&run_id)) {
+            record.metadata["controller_admission"] = admission;
+            lifecycle_store.write_record(&record)?;
+        }
     }
+
+    let Some(admit_runtime) = admit_runtime else {
+        return Ok(record);
+    };
 
     match admit_runtime(&run_id) {
         Ok(admission) => {
@@ -5023,10 +5086,15 @@ fn quarantine_queued_run_in_store(
                 "category": diagnostic.category,
                 "error_code": diagnostic.error_code,
                 "summary": diagnostic.summary,
+                "reason": diagnostic.summary,
+                "actor": "fleet-reconciler",
+                "cause": "admission_preflight_failed",
                 "provider_id": diagnostic.provider_id,
                 "required_environment_variables": diagnostic.required_environment_variables,
                 "quarantined_at": now,
+                "timestamp": now,
                 "remediation": remediation,
+                "recovery_action": remediation,
             }),
         );
         true
@@ -5180,9 +5248,14 @@ pub fn quarantine_queued_run_exact_in_store(
                     "category": "operator_quarantine",
                     "error_code": "operator_quarantine",
                     "summary": "operator quarantined this queued run",
+                    "reason": operator_reason,
+                    "actor": "operator",
+                    "cause": "operator_requested",
                     "operator_reason": operator_reason,
                     "quarantined_at": quarantined_at,
+                    "timestamp": quarantined_at,
                     "remediation": remediation,
+                    "recovery_action": remediation,
                 }),
             );
             true
@@ -7967,9 +8040,15 @@ pub fn record_promotion_in_store(
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
-        // A promoted patch blocked by deterministic gates is still the durable
-        // candidate, but it cannot be reported as a successful completed run.
-        if promotion.get("status").and_then(Value::as_str) == Some("gate_failed") {
+        // A candidate that has not completed controller-owned verification is
+        // recoverable evidence, not a successful completed run. In particular,
+        // the verification-pending checkpoint is written before gates start;
+        // leaving the provider's Succeeded state in place made Cook report
+        // success while the destination was still unverified (#14315).
+        if matches!(
+            promotion.get("status").and_then(Value::as_str),
+            Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
+        ) {
             set_run_state(record, AgentTaskRunState::CandidateRecoverable);
         }
         if let Some(acceptance) = record.acceptance.as_mut() {

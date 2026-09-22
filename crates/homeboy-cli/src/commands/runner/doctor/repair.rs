@@ -1,6 +1,6 @@
 use super::*;
 use homeboy::core::ErrorCode;
-use types::{RunnerDoctorOutput, RunnerDoctorStatus, RunnerRepair};
+use types::{RunnerDoctorOutput, RunnerDoctorStatus, RunnerRepair, RunnerRepairAction};
 
 /// A connect attempt already waits for controller promotion admission. Retry a
 /// timed-out wait once because a promotion can finish just after that bounded
@@ -888,6 +888,59 @@ fn refresh_outcome(
         0 => Ok(()),
         code => Err(format!("runner refresh-homeboy exited with code {code}")),
     })
+}
+
+/// Execute one check-owned repair without parsing its human-readable prose.
+/// The caller owns the bounded re-probe and action history.
+pub(super) fn apply_typed_action(
+    target: &target::RunnerTarget,
+    action: &RunnerRepairAction,
+) -> Result<(), String> {
+    let target::RunnerTarget::Ssh { id, client, .. } = target else {
+        return Err("typed Lab runner repairs require an SSH runner target".to_string());
+    };
+    match action {
+        RunnerRepairAction::RefreshHomeboy {
+            git_ref,
+            allow_downgrade,
+        } => target
+            .ensure_current()
+            .map_err(|error| error.message)
+            .and_then(|_| refresh_outcome(id, git_ref.clone(), *allow_downgrade)),
+        RunnerRepairAction::Reconnect => connect_outcome_after_promotion_wait(target, || {
+            target.ensure_current().and_then(|_| runner::connect(id))
+        }),
+        RunnerRepairAction::RefreshManagedSources => {
+            let mut report = RunnerDoctorOutput {
+                variant: "doctor",
+                command: "runner.doctor",
+                runner_id: id.clone(),
+                runner: types::RunnerTargetSummary {
+                    target_type: "ssh",
+                    registry: None,
+                    server: None,
+                },
+                status: RunnerDoctorStatus::Ok,
+                failure: None,
+                capabilities: Default::default(),
+                resources: Default::default(),
+                checks: Vec::new(),
+                secret_env_migration: None,
+                diagnostics: None,
+                daemon_recovery: None,
+                admission_summary: None,
+                provider_readiness: None,
+                repairs: Vec::new(),
+            };
+            repair_managed_sources(client, &mut report);
+            report
+                .repairs
+                .iter()
+                .find(|repair| repair.status == RunnerDoctorStatus::Error)
+                .map(|repair| Err(repair.message.clone()))
+                .unwrap_or(Ok(()))
+        }
+    }
 }
 
 fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {

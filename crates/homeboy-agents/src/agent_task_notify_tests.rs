@@ -105,6 +105,24 @@ fn intentional_no_change_terminal_notifications_match_policy_outcome() {
 }
 
 #[test]
+fn cancelled_cook_is_completed_without_failure_recovery_actions() {
+    let mut cancelled = report("cancelled", None);
+    cancelled.stop_reason = Some("Cook was cancelled: operator replacement".to_string());
+    cancelled.terminal_phase = Some("cancellation".to_string());
+    cancelled.terminal_failure_classification = Some("cancelled".to_string());
+
+    let payload = terminal_payload(&cancelled, None, 1);
+
+    assert_eq!(payload.kind, NotifyEventKind::Completed);
+    let body = payload.render_body();
+    assert!(body.contains("Status: cancelled"), "{body}");
+    assert!(body.contains("operator replacement"), "{body}");
+    assert!(!payload.actions.iter().any(
+        |action| action.command.contains("resume") || action.command.contains("cook-continue")
+    ));
+}
+
+#[test]
 fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
     let mut report = report("provider_failure", None);
     report.terminal_phase = Some("provider".to_string());

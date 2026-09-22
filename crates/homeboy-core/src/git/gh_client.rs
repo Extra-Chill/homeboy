@@ -408,12 +408,13 @@ fn apply_host_env(env: &mut Vec<(String, String)>, host_config: Option<&GithubHo
     let Some(host_config) = host_config else {
         return;
     };
-    for (key, value) in &host_config.env {
-        if !key.is_empty() && key != "GH_HOST" {
-            env.retain(|(existing, _)| existing != key);
-            env.push((key.clone(), value.clone()));
-        }
-    }
+    let explicit = host_config
+        .env
+        .iter()
+        .filter(|(key, _)| !key.is_empty() && key.as_str() != "GH_HOST")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    *env = super::transport::merge_explicit_git_env(std::mem::take(env), &explicit);
 }
 
 fn inherited_enterprise_https_proxy(

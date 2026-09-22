@@ -7,7 +7,9 @@ use crate::release::types::{
     ReleaseBumpPolicyOptions, ReleaseChangelogPlan, ReleaseOptions, ReleasePipelineOptions,
     ReleaseSemverRecommendation,
 };
-use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
+use homeboy_core::component::{
+    Component, ComponentScriptsConfig, ScopedExtensionConfig, SubtreePublicationConfig,
+};
 use homeboy_core::plan::{PlanStep, PlanStepStatus};
 use homeboy_core::Result;
 use homeboy_extension_contract::ExtensionManifest;
@@ -110,6 +112,74 @@ fn release_publish_defaults_to_extension_provided_registry_publication() {
             .status,
         PlanStepStatus::Ready
     );
+}
+
+#[test]
+fn subtree_publication_is_ordered_after_git_push_and_skipped_with_skip_publish() {
+    let mut component = fixture_component();
+    component.release.subtree.push(SubtreePublicationConfig {
+        prefix: "packages/example".to_string(),
+        remote: "https://example.test/repo.git".to_string(),
+        branch: "main".to_string(),
+        tag: true,
+        ..Default::default()
+    });
+    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
+    let mut warnings = Vec::new();
+    let mut hints = Vec::new();
+    let steps = build_release_steps(
+        &component,
+        &[],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &ReleaseOptions {
+            bump_type: "patch".to_string(),
+            dry_run: true,
+            ..Default::default()
+        },
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("release steps");
+    let push = step_index(
+        &steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        "git.push",
+    );
+    let subtree = step_index(
+        &steps
+            .iter()
+            .map(|step| step.id.as_str())
+            .collect::<Vec<_>>(),
+        "git.subtree.publish",
+    );
+    assert!(push < subtree);
+    assert_eq!(steps[subtree].needs, vec!["git.push"]);
+
+    let skipped = build_release_steps(
+        &component,
+        &[],
+        "1.0.0",
+        "1.0.1",
+        &fixture_changelog_plan(),
+        &ReleaseOptions {
+            bump_type: "patch".to_string(),
+            pipeline: ReleasePipelineOptions {
+                skip_publish: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        &release_scope,
+        &mut warnings,
+        &mut hints,
+    )
+    .expect("skipped release steps");
+    assert!(!skipped.iter().any(|step| step.id == "git.subtree.publish"));
 }
 
 #[test]

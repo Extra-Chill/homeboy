@@ -9,7 +9,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -442,9 +442,31 @@ impl WatchPoller for StatusPoller {
     }
 }
 
-fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
-    let interval = parse_duration("--interval", &args.interval)?;
+fn watch_status(args: StatusArgs) -> CmdResult<Value> {
     let timeout = parse_duration("--timeout", &args.timeout)?;
+    watch_status_with_timeout(args, Some(timeout))
+}
+
+/// Global `--wait` observes durable ownership until terminal completion rather
+/// than treating acceptance or the ordinary bounded watch timeout as success.
+pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
+    watch_status_with_timeout(
+        StatusArgs {
+            run_id: run_id.to_string(),
+            exact: false,
+            // A successful --no-finalize run may still offer Promote. Its
+            // available follow-up actions do not make terminal execution fail.
+            strict_subject_exit: false,
+            watch: true,
+            interval: "1s".to_string(),
+            timeout: "30m".to_string(),
+        },
+        None,
+    )
+}
+
+fn watch_status_with_timeout(mut args: StatusArgs, timeout: Option<Duration>) -> CmdResult<Value> {
+    let interval = parse_duration("--interval", &args.interval)?;
     args.watch = false;
     let poller = StatusPoller { args: args.clone() };
     let started = Instant::now();
@@ -452,10 +474,7 @@ fn watch_status(mut args: StatusArgs) -> CmdResult<Value> {
     let result = watch_loop(
         &poller,
         &args.run_id,
-        &WatchConfig {
-            interval,
-            timeout: Some(timeout),
-        },
+        &WatchConfig { interval, timeout },
         std::thread::sleep,
         || started.elapsed(),
         |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
@@ -4500,6 +4519,11 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
     let priority = if item.source == "current_lifecycle" {
         0
+    } else if class == "agent_task.provider_liveness_timeout" {
+        // The typed lifecycle timeout is authoritative. An unparsed provider
+        // stream can contain arbitrary words such as "error" and must not
+        // replace the recorded terminal state as the root cause.
+        0
     } else if is_policy_denial(&class, &text) {
         0
     } else if is_provider_structured_error(&class) {
@@ -5964,6 +5988,33 @@ fn diagnose_next_commands(
 mod tests {
     use super::*;
     use homeboy::core::Error;
+
+    #[test]
+    fn typed_provider_timeout_precedes_unparsed_provider_stream_error() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "task-a".to_string(),
+                class: "provider.process_stream".to_string(),
+                message: "provider error: stderr was truncated".to_string(),
+                source: "hydrated_process_stream".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "task-a".to_string(),
+                class: "agent_task.provider_liveness_timeout".to_string(),
+                message: "provider timed out after producing a recoverable candidate".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({"failure_classification": "timeout"}),
+            },
+        ]);
+
+        assert_eq!(
+            diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.class.as_str()),
+            Some("agent_task.provider_liveness_timeout")
+        );
+    }
 
     #[test]
     fn stale_generic_lab_replay_status_has_no_executable_action() {

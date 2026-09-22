@@ -1,8 +1,15 @@
 use super::store::read_plan_path;
 use super::*;
+use crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA;
 use homeboy_engine_primitives::content_hash;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
+
+const HARVEST_GIT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GIT_METADATA_BYTES: usize = 64 * 1024;
 
 const LAB_PRE_EXECUTION_CIRCUIT_SCHEMA: &str = "homeboy/lab-pre-execution-circuit/v1";
 const LAB_PRE_EXECUTION_REPAIR_ACTION: &str = "repair_lab_pre_execution_and_retry";
@@ -157,6 +164,7 @@ fn record_interrupted_local_owner_locked(
                 consumed,
                 in_flight,
                 &stop_reason,
+                &lifecycle_store.artifact_root(),
             )
         })
         .collect::<Vec<_>>();
@@ -167,7 +175,7 @@ fn record_interrupted_local_owner_locked(
                 .iter()
                 .any(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact)
     });
-    let (aggregate_status, ownership_state, run_cancelled) = if has_succeeded || harvested {
+    let (aggregate_status, ownership_state, run_cancelled) = if harvested {
         (
             crate::agent_task_scheduler::AgentTaskAggregateStatus::CandidateRecoverable,
             "owner_dead",
@@ -226,7 +234,7 @@ fn record_interrupted_local_owner_locked(
             .iter()
             .map(|task| AgentTaskProgressEvent {
                 task_id: task.task_id.clone(),
-                state: if harvested || has_succeeded {
+                state: if harvested {
                     AgentTaskState::CandidateRecoverable
                 } else if run_cancelled {
                     AgentTaskState::Cancelled
@@ -277,11 +285,7 @@ fn record_interrupted_local_owner_locked(
             "provider_executions_consumed": consumed,
             "provider_budget_consumed": consumed > 0,
             "in_flight_work_may_be_duplicated": in_flight || consumed > 0,
-            "candidate_status": if harvested || has_succeeded {
-                "harvested_or_recoverable"
-            } else {
-                "unavailable"
-            },
+            "candidate_status": if harvested { "harvested" } else { "unavailable" },
         }),
     );
     if run_cancelled {
@@ -296,8 +300,8 @@ fn record_interrupted_local_owner_locked(
             "phase": "terminal",
             "attempt": 1,
             "detail": "interrupted_owner",
-            "terminal_success": harvested || has_succeeded,
-            "exit_code": if harvested || has_succeeded { 0 } else { 1 },
+            "terminal_success": harvested,
+            "exit_code": if harvested { 0 } else { 1 },
             "updated_at": now,
         }),
     );
@@ -314,12 +318,13 @@ fn build_interrupted_owner_outcome(
     consumed: usize,
     in_flight: bool,
     stop_reason: &str,
+    artifact_root: &Path,
 ) -> AgentTaskOutcome {
     let mut outcome = AgentTaskOutcome {
         schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
         task_id: task.task_id.clone(),
         status: if has_succeeded {
-            AgentTaskOutcomeStatus::CandidateRecoverable
+            AgentTaskOutcomeStatus::Succeeded
         } else if has_failed {
             AgentTaskOutcomeStatus::Failed
         } else {
@@ -363,13 +368,14 @@ fn build_interrupted_owner_outcome(
         }),
         ..Default::default()
     };
-    harvest_interrupted_owner_candidate(run_id, task, &mut outcome);
+    harvest_interrupted_owner_candidate(run_id, task, artifact_root, &mut outcome);
     outcome
 }
 
 fn harvest_interrupted_owner_candidate(
     run_id: &str,
     task: &AgentTaskRequest,
+    artifact_root: &Path,
     outcome: &mut AgentTaskOutcome,
 ) {
     let discovery = crate::agent_task_timeout_artifacts::TimeoutArtifactDiscovery::discover(task);
@@ -393,6 +399,7 @@ fn harvest_interrupted_owner_candidate(
         );
         outcome.diagnostics.extend(discovered.diagnostics);
     }
+    harvest_git_workspace_candidate(run_id, task, artifact_root, outcome);
     let harvested = outcome
         .artifacts
         .iter()
@@ -405,6 +412,8 @@ fn harvest_interrupted_owner_candidate(
         outcome.metadata["candidate_status"] = json!("harvested");
         return;
     }
+    outcome.status = AgentTaskOutcomeStatus::Failed;
+    outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
     crate::agent_task_timeout_artifacts::append_unique_evidence_refs(
         &mut outcome.evidence_refs,
         vec![AgentTaskEvidenceRef {
@@ -421,6 +430,147 @@ fn harvest_interrupted_owner_candidate(
         data: json!({ "status": "unavailable" }),
     });
     outcome.metadata["candidate_status"] = json!("unavailable");
+}
+
+/// Harvest only the exact workspace recorded in the durable plan. This is a
+/// read-only fallback for a dead local provider owner, not a filesystem search:
+/// live providers never enter this path and unrelated Git roots are ignored.
+fn harvest_git_workspace_candidate(
+    run_id: &str,
+    task: &AgentTaskRequest,
+    artifact_root: &Path,
+    outcome: &mut AgentTaskOutcome,
+) {
+    let Some(root) = task.workspace.root.as_deref().map(Path::new) else {
+        return;
+    };
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    let Ok(top_level) = git_output(&root, &["rev-parse", "--show-toplevel"]) else {
+        return;
+    };
+    let Ok(top_level) = PathBuf::from(top_level).canonicalize() else {
+        return;
+    };
+    if top_level != root {
+        return;
+    }
+    let Ok(output) = bounded_harvest_git(
+        &root,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "HEAD",
+            "--",
+        ],
+        MAX_PATCH_BYTES,
+        HARVEST_GIT_TIMEOUT,
+    ) else {
+        return;
+    };
+    if output.stdout.is_empty() {
+        return;
+    }
+    let Ok(head_sha) = git_output(&root, &["rev-parse", "HEAD"]) else {
+        return;
+    };
+    let task_id = homeboy_core::paths::sanitize_path_segment(&task.task_id);
+    let artifact_id = format!("interrupted-{task_id}.patch");
+    let path = artifact_root
+        .join("interrupted-provider-candidates")
+        .join(homeboy_core::paths::sanitize_path_segment(run_id))
+        .join(&artifact_id);
+    if std::fs::create_dir_all(path.parent().expect("candidate artifact parent")).is_err()
+        || std::fs::write(&path, &output.stdout).is_err()
+    {
+        return;
+    }
+    let sha256 = content_hash::sha256_hex(&output.stdout);
+    outcome.artifacts.push(AgentTaskArtifact {
+        schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+        id: artifact_id,
+        kind: "patch".to_string(),
+        name: Some("interrupted-provider.patch".to_string()),
+        label: Some("Interrupted provider workspace diff".to_string()),
+        role: Some("patch".to_string()),
+        semantic_key: None,
+        path: Some(path.display().to_string()),
+        url: None,
+        mime: Some("text/x-patch".to_string()),
+        size_bytes: Some(output.stdout.len() as u64),
+        sha256: Some(sha256),
+        metadata: json!({
+            "actionable": true,
+            "discovered_from": "durable_task_workspace",
+            "source_provenance": {
+                "run_id": run_id,
+                "task_id": task.task_id,
+                "workspace": root,
+                "head_sha": head_sha,
+                "ownership": "durable_plan_workspace_after_owner_exit",
+            },
+        }),
+    });
+    outcome.evidence_refs.push(AgentTaskEvidenceRef {
+        kind: "interrupted-provider-workspace".to_string(),
+        uri: path.display().to_string(),
+        label: Some("Read-only diff harvested from the owned provider workspace".to_string()),
+    });
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<String> {
+    let output = bounded_harvest_git(root, args, MAX_GIT_METADATA_BYTES, HARVEST_GIT_TIMEOUT)?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn bounded_harvest_git(
+    root: &Path,
+    args: &[&str],
+    byte_limit: usize,
+    timeout: Duration,
+) -> Result<Output> {
+    use homeboy_engine_primitives::command::{
+        wait_with_bounded_output_supervised_owned, ExecutionOwner, SupervisedCommandTermination,
+    };
+
+    let io_error = |error: std::io::Error| {
+        Error::internal_io(error.to_string(), Some("harvest git output".to_string()))
+    };
+    let mut command = Command::new("git");
+    command
+        .current_dir(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut owner = ExecutionOwner::spawn(&mut command).map_err(io_error)?;
+    let result = wait_with_bounded_output_supervised_owned(
+        &mut owner,
+        byte_limit,
+        timeout,
+        timeout,
+        || false,
+        |_, _| Ok(()),
+    )
+    .map_err(io_error)?;
+    // Capture retains only a bounded tail while reading. A tail is never a
+    // complete patch (or trustworthy metadata), even when Git exits successfully.
+    if result.termination != SupervisedCommandTermination::Completed
+        || !result.output.status.success()
+        || result.output.capture.stdout.truncated
+        || result.output.capture.stderr.truncated
+    {
+        return Err(Error::validation_invalid_argument(
+            "workspace.root",
+            "Git harvest failed, timed out, or exceeded its output budget",
+            Some(root.display().to_string()),
+            None,
+        ));
+    }
+    Ok(result.output.into_output())
 }
 
 /// Replace only a scheduler-terminal snapshot fence failure with Cook's normal
@@ -503,7 +653,7 @@ fn record_pre_execution_failure_locked(
 
     let task_count = plan.tasks.len();
     let failed = task_count;
-    let retryable = error.retryable == Some(true);
+    let retryable = pre_execution_failure_is_retryable(error);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
@@ -776,7 +926,7 @@ pub(crate) fn build_pre_execution_failure_outcome(
     phase: &str,
     error: &Error,
 ) -> AgentTaskOutcome {
-    let retryable = error.retryable == Some(true);
+    let retryable = pre_execution_failure_is_retryable(error);
     let failure_classification = pre_execution_failure_classification(error);
     let candidate_adoption_recovery = candidate_adoption_recovery(phase, error);
     let error_code = reported_error_code(error);
@@ -876,11 +1026,31 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
     if error.code == homeboy_core::ErrorCode::ResourceCapacityReserve {
         return AgentTaskFailureClassification::Capacity;
     }
+    if is_controller_infrastructure_failure(error) {
+        return AgentTaskFailureClassification::ExecutionFailed;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {
         AgentTaskFailureClassification::InvalidInput
     }
+}
+
+/// Internal persistence failures are controller-owned infrastructure failures,
+/// not invalid caller input. They may be retried manually after the operator
+/// repairs the backing store, while the existing retry reservation still
+/// prevents duplicate active attempts.
+fn pre_execution_failure_is_retryable(error: &Error) -> bool {
+    error.retryable == Some(true) || is_controller_infrastructure_failure(error)
+}
+
+fn is_controller_infrastructure_failure(error: &Error) -> bool {
+    matches!(
+        error.code,
+        homeboy_core::ErrorCode::InternalIoError
+            | homeboy_core::ErrorCode::InternalJsonError
+            | homeboy_core::ErrorCode::StorageExhausted
+    )
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch
@@ -2936,6 +3106,204 @@ fn persist_provider_handle_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_git_timeout_reaps_descendant() {
+        let workspace = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let result = bounded_harvest_git(
+            workspace.path(),
+            &[
+                "-c",
+                "alias.hang=!sleep 60 & child=$!; printf '%s\\n' $child > child.pid; wait $child",
+                "hang",
+            ],
+            MAX_GIT_METADATA_BYTES,
+            Duration::from_secs(1),
+        );
+        assert!(
+            result.is_err(),
+            "a timed-out command must not yield a patch"
+        );
+        assert!(started.elapsed() < Duration::from_secs(15));
+        let pid = std::fs::read_to_string(workspace.path().join("child.pid"))
+            .expect("descendant started before deadline")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            !homeboy_engine_primitives::command::process_is_running(pid),
+            "Git descendant {pid} survived timeout cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_git_rejects_truncated_stdout_and_stderr() {
+        let workspace = tempfile::tempdir().unwrap();
+        for alias in [
+            "alias.overflow=!printf 123456789",
+            "alias.overflow=!printf 123456789 >&2",
+        ] {
+            assert!(bounded_harvest_git(
+                workspace.path(),
+                &["-c", alias, "overflow"],
+                8,
+                HARVEST_GIT_TIMEOUT,
+            )
+            .is_err());
+        }
+        let output = bounded_harvest_git(
+            workspace.path(),
+            &["-c", "alias.exact=!printf 12345678", "exact"],
+            8,
+            HARVEST_GIT_TIMEOUT,
+        )
+        .expect("exactly the budget is complete output");
+        assert_eq!(output.stdout, b"12345678");
+    }
+
+    #[test]
+    fn interrupted_owner_never_publishes_oversized_patch_tail() {
+        let workspace = tempfile::tempdir().unwrap();
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["init", "-q"]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["config", "user.name", "Test"],
+        );
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        std::fs::write(workspace.path().join("tracked.txt"), "before\n").unwrap();
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["add", "."]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["commit", "-qm", "base"],
+        );
+        std::fs::write(
+            workspace.path().join("tracked.txt"),
+            vec![b'x'; MAX_PATCH_BYTES + 1],
+        )
+        .unwrap();
+        let artifacts = tempfile::tempdir().unwrap();
+        let mut outcome = AgentTaskOutcome::default();
+        harvest_git_workspace_candidate(
+            "oversized",
+            &interrupted_workspace_request(workspace.path()),
+            artifacts.path(),
+            &mut outcome,
+        );
+        assert!(outcome.artifacts.is_empty());
+        assert!(outcome.evidence_refs.is_empty());
+        assert_eq!(std::fs::read_dir(artifacts.path()).unwrap().count(), 0);
+    }
+
+    fn interrupted_workspace_request(root: &Path) -> AgentTaskRequest {
+        AgentTaskRequest {
+            schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "task".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: crate::agent_task::AgentTaskExecutor {
+                backend: "fixture".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: "edit".to_string(),
+            inputs: Value::Null,
+            source_refs: Vec::new(),
+            workspace: crate::agent_task::AgentTaskWorkspace {
+                root: Some(root.display().to_string()),
+                ..Default::default()
+            },
+            component_contracts: Vec::new(),
+            policy: crate::agent_task::AgentTaskPolicy::default(),
+            limits: crate::agent_task::AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
+            runtime_tools: Vec::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    #[test]
+    fn interrupted_owner_harvests_owned_tracked_git_diff_without_mutating_workspace() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["init", "-q"]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["config", "user.name", "Test"],
+        );
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        std::fs::write(workspace.path().join("tracked.txt"), "before\n").expect("base file");
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["add", "."]);
+        homeboy_core::test_support::run_git_fixture_command(
+            workspace.path(),
+            &["commit", "-q", "-m", "base"],
+        );
+        std::fs::write(workspace.path().join("tracked.txt"), "after\n").expect("candidate edit");
+        let before = std::fs::read(workspace.path().join("tracked.txt")).expect("read candidate");
+        let artifact_root = tempfile::tempdir().expect("artifact root");
+        let mut outcome = AgentTaskOutcome::default();
+
+        harvest_git_workspace_candidate(
+            "run-1",
+            &interrupted_workspace_request(workspace.path()),
+            artifact_root.path(),
+            &mut outcome,
+        );
+
+        assert_eq!(
+            std::fs::read(workspace.path().join("tracked.txt")).unwrap(),
+            before
+        );
+        let artifact = outcome.artifacts.first().expect("harvested patch");
+        assert!(crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact));
+        assert_eq!(
+            artifact.metadata["discovered_from"],
+            "durable_task_workspace"
+        );
+        assert!(Path::new(artifact.path.as_deref().unwrap()).starts_with(artifact_root.path()));
+        assert!(std::fs::read(artifact.path.as_deref().unwrap())
+            .unwrap()
+            .windows(b"after".len())
+            .any(|window| window == b"after"));
+    }
+
+    #[test]
+    fn interrupted_owner_without_workspace_diff_stays_unavailable() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        homeboy_core::test_support::run_git_fixture_command(workspace.path(), &["init", "-q"]);
+        let artifact_root = tempfile::tempdir().expect("artifact root");
+        let mut outcome = AgentTaskOutcome {
+            status: AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        };
+
+        harvest_interrupted_owner_candidate(
+            "run-2",
+            &interrupted_workspace_request(workspace.path()),
+            artifact_root.path(),
+            &mut outcome,
+        );
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(outcome.metadata["candidate_status"], "unavailable");
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.class == "interrupted_owner.candidate_unavailable"));
+    }
 
     fn artifact(id: &str, kind: &str, runner_id: Option<&str>) -> AgentTaskArtifact {
         AgentTaskArtifact {

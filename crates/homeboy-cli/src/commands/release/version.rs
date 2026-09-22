@@ -61,6 +61,7 @@ pub fn run_command(command: VersionCommand) -> CmdResult<VersionOutput> {
 fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
     let component_id = args.component_id;
     let path = args.path;
+    eprintln!("[release] version show: resolving component");
 
     let info = if let Some(ref p) = path {
         let comp = component::resolve_effective(component_id.as_deref(), Some(p), None)?;
@@ -77,6 +78,7 @@ fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
             Err(_) => read_version(None)?,
         }
     };
+    eprintln!("[release] version show: component resolved");
 
     let display_id = component_id.or_else(|| {
         // Include discovered component ID in output
@@ -88,6 +90,7 @@ fn show(args: VersionShowArgs) -> CmdResult<VersionOutput> {
                 .map(|c| c.id)
         }
     });
+    eprintln!("[release] version show: output ready");
 
     Ok((
         VersionOutput::Show(VersionShowOutput {

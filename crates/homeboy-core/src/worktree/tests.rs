@@ -1321,6 +1321,203 @@ fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
 }
 
 #[test]
+fn create_partial_clone_worktree_requires_configured_host_transport() {
+    crate::test_support::with_isolated_home(|home| {
+        let canonical = "https://127.0.0.1:1/acme/repo.git";
+        let bare = seed_partial_clone_remote(home.path());
+        let file_url = format!(
+            "file://{}",
+            bare.canonicalize().expect("bare remote").display()
+        );
+        let missing =
+            materialize_partial_clone(home.path(), "partial-missing-transport", &bare, canonical);
+        let routed =
+            materialize_partial_clone(home.path(), "partial-configured-route", &bare, canonical);
+        write_component_registration(home.path(), "partial-missing-transport", &missing);
+        write_component_registration(home.path(), "partial-configured-route", &routed);
+        let stored_config = fs::read(routed.join(".git/config")).expect("stored config");
+
+        let missing_err = create(WorktreeCreateOptions {
+            component_id: "partial-missing-transport".to_string(),
+            branch: "fix/hydrate".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect_err("blobless worktree add cannot reach an unrouted HTTPS origin");
+        assert_eq!(missing_err.code.as_str(), "git.command_failed");
+        assert!(
+            missing_err.message.contains("127.0.0.1")
+                || missing_err.to_string().contains("127.0.0.1")
+        );
+
+        let mut config = crate::defaults::HomeboyConfig::default();
+        config.github_hosts.insert(
+            "127.0.0.1".to_string(),
+            crate::component::GithubHostConfig {
+                proxy: None,
+                env: std::collections::HashMap::from([
+                    ("GIT_CONFIG_COUNT".to_string(), "2".to_string()),
+                    (
+                        "GIT_CONFIG_KEY_0".to_string(),
+                        format!("url.{file_url}.insteadOf"),
+                    ),
+                    ("GIT_CONFIG_VALUE_0".to_string(), canonical.to_string()),
+                    (
+                        "GIT_CONFIG_KEY_1".to_string(),
+                        "protocol.file.allow".to_string(),
+                    ),
+                    ("GIT_CONFIG_VALUE_1".to_string(), "always".to_string()),
+                    (
+                        "GIT_ASKPASS".to_string(),
+                        "/opt/credential-helper".to_string(),
+                    ),
+                ]),
+            },
+        );
+        crate::defaults::save_config(&config).expect("save host transport");
+
+        let created = create(WorktreeCreateOptions {
+            component_id: "partial-configured-route".to_string(),
+            branch: "fix/hydrate".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+        })
+        .expect("configured rewrite hydrates missing checkout blobs");
+        let worktree = PathBuf::from(&created.record.worktree_path);
+
+        assert!(worktree.join(".git").is_file(), "must be a linked worktree");
+        assert_eq!(
+            fs::read_to_string(worktree.join("payload.txt")).expect("hydrated blob"),
+            "partial-clone payload\n"
+        );
+        assert_eq!(
+            fs::read(routed.join(".git/config")).expect("stored config after hydration"),
+            stored_config,
+            "transport must preserve all stored remote and repository settings"
+        );
+        assert_eq!(
+            git::run_git(&routed, &["remote", "get-url", "origin"], "origin url")
+                .unwrap()
+                .trim(),
+            canonical
+        );
+        assert!(
+            git::run_git(
+                &routed,
+                &["config", "--local", "--get-regexp", r"url\..*\.insteadOf"],
+                "local insteadOf",
+            )
+            .is_err(),
+            "HTTPS rewrite must not persist into repository config"
+        );
+        let listed = git::run_git(
+            &routed,
+            &["worktree", "list", "--porcelain"],
+            "worktree list",
+        )
+        .unwrap();
+        assert!(
+            listed.contains(&worktree.to_string_lossy().to_string()),
+            "git must register the linked worktree"
+        );
+
+        let unrelated = git::git_transport_env(
+            "git.example.test",
+            &crate::component::GithubConfig::default(),
+        );
+        assert!(
+            !unrelated.iter().any(|(key, value)| {
+                key.starts_with("GIT_CONFIG")
+                    && (value.contains(&file_url) || value.contains("insteadOf"))
+            }),
+            "unrelated hosts keep default transport"
+        );
+    });
+}
+
+fn seed_partial_clone_remote(home: &Path) -> PathBuf {
+    let seed = home.join("partial-seed");
+    let bare = home.join("partial-upstream.git");
+    fs::create_dir_all(&seed).expect("seed directory");
+    run_git(&seed, &["init", "-q", "-b", "main"]);
+    run_git(&seed, &["config", "user.email", "homeboy@example.test"]);
+    run_git(&seed, &["config", "user.name", "Homeboy Test"]);
+    fs::write(seed.join("payload.txt"), "partial-clone payload\n").expect("payload");
+    fs::write(seed.join("homeboy.json"), r#"{"id":"partial-clone"}"#).expect("manifest");
+    run_git(&seed, &["add", "."]);
+    run_git(&seed, &["commit", "-q", "-m", "payload"]);
+    run_git(
+        home,
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            &seed.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+    run_git(&bare, &["config", "uploadpack.allowFilter", "true"]);
+    bare
+}
+
+fn materialize_partial_clone(home: &Path, id: &str, bare: &Path, origin_url: &str) -> PathBuf {
+    let parent = home.join("Developer");
+    fs::create_dir_all(&parent).expect("developer directory");
+    let source = parent.join(id);
+    let file_url =
+        reqwest::Url::from_file_path(bare.canonicalize().expect("bare path")).expect("file URL");
+    run_git(
+        home,
+        &[
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            "-q",
+            file_url.as_str(),
+            &source.to_string_lossy(),
+        ],
+    );
+    run_git(&source, &["remote", "set-url", "origin", origin_url]);
+    let tree = git::run_git(&source, &["ls-tree", "-r", "HEAD"], "checkout blobs")
+        .expect("tree available without blobs");
+    for entry in tree.lines() {
+        let fields: Vec<_> = entry.split_whitespace().collect();
+        assert_eq!(fields[1], "blob");
+        let output = std::process::Command::new("git")
+            .current_dir(&source)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args(["cat-file", "-e", fields[2]])
+            .output()
+            .expect("inspect local object database");
+        assert!(
+            !output.status.success(),
+            "checkout blob must actually be absent"
+        );
+    }
+    assert_eq!(
+        git::run_git(
+            &source,
+            &["config", "--get", "remote.origin.partialclonefilter"],
+            "partial clone filter",
+        )
+        .unwrap()
+        .trim(),
+        "blob:none"
+    );
+    assert!(
+        !source.join("payload.txt").is_file(),
+        "blobless clone must not materialize checkout blobs"
+    );
+    source
+}
+
+#[test]
 fn create_reuses_existing_worktree_with_a_relative_gitdir_pointer() {
     crate::test_support::with_isolated_home(|home| {
         let (source, options) = registered_create_fixture(home.path(), "relative-existing-fixture");
@@ -3510,4 +3707,405 @@ fn reaping_audit_requires_removal_not_a_plan() {
         audit[0].reason.as_deref(),
         Some("cleanup --include task-worktrees")
     );
+}
+
+// -- #14745: squash/rebase-merged worktree reclamation ----------------------
+//
+// `git merge-base --is-ancestor` (and the plain `rev-list` ancestry it
+// mirrors) is permanently blind to a GitHub squash or rebase merge: both
+// rewrite the landed commit(s), so the branch's original commit objects are
+// never reachable from the target even though every line they touch already
+// lives there. These tests build real repositories reproducing each case
+// from the issue and prove `branch_content_merged_until` fixes exactly the
+// squash/rebase cases while every existing safety predicate still fires.
+
+/// `git_repo()`'s initial branch name depends on the ambient git
+/// configuration. Pin it to a known name so `base_ref` can name it
+/// explicitly instead of relying on the worktree-relative "HEAD" most other
+/// fixtures in this file use (which resolves to the *worktree's own* tip,
+/// not the shared source branch these tests need to diff against).
+fn stable_main_branch(source: &Path) -> &'static str {
+    run_git(source, &["branch", "-M", "main"]);
+    "main"
+}
+
+#[test]
+fn cleanup_reclaims_squash_merged_multi_commit_task_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "squash-merged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    // Two commits so the squash must combine more than one change — a
+    // single-commit probe (matching the branch's one remaining commit
+    // one-for-one against the squash commit) would miss this failure mode.
+    fs::write(worktree.join("task-1.txt"), "one\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work 1"]);
+    fs::write(worktree.join("task-2.txt"), "two\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work 2"]);
+
+    // Simulate GitHub's "Squash and merge": one new rewritten commit lands
+    // on the target carrying the branch's combined diff. The branch's two
+    // original commits are never main's ancestors.
+    run_git(source.path(), &["merge", "--squash", "task"]);
+    run_git(
+        source.path(),
+        &["commit", "-q", "-m", "squashed task work (#1)"],
+    );
+    assert!(
+        run_git_status(
+            source.path(),
+            &["merge-base", "--is-ancestor", "task", main]
+        )
+        .is_err(),
+        "the squash rewrite must actually defeat plain ancestry, or this test proves nothing"
+    );
+
+    let store = dir.path().join("store");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+
+    let safety = safety_report(&record).unwrap();
+    assert_eq!(
+        safety.unpushed_commits, 0,
+        "squash-merged content must not block reclamation just because its \
+         original commits were rewritten"
+    );
+    assert!(safety.safe, "reasons: {:?}", safety.reasons);
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.counts.branches_deleted, 1);
+    assert!(!worktree.exists());
+    assert!(!std::process::Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/task"])
+        .current_dir(source.path())
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[test]
+fn cleanup_reclaims_rebase_merged_task_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "rebase-merged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task-1.txt"), "one\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work 1"]);
+    fs::write(worktree.join("task-2.txt"), "two\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work 2"]);
+
+    // Advance the target first. Without this the replay below reproduces the
+    // original commits byte for byte — same tree, parent, message, author and
+    // date all hash to the same SHAs — so the target would literally contain
+    // the branch's own commits and plain ancestry would still hold, leaving
+    // the containment probe untested.
+    fs::write(source.path().join("main-1.txt"), "main\n").unwrap();
+    run_git(source.path(), &["add", "."]);
+    run_git(source.path(), &["commit", "-q", "-m", "main work 1"]);
+
+    // Simulate GitHub's "Rebase and merge": each original commit is replayed
+    // individually onto the target with the same diff/patch-id but a new
+    // hash and parent. Plain ancestry still cannot see it.
+    run_git(source.path(), &["cherry-pick", &format!("{main}..task")]);
+    assert!(
+        run_git_status(
+            source.path(),
+            &["merge-base", "--is-ancestor", "task", main]
+        )
+        .is_err(),
+        "the rebase rewrite must actually defeat plain ancestry, or this test proves nothing"
+    );
+
+    let store = dir.path().join("store");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+
+    let safety = safety_report(&record).unwrap();
+    assert_eq!(safety.unpushed_commits, 0);
+    assert!(safety.safe, "reasons: {:?}", safety.reasons);
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.counts.branches_deleted, 1);
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn cleanup_reclaims_fast_forward_merged_task_branch() {
+    // The ordinary case: an actual merge commit (or fast-forward) keeps the
+    // branch's original commits as real ancestors of the target, so the
+    // plain `git merge-base --is-ancestor` fast path still governs and the
+    // content-containment fallback is never needed to reach the same
+    // answer.
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "ff-merged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
+    run_git(source.path(), &["merge", "--ff-only", "task"]);
+    assert!(
+        run_git_status(
+            source.path(),
+            &["merge-base", "--is-ancestor", "task", main]
+        )
+        .is_ok(),
+        "an ordinary fast-forward merge must remain a plain ancestor"
+    );
+
+    let store = dir.path().join("store");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.branches_deleted, 1);
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn cleanup_retains_task_branch_with_genuinely_unmerged_commits() {
+    // The content-containment probe must not paper over real unmerged work:
+    // this branch was never merged into main by any means, squash or
+    // otherwise, and must stay retained exactly as before.
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "genuinely-unmerged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
+
+    let store = dir.path().join("store");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+
+    let safety = safety_report(&record).unwrap();
+    assert_eq!(safety.unpushed_commits, 1);
+    assert!(!safety.safe);
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 0);
+    assert_eq!(output.counts.removed, 0);
+    assert_eq!(output.counts.skipped, 1);
+    assert!(output.skipped[0]
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("unpushed commit")));
+    assert!(worktree.exists());
+}
+
+#[test]
+fn cleanup_retains_dirty_worktree_even_when_its_branch_is_squash_merged() {
+    // A squash-merged branch whose worktree still has an uncommitted or
+    // untracked change must stay retained: content containment answers "is
+    // the committed work already on the target?", not "is this checkout
+    // safe to delete right now?".
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "dirty-squash-merged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
+    run_git(source.path(), &["merge", "--squash", "task"]);
+    run_git(
+        source.path(),
+        &["commit", "-q", "-m", "squashed task work (#2)"],
+    );
+    // Untracked residue left behind in the reclaimable worktree.
+    fs::write(worktree.join("scratch.txt"), "not committed\n").unwrap();
+
+    let store = dir.path().join("store");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+
+    let safety = safety_report(&record).unwrap();
+    assert_eq!(
+        safety.unpushed_commits, 0,
+        "the committed work is squash-merged and must not itself block reclamation"
+    );
+    assert!(safety.dirty);
+    assert!(!safety.safe);
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 0);
+    assert_eq!(output.counts.removed, 0);
+    assert_eq!(output.counts.skipped, 1);
+    assert!(output.skipped[0]
+        .reasons
+        .iter()
+        .any(|reason| reason == "dirty worktree"));
+    assert!(worktree.exists());
+}
+
+#[test]
+fn cleanup_retains_squash_merged_worktree_claimed_by_a_live_owner() {
+    // A live durable claim must keep governing even once content
+    // containment makes a worktree otherwise reclaimable — an active run or
+    // process still owns the checkout.
+    let data_root = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let main = stable_main_branch(source.path());
+    let worktree = sibling_worktree_path(source.path(), "claimed-squash-merged-cleanup");
+    run_git(
+        source.path(),
+        &["worktree", "add", "-b", "task", &worktree.to_string_lossy()],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task work"]);
+    run_git(source.path(), &["merge", "--squash", "task"]);
+    run_git(
+        source.path(),
+        &["commit", "-q", "-m", "squashed task work (#3)"],
+    );
+
+    let store = data_root.path().join("task-worktrees");
+    let mut record = succeeded_record(source.path(), &worktree);
+    record.base_ref = main.to_string();
+    write_record(&store, &record).unwrap();
+    let claims = crate::workspace_claim::WorkspaceClaimStore::new(
+        data_root
+            .path()
+            .join(crate::workspace_claim::LOCAL_WORKSPACE_CLAIMS_DIR),
+    );
+    claims
+        .register_owner(
+            record.effective_workspace_identity().unwrap(),
+            "live-cook-run",
+            60_000,
+            now_ms(),
+        )
+        .unwrap();
+
+    let safety = safety_report(&record).unwrap();
+    assert_eq!(
+        safety.unpushed_commits, 0,
+        "the committed work is squash-merged and must not itself block reclamation"
+    );
+
+    let output = cleanup_with_store(
+        WorktreeCleanupOptions {
+            force: false,
+            dry_run: false,
+            cleanup_branches: true,
+            allow_unmerged_branches: false,
+            reaper: None,
+        },
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(output.counts.candidates, 0);
+    assert_eq!(output.counts.removed, 0);
+    assert_eq!(output.counts.skipped, 1);
+    assert!(output.skipped[0]
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("live-cook-run")));
+    assert!(worktree.exists());
+}
+
+/// `run_git` (this module's test helper) panics on a nonzero exit; these
+/// tests need the exit code itself to assert what plain ancestry does and
+/// does not see, so shell out directly instead.
+fn run_git_status(path: &Path, args: &[&str]) -> std::result::Result<(), ()> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .status()
+        .map_err(|_| ())
+        .and_then(|status| if status.success() { Ok(()) } else { Err(()) })
 }

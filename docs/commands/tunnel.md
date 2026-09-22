@@ -71,7 +71,6 @@ root, then confirm the listener before relying on its public route:
 ```sh
 homeboy tunnel service start homeboy-artifact-origin \
   --runner homeboy-lab \
-  --detach-after-handoff \
   --host 127.0.0.1 \
   --port 7351 \
   --require-listener \

@@ -9,11 +9,14 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use fs4::fs_std::FileExt;
 use homeboy_core::api_jobs::JobStore;
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
+use std::fs::OpenOptions;
 use std::process::Command;
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -32,6 +35,79 @@ fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Valu
             "pinned_run_id": run_id,
         }),
     )])
+}
+
+#[test]
+fn detached_placeholder_is_discoverable_while_runtime_admission_is_locked() {
+    with_isolated_home(|_| {
+        let store = Arc::new(test_lifecycle_store());
+        let cook_id = "locked-detached-placeholder";
+        let runtime_root = homeboy_core::controller_runtime::runtime_root_in(store.roots().data())
+            .expect("resolve isolated runtime root");
+        std::fs::create_dir_all(&runtime_root).expect("create isolated runtime root");
+        let lock_path = runtime_root.join("admission.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .expect("open runtime admission lock");
+        lock.lock_exclusive().expect("hold runtime admission lock");
+
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let parent_store = Arc::clone(&store);
+        let parent = std::thread::spawn(move || {
+            let result = record_detached_cook_handoff_parent_in_store(&parent_store, cook_id);
+            completed_tx
+                .send(result.is_ok())
+                .expect("report parent persistence");
+            result
+        });
+
+        let completed_while_locked = completed_rx.recv_timeout(Duration::from_millis(250));
+        assert!(
+            completed_while_locked.is_ok(),
+            "placeholder persistence waited on runtime admission: {completed_while_locked:?}"
+        );
+        let parent_record = parent.join().expect("join placeholder persistence");
+        assert_eq!(parent_record.expect("persist placeholder").run_id, cook_id);
+
+        let status = reconcile_status(cook_id).expect("pending placeholder is discoverable");
+        assert_eq!(status.run_id, cook_id);
+        cancel_run_in_store(&store, cook_id, Some("test cancellation"))
+            .expect("cancel pending placeholder");
+        require_detached_cook_handoff_fence_open_in_store(&store, cook_id)
+            .expect_err("cancellation fences a later child admission");
+
+        let executable = AgentTaskPlan::new("locked-executable", Vec::new());
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let executable_store = Arc::clone(&store);
+        let executable_thread = std::thread::spawn(move || {
+            let result =
+                submit_plan_in_store(&executable_store, &executable, Some("locked-executable"));
+            admitted_tx
+                .send(result.is_ok())
+                .expect("report executable admission");
+            result
+        });
+        assert!(
+            admitted_rx
+                .recv_timeout(Duration::from_millis(250))
+                .is_err(),
+            "ordinary executable submission bypassed runtime admission"
+        );
+        drop(lock);
+        assert_eq!(
+            admitted_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("executable admission completion"),
+            true
+        );
+        executable_thread
+            .join()
+            .expect("join executable admission")
+            .expect("ordinary executable submission admits after lock release");
+    });
 }
 
 #[test]
@@ -4262,6 +4338,30 @@ fn non_retryable_pre_execution_failure_remains_invalid_input() {
     assert_eq!(outcome.diagnostics[0].data["retryable"], false);
     assert_eq!(outcome.outputs["retryable"], false);
     assert_eq!(outcome.metadata["retryable"], false);
+    assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
+}
+
+#[test]
+fn controller_storage_failure_is_execution_failed_and_retryable_after_repair() {
+    let plan = test_plan();
+    let error = Error::internal_json(
+        "persisted staging record has an unsupported schema",
+        Some("read Lab staging record".to_string()),
+    );
+    let outcome = build_pre_execution_failure_outcome(
+        "cook-storage-repair",
+        &plan.tasks[0],
+        "lab_staging_submission",
+        &error,
+    );
+
+    assert_eq!(
+        outcome.failure_classification,
+        Some(AgentTaskFailureClassification::ExecutionFailed)
+    );
+    assert_eq!(outcome.diagnostics[0].data["retryable"], true);
+    assert_eq!(outcome.outputs["retryable"], true);
+    assert_eq!(outcome.metadata["retryable"], true);
     assert_eq!(outcome.metadata["provider_executions_consumed"], 0);
 }
 

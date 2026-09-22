@@ -539,6 +539,16 @@ fn create_with_store_unlocked(
         ..TargetSpec::default()
     })?;
     let source_checkout = source_checkout_for_worktree(&target)?;
+    let git_transport = git::git_transport_env_for_command(
+        &source_checkout,
+        &["fetch", "origin"],
+        &target.component.github,
+    );
+    let hydration_transport = git::git_transport_env_for_command(
+        &source_checkout,
+        &["worktree", "add"],
+        &target.component.github,
+    );
 
     let parent = source_checkout.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -578,7 +588,7 @@ fn create_with_store_unlocked(
         .unwrap_or("HEAD");
     let handoff_observation = options
         .require_handoff_freshness
-        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref))
+        .then(|| prepare_handoff_freshness(&source_checkout, handoff_base_ref, &git_transport))
         .transpose()?;
     if worktree_path.exists() {
         let record = existing.ok_or_else(|| {
@@ -646,7 +656,7 @@ fn create_with_store_unlocked(
         }
         let previous = create_evidence(&record, "missing".to_string())?;
         let worktree_owner = ownership::owner_for_path_or_ancestor(parent)?;
-        git::run_git(
+        git::run_git_with_env(
             &source_checkout,
             &[
                 "worktree",
@@ -655,6 +665,7 @@ fn create_with_store_unlocked(
                 &options.branch,
             ],
             "git worktree add restore",
+            &hydration_transport,
         )?;
         ownership::normalize_created_path(
             &worktree_path,
@@ -682,7 +693,7 @@ fn create_with_store_unlocked(
         &source_checkout,
         &options.from.unwrap_or_else(|| "HEAD".to_string()),
     )?;
-    git::run_git(
+    git::run_git_with_env(
         &source_checkout,
         &[
             "worktree",
@@ -693,6 +704,7 @@ fn create_with_store_unlocked(
             &base_ref,
         ],
         "git worktree add",
+        &hydration_transport,
     )?;
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
     pin_worktree_identity(&worktree_path)?;
@@ -736,20 +748,24 @@ struct PendingHandoffFreshness {
     remote_default_sha: String,
 }
 
-fn prepare_handoff_freshness(source: &Path, base_ref: &str) -> Result<PendingHandoffFreshness> {
+fn prepare_handoff_freshness(
+    source: &Path,
+    base_ref: &str,
+    git_transport: &[(String, String)],
+) -> Result<PendingHandoffFreshness> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     git::fetch_remote_tracking_refs_until(
         source,
         &["fetch", "origin"],
         "git fetch origin for worktree handoff",
-        &[],
+        git_transport,
         std::time::Instant::now() + TIMEOUT,
     )?;
     let advertised = git::run_git_with_env_timeout(
         source,
         &["ls-remote", "--symref", "origin", "HEAD"],
         "git ls-remote origin HEAD for worktree handoff",
-        &[],
+        git_transport,
         TIMEOUT,
     )?;
     let remote_head = advertised.lines().find_map(|line| {
@@ -2280,13 +2296,20 @@ fn branch_cleanup_report_until(
         });
     }
     let base_ref = branch_cleanup_base_ref(record);
+    // Plain ancestry is the cheap, exact test for an ordinary fast-forward or
+    // merge-commit merge, but it is permanently `false` for a GitHub squash
+    // or rebase merge: both rewrite the landed commit(s), so the branch's
+    // original commit objects are never reachable from `base_ref` even
+    // though every line they touch already lives there. Fall back to the
+    // content-containment probe, which survives that rewrite (#14745).
     let merged = run_inventory_git_until(
         &source,
         &["merge-base", "--is-ancestor", branch, &base_ref],
         "git merge-base branch cleanup",
         deadline,
     )
-    .is_ok();
+    .is_ok()
+        || branch_content_merged_until(&source, branch, &base_ref, deadline).unwrap_or(false);
     Ok(WorktreeBranchCleanupReport {
         branch: record.branch.clone(),
         base_ref,
@@ -2487,7 +2510,145 @@ fn unpushed_commit_count_until(
         "git rev-list",
         deadline,
     )?;
-    Ok(count.trim().parse::<u32>().unwrap_or(0))
+    let count = count.trim().parse::<u32>().unwrap_or(0);
+    if count == 0 {
+        return Ok(0);
+    }
+    // `rev-list` above walks plain commit ancestry, which a GitHub squash or
+    // rebase merge permanently defeats: both rewrite the landed commit(s),
+    // so HEAD's original commits are never reachable from `base_ref` even
+    // though their content already is. Confirm genuine non-containment with
+    // the content probe before reporting these as unpushed/unmerged (#14745).
+    // Any probe failure (including a mid-command deadline) falls back to the
+    // conservative, already-established answer: report the raw count rather
+    // than risk treating a real problem as content containment.
+    if branch_content_merged_until(path, "HEAD", base_ref, deadline).unwrap_or(false) {
+        return Ok(0);
+    }
+    Ok(count)
+}
+
+/// Whether `branch_ref`'s content is already present in `target_ref`,
+/// surviving a GitHub squash or rebase merge that rewrites the landed
+/// commit(s) and permanently breaks `git merge-base --is-ancestor` (#14745).
+///
+/// This is the shared containment primitive behind both
+/// `unpushed_commit_count_until` (is a worktree reclaimable?) and
+/// `branch_cleanup_report_until` (is its branch safe to delete?). A squash or
+/// rebase merge means `branch_ref`'s original commit objects are never
+/// reachable from `target_ref` by ancestry, even though every line they
+/// touch already lives there. Two content-based fallbacks recover that
+/// signal without depending on which merge style upstream used:
+///
+///   - `git cherry` patch-id equivalence per commit, which recognizes a
+///     rebase merge: each original commit is rebased individually onto the
+///     target with the same diff/patch-id, only its hash and parent change.
+///   - a synthetic commit carrying the *aggregate* diff between `branch_ref`
+///     and its merge-base with `target_ref`, probed the same way, which
+///     recognizes a squash merge: many branch commits collapse into one
+///     rewritten commit on the target, so no single original commit's
+///     patch-id lines up on its own.
+///
+/// A branch that is genuinely unmerged fails both probes: its commits (and
+/// their aggregate) have no patch-id equivalent anywhere in `target_ref`.
+///
+/// `homeboy stack` already has a `git cherry`-based `patch_in_base` probe for
+/// the same squash-merge symptom in its own PR-tracking domain, but it
+/// compares a single PR head SHA and cannot see this crate's registry (nor
+/// should it — `homeboy-stack` depends on `homeboy-core`, not the other way
+/// around). The synthetic-commit fallback here generalizes that idea to
+/// multi-commit worktree branches, which a single-SHA patch-id compare
+/// cannot: a squash of N commits has no individual commit whose patch-id
+/// matches the combined squash commit.
+fn branch_content_merged_until(
+    path: &Path,
+    branch_ref: &str,
+    target_ref: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<bool> {
+    if commits_patch_equivalent_in_target_until(path, branch_ref, target_ref, deadline)? {
+        return Ok(true);
+    }
+    squash_diff_in_target_until(path, branch_ref, target_ref, deadline)
+}
+
+/// `git cherry <target_ref> <branch_ref>` lists every commit reachable from
+/// `branch_ref` that git's ancestry walk cannot find in `target_ref`,
+/// tagging each `-` if an equivalent-patch commit already exists somewhere
+/// in `target_ref` and `+` if not. Every line `-` (including the vacuous
+/// case of an empty list, i.e. `branch_ref` is already a plain ancestor)
+/// means `branch_ref` is fully absorbed by content, not just by ancestry.
+fn commits_patch_equivalent_in_target_until(
+    path: &Path,
+    branch_ref: &str,
+    target_ref: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<bool> {
+    let output = run_inventory_git_until(
+        path,
+        &["cherry", target_ref, branch_ref],
+        "git cherry",
+        deadline,
+    )?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .all(|line| line.starts_with('-')))
+}
+
+/// Squash-merge fallback for `branch_content_merged_until`: every path the
+/// branch touched since its merge-base already has identical content in the
+/// target.
+///
+/// A squash merge collapses many commits into one rewritten commit, so no
+/// individual commit's patch-id lines up and the per-commit probe above
+/// cannot see it. Comparing content per path recognizes that without
+/// depending on commit shape at all.
+///
+/// This is deliberately read-only. An earlier form built a synthetic commit
+/// with `git commit-tree` so the aggregate diff could be patch-id compared,
+/// but that writes a commit object into the repository being inspected.
+/// Worktree inventory and cleanup must not mutate the object database of a
+/// checkout they are only reporting on.
+///
+/// Conservative by construction: if the target later changed one of those
+/// paths again, the contents differ and containment is not claimed, so the
+/// worktree is retained rather than reclaimed on a weaker signal.
+fn squash_diff_in_target_until(
+    path: &Path,
+    branch_ref: &str,
+    target_ref: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<bool> {
+    let merge_base = run_inventory_git_until(
+        path,
+        &["merge-base", branch_ref, target_ref],
+        "git merge-base squash probe",
+        deadline,
+    )?;
+    let merge_base = merge_base.trim();
+    if merge_base.is_empty() {
+        return Ok(false);
+    }
+    let changed = run_inventory_git_until(
+        path,
+        &["diff", "--name-only", merge_base, branch_ref],
+        "git diff branch paths",
+        deadline,
+    )?;
+    let changed: Vec<&str> = changed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if changed.is_empty() {
+        return Ok(false);
+    }
+
+    let mut args = vec!["diff", "--quiet", branch_ref, target_ref, "--"];
+    args.extend(changed.iter().copied());
+    Ok(run_inventory_git_until(path, &args, "git diff branch against target", deadline).is_ok())
 }
 
 pub(super) fn canonical_existing_path(path: &str) -> Result<PathBuf> {

@@ -172,12 +172,7 @@ fn resolve_adoption_candidate_base(
         [candidate_parent, resolved_base_parent] => {
             let resolved_base = resolved_base_ref
                 .filter(|base| !base.trim().is_empty())
-                .map(|base| {
-                    git_stdout(
-                        cwd,
-                        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-                    )
-                })
+                .map(|base| resolve_adoption_base_ref(cwd, base))
                 .transpose()?
                 .map(|base| base.trim().to_string())
                 .ok_or_else(|| {
@@ -242,6 +237,36 @@ fn resolve_adoption_candidate_base(
             "adopted candidate must have one parent or exactly two authenticated merge parents",
         )),
     }
+}
+
+/// Adoption freshness is resolved from the authoritative remote-tracking ref.
+/// A local branch can lag (or point at an operator's unrelated checkout), while
+/// the documented recovery merge is made from the exact `origin/<base>` commit.
+/// An explicit object id remains authoritative and is never redirected.
+fn resolve_adoption_base_ref(cwd: &Path, requested: &str) -> Result<String> {
+    let requested = requested.trim();
+    let mut candidates = Vec::new();
+    if !requested.contains('/') && !is_full_git_object_id(requested) {
+        candidates.push(format!("origin/{requested}"));
+    }
+    candidates.push(requested.to_string());
+    candidates
+        .into_iter()
+        .find_map(|candidate| {
+            git_stdout(
+                cwd,
+                &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")],
+            )
+            .ok()
+        })
+        .map(|base| base.trim().to_string())
+        .ok_or_else(|| {
+            adoption_graph_error(requested, "resolved immutable base ref is unavailable")
+        })
+}
+
+fn is_full_git_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_adoption_parent_lineage(

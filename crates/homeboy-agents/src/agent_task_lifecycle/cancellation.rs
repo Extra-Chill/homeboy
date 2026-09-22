@@ -293,6 +293,16 @@ pub(crate) fn cancel_exact_run_in_store(
                 "cancel_reason".to_string(),
                 json!(reason.unwrap_or("cancel requested")),
             );
+            metadata.insert(
+                "cancellation_provenance".to_string(),
+                json!({
+                    "actor": "controller",
+                    "cause": "operator_requested",
+                    "reason": reason.unwrap_or("cancel requested"),
+                    "timestamp": cancelled_at,
+                    "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+                }),
+            );
             if let Some(service_cleanup) = service_cleanup.clone() {
                 metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
             }
@@ -805,6 +815,16 @@ fn cancel_resolved_run_in_store(
             "cancel_reason".to_string(),
             json!(reason.unwrap_or("cancel requested")),
         );
+        metadata.insert(
+            "cancellation_provenance".to_string(),
+            json!({
+                "actor": "controller",
+                "cause": "operator_requested",
+                "reason": reason.unwrap_or("cancel requested"),
+                "timestamp": cancelled_at,
+                "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+            }),
+        );
         if detached_handoff_parent {
             metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
                 json!("cancelled");
@@ -966,6 +986,16 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
     let metadata = record.ensure_metadata_object();
     terminalize_running_provider_executions(metadata, &cancelled_at);
     metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+    metadata.insert(
+        "cancellation_provenance".to_string(),
+        json!({
+            "actor": "controller",
+            "cause": "controller_job_cancelled",
+            "reason": "controller-owned staging job was cancelled",
+            "timestamp": cancelled_at,
+            "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+        }),
+    );
     metadata.insert(
         "controller_job_cancellation".to_string(),
         json!({
@@ -1168,6 +1198,16 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let metadata = record.ensure_metadata_object();
     terminalize_running_provider_executions(metadata, &cancelled_at);
     metadata.insert("cancel_requested_at".to_string(), json!(cancelled_at));
+    metadata.insert(
+        "cancellation_provenance".to_string(),
+        json!({
+            "actor": "controller",
+            "cause": "opaque_provider_cancellation",
+            "reason": "provider cancellation requested before provider execution completed",
+            "timestamp": cancelled_at,
+            "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+        }),
+    );
     metadata.insert(
         "cancel_note".to_string(),
         json!("provider-specific cancellation is delegated through opaque provider handles"),

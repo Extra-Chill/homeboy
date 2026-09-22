@@ -43,7 +43,7 @@ pub use config::{
     ComponentScriptsConfig, DependencyStackEdge, DeploymentProviderAttachment, GitDeployConfig,
     GithubConfig, GithubHostConfig, GithubReleaseOwner, PackageArtifact,
     PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig, ScopedExtensionConfig,
-    VersionTarget,
+    SubtreeBranchPolicy, SubtreePublicationConfig, VersionTarget,
 };
 pub use inventory::{
     exists, exists_in_root, extension_provides_artifact_pattern,

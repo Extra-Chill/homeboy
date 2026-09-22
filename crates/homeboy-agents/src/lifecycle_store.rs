@@ -1102,6 +1102,19 @@ impl AgentTaskLifecycleStore {
         )
     }
 
+    pub(crate) fn write_record_without_events(&self, record: &AgentTaskRunRecord) -> Result<()> {
+        let committed = self.with_config_lock(|| {
+            write_record_with_aggregate_without_workspace_authority_mode(
+                self,
+                record,
+                read_mirrored_aggregate_in_store(self, &record.run_id)?,
+                true,
+                false,
+            )
+        })?;
+        self.project_terminal_record_after_unlock(&committed.run_id)
+    }
+
     pub(crate) fn rearm_pre_execution_record_with_runtime(
         &self,
         record: &AgentTaskRunRecord,
@@ -1188,6 +1201,7 @@ impl AgentTaskLifecycleStore {
                 &rebound,
                 read_mirrored_aggregate_in_store(self, &rebound.run_id)?,
                 false,
+                true,
             )?;
             // A pre-execution failure writes a synthetic failed aggregate for
             // durable diagnostics. Once the zero-provider attempt is rearmed,
@@ -1595,6 +1609,7 @@ fn write_record_with_aggregate_without_workspace_authority(
         record,
         aggregate,
         true,
+        true,
     )
 }
 
@@ -1603,6 +1618,7 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
     preserve_terminal: bool,
+    emit_events: bool,
 ) -> Result<AgentTaskRunRecord> {
     #[cfg(any(test, feature = "test-support"))]
     if FAIL_NEXT_RECORD_WRITE.replace(false) {
@@ -1642,11 +1658,16 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         .into_iter()
         .collect();
     let ledger = store.control_plane_event_stream(&run)?.unwrap_or_default();
-    let mut events =
-        super::durable_progress::prepared_progress_events(&record, aggregate.as_ref())?;
-    events.extend(super::durable_progress::prepared_unreceipted_action_events(
-        &record, &store, &receipts, &ledger,
-    )?);
+    let mut events = if emit_events {
+        super::durable_progress::prepared_progress_events(&record, aggregate.as_ref())?
+    } else {
+        Vec::new()
+    };
+    if emit_events {
+        events.extend(super::durable_progress::prepared_unreceipted_action_events(
+            &record, &store, &receipts, &ledger,
+        )?);
+    }
     super::durable_progress::stamp_durable_event_history(&mut record);
     let mut metadata_json =
         merge_observation_metadata(existing_metadata, observation_metadata(&record, aggregate)?);

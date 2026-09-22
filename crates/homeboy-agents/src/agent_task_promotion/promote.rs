@@ -965,7 +965,10 @@ fn promote_with_provider_and_checkpoint_internal(
     };
     let (artifact, recoverable_admission) = match admission {
         Ok(admission) => admission,
-        Err(error) if options.artifact_id.is_none() && !outcome_has_patch_artifacts(&outcome) => {
+        Err(error)
+            if options.artifact_id.is_none()
+                && !outcome_has_actionable_patch_artifacts(&outcome) =>
+        {
             if let Some(committed_patch) = committed_changes_patch(&options)? {
                 return promote_committed_changes(
                     &options,
@@ -1570,6 +1573,16 @@ pub(crate) fn outcome_has_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
         .artifacts
         .iter()
         .any(|artifact| is_actionable_patch_artifact(artifact) || is_empty_patch_artifact(artifact))
+}
+
+/// Whether the outcome carries a patch artifact that could actually be applied.
+///
+/// An empty patch artifact is a claim that the provider changed nothing, not
+/// evidence of promotable work. Promotion fallbacks must therefore key on
+/// actionable artifacts: a provider that committed its work and emitted an
+/// empty patch still has a real candidate to harvest from the worktree.
+pub(crate) fn outcome_has_actionable_patch_artifacts(outcome: &AgentTaskOutcome) -> bool {
+    outcome.artifacts.iter().any(is_actionable_patch_artifact)
 }
 
 fn has_recoverable_candidate_provenance(

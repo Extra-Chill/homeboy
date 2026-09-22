@@ -156,8 +156,11 @@ pub fn run_git(git_root: &Path, args: &[&str], context: &str) -> Result<String> 
 
 /// Run Git with an explicit transport environment.
 ///
-/// The inherited process environment remains available, so repository-level
-/// credential helpers, URL rewrites, and SSH configuration keep working.
+/// Configured host proxy/env is applied first for remote-capable commands, then
+/// `env` overrides matching keys. The inherited process environment remains
+/// available, so repository-level credential helpers, URL rewrites, and SSH
+/// configuration keep working. Environment values are not included in command
+/// diagnostics.
 pub fn run_git_with_env(
     git_root: &Path,
     args: &[&str],
@@ -218,9 +221,7 @@ pub fn run_git_output_with_env_timeout(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    super::transport::apply_configured_transport(&mut command, git_root, args, env);
     command::isolate_process_tree(&mut command);
     let mut child = command.spawn().map_err(|error| {
         Error::git_command_failed_with_details(
@@ -371,9 +372,7 @@ pub fn run_git_output_with_env(
         .args(args)
         .current_dir(git_root)
         .stdin(std::process::Stdio::null());
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    super::transport::apply_configured_transport(&mut command, git_root, args, env);
     command.output().map_err(|e| {
         Error::git_command_failed_with_details(
             git_failure_message(context, &e.to_string()),
@@ -773,6 +772,46 @@ mod tests {
     use crate::git::primitives_query::current_branch;
 
     use crate::test_support::run_git_command as git;
+
+    #[test]
+    fn run_git_diagnostics_omit_transport_environment_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "-q"]);
+        git(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://127.0.0.1:1/acme/repo.git",
+            ],
+        );
+
+        let err = run_git_with_env(
+            dir.path(),
+            &["fetch", "origin"],
+            "git fetch",
+            &[
+                (
+                    "GIT_ASKPASS".to_string(),
+                    "/secret/credential-helper".to_string(),
+                ),
+                (
+                    "GIT_CONFIG_VALUE_0".to_string(),
+                    "/secret/never-echo-helper".to_string(),
+                ),
+            ],
+        )
+        .expect_err("unreachable origin fails");
+
+        assert_eq!(err.details["command"], "git fetch origin");
+        assert!(err.details.get("env").is_none());
+        assert!(!err.message.contains("/secret/"));
+        assert_eq!(
+            err.details.get("command").and_then(|value| value.as_str()),
+            Some("git fetch origin")
+        );
+    }
 
     #[test]
     fn run_git_failure_includes_command_cwd_exit_stdout_and_stderr() {
@@ -1384,6 +1423,7 @@ mod tests {
 
     #[test]
     fn fetch_and_merge_upstream_uses_the_caller_deadline_for_authority_wait() {
+        let _env_lock = crate::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let repository = dir.path();
         git(repository, &["init", "-q", "-b", "main"]);

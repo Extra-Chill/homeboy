@@ -65,20 +65,17 @@ pub enum AgentTaskCommand {
     /// WAIT POLICY: Cook always persists a durable run id before materialization,
     /// so a returned command is not by itself proof of a completed cook.
     ///
-    /// By default Cook observes until the lifecycle is terminal and returns the
-    /// terminal Cook report.
-    ///
-    /// `--detach-after-handoff` returns once the controller durably owns the
+    /// By default Cook returns once the controller durably owns the
     /// run. Its submission result reports `accepted` after executable-attempt
     /// materialization or `pending` while a live supervised child is still
     /// preparing. It is honored on every placement: with `--placement local`
     /// the Cook is re-executed in its own session, so it survives a client that
     /// is interrupted or times out.
     ///
-    /// Do not infer the wait policy from client interactivity. An orchestration
-    /// client that needs the detached contract should pass
-    /// `--detach-after-handoff` rather than rely on the default, and read the
-    /// terminal outcome from `agent-task status <run-id>` in either case.
+    /// Pass global `--wait` to observe until terminal completion and return the
+    /// terminal exit status. Placement and durable ownership are independent of
+    /// this wait policy. Inspect with `agent-task status <run-id>` or follow with
+    /// `runs watch <run-id>`. Preview remains synchronous and executes no work.
     #[command(
         after_help = "Quick start:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy'\n\nBackend selection: pass --backend explicitly, configure agent_task.default_backend, or use --preview to see the ready backend routes. Preview adds --backend to its replay command only when exactly one ready route is eligible; multiple ready routes require an explicit choice.\n\nNo default configured (agent_task.default_backend unset, e.g. a fresh or reset agent_task: {}): run `homeboy agent-task providers --set-default` to live-probe every declared backend and write a working default_backend/rotation from what actually authenticates here.\n\nInspect inferred inputs without side effects:\n  homeboy agent-task cook --repo REPO --task-url URL --prompt @task.md --verify 'homeboy review test homeboy' --preview\n\nUse --help-full for the complete advanced option reference."
     )]
@@ -87,6 +84,8 @@ pub enum AgentTaskCommand {
     /// The persisted recipe supplies the original prompt, transport, gates,
     /// worktree, and disclosure policy.
     CookContinue(CookContinueArgs),
+    /// Attach candidate-bound review findings to an existing Cook.
+    CookFeedback(CookFeedbackArgs),
     /// Operate durable defined multi-agent loops: define, inspect, resume, and stop.
     ///
     /// A loop is not a one-shot PR cook. It persists controller state, tracks
@@ -299,6 +298,36 @@ pub struct CookContinueArgs {
     pub full: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct CookFeedbackArgs {
+    /// Durable Cook ID receiving the review.
+    pub cook_id: String,
+    /// Reviewed commit, artifact, or other durable candidate identity.
+    #[arg(long, value_name = "IDENTITY")]
+    pub candidate: Option<String>,
+    /// Inline Markdown feedback.
+    #[arg(long, conflicts_with_all = ["file", "stdin"])]
+    pub text: Option<String>,
+    /// Markdown file containing feedback.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["text", "stdin"])]
+    pub file: Option<String>,
+    /// Read Markdown feedback from stdin.
+    #[arg(long, conflicts_with_all = ["text", "file"])]
+    pub stdin: bool,
+    /// Reviewer identity retained with the finding.
+    #[arg(long, default_value = "operator")]
+    pub author: String,
+    /// Source label retained with the finding.
+    #[arg(long, default_value = "review")]
+    pub source: String,
+    /// Stable retry key. Reusing it returns the original durable finding.
+    #[arg(long)]
+    pub idempotency_key: Option<String>,
+    /// Read the durable feedback ledger instead of submitting a finding.
+    #[arg(long)]
+    pub status: bool,
+}
+
 #[cfg(test)]
 mod cook_continue_tests {
     use clap::Parser;
@@ -378,6 +407,54 @@ mod cook_continue_tests {
             "run-a",
             "--model",
             "replacement-model",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn feedback_accepts_inline_file_or_stdin_contract_and_status() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--text",
+            "fix this",
+            "--idempotency-key",
+            "review-1",
+        ])
+        .expect("inline feedback parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::CookFeedback(args) = agent_task.command else {
+            panic!("expected cook-feedback command");
+        };
+        assert_eq!(args.candidate.as_deref(), Some("candidate-a"));
+        assert_eq!(args.text.as_deref(), Some("fix this"));
+        assert!(!args.status);
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--status",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook-feedback",
+            "cook-1",
+            "--candidate",
+            "candidate-a",
+            "--text",
+            "one",
+            "--stdin",
         ])
         .is_err());
     }

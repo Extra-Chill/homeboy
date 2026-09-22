@@ -922,6 +922,7 @@ fn run_pre_build_scripts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::error::ErrorCode;
 
     #[test]
     fn build_timeout_preserves_long_default_and_accepts_override() {
@@ -1002,7 +1003,7 @@ mod tests {
 
             let error = execute_build_component(&component, None)
                 .expect_err("capacity admission must run before the build script");
-            assert!(error.is_storage_exhausted());
+            assert_eq!(error.code, ErrorCode::ResourceCapacityReserve);
         });
     }
 

@@ -134,12 +134,23 @@ impl NotifyEvent {
         }
     }
 
-    /// Bind an explicit destination. A `None` route leaves the event route-less,
-    /// so it resolves through the configured operations default instead.
+    /// Bind an explicit destination. A `None` route without a caller-selected
+    /// transport leaves the event fully route-less, so it resolves through
+    /// the configured operations default instead. A caller can also select a
+    /// transport that ends up with no route (no declared resolver, or an
+    /// unmatched one); that selection is not "no context" and must not be
+    /// silently replaced by an unrelated default, so it is read back from the
+    /// resolution evidence the runtime already binds alongside the route.
     pub fn with_route(mut self, route: Option<&NotificationRoute>) -> Self {
-        if let Some(route) = route {
-            self.transport = Some(route.transport.clone());
-            self.route = Some(route.route.clone());
+        match route {
+            Some(route) => {
+                self.transport = Some(route.transport.clone());
+                self.route = Some(route.route.clone());
+            }
+            None => {
+                self.transport = crate::notification_route::current_resolution()
+                    .and_then(|resolution| resolution.transport);
+            }
         }
         self
     }
@@ -588,6 +599,38 @@ mod tests {
             ));
             assert!(!outcome.delivered);
             assert!(outcome.error.unwrap().contains("missing.transport"));
+        });
+    }
+
+    /// A caller-selected transport that resolved with no route (no declared
+    /// resolver, or an unmatched one) is not "no context supplied": it must
+    /// still receive the event, rather than being silently replaced by
+    /// whatever operations default happens to be configured.
+    #[test]
+    fn route_less_transport_selection_is_not_overridden_by_operations_default() {
+        use crate::notification_route::{with_current_resolution, NotificationRouteResolution};
+
+        crate::test_support::with_isolated_home(|_| {
+            install_transport("chosen.transport", vec!["true"]);
+            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+                notifications: crate::defaults::NotificationConfig {
+                    default_transport: Some("other.default".to_string()),
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            let mut evidence = NotificationRouteResolution::new("route_less");
+            evidence.transport = Some("chosen.transport".to_string());
+            let outcome = with_current_resolution(Some(evidence), || {
+                dispatch(&NotifyEvent::run_completed_with_route(
+                    "run-123", "pass", None,
+                ))
+            });
+            assert!(outcome.delivered);
+            let NotifyDelivery::Transport { transport_id, .. } = outcome.delivery else {
+                panic!("expected transport delivery");
+            };
+            assert_eq!(transport_id, "chosen.transport");
         });
     }
 

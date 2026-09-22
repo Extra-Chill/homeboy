@@ -334,7 +334,8 @@ fn terminal_payload(
     component: Option<&str>,
     exit_code: i32,
 ) -> NotifyPayload {
-    let kind = if exit_code == 0 {
+    let cancelled = report.status == "cancelled";
+    let kind = if exit_code == 0 || cancelled {
         NotifyEventKind::Completed
     } else {
         NotifyEventKind::NeedsAttention
@@ -449,6 +450,8 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
             "cook {} — {}",
             if succeeded {
                 "succeeded"
+            } else if report.status == "cancelled" {
+                "cancelled"
             } else {
                 "needs attention"
             },

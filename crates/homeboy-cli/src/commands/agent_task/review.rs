@@ -800,6 +800,49 @@ impl PromotionProgressReporter {
     }
 }
 
+struct AdoptionProgressReporter {
+    stopped: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AdoptionProgressReporter {
+    fn new(source: &str, candidate_ref: &str, interval: std::time::Duration) -> Self {
+        promotion_progress_line(&format!(
+            "adoption: candidate `{candidate_ref}` accepted for `{source}`; status -> homeboy agent-task status {source}"
+        ));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
+        let started = Instant::now();
+        let source = source.to_string();
+        let worker = std::thread::spawn(move || {
+            while !worker_stopped.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + interval;
+                while !worker_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if worker_stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                promotion_progress_line(&format!(
+                    "adoption heartbeat: source={source} phase=verification elapsed={}s; status -> homeboy agent-task status {source}",
+                    started.elapsed().as_secs(),
+                ));
+            }
+        });
+        Self {
+            stopped,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn promotion_progress_line(message: &str) {
     let message = homeboy::core::redaction::redact_string(message);
     if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
@@ -824,6 +867,11 @@ fn promotion_progress_line(message: &str) {
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
+    let reporter = AdoptionProgressReporter::new(
+        &args.run_or_cook_id,
+        &args.candidate_ref,
+        std::time::Duration::from_secs(5),
+    );
     let result =
         agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
             &args.run_or_cook_id,
@@ -836,7 +884,9 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
             Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        )?;
+        );
+    reporter.finish();
+    let result = result?;
     let exit_code = result.exit_code;
     let cook_id = result.value.cook_id.clone();
     let selected_attempt = result.value.attempts.first().ok_or_else(|| {
@@ -1871,7 +1921,7 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
 
     serde_json::json!({
         "schema": AGENT_TASK_PROVIDER_SCOPE_SCHEMA,
-        "location": location,
+        "location": if runner_id.is_some() { "runner" } else { location },
         "runner_id": runner_id,
         "label": label,
         "homeboy_identity": {
@@ -2216,6 +2266,12 @@ fn provider_status(
             "credentials_present" => "present",
             "credentials_unverified" => "unverified",
             "credentials_unusable" => "unusable",
+            // Capacity exhaustion is not "unavailable" the way a missing
+            // credential or dead runtime is: the account is authenticated and
+            // otherwise fine, just out of capacity until a known/unknown
+            // reset. Keep it distinguishable in the same status vocabulary an
+            // operator already filters `--status` on (#14858).
+            "capacity_exhausted" => "exhausted",
             _ => "unavailable",
         };
     }
@@ -2305,6 +2361,18 @@ fn compact_provider(
                 "configuration": compact_check(dispatchability.checks.configuration.ready, dispatchability.checks.configuration.reason.as_deref()),
                 "runtime": compact_check(dispatchability.checks.runtime.ready, dispatchability.checks.runtime.reason.as_deref()),
             },
+            // Per-connected-account capacity as typed readiness evidence
+            // (#14858), observable before dispatch through this same
+            // inspection command. `null` only when the live probe never ran
+            // (e.g. `--validate-readiness` was not passed); a provider that
+            // ran its probe but published nothing reports `unknown` with a
+            // reason here, not `null`.
+            "capacity": dispatchability
+                .readiness
+                .live_inference
+                .evidence
+                .as_ref()
+                .map(|evidence| serde_json::to_value(&evidence.capacity).unwrap_or(Value::Null)),
         },
         "default_backend": provider.default_backend,
         "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 64)).collect::<Vec<_>>(),
@@ -3799,6 +3867,84 @@ mod tests {
                 output["readiness_validation"]["live_inference"]["evidence"]["classification"],
                 "account"
             );
+        });
+    }
+
+    /// #14858 acceptance: capacity exhaustion is a distinct typed readiness
+    /// state from account/credential unavailability, and carries its reset
+    /// instant. Querying one explicitly-named, not-yet-recovered `--backend`
+    /// fails fast with a structured error (the same behavior an explicitly
+    /// named `account_unavailable`/`credentials_unusable` backend already
+    /// gets here) — the capacity evidence rides in that error's structured
+    /// detail rather than a success envelope, but it is still observable
+    /// through this same inspection command before any dispatch is attempted.
+    #[test]
+    fn providers_reports_capacity_exhaustion_distinctly_with_its_reset_instant() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut provider = provider("capped.provider", "capped");
+            provider.cli.profiles = serde_json::from_value(serde_json::json!([
+                { "name": "capped", "model": "capped-model" }
+            ]))
+            .expect("provider profile");
+            provider.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":false,\"classification\":\"capacity\",\"retryable\":true,\"remediation\":\"wait for the reset window\",\"reason\":\"5-hour usage limit reached\",\"cache_key\":\"capped-account\",\"identity\":{\"account\":\"capped\"},\"capacity\":{\"remaining\":0,\"reset_at\":\"2026-08-27T12:37:03Z\"}}'"]
+                }))
+                .expect("capacity-exhausted readiness invocation"),
+            );
+            let mut args = providers_args();
+            args.backend = Some("capped".to_string());
+            args.selector = Some("capped.provider".to_string());
+            args.model = Some("capped-model".to_string());
+            args.validate_readiness = true;
+
+            let error = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect_err("an explicitly-named capacity-exhausted backend fails fast");
+
+            assert!(
+                error.message.contains("capacity_exhausted"),
+                "capacity exhaustion must not read as the generic account/runtime buckets: {}",
+                error.message
+            );
+            let verdict = error.details["tried"][0]
+                .as_str()
+                .expect("structured verdict detail");
+            assert!(verdict.contains("\"state\":\"capacity_exhausted\""));
+            assert!(
+                verdict.contains("\"capacity\":{\"state\":\"exhausted\",\"reset_at\":\"2026-08-27T12:37:03+00:00\""),
+                "capacity evidence must carry its reset instant structurally: {verdict}"
+            );
+        });
+    }
+
+    /// #14858 acceptance: unknown capacity. A provider that never fills in
+    /// `capacity` remains dispatchable and is reported as unknown with a
+    /// reason, never silently treated as unavailable nor as available.
+    #[test]
+    fn providers_reports_unknown_capacity_when_a_provider_publishes_nothing() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut provider = provider("silent.provider", "silent");
+            provider.readiness_invocation = Some(
+                serde_json::from_value(serde_json::json!({
+                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
+                }))
+                .expect("silent readiness invocation"),
+            );
+            let mut args = providers_args();
+            args.backend = Some("silent".to_string());
+            args.selector = Some("silent.provider".to_string());
+            args.validate_readiness = true;
+
+            let (output, status) = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect("silent-capacity provider report");
+
+            assert_eq!(status, 0);
+            assert_eq!(output["dispatchability"]["ready"], true);
+            let capacity = &output["providers"][0]["dispatchability"]["capacity"];
+            assert_eq!(capacity["state"], "unknown");
+            assert!(capacity["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()));
         });
     }
 

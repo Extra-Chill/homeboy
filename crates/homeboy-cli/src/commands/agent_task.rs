@@ -18,6 +18,7 @@ pub mod controller;
 pub(crate) mod default_branch;
 pub mod doctor;
 pub mod fanout;
+pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod loop_definition;
 pub mod prompts;
@@ -40,13 +41,13 @@ pub use args::{
     AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
-    CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
-    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, MigrateEventHistoryArgs,
-    PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs, QuarantineArgs,
-    RearmArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs, ReplayProviderBoundaryArgs,
-    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
-    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, ValidatePlanArgs,
-    VerifyGateArgs, VerifyReplacementArgs,
+    CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, CookFeedbackArgs,
+    DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs,
+    MigrateEventHistoryArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs,
+    ProvidersArgs, QuarantineArgs, RearmArgs, ReconcileRecordsArgs, RecordReplacementGateProofArgs,
+    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
+    ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs,
+    ValidatePlanArgs, VerifyGateArgs, VerifyReplacementArgs,
 };
 
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
@@ -317,6 +318,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             run::preflight_continue_cook(args)
         }
         AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
+        AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),

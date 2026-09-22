@@ -62,22 +62,19 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
         String::from_utf8_lossy(&submitted.stderr)
     );
 
-    let mut status = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    status.current_dir(foreign.path()).args([
-        "agent-task",
-        "status",
-        "foreign-runtime-provenance",
-        "--full",
-    ]);
-    let status = bounded_output(status);
-    assert!(
-        status.status.success(),
-        "status failed: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    let status: serde_json::Value =
-        serde_json::from_slice(&status.stdout).expect("status is structured JSON");
-    let source = &status["data"]["metadata"]["controller_runtime"]["originating"]["source"];
+    // The CLI's `agent-task status` projection is a bounded operator summary:
+    // it carries `runtime.build_identity` but no `metadata`, so the originating
+    // source provenance this test exists to pin is not reachable through it at
+    // all (the earlier `--full` flag it passed does not exist). Read the
+    // durable lifecycle record instead, which is where the controller runtime
+    // records that provenance and where the library-level coverage asserts it.
+    let record =
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots())
+            .read_record("foreign-runtime-provenance")
+            .expect("durable lifecycle record for the submitted run");
+    let source = &record.metadata
+        [homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
+        ["source"];
 
     assert_eq!(
         source["repository"],
@@ -88,13 +85,15 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
     assert_ne!(source["revision"], foreign_revision);
     assert_ne!(source["verification"], "observed_from_process_cwd");
     assert!(
-        status["data"]["metadata"]["controller_runtime"]["originating"]["sha256"]
+        record.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["sha256"]
             .as_str()
             .is_some_and(|digest| !digest.is_empty()),
         "immutable executable hash evidence is retained"
     );
     assert!(
-        status["data"]["metadata"]["controller_runtime"]["originating"]["build_identity"]
+        record.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["build_identity"]
             .as_str()
             .is_some_and(|identity| !identity.is_empty()),
         "build identity evidence is retained"

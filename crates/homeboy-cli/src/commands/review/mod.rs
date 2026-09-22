@@ -1064,11 +1064,12 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 }
 
 /// Start changed-only summary review in an independent session. This narrow
-/// form is intentionally asynchronous: its durable run is admitted before any
-/// component, dependency, or changed-scope discovery can block.
+/// form admits its durable run before component, dependency, or changed-scope
+/// discovery can block. `wait` observes that worker's terminal exit status.
 pub(crate) fn detach_changed_only_summary(
     args: &ReviewArgs,
     normalized_args: &[String],
+    wait: bool,
 ) -> homeboy::core::Result<Option<i32>> {
     if !args.changed.changed_only || !args.summary || args.command.is_some() {
         return Ok(None);
@@ -1102,8 +1103,16 @@ pub(crate) fn detach_changed_only_summary(
         .args(normalized_args.iter().skip(1))
         .env(DETACHED_REVIEW_RUN_ID_ENV, &run_id)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(if wait {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
+        .stderr(if wait {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        });
     homeboy::core::process::detach_from_caller_session(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1141,6 +1150,17 @@ pub(crate) fn detach_changed_only_summary(
         std::thread::sleep(Duration::from_millis(10));
     }
     launcher_observation.progress("handoff", "detached-worker", "accepted");
+    if wait {
+        return child
+            .wait()
+            .map(|status| Some(status.code().unwrap_or(1)))
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("wait for durable review".to_string()),
+                )
+            });
+    }
     println!(
         "{}",
         serde_json::json!({

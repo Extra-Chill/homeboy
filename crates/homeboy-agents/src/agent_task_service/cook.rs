@@ -704,6 +704,48 @@ fn report_cook_progress_with_activity(
     Ok(())
 }
 
+fn admit_cook_runtime_generation(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimeGenerationPinGuard> {
+    let pin_run_id = run_id.to_string();
+    let pin_cook_id = cook_id.to_string();
+    homeboy_core::runtime_promotion::pin_cook_generation_waiting(
+        run_id,
+        Duration::from_secs(30),
+        || {
+            lifecycle_store
+                .read_record(&pin_run_id)
+                .ok()
+                .is_some_and(|record| {
+                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                })
+        },
+        |event| {
+            let detail = format!(
+                "waiting {}ms/{}ms for runtime promotion owner pid {} operation `{}` target `{}` generation `{}`",
+                event.waited_ms,
+                event.wait_timeout_ms,
+                event.owner_pid,
+                event.owner_operation,
+                event.target,
+                event.owner_generation,
+            );
+            let _ = report_cook_progress(
+                lifecycle_store,
+                durable_observer,
+                &pin_cook_id,
+                &pin_run_id,
+                "runtime_promotion_wait",
+                1,
+                Some(&detail),
+            );
+        },
+    )
+}
+
 /// Run one controller startup phase while keeping its already-admitted Cook
 /// observable. Startup work can block on Git, filesystem capacity, or a shared
 /// base-capture lock, so it receives a bounded durable heartbeat before any
@@ -872,7 +914,7 @@ fn promote_with_operation_claim_in_store(
     }
 }
 
-fn bounded_error_diagnostic(error: &Error) -> Value {
+pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
     let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
@@ -1151,7 +1193,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Do not run or report verification commands: Homeboy runs the declared deterministic gates itself after harvest and records the authoritative verification evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Bounded checks are allowed when they reproduce the reported behavior, test a hypothesis, or help develop a regression; describe those as observations, never as authoritative final gate results. Homeboy runs the declared deterministic gates itself after harvest and records that evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
         let form_timeout_ms = review_form_timeout_ms(request);
@@ -1191,7 +1233,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
     }
 
     let mut instructions = vec![
-        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate: use this attempt entirely for the source change, not for running or improvising your own verification.".to_string(),
+        "Declared deterministic gates are controller-owned. Homeboy runs them itself after it harvests your candidate. Use this attempt for the source change and, when useful, bounded checks to reproduce behavior, test a hypothesis, or develop regression coverage. Treat those results as observations for this attempt, not as authoritative final gate results.".to_string(),
     ];
     if !public_gates.is_empty() {
         instructions.push(format!(
@@ -1205,7 +1247,7 @@ fn project_controller_owned_gate_contract(options: &mut CookRequest) {
         ));
     }
     instructions.push(
-        "Do not run or report a verification command yourself; Homeboy records the authoritative gate evidence separately after harvest."
+        "Do not claim a focused check is a final gate result. Homeboy records the authoritative gate evidence separately after harvest."
             .to_string(),
     );
     let contract = instructions.join("\n");
@@ -3249,6 +3291,13 @@ fn persisted_terminal_cook_status(
         .map(CookStatus::from_status)
 }
 
+fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> CookStatus {
+    match state {
+        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+        _ => CookStatus::ProviderFailure,
+    }
+}
+
 /// Report a child from the durable state a previous coordinator left, without
 /// running it. The exit code follows the same rule the live path uses: only a
 /// successful run is a zero exit.
@@ -3746,6 +3795,21 @@ fn remediation_tool_policy_error(request: &crate::agent_task::AgentTaskRequest) 
     })
 }
 
+fn cook_remediation_same_provider(
+    promotion: &AgentTaskPromotionReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    plan: &AgentTaskPlan,
+    durable_provider_executions: Option<&Value>,
+    follow_up: &crate::agent_task::AgentTaskExecutor,
+) -> Option<bool> {
+    // A gate result authenticates the durable candidate and identifies this as
+    // same-provider gate remediation, even when a timed-out provider omitted
+    // its terminal executor identity.
+    promotion.status.gate_failed().then_some(true).or_else(|| {
+        terminal_executor_matches(aggregate, plan, durable_provider_executions, follow_up)
+    })
+}
+
 fn follow_up_budget_scope(
     source_request: &crate::agent_task::AgentTaskRequest,
     follow_up_request: &crate::agent_task::AgentTaskRequest,
@@ -3974,20 +4038,21 @@ pub(crate) fn dispatch_cook_follow_up(
             reason: "max_provider_executions".to_string(),
         });
     };
+    let durable_provider_executions = lifecycle_store
+        .read_record(source_run_id)
+        .ok()
+        .and_then(|record| record.metadata.get("provider_executions").cloned())
+        .filter(|executions| {
+            executions
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        });
     let same_provider = (known_same_executor
         || follow_up_request.inputs["cook_loop"]["review_form_required"] == true)
         .then_some(true)
         .or_else(|| {
-            let durable_provider_executions = lifecycle_store
-                .read_record(source_run_id)
-                .ok()
-                .and_then(|record| record.metadata.get("provider_executions").cloned())
-                .filter(|executions| {
-                    executions
-                        .as_array()
-                        .is_some_and(|executions| !executions.is_empty())
-                });
-            terminal_executor_matches(
+            cook_remediation_same_provider(
+                promotion,
                 aggregate,
                 plan,
                 durable_provider_executions.as_ref(),
@@ -6656,15 +6721,6 @@ fn run_cook_spine(
             &plan,
         )?;
     }
-    report_cook_progress(
-        lifecycle_store,
-        durable_observer,
-        &options.identity.cook_id,
-        &options.identity.initial_run_id,
-        "provider_ready",
-        1,
-        None,
-    )?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
@@ -6683,8 +6739,48 @@ fn run_cook_spine(
     }
     // The initial attempt is the durable status/activity owner. Pin it rather
     // than the stable cook ID, which may not itself name a lifecycle record.
-    let _runtime_generation =
-        homeboy_core::runtime_promotion::pin_cook_generation(&options.identity.initial_run_id)?;
+    // Runtime promotion admission is before provider-ready: a queued Cook must
+    // not advertise a resumable provider phase while it is still waiting for
+    // the shared flock.
+    let pin_run_id = options.identity.initial_run_id.clone();
+    let pin_cook_id = options.identity.cook_id.clone();
+    let _runtime_generation = match admit_cook_runtime_generation(
+        lifecycle_store,
+        durable_observer,
+        &pin_cook_id,
+        &pin_run_id,
+    ) {
+        Ok(pin) => pin,
+        Err(error)
+            if lifecycle_store
+                .read_record(&pin_run_id)
+                .ok()
+                .is_some_and(|record| {
+                    record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                }) =>
+        {
+            return Ok(cook_report(CookReportInput {
+                cook_id: pin_cook_id,
+                status: CookStatus::Cancelled.as_str(),
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(error.to_string()),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&pin_run_id),
+            }));
+        }
+        Err(error) => return Err(error),
+    };
+    report_cook_progress(
+        lifecycle_store,
+        durable_observer,
+        &options.identity.cook_id,
+        &options.identity.initial_run_id,
+        "provider_ready",
+        1,
+        None,
+    )?;
     let max_attempts = options.retry_policy.max_attempts.max(1);
     let mut attempts = Vec::new();
     // A retry may already be durably dispatched when this controller resumes.
@@ -7747,56 +7843,72 @@ fn run_cook_spine(
             let remaining_budget = budget_limit
                 .as_ref()
                 .and_then(|budget| budget_remaining(budget, budget_used));
+            let status = terminal_fallback_status(record.state);
+            let cancelled = status == CookStatus::Cancelled;
             let mut report = cook_report(CookReportInput {
                 cook_id,
-                status: "provider_failure",
+                status: status.as_str(),
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
-                stop_reason: Some(format!(
-                    "agent-task run {run_id} ended in state {:?}",
-                    record.state
-                )),
+                stop_reason: if cancelled {
+                    Some(format!(
+                        "Cook was cancelled: {}",
+                        record.metadata["cancel_reason"]
+                            .as_str()
+                            .unwrap_or("cancel requested")
+                    ))
+                } else {
+                    Some(format!(
+                        "agent-task run {run_id} ended in state {:?}",
+                        record.state
+                    ))
+                },
                 exit_code: 1,
                 invocation_latest_run_id: Some(&run_id),
             });
-            make_provider_timeout_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &plan,
-                &run_id,
-                remaining_budget,
-                agent_task_lifecycle::has_active_provider_execution_in_store(
-                    lifecycle_store,
+            if cancelled {
+                report.value.terminal_phase = Some("cancellation".to_string());
+                report.value.terminal_failure_classification = Some("cancelled".to_string());
+            } else {
+                make_provider_timeout_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &plan,
                     &run_id,
-                )
-                .unwrap_or(true),
-            );
-            make_provider_rotation_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &run_id,
-            );
-            make_startup_without_output_actionable(
-                Some(lifecycle_store),
-                &mut report,
-                &aggregate,
-                &run_id,
-            );
-            if report.value.terminal_phase.is_none() {
-                if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
-                    record.metadata["provider_executions_consumed"]
-                        .as_u64()
-                        .unwrap_or(0),
-                    aggregate
-                        .outcomes
-                        .iter()
-                        .flat_map(|outcome| &outcome.diagnostics),
-                ) {
-                    report.value.terminal_phase = Some(phase);
-                    report.value.terminal_failure_classification = Some(classification);
+                    remaining_budget,
+                    agent_task_lifecycle::has_active_provider_execution_in_store(
+                        lifecycle_store,
+                        &run_id,
+                    )
+                    .unwrap_or(true),
+                );
+                make_provider_rotation_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &run_id,
+                );
+                make_startup_without_output_actionable(
+                    Some(lifecycle_store),
+                    &mut report,
+                    &aggregate,
+                    &run_id,
+                );
+                if report.value.terminal_phase.is_none() {
+                    if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
+                        record.metadata["provider_executions_consumed"]
+                            .as_u64()
+                            .unwrap_or(0),
+                        aggregate
+                            .outcomes
+                            .iter()
+                            .flat_map(|outcome| &outcome.diagnostics),
+                    ) {
+                        report.value.terminal_phase = Some(phase);
+                        report.value.terminal_failure_classification = Some(classification);
+                    }
                 }
             }
             return Ok(report);
@@ -8441,6 +8553,21 @@ fn run_cook_spine(
                         "at least one deterministic gate could not execute under the resolved \
      placement and deferred; the candidate patch is promoted and unverified, not rejected. \
      Retry once the required environment (e.g. a ready Lab runner) is available"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
+            AgentTaskCookLoopStatus::GateDeclarationInvalid => {
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: "gate_declaration_invalid",
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        "a declared deterministic gate is invalid or selects an inadmissible test population; correct the gate declaration and start Cook again"
                             .to_string(),
                     ),
                     exit_code: 1,

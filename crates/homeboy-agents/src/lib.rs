@@ -23,6 +23,7 @@ pub mod agent_task_dispatch_service;
 pub mod agent_task_executor_evidence;
 pub(crate) mod agent_task_fanout;
 pub(crate) mod agent_task_fanout_supervisor;
+pub mod agent_task_feedback;
 pub(crate) mod agent_task_finalization;
 pub(crate) mod agent_task_gate;
 pub(crate) mod agent_task_gate_executor;

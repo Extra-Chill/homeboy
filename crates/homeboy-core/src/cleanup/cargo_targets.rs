@@ -1191,33 +1191,77 @@ fn admit_shared_cargo_target_with_capacity(
         .filter(|store| !store.reasons.iter().any(|reason| reason == "active_lease"))
         .collect();
     reclaimable.sort_by_key(|store| std::cmp::Reverse(store.size_bytes));
+    let reclaimable_bytes: u64 = reclaimable.iter().map(|store| store.size_bytes).sum();
+    let caller_owned_bytes: u64 = stores
+        .iter()
+        .filter(|store| is_caller_owned_explicit_target(store))
+        .map(|store| store.size_bytes)
+        .sum();
+    let active_lease_bytes: u64 = stores
+        .iter()
+        .filter(|store| !is_caller_owned_explicit_target(store))
+        .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
+        .map(|store| store.size_bytes)
+        .sum();
     let protected_bytes: u64 = stores
         .iter()
         .filter(|store| !is_caller_owned_explicit_target(store))
         .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
         .map(|store| store.size_bytes)
         .sum();
+    let inventory_command = "homeboy cleanup --include shared-cargo-targets --limit 5";
+    let apply_command = "homeboy cleanup --include shared-cargo-targets --apply";
+    let no_eligible_reclaim = reclaimable_bytes == 0;
+    let message = if no_eligible_reclaim {
+        if caller_owned_bytes > 0 {
+            "target filesystem is below the configured free-space reserve; no eligible Homeboy-managed Cargo store can be reclaimed (caller-owned explicit targets are retained)"
+        } else {
+            "target filesystem is below the configured free-space reserve; no eligible Homeboy-managed Cargo store can be reclaimed"
+        }
+    } else {
+        "target filesystem does not satisfy the configured free-space reserve"
+    };
+    let recovery_command = if no_eligible_reclaim {
+        inventory_command
+    } else {
+        apply_command
+    };
     let mut error = Error::validation_invalid_argument(
         "shared_cargo_target",
-        "target filesystem does not satisfy the configured free-space reserve",
+        message,
         Some(root.display().to_string()),
-        Some(vec![
-            "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
-        ]),
+        Some(vec![recovery_command.to_string()]),
     );
     error.details["filesystem"] = json!(capacity.filesystem);
     error.details["available_bytes"] = json!(capacity.available_bytes);
     error.details["available_inodes"] = json!(capacity.available_inodes);
     error.details["reserve_bytes"] = json!(retention.shared_store_reserve_bytes);
     error.details["reserve_inodes"] = json!(retention.shared_store_reserve_inodes);
+    error.details["eligible_reclaimable_bytes"] = json!(reclaimable_bytes);
+    error.details["caller_owned_bytes"] = json!(caller_owned_bytes);
+    error.details["active_lease_bytes"] = json!(active_lease_bytes);
     error.details["protected_bytes"] = json!(protected_bytes);
     error.details["largest_reclaimable_stores"] = json!(reclaimable
         .into_iter()
         .take(5)
         .map(|store| json!({ "path": store.path, "size_bytes": store.size_bytes }))
         .collect::<Vec<_>>());
-    error.details["cleanup_command"] =
-        json!("homeboy cleanup --include shared-cargo-targets --apply");
+    error.details["cleanup_command"] = json!(recovery_command);
+    error.details["inventory_command"] = json!(inventory_command);
+    error.details["recovery"] = json!(if no_eligible_reclaim {
+        "Inspect the bounded inventory, stop any owning build, and reclaim caller-owned targets only through their owner."
+    } else {
+        "Apply the eligible Homeboy-managed stores, then retry admission."
+    });
+    if no_eligible_reclaim {
+        error = error.with_hint(format!(
+            "No safe Homeboy reclaim is available. Inspect the bounded inventory with `{inventory_command}`; caller-owned targets require recovery by their owning build or operator."
+        ));
+    } else {
+        error = error.with_hint(format!(
+            "Reclaim eligible shared Cargo stores with `{apply_command}`, then retry."
+        ));
+    }
     Err(error)
 }
 
@@ -1750,6 +1794,8 @@ mod tests {
         assert_eq!(error.details["reserve_bytes"], 100);
         assert_eq!(error.details["reserve_inodes"], 10);
         assert_eq!(error.details["protected_bytes"], 7);
+        assert_eq!(error.details["eligible_reclaimable_bytes"], 12);
+        assert_eq!(error.details["caller_owned_bytes"], 0);
         assert_eq!(
             error.details["largest_reclaimable_stores"][0]["path"],
             reclaimable.display().to_string()
@@ -1759,6 +1805,59 @@ mod tests {
             "homeboy cleanup --include shared-cargo-targets --apply"
         );
         assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn admission_does_not_offer_a_noop_apply_for_caller_owned_targets() {
+        let root = TempDir::new().unwrap();
+        let source = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let explicit = acquire_explicit_cargo_target_in(
+            root.path(),
+            "caller-owned",
+            source.path(),
+            "generated-target",
+            now,
+        )
+        .unwrap();
+        fs::create_dir_all(explicit.target_dir()).unwrap();
+        fs::write(explicit.target_dir().join("artifact"), vec![b'x'; 12]).unwrap();
+        drop(explicit);
+
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            shared_store_reserve_inodes: 10,
+            ..crate::defaults::RetentionConfig::default()
+        };
+        let error = admit_shared_cargo_target_with_capacity(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: 9,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.details["eligible_reclaimable_bytes"], 0);
+        assert_eq!(error.details["caller_owned_bytes"], 12);
+        assert_eq!(
+            error.details["cleanup_command"],
+            "homeboy cleanup --include shared-cargo-targets --limit 5"
+        );
+        assert_eq!(
+            error.details["inventory_command"],
+            "homeboy cleanup --include shared-cargo-targets --limit 5"
+        );
+        assert!(error
+            .message
+            .contains("no eligible Homeboy-managed Cargo store"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("bounded inventory")));
+        assert!(source.path().join("generated-target/artifact").exists());
     }
 
     #[test]

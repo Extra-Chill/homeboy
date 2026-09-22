@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::work_job::{
-    register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation, WorkJobPhase,
+    register_work_job_handler, work_job_submission, WorkJobHandler, WorkJobInvocation,
+    WorkJobPhase, WorkJobStep,
 };
 use crate::agent_task_loop_controller::{self, AgentTaskLoopControllerState};
 
@@ -164,17 +164,29 @@ impl WorkJobHandler for LoopWorkHandler {
         job.to_checkpoint()
     }
 
-    fn advance(
-        &self,
-        checkpoint: Value,
-        handle: WorkJobHandle,
-        invocation: WorkJobInvocation,
-    ) -> Result<Value> {
+    fn initial_progress(&self, checkpoint: &Value) -> Result<Value> {
+        Ok(AgentTaskLoopJob::parse(checkpoint.clone())?.result())
+    }
+
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>> {
+        let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
+        job.phase
+            .eq(&WorkJobPhase::Completed)
+            .then(|| Ok(job.result()))
+            .transpose()
+    }
+
+    fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskLoopJob::parse(checkpoint)?;
-        if invocation == WorkJobInvocation::Resume && job.phase == WorkJobPhase::Completed {
-            return Ok(job.result());
+        if job.phase == WorkJobPhase::Completed {
+            return Ok(WorkJobStep::Complete(job.result()));
         }
-        self.supervise(&mut job, handle)
+        self.observe(&mut job, invocation)
+    }
+
+    fn cancelled(&self, checkpoint: Value) -> Result<Value> {
+        let mut job = AgentTaskLoopJob::parse(checkpoint)?;
+        terminalize_interrupted(&mut job, AgentTaskLoopControllerState::Abandoned)
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -187,41 +199,44 @@ impl WorkJobHandler for LoopWorkHandler {
         {
             return Ok(());
         }
+        if controller_state_is_terminal(
+            agent_task_loop_controller::controller_status(&job.request.loop_id)?.state,
+        ) {
+            return Ok(());
+        }
         homeboy_core::process::terminate_process_tree(job.request.child_pid).map(|_| ())
     }
 }
 
 impl LoopWorkHandler {
-    fn supervise(&self, job: &mut AgentTaskLoopJob, handle: WorkJobHandle) -> Result<Value> {
+    fn observe(
+        &self,
+        job: &mut AgentTaskLoopJob,
+        _invocation: WorkJobInvocation,
+    ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
-        handle.checkpoint(job.to_checkpoint()?)?;
-        handle.progress(job.result())?;
-
-        loop {
-            if job.refresh_controller_state() {
-                handle.checkpoint(job.to_checkpoint()?)?;
-                handle.progress(job.result())?;
-            }
-            if job
-                .controller_state
-                .is_some_and(controller_state_is_terminal)
-            {
-                job.phase = WorkJobPhase::Completed;
-                return Ok(job.result());
-            }
-            if handle.is_cancelled() {
-                let _ = self.cancel(&job.to_checkpoint()?);
-                return terminalize_interrupted(job, AgentTaskLoopControllerState::Abandoned);
-            }
-            if !super::work_job::supervised_child_is_live(
-                job.request.child_pid,
-                &job.request.child_start_identity,
-            ) {
-                return terminalize_interrupted(job, AgentTaskLoopControllerState::Failed);
-            }
-            std::thread::sleep(SUPERVISION_POLL);
+        if job
+            .controller_state
+            .is_some_and(controller_state_is_terminal)
+        {
+            job.phase = WorkJobPhase::Completed;
+            return Ok(WorkJobStep::Complete(job.result()));
         }
+        if !super::work_job::supervised_child_is_live(
+            job.request.child_pid,
+            &job.request.child_start_identity,
+        ) {
+            return Ok(WorkJobStep::Complete(terminalize_interrupted(
+                job,
+                AgentTaskLoopControllerState::Failed,
+            )?));
+        }
+        Ok(WorkJobStep::Continue {
+            checkpoint: job.to_checkpoint()?,
+            progress: job.result(),
+            wait: SUPERVISION_POLL,
+        })
     }
 }
 
@@ -375,6 +390,9 @@ mod tests {
                 .expect("construct work harness");
             let mut checkpoint = driver.prepare(request).expect("prepare loop work");
             checkpoint["checkpoint"]["phase"] = json!("completed");
+            harness
+                .request_cancellation("cancel racing terminal replay")
+                .expect("request cancellation");
 
             let first = driver
                 .resume(checkpoint.clone(), harness.handle())
@@ -385,6 +403,117 @@ mod tests {
 
             assert_eq!(first, second);
             assert_eq!(first["result"]["controller_state"], "completed");
+            assert_eq!(
+                agent_task_loop_controller::load_controller("loop-complete")
+                    .expect("read terminal controller")
+                    .state,
+                AgentTaskLoopControllerState::Completed
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_preserves_a_controller_that_terminalized_while_child_lives() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-cancel-racing-terminal";
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let request = loop_work_job_submission(loop_id, child.id(), &identity)
+                .expect("build submission")["request"]
+                .clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct work harness");
+            let prepared = driver.prepare(request).expect("prepare loop work");
+
+            record.state = AgentTaskLoopControllerState::Completed;
+            agent_task_loop_controller::write_controller(&record).expect("complete controller");
+            harness
+                .request_cancellation("cancel racing terminal controller")
+                .expect("request cancellation");
+
+            driver
+                .cancel(&prepared)
+                .expect("authoritative cancel recheck");
+            let result = driver
+                .resume(prepared, harness.handle())
+                .expect("preserve terminal controller outcome");
+
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["controller_state"], "completed");
+            assert!(matches!(
+                homeboy_core::process::process_identity_state(child.id(), None),
+                ProcessIdentityState::Live
+            ));
+
+            homeboy_core::process::terminate_process_tree(child.id()).expect("clean fixture child");
+            let _ = child.wait();
+        });
+    }
+
+    #[test]
+    fn idle_ticks_do_not_repeat_checkpoint_or_progress_writes() {
+        with_isolated_home(|_| {
+            agent_task_loop_controller::create_controller("loop-idle", "repair", "v1")
+                .expect("create controller");
+            let child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let request = loop_work_job_submission("loop-idle", child.id(), &identity)
+                .expect("build submission")["request"]
+                .clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = Arc::new(
+                ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                    .expect("construct work harness"),
+            );
+            let prepared = driver.prepare(request).expect("prepare loop work");
+            let thread_harness = Arc::clone(&harness);
+            let thread_driver = Arc::clone(&driver);
+            let execution = std::thread::spawn(move || {
+                thread_driver
+                    .execute(prepared, thread_harness.handle())
+                    .expect("execute idle loop");
+            });
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while harness.events().expect("read events").len() < 2 {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "initial events missing"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let initial_events = harness.events().expect("read initial events").len();
+            std::thread::sleep(Duration::from_millis(650));
+            assert_eq!(
+                harness.events().expect("read idle events").len(),
+                initial_events
+            );
+
+            harness
+                .request_cancellation("stop idle loop")
+                .expect("request cancellation");
+            driver
+                .cancel(
+                    &harness
+                        .checkpoint()
+                        .expect("read checkpoint")
+                        .expect("checkpoint"),
+                )
+                .expect("cancel coordinator");
+            execution.join().expect("join loop execution");
         });
     }
 

@@ -31,7 +31,6 @@ fn root_global_flag_surface_is_pinned() {
             "allow-dirty-lab-workspace",
             "artifact-root",
             "delete-workspace-on-failure",
-            "detach-after-handoff",
             "lab-env-json",
             "notification-route",
             "notification-transport",
@@ -42,6 +41,7 @@ fn root_global_flag_surface_is_pinned() {
             "runner-secret-env",
             "runner-workspace-root",
             "skip-deps-hydration",
+            "wait",
         ],
         "the globally-propagated flag surface changed; update remote \
          capability negotiation and docs before accepting this",

@@ -190,11 +190,12 @@ pub mod dispatch_service {
     };
     pub use super::super::agent_task_dispatch_service::{
         build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
-        preflight_dispatch_provider_admission, resolve_cook_initial_provider_route_with_catalog,
-        resolve_dispatch_request, resolve_dispatch_request_with_default,
-        resolve_dispatch_request_with_default_and_catalog, run_dispatch_command,
-        AgentTaskDispatchCommand, AgentTaskDispatchRequest, DispatchCoreInputs,
-        DISPATCH_RESULT_SCHEMA,
+        preflight_dispatch_provider_admission, require_model_override_acknowledgement,
+        require_model_override_acknowledgement_with_catalog,
+        resolve_cook_initial_provider_route_with_catalog, resolve_dispatch_request,
+        resolve_dispatch_request_with_default, resolve_dispatch_request_with_default_and_catalog,
+        run_dispatch_command, AgentTaskDispatchCommand, AgentTaskDispatchRequest,
+        DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
 }
 
@@ -322,6 +323,14 @@ pub mod provider {
     /// production build: `fixture` is not a registered agent runtime, so no
     /// caller may branch on the name outside a `test-support` build (#11118).
     pub use crate::agent_task_provider::is_fixture_backend;
+    /// Per-connected-account capacity as typed readiness evidence (#14858):
+    /// remaining/limit/reset instant when a provider publishes them, distinct
+    /// from a missing-credential or unusable-runtime state, and explicitly
+    /// `Unknown` (never silently inferred available) when a provider
+    /// publishes nothing.
+    pub use crate::agent_task_provider::{
+        capacity_readiness_from_outcome, AgentTaskProviderCapacityReadiness,
+    };
     pub use crate::agent_task_provider::{
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,

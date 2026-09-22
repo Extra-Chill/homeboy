@@ -324,8 +324,18 @@ fn homeboy_version_skew_check_warns_for_different_build_identities() {
     assert!(check
         .remediation
         .as_deref()
-        .is_some_and(|value| value.contains("common published or source revision")));
-    assert!(check.remediation_action.is_none());
+        .is_some_and(|value| value.contains("Ancestry could not be verified")));
+    assert!(matches!(
+        check.remediation_action,
+        Some(RunnerRepairAction::RefreshHomeboy {
+            allow_downgrade: false,
+            ..
+        })
+    ));
+    assert_eq!(
+        check.details.get("recovery_ref_source").map(String::as_str),
+        Some("controller_build_identity")
+    );
 }
 
 #[test]

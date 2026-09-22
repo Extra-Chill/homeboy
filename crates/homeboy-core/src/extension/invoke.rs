@@ -248,28 +248,44 @@ pub fn run_action(
     action_id: &str,
     project_id: Option<&str>,
     data: Option<&str>,
-) -> Result<serde_json::Value> {
+    payload: Option<&str>,
+) -> Result<(serde_json::Value, i32)> {
     use homeboy_extension_contract::api::v1::{
         ExtensionApiActionInvokeRequest, EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA,
         EXTENSION_API_V1,
     };
 
-    let selected = data
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|error| Error::internal_json(error.to_string(), Some("parse action data".into())))?
-        .unwrap_or_default();
-    action_api::response_value(action_api::invoke_action_api(
-        &ExtensionApiActionInvokeRequest {
-            schema: EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA.to_string(),
-            api_version: EXTENSION_API_V1,
-            extension_id: extension_id.to_string(),
-            action_id: action_id.to_string(),
-            project_id: project_id.map(str::to_string),
-            selected,
-            payload: None,
-        },
-    ))
+    let selected =
+        parse_action_json::<Vec<serde_json::Value>>(data, "action data")?.unwrap_or_default();
+    let payload = parse_action_json(payload, "action payload")?;
+    let response = action_api::invoke_action_api(&ExtensionApiActionInvokeRequest {
+        schema: EXTENSION_API_ACTION_INVOKE_REQUEST_SCHEMA.to_string(),
+        api_version: EXTENSION_API_V1,
+        extension_id: extension_id.to_string(),
+        action_id: action_id.to_string(),
+        project_id: project_id.map(str::to_string),
+        selected,
+        payload,
+    });
+    let exit_code = response
+        .process
+        .as_ref()
+        .and_then(|process| process.exit_code)
+        .unwrap_or(0);
+    Ok((action_api::response_value(response)?, exit_code))
+}
+
+fn parse_action_json<T: serde::de::DeserializeOwned>(
+    spec: Option<&str>,
+    context: &str,
+) -> Result<Option<T>> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let raw = crate::config::read_json_spec_to_string(spec)?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|error| Error::validation_invalid_json(error, Some(context.to_string()), None))
 }
 
 fn extension_runtime(extension: &ExtensionManifest) -> Result<&RuntimeConfig> {

@@ -67,9 +67,11 @@ pub struct Cli {
     )]
     pub placement: Placement,
 
-    /// Submit to Lab and return after durable controller handoff. Omit it to
-    /// keep observing the remote lifecycle, which remains the default.
-    #[arg(long, global = true)]
+    /// Observe eligible durable work until terminal completion and return its
+    /// exit status. By default, return after verified durable controller handoff
+    /// with run identity and inspection commands. Placement is independent.
+    #[arg(long = "wait", id = "wait", global = true, action = clap::ArgAction::SetFalse)]
+    // Keep the execution boundary's effective policy: --wait sets it to false.
     pub detach_after_handoff: bool,
 
     /// Directory where persisted run artifacts are copied.
@@ -1349,13 +1351,49 @@ mod tests {
     }
 
     #[test]
+    fn wait_is_global_and_independent_of_placement() {
+        for placement in ["auto", "local", "lab", "lab-or-local"] {
+            for wait in [false, true] {
+                let mut argv = vec![
+                    "homeboy",
+                    "--placement",
+                    placement,
+                    "agent-task",
+                    "cook",
+                    "--prompt",
+                    "fix it",
+                    "--preview",
+                ];
+                if wait {
+                    argv.push("--wait");
+                }
+                let matches = Cli::command_with_scoped_lab_args()
+                    .try_get_matches_from(&argv)
+                    .unwrap();
+                let (cli, _) = Cli::from_registered_arg_matches(&matches).unwrap();
+                assert_eq!(cli.detach_after_handoff, !wait);
+                assert_eq!(matches.get_flag("wait"), !wait);
+            }
+        }
+        let cli = Cli::try_parse_from(["homeboy", "--wait", "status"]).unwrap();
+        assert!(!cli.detach_after_handoff);
+        assert!(Cli::try_parse_from(["homeboy", "--detach-after-handoff", "status"]).is_err());
+        let cli = Cli::try_parse_from(["homeboy", "runner", "exec", "lab", "--", "tool", "--wait"])
+            .unwrap();
+        assert!(
+            cli.detach_after_handoff,
+            "forwarded --wait belongs to the tool"
+        );
+    }
+
+    #[test]
     fn lab_flags_are_hidden_from_non_portable_command_help() {
         let help = scoped_help(&["contract", "manifest"]);
 
         for flag in [
+            "--wait",
             "--placement",
             "--runner",
-            "--detach-after-handoff",
             "--allow-dirty-lab-workspace",
             "--skip-deps-hydration",
             "--delete-workspace-on-failure",
@@ -1376,9 +1414,9 @@ mod tests {
         let help = scoped_help(&["bench"]);
 
         for flag in [
+            "--wait",
             "--placement",
             "--runner",
-            "--detach-after-handoff",
             "--allow-dirty-lab-workspace",
             "--skip-deps-hydration",
             "--delete-workspace-on-failure",

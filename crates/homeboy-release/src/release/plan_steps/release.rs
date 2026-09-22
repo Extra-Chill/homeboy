@@ -220,12 +220,15 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
             .string("branch", push_branch),
     ));
 
+    let publication_step = add_subtree_publication_step(&mut steps, component, "git.push", options);
+    let publication_need = publication_step.as_deref().unwrap_or("git.push");
+
     if github_release_needed {
         steps.push(ready_step(
             "github.release",
             "github.release",
             "Create GitHub Release",
-            vec!["git.push".to_string()],
+            vec![publication_need.to_string()],
             StepConfig::new(),
         ));
     }
@@ -239,7 +242,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
                 &step_id,
                 &step_id,
                 format!("Publish to {}", target),
-                vec!["git.push".to_string()],
+                vec![publication_need.to_string()],
                 StepConfig::new(),
             ));
         }
@@ -258,7 +261,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
         } else if github_release_needed {
             vec!["github.release".to_string()]
         } else {
-            vec!["git.push".to_string()]
+            vec![publication_need.to_string()]
         };
         steps.push(ready_step(
             "cleanup",
@@ -292,7 +295,7 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
                 vec!["git.push".to_string()]
             }
         } else {
-            vec!["git.push".to_string()]
+            vec![publication_need.to_string()]
         };
 
         steps.push(ready_step(
@@ -396,6 +399,12 @@ fn build_head_release_steps(
                 .string("tag", tag_name),
         ));
         artifact_need = "git.push".to_string();
+    }
+
+    let publication_step =
+        add_subtree_publication_step(&mut steps, component, &artifact_need, options);
+    if let Some(step_id) = publication_step {
+        artifact_need = step_id;
     }
 
     if registry_publish_enabled
@@ -639,6 +648,28 @@ fn add_disabled_publish_steps(steps: &mut Vec<PlanStep>, publish_targets: &[Stri
             string_config("reason", "component release.publish=false"),
         ));
     }
+}
+
+fn add_subtree_publication_step(
+    steps: &mut Vec<PlanStep>,
+    component: &Component,
+    needs: &str,
+    options: &ReleaseOptions,
+) -> Option<String> {
+    if component.release.subtree.is_empty() || options.pipeline.skip_publish {
+        return None;
+    }
+    let id = "git.subtree.publish";
+    steps.push(ready_step(
+        id,
+        id,
+        "Publish configured Git subtrees",
+        vec![needs.to_string()],
+        StepConfig::new()
+            .json("publications", &component.release.subtree)
+            .bool("preview", options.dry_run),
+    ));
+    Some(id.to_string())
 }
 
 fn add_release_extension_diagnostics(

@@ -4,8 +4,6 @@ use std::process::Command;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use homeboy_core::process::pid_has_ownership_token;
 use homeboy_core::test_support::{HermeticDaemonGuard, HermeticTestContext, TestBinary};
 
 #[test]
@@ -375,23 +373,23 @@ fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
         "record both supervisor and server: {pids:?}"
     );
 
+    // Ownership here is proven by the exact `--startup-token` argv value the
+    // daemon publishes for itself (`daemon_pid_owns_token`), not by reading a
+    // foreign process's environment. The supervisor and server are orphaned by
+    // the double-fork that detaches them, so they are neither this test's nor
+    // its `HomeboyFixture` child's direct descendants; reading their
+    // `/proc/<pid>/environ` depends on host ptrace policy this test never
+    // establishes and cannot assume (#14751). The command-line evidence is
+    // published by the same process and requires no such permission.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline
-        && pids.iter().any(|pid| {
-            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", &token)
-                .expect("inspect recorded daemon ownership")
-        })
-    {
+    while Instant::now() < deadline && pids.iter().any(|pid| daemon_pid_owns_token(*pid, &token)) {
         std::thread::sleep(Duration::from_millis(50));
     }
 
     let survivors: Vec<_> = pids
         .iter()
         .copied()
-        .filter(|pid| {
-            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", &token)
-                .expect("inspect recorded daemon ownership")
-        })
+        .filter(|pid| daemon_pid_owns_token(*pid, &token))
         .collect();
     if !survivors.is_empty() {
         // This only runs when the token still proves ownership immediately
@@ -451,13 +449,13 @@ fn assert_dead_idle_lease_recovery(command: &[&str]) {
         );
     }
 
+    // `daemon_pids_for_token` already proves ownership by matching the exact
+    // `--startup-token` argv value in the same `ps` scan that finds the pid,
+    // so a non-empty result is already ownership evidence; a further
+    // environ-based recheck would only add a foreign-process permission
+    // dependency this test does not need (#14751).
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline
-        && daemon_pids_for_token(token).iter().any(|pid| {
-            pid_has_ownership_token(*pid, "HOMEBOY_DAEMON_STARTUP_TOKEN", token)
-                .expect("inspect terminated daemon")
-        })
-    {
+    while Instant::now() < deadline && !daemon_pids_for_token(token).is_empty() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -516,6 +514,31 @@ fn daemon_pids_for_token(token: &str) -> Vec<u32> {
             .flatten()
         })
         .collect()
+}
+
+/// Prove `pid` still owns `token` by reading the exact `--startup-token` argv
+/// value the daemon published for itself via `ps`.
+///
+/// This is deliberately evidence the daemon process itself owns and exposes
+/// through its own command line, not a read of a foreign process's live
+/// environment table. The daemon supervisor and server are detached from this
+/// test's process tree (double-forked so cleanup survives the fixture's own
+/// exit), so a `/proc/<pid>/environ` read depends on host ptrace policy this
+/// test does not establish; `ps` command-line evidence carries no such
+/// dependency (#14751).
+#[cfg(unix)]
+fn daemon_pid_owns_token(pid: u32, token: &str) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    command.contains("daemon") && command.contains("--startup-token") && command.contains(token)
 }
 
 #[cfg(unix)]

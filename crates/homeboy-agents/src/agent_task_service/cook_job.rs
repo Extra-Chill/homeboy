@@ -44,8 +44,8 @@ use homeboy_core::process::ProcessStartIdentity;
 use homeboy_core::{Error, ErrorCode, Result};
 
 use super::work_job::{
-    register_work_job_handler, work_job_submission, WorkJobHandle, WorkJobHandler,
-    WorkJobInvocation, WorkJobPhase,
+    register_work_job_handler, work_job_submission, WorkJobHandler, WorkJobInvocation,
+    WorkJobPhase, WorkJobStep,
 };
 use crate::agent_task_lifecycle;
 
@@ -305,19 +305,29 @@ impl WorkJobHandler for CookWorkHandler {
         job.to_checkpoint()
     }
 
-    fn advance(
-        &self,
-        checkpoint: Value,
-        handle: WorkJobHandle,
-        invocation: WorkJobInvocation,
-    ) -> Result<Value> {
+    fn initial_progress(&self, checkpoint: &Value) -> Result<Value> {
+        Ok(AgentTaskCookJob::parse(checkpoint.clone())?.progress_projection())
+    }
+
+    fn terminal_result(&self, checkpoint: &Value) -> Result<Option<Value>> {
+        let job = AgentTaskCookJob::parse(checkpoint.clone())?;
+        job.phase
+            .eq(&WorkJobPhase::Completed)
+            .then(|| job.completed_result())
+            .transpose()
+    }
+
+    fn advance(&self, checkpoint: Value, invocation: WorkJobInvocation) -> Result<WorkJobStep> {
         let mut job = AgentTaskCookJob::parse(checkpoint)?;
-        if invocation == WorkJobInvocation::Resume
-            && job.resume_disposition() == CookJobResumeDisposition::AlreadyComplete
-        {
-            return job.completed_result();
+        if job.phase == WorkJobPhase::Completed {
+            return Ok(WorkJobStep::Complete(job.completed_result()?));
         }
-        self.supervise(&mut job, handle)
+        self.observe(&mut job, invocation)
+    }
+
+    fn cancelled(&self, checkpoint: Value) -> Result<Value> {
+        let mut job = AgentTaskCookJob::parse(checkpoint)?;
+        job.observe_terminal(None)
     }
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
@@ -356,100 +366,57 @@ impl WorkJobHandler for CookWorkHandler {
 }
 
 impl CookWorkHandler {
-    /// Watch a detached child to its durable terminal state.
-    ///
-    /// Liveness is judged by PID *and* kernel start identity. An
-    /// `IdentityMismatch` or `Unverifiable` reading is treated as "no longer our
-    /// child" rather than as death, so supervision can never attribute a
-    /// stranger's process to this cook.
-    fn supervise(&self, job: &mut AgentTaskCookJob, handle: WorkJobHandle) -> Result<Value> {
+    fn observe(
+        &self,
+        job: &mut AgentTaskCookJob,
+        _invocation: WorkJobInvocation,
+    ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
-        handle.checkpoint(job.to_checkpoint()?)?;
-        handle.progress(job.progress_projection())?;
-
-        loop {
-            // Cancellation is the daemon's to terminalize; this thread only
-            // needs to stop supervising promptly so the supervisor can join it.
-            if handle.is_cancelled() {
-                return job.observe_terminal(None);
+        if job.run_id.is_none() {
+            if let Some(run_id) = latest_run_id_for_job(&job.request) {
+                job.run_id = Some(run_id);
             }
-
-            // Publish the attempt id exactly once, as soon as the cook has one.
-            if job.run_id.is_none() {
-                if let Some(run_id) = latest_run_id_for_job(&job.request) {
-                    job.run_id = Some(run_id);
-                    handle.checkpoint(job.to_checkpoint()?)?;
-                    handle.progress(job.progress_projection())?;
-                }
-            }
-
-            // Runner ownership starts when the durable attempt records its job,
-            // not when the launcher child exits. A detached Cook can retain a
-            // provably-live launcher while its reverse worker has already
-            // published a terminal broker result. Keep process identity as the
-            // child-exit safety guard below, but let the daemon project the
-            // runner authority throughout supervision.
-            if let Some(run_id) = job.run_id.as_deref() {
-                let lifecycle_store =
-                    agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-                let mut record = lifecycle_store.read_record(run_id)?;
-                if record.state.is_terminal() {
-                    return job.observe_terminal(Some(record.run_id));
-                }
-                if record.runner_id().is_some() && record.runner_job_id().is_some() {
-                    agent_task_lifecycle::reconcile_runner_job_state_in_store(
-                        &lifecycle_store,
-                        &mut record,
-                    )?;
-                    handle.checkpoint(job.to_checkpoint()?)?;
-                    handle.progress(job.progress_projection())?;
-                    if record.state.is_terminal() {
-                        return job.observe_terminal(Some(record.run_id));
-                    }
-                }
-            }
-
-            if !super::work_job::supervised_child_is_live(
-                job.request.child_pid,
-                &job.request.child_start_identity,
-            ) {
-                return job.observe_terminal(job.run_id.clone());
-            }
-
-            std::thread::sleep(SUPERVISION_POLL);
         }
-    }
-}
 
-/// What a resumed cook job must do, decided before any job handle is needed.
-///
-/// Extracted so the idempotency property can be asserted directly: no variant
-/// here spawns provider work, and the enum is exhaustive over the states a
-/// recovered checkpoint can be in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CookJobResumeDisposition {
-    /// The job already reached a durable terminal state. Replay it.
-    AlreadyComplete,
-    /// The supervised child is still provably the process we were handed.
-    ReadoptLiveChild,
-    /// The child is gone. Read the cook's durable outcome; never re-run it.
-    ObserveTerminalOutcome,
+        if let Some(run_id) = job.run_id.as_deref() {
+            let lifecycle_store =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let mut record = lifecycle_store.read_record(run_id)?;
+            if record.state.is_terminal() {
+                return Ok(WorkJobStep::Complete(
+                    job.observe_terminal(Some(record.run_id))?,
+                ));
+            }
+            if record.runner_id().is_some() && record.runner_job_id().is_some() {
+                agent_task_lifecycle::reconcile_runner_job_state_in_store(
+                    &lifecycle_store,
+                    &mut record,
+                )?;
+                if record.state.is_terminal() {
+                    return Ok(WorkJobStep::Complete(
+                        job.observe_terminal(Some(record.run_id))?,
+                    ));
+                }
+            }
+        }
+
+        if !super::work_job::supervised_child_is_live(
+            job.request.child_pid,
+            &job.request.child_start_identity,
+        ) {
+            return Ok(WorkJobStep::Complete(
+                job.observe_terminal(job.run_id.clone())?,
+            ));
+        }
+        Ok(WorkJobStep::Continue {
+            checkpoint: job.to_checkpoint()?,
+            progress: job.progress_projection(),
+            wait: SUPERVISION_POLL,
+        })
+    }
 }
 
 impl AgentTaskCookJob {
-    pub fn resume_disposition(&self) -> CookJobResumeDisposition {
-        if self.phase == WorkJobPhase::Completed {
-            return CookJobResumeDisposition::AlreadyComplete;
-        }
-        if super::work_job::supervised_child_is_live(
-            self.request.child_pid,
-            &self.request.child_start_identity,
-        ) {
-            return CookJobResumeDisposition::ReadoptLiveChild;
-        }
-        CookJobResumeDisposition::ObserveTerminalOutcome
-    }
-
     fn progress_projection(&self) -> Value {
         json!({
             "phase": self.phase,
@@ -1082,10 +1049,6 @@ mod tests {
         job.run_id = Some("cook-complete-attempt-1".to_string());
         job.terminal_state = Some(agent_task_lifecycle::AgentTaskRunState::Succeeded);
 
-        assert_eq!(
-            job.resume_disposition(),
-            CookJobResumeDisposition::AlreadyComplete
-        );
         // Replay is byte-identical however many times recovery happens.
         let first = job.completed_result().expect("first replay");
         let second = job.completed_result().expect("second replay");
@@ -1094,21 +1057,35 @@ mod tests {
         assert_eq!(first["run_id"], "cook-complete-attempt-1");
     }
 
-    /// A checkpoint whose child is gone resolves to observation, never to a
-    /// re-execution. PID 0 is never live, so this is deterministic.
     #[test]
-    fn resume_observes_rather_than_restarts_a_dead_child() {
-        let mut job =
-            AgentTaskCookJob::parse(request_of("cook-dead-child", 4242)).expect("parse request");
-        job.phase = WorkJobPhase::Supervising;
-        // u32::MAX is not a live pid, and the recorded start identity cannot
-        // match, so liveness is provably false.
-        job.request.child_pid = u32::MAX;
+    fn resume_observes_a_dead_child_through_the_driver() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-dead-child";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist handoff parent");
+            let request = work_request_of(cook_id, u32::MAX);
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct controller job harness");
+            let prepared = driver.prepare(request).expect("prepare cook job");
 
-        assert_eq!(
-            job.resume_disposition(),
-            CookJobResumeDisposition::ObserveTerminalOutcome
-        );
+            let result = driver
+                .resume(prepared, harness.handle())
+                .expect("observe dead child without redispatch");
+
+            assert_eq!(result["result"]["phase"], "completed");
+            assert_eq!(result["result"]["terminal_state"], "failed");
+            assert_eq!(
+                harness
+                    .checkpoint()
+                    .expect("read checkpoint")
+                    .expect("checkpoint persisted")["checkpoint"]["phase"],
+                "supervising"
+            );
+        });
     }
 
     #[test]

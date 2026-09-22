@@ -4,6 +4,159 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.13] - 2026-09-22
+
+### Fixed
+- separate split timeout from git calls
+- allow a transport-only route, consult its resolver
+- harvest interrupted provider candidates
+- do not claim artifact cleanup completion
+
+## [0.383.12] - 2026-09-22
+
+### Changed
+- preserve gate events in cancel replay
+
+### Fixed
+- prefer typed provider timeout diagnostics
+- reject incomplete connected runner status
+
+## [0.383.11] - 2026-09-22
+
+### Fixed
+- return after durable handoff unless --wait
+- accept a detached default tip in every default-branch check
+- separate provider success from gate completion
+- expose quarantine and cancellation provenance
+- bind adoption merges to immutable remote base
+- route explicit provider readiness to runner
+- preserve typed daemon staging errors
+
+## [0.383.10] - 2026-09-22
+
+### Fixed
+- keep Lab execution off hot controller
+- migrate staging retention records
+- accept detached default tip
+
+## [0.383.9] - 2026-09-22
+
+### Changed
+- prove attachment remote_path precedence holds on checkout-less resolution
+
+### Fixed
+- classify storage failures for durable retry
+- fail closed on wrong runner readiness scope
+
+## [0.383.8] - 2026-09-22
+
+### Fixed
+- retain nested provider model provenance
+- bound live repo artifact inventory
+- reuse durably captured base during concurrent admission
+- drain the child's stdout while it runs
+
+## [0.383.7] - 2026-09-22
+
+### Fixed
+- classify gate remediation without provider identity
+- align continuation recovery admission
+- reclaim terminal controller scratch
+
+## [0.383.6] - 2026-09-22
+
+### Fixed
+- allow bounded verification checks
+- honor configured identity for Lab transport
+
+## [0.383.5] - 2026-09-22
+
+### Fixed
+- bound aggregate repo artifact pages
+- align dead-lease recovery planning
+- a configured identity is the only identity offered
+
+## [0.383.4] - 2026-09-22
+
+### Changed
+- stop hanging by not asking the cheap question through the expensive path
+
+### Fixed
+- stop a non-deterministic deadline test from gating releases
+- select inline test modules beside their source
+- serialize subtree output as a tagged object
+- keep the real error in failure diagnostics
+- stop gating deploy on undeclared-need extensions
+
+## [0.383.3] - 2026-09-21
+
+### Fixed
+- carry extension-skipped components into real sweep results
+
+## [0.383.2] - 2026-09-21
+
+### Fixed
+- route source changes to the tests that own them
+
+## [0.383.1] - 2026-09-21
+
+### Changed
+- establish release gate fixtures instead of sampling host state
+
+### Fixed
+- harvest committed changes behind an empty provider patch
+- reclaim squash and rebase merged task branches
+
+## [0.383.0] - 2026-09-21
+
+### Added
+- expose provider capacity as typed readiness evidence
+- publish configured git subtrees
+
+### Fixed
+- stop rsyncing directories into a live path in place
+- require consent for model overrides
+- pass action payloads through CLI
+- preserve cancellation lifecycle classification
+
+## [0.382.0] - 2026-09-21
+
+### Added
+- add remote release coordinate resolution
+- durable Cook review feedback
+
+### Changed
+- centralize work supervision
+
+### Fixed
+- align auto preview with Lab admission
+- report unavailable shared cargo reclaim
+- preserve source build timeout state
+- preserve detached child diagnostics
+- project evidence for deferred workspaces
+- converge doctor repairs safely
+- share readiness cache across admission phases
+- publish detached handoff before runtime admission
+- stabilize authority locks and adoption replay fixtures
+- preserve promotion failure causes
+- bound Cook promotion admission waits
+
+## [0.381.0] - 2026-09-21
+
+### Added
+- hand off authoritative GitHub checks
+
+### Changed
+- cover terminal owner pid projection
+
+### Fixed
+- reject invalid gates before provider remediation
+- preserve daemon bootstrap diagnostics
+- route configured transport during hydration
+- add provider_ci to CookFinalization fixtures
+- resolve first, then branch — checkout-less components work in every mode
+- keep live promotion observable and refuse overlapping continuation
+
 ## [0.380.0] - 2026-09-20
 
 ### Added

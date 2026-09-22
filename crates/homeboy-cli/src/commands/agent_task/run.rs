@@ -384,6 +384,13 @@ pub(crate) fn preview_cook(
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
+    let preview_request =
+        dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    dispatch_service::require_model_override_acknowledgement_with_catalog(
+        &preview_request,
+        &catalog,
+    )?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -1182,9 +1189,6 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
         Some("lab-or-local") => homeboy_lab_runner_contract::Placement::LabOrLocal,
         _ => homeboy_lab_runner_contract::Placement::Auto,
     };
-    let detached = replay_args
-        .iter()
-        .any(|arg| arg == "--detach-after-handoff");
     if let ResourceAdmissionDecision::Rejected {
         label, evidence, ..
     } = result.resource_admission
@@ -1198,7 +1202,7 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
         return indeterminate_preview_admission_with_next_action(&reason, "homeboy self doctor");
     }
     if crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
-        requested, detached, &result,
+        requested, &result,
     ) && requested == homeboy_lab_runner_contract::Placement::Auto
         && crate::commands::infra::route::auto_cook_unavailable_lab_state(&result).is_some()
     {
@@ -1215,7 +1219,6 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
             if requested == homeboy_lab_runner_contract::Placement::LabOrLocal
                 || !crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
                     requested,
-                    detached,
                     &result,
                 ) =>
         {
@@ -1402,7 +1405,7 @@ fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
     serde_json::json!({
         "requested": placement,
         "runner": runner,
-        "detach_after_handoff": argv.iter().any(|value| value == "--detach-after-handoff"),
+        "detach_after_handoff": !argv.iter().take_while(|value| value.as_str() != "--").any(|value| value == "--wait"),
         "route_executed": false,
     })
 }
@@ -2195,7 +2198,6 @@ mod preview_tests {
         let policy = preview_placement_policy_from_argv(&[
             "homeboy".to_string(),
             "--placement=lab-or-local".to_string(),
-            "--detach-after-handoff".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--".to_string(),
@@ -3075,14 +3077,13 @@ mod preview_tests {
     }
 
     #[test]
-    fn auto_local_fallback_preview_surfaces_disconnected_lab_admission() {
+    fn auto_local_fallback_preview_does_not_change_placement_for_default_handoff() {
         let _reset = ResetCapturedPreflight;
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--preview",
-            "--detach-after-handoff",
             "--prompt",
             "implement the issue",
             "--verify",
@@ -3108,16 +3109,10 @@ mod preview_tests {
             "agent-task".to_string(),
             "cook".to_string(),
             "--preview".to_string(),
-            "--detach-after-handoff".to_string(),
         ]);
 
         assert_eq!(policy["selected"], "local");
-        assert_eq!(policy["admission"]["state"], "blocked");
-        assert_eq!(policy["admission"]["remaining_blocker"], "not_connected");
-        assert!(policy["admission"]["next_action"]
-            .as_str()
-            .expect("local replay")
-            .contains("--placement local"));
+        assert_eq!(policy["admission"]["state"], "admissible");
     }
 
     #[test]
@@ -3132,8 +3127,8 @@ mod preview_tests {
                     "cook".to_string(),
                     "--preview".to_string(),
                 ];
-                if detached {
-                    argv.push("--detach-after-handoff".to_string());
+                if !detached {
+                    argv.push("--wait".to_string());
                 }
                 let cli = Cli::try_parse_from(argv.clone()).expect("parse placement preview");
                 crate::cli_runtime::capture_preflight_result_for_test(
@@ -3154,8 +3149,7 @@ mod preview_tests {
                 let policy = preview_placement_policy_with_admission(&argv);
                 let state = policy.pointer("/admission/state").and_then(Value::as_str);
                 match (placement, detached) {
-                    ("auto", true) => assert_eq!(state, Some("blocked")),
-                    ("auto", false) | ("lab-or-local", _) => {
+                    ("auto", _) | ("lab-or-local", _) => {
                         assert_eq!(
                             state,
                             Some("admissible"),
@@ -3231,6 +3225,12 @@ mod preview_tests {
             .expect("origin SHA is UTF-8")
             .trim()
             .to_string();
+            let evidence_source = tempfile::NamedTempFile::new().expect("evidence source");
+            std::fs::write(evidence_source.path(), "issue evidence\n").expect("write evidence");
+            let evidence_arg = format!(
+                r#"{{"id":"issue","source":"{}"}}"#,
+                evidence_source.path().display()
+            );
             let repository = checkout.display().to_string();
             let handle = "fixture@fix-issue-14714";
             let args = cook(&[
@@ -3255,6 +3255,8 @@ mod preview_tests {
                 "--to-worktree",
                 handle,
                 "--no-finalize",
+                "--provider-evidence",
+                &evidence_arg,
             ]);
 
             let (preview, exit_code) = preview_cook(args.clone(), None).expect("preview");
@@ -3288,6 +3290,11 @@ mod preview_tests {
             let provision =
                 provision_cook_destination(&args).expect("execution admits planned create");
             assert_eq!(provision["action"], "lookup_pending");
+            let plan = compile_cook_plan(&args, provision.clone()).expect("compile deferred Cook");
+            let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("deferred projected evidence path");
+            assert!(Path::new(projected_path).is_file());
 
             let executor = Arc::new(UnmaterializedPreviewExecutor);
             let (report, _) = run_cook_with_executor(args, executor).expect("cook replay");
@@ -3351,26 +3358,34 @@ mod preview_tests {
     }
 
     #[test]
-    fn compile_cook_plan_returns_a_typed_evidence_blocker_without_a_workspace() {
-        let args = cook(&[
-            "homeboy",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "read the evidence",
-            "--to-worktree",
-            "missing@worktree",
-            "--no-finalize",
-            "--provider-evidence",
-            r#"{"id":"issue","source":"/tmp/issue.md"}"#,
-        ]);
-        let error = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
-            .expect_err("evidence without a workspace must not panic");
-        assert_eq!(
-            error.code,
-            homeboy::core::ErrorCode::ValidationInvalidArgument
-        );
-        assert_eq!(error.details["field"], "provider-evidence");
+    fn compile_cook_plan_projects_evidence_before_deferred_workspace_binding() {
+        crate::test_support::with_isolated_home(|_| {
+            let source = tempfile::NamedTempFile::new().expect("evidence");
+            std::fs::write(source.path(), "deferred evidence\n").expect("write evidence");
+            let evidence_arg =
+                format!(r#"{{"id":"issue","source":"{}"}}"#, source.path().display());
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "read the evidence",
+                "--to-worktree",
+                "missing@worktree",
+                "--no-finalize",
+                "--provider-evidence",
+                &evidence_arg,
+            ]);
+            let plan = compile_cook_plan(&args, serde_json::json!({ "action": "lookup_pending" }))
+                .expect("deferred evidence is admitted before workspace binding");
+            let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
+                .as_str()
+                .expect("projected evidence path");
+            assert!(Path::new(projected_path).is_file());
+            assert_eq!(plan.metadata["cook_provision"]["action"], "lookup_pending");
+        });
     }
 
     #[test]
@@ -3746,7 +3761,22 @@ where
                 &run_id,
             )?
         } else {
-            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
+            if claim.is_none()
+                && record
+                    .metadata
+                    .get("latest_promotion")
+                    .is_some_and(Value::is_object)
+            {
+                // A direct operator continuation must remain admissible even
+                // when status reconciliation has not materialized the queue
+                // entry yet. Finalization receipts are handled above and stay
+                // observation-only.
+                recipe_store.enqueue_terminal_continuation(&recipe.cook_id, &run_id)?;
+                recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            } else {
+                claim
+            }
         };
         let Some(claim) = claim else {
             return Ok((
@@ -6521,6 +6551,32 @@ pub(crate) fn preflight_cook_execution_request(
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(&args, provenance)?;
+    confirm_model_override(args)?;
+    Ok(())
+}
+
+fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if args.dispatch.core.acknowledge_model_override {
+        return Ok(());
+    }
+    let dispatch = resolved_dispatch_args_for_cook(args)?;
+    let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let catalog = provider::AgentTaskProviderCatalog::discover();
+    if let Err(error) =
+        dispatch_service::require_model_override_acknowledgement_with_catalog(&request, &catalog)
+    {
+        if !crate::commands::utils::tty::require_tty_for_interactive() {
+            return Err(error);
+        }
+        let answer = crate::commands::utils::tty::prompt(&format!(
+            "{} Continue with this model? [y/N] ",
+            error.message
+        ))?;
+        if !matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(error);
+        }
+        args.dispatch.core.acknowledge_model_override = true;
+    }
     Ok(())
 }
 
@@ -7353,6 +7409,7 @@ mod prompt_input_tests {
                 deny_command: Vec::new(),
                 allow_command: Vec::new(),
                 command_policy_reason: None,
+                acknowledge_model_override: false,
             },
         }
     }
@@ -7476,14 +7533,6 @@ pub(crate) fn compile_cook_plan(
             "Cook destination provisioning did not return a task worktree path".to_string(),
         ));
     }
-    if !args.provider_evidence_inputs.is_empty() && requested_workspace.is_none() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "provider-evidence",
-            "provider evidence requires a bound Cook workspace",
-            None,
-            None,
-        ));
-    }
     if let Some(workspace) = requested_workspace.as_deref() {
         validate_cook_destination_identity(args, Path::new(workspace))?;
     }
@@ -7512,14 +7561,14 @@ pub(crate) fn compile_cook_plan(
     dispatch.cwd = None;
     dispatch.workspace = requested_workspace.clone();
     let admitted_evidence = admit_provider_evidence_inputs(&args.provider_evidence_inputs)?;
-    let evidence = if requested_workspace.is_some() {
-        project_admitted_provider_evidence_inputs(
-            &args.provider_evidence_inputs,
-            &admitted_evidence,
-        )?
-    } else {
-        Vec::new()
-    };
+    // The controller store snapshots evidence before a deferred native
+    // workspace is materialized. Its content-addressed paths are independent
+    // of the eventual checkout, so keep the same projection in the durable
+    // plan for both existing and deferred destinations.
+    let evidence = project_admitted_provider_evidence_inputs(
+        &args.provider_evidence_inputs,
+        &admitted_evidence,
+    )?;
     let projected_paths = projected_provider_evidence_paths(&evidence);
     rewrite_provider_evidence_prompt(
         &mut dispatch.prompt,
@@ -7614,11 +7663,13 @@ fn validate_cook_provider_execution_plan(
     plan: &homeboy::agents::agent_tasks::AgentTaskPlan,
     catalog: &homeboy::agents::agent_task_provider::AgentTaskProviderCatalog,
 ) -> homeboy::core::Result<()> {
+    let mut readiness_cache =
+        homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
     let selected_plan =
         homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
             &plan,
             &catalog,
-            &mut homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            &mut readiness_cache,
         )?;
     catalog.validate_selected_models(&selected_plan)?;
     Ok(())

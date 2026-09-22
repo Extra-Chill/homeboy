@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub(crate) const DURABLE_EVENT_HISTORY_METADATA_KEY: &str = "durable_event_history";
 pub const EVENT_HISTORY_MIGRATION_SCHEMA: &str = "homeboy/agent-task-event-history-migration/v1";
+const PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskEventHistoryMigration {
@@ -247,6 +248,32 @@ pub(crate) fn prepared_progress_events(
     for request in gate_lifecycle_requests(record)? {
         events.push(prepare_request(&run, record, request)?);
     }
+    if let Some(provenance) = record
+        .metadata
+        .get("queue_quarantine")
+        .and_then(Value::as_object)
+    {
+        events.push(prepare_provenance_event(
+            &run,
+            record,
+            "run.quarantined",
+            "quarantine",
+            provenance,
+        )?);
+    }
+    if let Some(provenance) = record
+        .metadata
+        .get("cancellation_provenance")
+        .and_then(Value::as_object)
+    {
+        events.push(prepare_provenance_event(
+            &run,
+            record,
+            "run.cancelled",
+            "cancellation",
+            provenance,
+        )?);
+    }
     Ok(events)
 }
 
@@ -270,6 +297,7 @@ pub fn record_promotion_progress_in_store(
     output_tail: Option<&str>,
 ) -> Result<()> {
     let run_id = sanitize_run_id(run_id);
+    let output_tail = output_tail.map(bound_promotion_progress_output);
     let record = lifecycle_store
         .mutate_record(&run_id, |record| {
             let now = now_timestamp();
@@ -354,6 +382,23 @@ pub fn record_promotion_progress_in_store(
         )
         .map_err(|error| Error::internal_unexpected(error.to_string()))?;
     Ok(())
+}
+
+/// Control-plane event data is bounded at 64 KiB. Gate subprocess capture is
+/// bounded independently, but a long final line can still fill that budget
+/// once the heartbeat envelope is added. Keep the durable heartbeat useful
+/// without allowing diagnostic output to abort the gate itself.
+fn bound_promotion_progress_output(output: &str) -> String {
+    if output.len() <= PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES {
+        return output.to_string();
+    }
+    let start = output.len() - PROMOTION_PROGRESS_OUTPUT_TAIL_MAX_BYTES;
+    let start = output
+        .char_indices()
+        .find(|(index, _)| *index >= start)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    format!("[output truncated]\n{}", &output[start..])
 }
 
 /// The phase that failed a run is absent from its own log whenever a
@@ -545,6 +590,51 @@ fn prepare_request(
 ) -> Result<PreparedControlPlaneEventAppend> {
     crate::orchestration::prepare_control_plane_event_append(run, record, &request)
         .map_err(map_append_error)
+}
+
+fn prepare_provenance_event(
+    run: &RunId,
+    record: &AgentTaskRunRecord,
+    kind: &str,
+    identity: &str,
+    provenance: &serde_json::Map<String, Value>,
+) -> Result<PreparedControlPlaneEventAppend> {
+    let actor = provenance
+        .get("actor")
+        .and_then(Value::as_str)
+        .unwrap_or("controller");
+    let timestamp = provenance
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    prepare_request(
+        run,
+        record,
+        ControlPlaneEventAppendRequest {
+            schema: CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA.to_string(),
+            idempotency_key: crate::orchestration::progress_event_idempotency_key(
+                kind,
+                &format!("{identity}\0{}", record.run_id),
+            ),
+            actor: actor.to_string(),
+            kind: kind.to_string(),
+            source: ControlPlaneEventSource {
+                component: "agent-task".to_string(),
+                instance: None,
+            },
+            occurred_at: timestamp,
+            task: None,
+            attempt: None,
+            execution: None,
+            data: json!({
+                "state": if kind == "run.cancelled" { AgentTaskState::Cancelled } else { AgentTaskState::Queued },
+                "message": provenance.get("reason").and_then(Value::as_str).unwrap_or(kind),
+                "provenance": provenance,
+            }),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+        },
+    )
 }
 
 fn provider_execution_request(

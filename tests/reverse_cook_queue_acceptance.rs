@@ -361,7 +361,6 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
         .env("PATH", &path)
         .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
         .args([
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--placement",

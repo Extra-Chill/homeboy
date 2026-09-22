@@ -455,7 +455,7 @@ fn run_controller_upgrade_with_operation(
         if !replacement_now_required {
             // Even when no binary update is needed, still run extension updates.
             let selection_guard =
-                acquire_controller_selection_guard(operation, "controller extension refresh")?;
+                acquire_controller_selection_guard_fast(operation, "controller extension refresh")?;
             // Acquiring shared admission proves every prior installer mutation
             // fence has drained. Freeze its pending byte evidence before this
             // operation can return the same-version/no-update result.
@@ -752,6 +752,12 @@ fn run_controller_upgrade_with_operation(
                                 .borrow_mut()
                                 .record_replacement_checkpoint_durable(checkpoint)
                         };
+                    if install_method == InstallMethod::Source {
+                        operation.borrow_mut().mark_controller_durable(
+                            "candidate_building",
+                            "source candidate build started; controller promotion not attempted",
+                        )?;
+                    }
                     execute_upgrade(
                         install_method,
                         source_upgrade_path.as_deref(),
@@ -788,7 +794,26 @@ fn run_controller_upgrade_with_operation(
             }
             result
         },
-    )?;
+    );
+    let controller_upgrade = match controller_upgrade {
+        Ok(result) => result,
+        Err(error) => {
+            operation.mark_controller_durable(
+                "failed",
+                if error
+                    .details
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("source_build_deadline_exceeded")
+                {
+                    "source candidate build timed out; controller promotion was not attempted"
+                } else {
+                    "controller candidate execution failed before promotion"
+                },
+            )?;
+            return Err(error);
+        }
+    };
     let (success, new_version, new_build_identity, source_revision, superseded) =
         match controller_upgrade {
             Ok(result) => result,
@@ -2205,6 +2230,27 @@ fn acquire_controller_selection_guard(
         },
         CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT,
         |event| operation.record_promotion_wait(&event),
+    )?;
+    operation.clear_promotion_wait_durable()?;
+    operation.take_persistence_error()?;
+    Ok(guard)
+}
+
+fn acquire_controller_selection_guard_fast(
+    operation: &mut UpgradeOperation,
+    operation_name: &str,
+) -> Result<homeboy_core::runtime_promotion::RuntimeSelectionGuard> {
+    let operation_id = operation
+        .id()
+        .ok_or_else(|| Error::internal_unexpected("controller selection requires an operation"))?
+        .to_string();
+    let guard = homeboy_core::runtime_promotion::try_protect_runtime_selection_with_status(
+        operation_name,
+        "active controller",
+        homeboy_core::runtime_promotion::RuntimePromotionOwnerStatus {
+            status_command: format!("homeboy upgrade status {operation_id}"),
+            operation_id,
+        },
     )?;
     operation.clear_promotion_wait_durable()?;
     operation.take_persistence_error()?;

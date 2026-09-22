@@ -143,6 +143,9 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// Model name forwarded to the selected provider for every child cook.
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
+    /// Explicitly acknowledge that the model may displace configured routes.
+    #[arg(long = "acknowledge-model-override")]
+    pub acknowledge_model_override: bool,
     /// Named provider profile declared by an installed provider's CLI,
     /// supplying default backend/selector/model/provider-config values for
     /// every child. Explicit flags win over the profile.
@@ -251,6 +254,9 @@ pub struct AgentTaskFanoutInputArgs {
     /// Model name override forwarded to the selected provider.
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
+    /// Explicitly acknowledge that the model may displace configured routes.
+    #[arg(long = "acknowledge-model-override")]
+    pub acknowledge_model_override: bool,
 }
 
 /// `fanout plan` reads one of two mutually exclusive inputs: an existing
@@ -288,6 +294,9 @@ pub struct AgentTaskFanoutPlanArgs {
     /// Model name forwarded to the selected provider for every planned child.
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
+    /// Explicitly acknowledge that the model may displace configured routes.
+    #[arg(long = "acknowledge-model-override")]
+    pub acknowledge_model_override: bool,
     /// Registered repository slug or exact registered primary checkout path to
     /// plan children for. Required with (and only with) issue URLs.
     #[arg(
@@ -354,6 +363,7 @@ impl AgentTaskFanoutPlanArgs {
             backend: self.backend,
             selector: self.selector,
             model: self.model,
+            acknowledge_model_override: self.acknowledge_model_override,
             provider_profile: None,
             secret_env: Vec::new(),
             provider_config: None,

@@ -6263,7 +6263,7 @@ pub fn cook_failure_context(
     cook_failure_context_with_stores(None, None, cook_id, latest_run_id, status)
 }
 
-fn cook_failure_context_with_stores(
+pub(crate) fn cook_failure_context_with_stores(
     recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
     lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
     cook_id: &str,
@@ -6446,6 +6446,17 @@ fn cook_failure_context_with_stores(
             "operation_in_progress".to_string(),
             None,
         )
+    } else if let Some(diagnostic) = controller_diagnostic.as_ref() {
+        (
+            "promotion".to_string(),
+            diagnostic
+                .pointer("/deepest_cause/code")
+                .or_else(|| diagnostic.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("promotion_failure")
+                .to_string(),
+            Some(diagnostic.clone()),
+        )
     } else if let Some(diagnostic) = promotion_diagnostic.as_ref() {
         (
             "promotion".to_string(),
@@ -6461,10 +6472,16 @@ fn cook_failure_context_with_stores(
             "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
         )
     {
+        let diagnostic = promotion.and_then(gate_failure_diagnostic).or_else(|| {
+            Some(json!({
+                "class": "agent_task.promotion_gate_failed",
+                "message": "Deterministic promotion gate failed",
+            }))
+        });
         (
             "deterministic_gate".to_string(),
             "gate_failed".to_string(),
-            None,
+            diagnostic,
         )
     } else if let Some(diagnostic) = finalization_diagnostic.as_ref() {
         (
@@ -6548,17 +6565,50 @@ fn cook_failure_context_with_stores(
             )
         })
         .unwrap_or_else(|| {
+            let retry_admitted = record.as_ref().is_some_and(|record| {
+                lifecycle_store
+                    .map(|store| super::retry_admission_in_root(store, &record.run_id))
+                    .unwrap_or_else(|| super::retry_admission(&record.run_id))
+                    .is_ok()
+            });
+            let continuation_pending = record.as_ref().is_some_and(|record| {
+                let state = lifecycle_store
+                    .map(|store| {
+                        super::cook_recipe::continuation_state_in_store(
+                            &super::cook_recipe::CookRecipeStore::from_data_root(store.data_root()),
+                            cook_id,
+                            &record.run_id,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| {
+                        super::cook_recipe::CookRecipeStore::from_current_data_root()
+                            .ok()
+                            .and_then(|store| {
+                                super::cook_recipe::continuation_state_in_store(
+                                    &store,
+                                    cook_id,
+                                    &record.run_id,
+                                )
+                                .ok()
+                            })
+                    });
+                state == Some(super::cook_recipe::CookContinuationState::Pending)
+            });
+            let continuation_admitted = continuation_action_admitted(
+                record
+                    .as_ref()
+                    .and_then(|record| record.metadata.get("cook_continuation_admission")),
+                retry_admitted
+                    || (matches!(status, "gate_failed" | "no_op_gate_failed")
+                        && continuation_pending),
+            );
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
                 recovery_legal,
                 blocking_claim.is_some(),
-                record.as_ref().is_some_and(|record| {
-                    lifecycle_store
-                        .map(|store| super::retry_admission_in_root(store, &record.run_id))
-                        .unwrap_or_else(|| super::retry_admission(&record.run_id))
-                        .is_ok()
-                }),
+                continuation_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 ambiguous_promotion_artifact_ids(
                     lifecycle_store,
@@ -6598,6 +6648,54 @@ fn cook_failure_context_with_stores(
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
     })
+}
+
+/// Project the first failed controller-owned gate into the Cook-wide bounded
+/// cause. Provider output is evidence of candidate production, not the cause
+/// after promotion has reached deterministic verification.
+fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
+    let gate = promotion
+        .get("deterministic_gates")
+        .or_else(|| promotion.get("gate_results"))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|gate| {
+            matches!(
+                gate.get("status").and_then(Value::as_str),
+                Some("failed" | "failure")
+            )
+        })?;
+    let evidence = gate.get("failure_evidence");
+    let message = evidence
+        .and_then(|evidence| {
+            evidence
+                .get("summary")
+                .or_else(|| evidence.get("agent_feedback"))
+        })
+        .and_then(Value::as_str)
+        .or_else(|| gate.get("message").and_then(Value::as_str))
+        .or_else(|| {
+            evidence
+                .and_then(|evidence| evidence.get("stderr_tail"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Deterministic promotion gate failed");
+    Some(json!({
+        "class": "agent_task.promotion_gate_failed",
+        "message": message,
+        "details": {
+            "gate": gate.get("id").or_else(|| gate.get("name")),
+            "command": gate.get("command").or_else(|| evidence.and_then(|evidence| evidence.get("command"))),
+            "exit_code": gate.get("exit_code").or_else(|| evidence.and_then(|evidence| evidence.get("exit_code"))),
+            "failure_evidence": evidence,
+        },
+    }))
+}
+
+fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bool {
+    admission
+        .map(|admission| admission["first_authoritative_denial"].is_null())
+        .unwrap_or(fallback)
 }
 
 /// A persisted failure is normally not trusted to manufacture shell commands.
@@ -6966,6 +7064,7 @@ fn cook_recovery_actions_with_prefix(
         | "green_no_finalize"
         | "intentional_no_change"
         | "no_candidate"
+        | "cancelled"
         | "execution_budget_exhausted"
         | "retries_exhausted"
         | "pre_execution_failure" => false,
@@ -7068,6 +7167,7 @@ mod recovery_action_tests {
                 false,
                 vec!["status", "diagnose"],
             ),
+            ("cancelled", true, false, vec!["status", "diagnose"]),
             (
                 "pre_execution_failure",
                 true,
@@ -7184,6 +7284,61 @@ mod recovery_action_tests {
             actions(&recovery.next_actions),
             actions(&recovery.legal_actions)
         );
+    }
+
+    #[test]
+    fn recovery_actions_match_continuation_admission_for_failure_states() {
+        let actions = |status, admitted| {
+            cook_recovery_actions(
+                status,
+                "recovery-state-attempt-1",
+                true,
+                false,
+                admitted,
+                false,
+                Vec::new(),
+                None,
+            )
+            .legal_actions
+            .into_iter()
+            .map(|action| action.action)
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(actions("gate_failed", false), vec!["status", "diagnose"]);
+        assert!(actions("gate_failed", true).contains(&"resume".to_string()));
+        assert!(actions("durable_failure", true).contains(&"resume".to_string()));
+        assert!((cook_recovery_actions(
+            "gate_failed",
+            "recovery-state-attempt-1",
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            None,
+        )
+        .legal_actions)
+            .iter()
+            .all(|action| action.action != "resume"));
+    }
+
+    #[test]
+    fn denied_continuation_admission_withholds_resume_even_when_retry_is_admitted() {
+        let admission = serde_json::json!({
+            "schema": "homeboy/cook-continuation-admission/v1",
+            "first_authoritative_denial": "live_owner_in_progress"
+        });
+
+        assert!(!continuation_action_admitted(Some(&admission), true));
+        assert!(continuation_action_admitted(
+            Some(&serde_json::json!({
+                "schema": "homeboy/cook-continuation-admission/v1",
+                "first_authoritative_denial": null
+            })),
+            false
+        ));
+        assert!(continuation_action_admitted(None, true));
     }
 
     #[test]
