@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.0] - 2026-09-22
+
+### Added
+- add npm publishing credentials
+
 ## [2.19.1] - 2026-09-21
 
 ### Fixed
