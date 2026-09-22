@@ -356,6 +356,7 @@ pub mod provider {
     };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
+        provider_secret_credential_mappings_for_plan_with_providers,
         provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
     };
 }

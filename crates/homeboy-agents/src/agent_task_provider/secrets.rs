@@ -1,5 +1,8 @@
 use super::resolution::select_provider;
 use super::*;
+use homeboy_core::secret_env_plan::{
+    SecretEnvCredentialSource, SecretEnvProviderCredentialMapping,
+};
 
 pub(super) fn apply_provider_runner_secret_env_contracts_with_providers(
     plan: &mut AgentTaskPlan,
@@ -81,6 +84,43 @@ pub fn provider_secret_sources_for_plan_with_providers(
         sources.extend(provider_secret_sources(provider, Some(request)));
     }
     sources
+}
+
+pub fn provider_secret_credential_mappings_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> BTreeMap<String, SecretEnvProviderCredentialMapping> {
+    let mut mappings = BTreeMap::new();
+    for request in &plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        let secret_env = provider_secret_env_plan(provider, request).secret_env_names();
+        let sources = provider_secret_sources(provider, Some(request))
+            .into_iter()
+            .map(|(name, source)| {
+                (
+                    name,
+                    SecretEnvCredentialSource {
+                        source: source.source,
+                        env_var: source.env_var,
+                        path: source.path,
+                        scope: source.scope,
+                        name: source.name,
+                        field: source.field,
+                    },
+                )
+            })
+            .collect();
+        mappings.insert(
+            provider.id.clone(),
+            SecretEnvProviderCredentialMapping {
+                secret_env,
+                sources,
+            },
+        );
+    }
+    mappings
 }
 
 fn provider_secret_env(

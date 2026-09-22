@@ -42,11 +42,13 @@ pub(super) fn resolve_runner_secret_env_for_plan(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
+    let mut fallback_sources = provider_secret_sources_for_discovered_providers();
+    fallback_sources.extend(provider_secret_sources_from_plan(plan));
     resolve_runner_secret_env_for_command_with_fallbacks(
         secret_env,
         &plan.secret_env_names(),
         env,
-        &provider_secret_sources_for_discovered_providers(),
+        &fallback_sources,
     )
 }
 
@@ -357,6 +359,8 @@ pub(super) fn resolve_controller_secret_env_for_plan_with_fallbacks(
     env: &HashMap<String, String>,
     fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
 ) -> Result<HashMap<String, String>> {
+    let mut fallback_sources = fallback_sources.clone();
+    fallback_sources.extend(provider_secret_sources_from_plan(plan));
     let mut controller_secret_env = HashMap::new();
     let mut controller_required_names = Vec::new();
     for name in plan.secret_env_names() {
@@ -389,8 +393,39 @@ pub(super) fn resolve_controller_secret_env_for_plan_with_fallbacks(
         &controller_secret_env,
         &controller_required_names,
         env,
-        fallback_sources,
+        &fallback_sources,
     )
+}
+
+fn provider_secret_sources_from_plan(
+    plan: &SecretEnvPlan,
+) -> HashMap<String, homeboy_core::defaults::AgentTaskSecretSource> {
+    plan.provider_credentials
+        .values()
+        .flat_map(|mapping| mapping.sources.iter())
+        .map(|(name, source)| {
+            let path = source.path.clone().or_else(|| {
+                matches!(
+                    source.source.as_str(),
+                    "json-file" | "json-file-jwt-expiration"
+                )
+                .then(|| source.name.clone())
+                .flatten()
+            });
+            (
+                name.clone(),
+                homeboy_core::defaults::AgentTaskSecretSource {
+                    source: source.source.clone(),
+                    env_var: source.env_var.clone(),
+                    path,
+                    scope: source.scope.clone(),
+                    name: source.name.clone(),
+                    field: source.field.clone(),
+                    value: None,
+                },
+            )
+        })
+        .collect()
 }
 
 fn is_runner_deferred_secret_env_ref(source: &server::RunnerSecretEnvRef) -> bool {
