@@ -370,10 +370,23 @@ pub fn resolve_parsed_command_preflight(
             None,
         ));
     }
-    let resource_admission = evaluate_resource_admission(
-        &input.resource_admission,
-        policy.resource_admission_evidence,
-    );
+    // Controller admission covers controller-owned work only. Once a connected
+    // ready runner is selected, the provider attempt is owned by Lab and must
+    // not be blocked by the controller's load; controller pressure remains
+    // available as transport/setup evidence in the policy snapshot.
+    let resource_admission = if policy.runner_admitted
+        && policy.selected_runner_id.is_some()
+        && !matches!(
+            input.controller_execution,
+            ControllerExecution::ControllerOnly
+        ) {
+        ResourceAdmissionDecision::Admitted
+    } else {
+        evaluate_resource_admission(
+            &input.resource_admission,
+            policy.resource_admission_evidence,
+        )
+    };
     let local_route_admissible = policy.auto_local_capacity_fallback
         || !matches!(
             resource_admission,
@@ -692,6 +705,78 @@ pub fn reset_captured_result_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_lab_execution_is_admitted_even_when_controller_is_hot() {
+        let input = |controller_execution| ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "agent-task".into(),
+                operation: vec!["cook".into()],
+            },
+            resource_admission: ResourceAdmissionRequirement::Required {
+                label: "agent-task cook".into(),
+                engages_at: ResourceHeat::Warm,
+            },
+            controller_execution,
+            deferred_workload: DeferredWorkloadPolicy::Forbidden,
+            placement: PlacementIntent::Lab,
+            runner: RunnerIntent::Explicit("lab-a".into()),
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: false },
+            provenance: ProvenanceRequirement::CaptureExecution,
+        };
+        let policy = |_controller_execution| ParsedCommandPolicySnapshot {
+            resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::Hot,
+            },
+            resource_policy: None,
+            lab_readiness: Some(LabReadinessSnapshot {
+                state: "connected_ready".into(),
+                selected_runner_id: Some("lab-a".into()),
+                available_runner_ids: vec!["lab-a".into()],
+                reasons: Vec::new(),
+                remediation_commands: Vec::new(),
+                repair_admitted_runner_ids: Vec::new(),
+            }),
+            selected_runner_id: Some("lab-a".into()),
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: true,
+                selected_runner_id: Some("lab-a".into()),
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted: true,
+            runner_incompatible: false,
+            auto_local_capacity_fallback: false,
+        };
+
+        for controller_execution in [
+            ControllerExecution::Ordinary,
+            ControllerExecution::SplitPlacementCoordinator,
+        ] {
+            let result = resolve_parsed_command_preflight(
+                vec!["homeboy".into()],
+                input(controller_execution),
+                policy(controller_execution),
+            )
+            .expect("ready Lab execution resolves");
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::Admitted
+            );
+        }
+
+        let result = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            input(ControllerExecution::ControllerOnly),
+            policy(ControllerExecution::ControllerOnly),
+        )
+        .expect("controller-only execution resolves");
+        assert!(matches!(
+            result.resource_admission,
+            ResourceAdmissionDecision::Rejected { .. }
+        ));
+    }
 
     #[test]
     fn generic_input_is_a_complete_serializable_contract() {

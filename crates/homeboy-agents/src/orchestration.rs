@@ -4147,6 +4147,35 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
     if !decision.is_valid() {
         return None;
     }
+    // Detached Cook admission creates a controller-local submission stamp
+    // before its executable plan exists. The immutable admission binding has
+    // already selected the Lab runner, so expose that selection instead of
+    // reporting the transport placeholder as controller execution.
+    if decision.is_submission_stamp() {
+        if let Some(runner_id) = record
+            .metadata
+            .pointer("/unmaterialized_cook_admission/binding/placement/runner_ref")
+            .and_then(Value::as_str)
+            .filter(|runner_id| !runner_id.trim().is_empty())
+        {
+            let requested = match record
+                .metadata
+                .pointer("/unmaterialized_cook_admission/binding/placement/requested")
+                .and_then(Value::as_str)
+            {
+                Some("lab") | Some("lab_or_local") => ControlPlaneRunPlacementRequested::Runner,
+                _ => ControlPlaneRunPlacementRequested::Automatic,
+            };
+            return ControlPlaneRunPlacement::new(
+                format!("unmaterialized-cook-{}", record.run_id),
+                requested,
+                ControlPlaneRunPlacementSelected::Runner,
+                None,
+                Some(runner_id.to_string()),
+            )
+            .ok();
+        }
+    }
     let selected = match decision.selected {
         EffectiveExecutionPlacement::Local if decision.runner.is_none() => {
             ControlPlaneRunPlacementSelected::Controller
@@ -8298,6 +8327,38 @@ mod tests {
         assert_eq!(value["placement"]["requested"], "controller");
         assert_eq!(value["placement"]["selected"], "controller");
         assert!(value["placement"].get("runner_id").is_none());
+        assert!(value["placement"].get("effective").is_none());
+    }
+
+    #[test]
+    fn placement_projects_ready_lab_admission_before_cook_materialization() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision = homeboy_lab_runner_contract::ExecutionPlacementDecision::controller_local(
+            homeboy_lab_runner_contract::CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
+            "v1",
+            homeboy_lab_runner_contract::ExecutionPlacementIdentity {
+                repository: "controller-local".to_string(),
+                workspace: "controller-local".to_string(),
+                task: "detached-cook".to_string(),
+                candidate: None,
+                base: None,
+            },
+            homeboy_lab_runner_contract::Placement::Auto,
+        );
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+        record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
+            "binding": {
+                "placement": {
+                    "requested": "auto",
+                    "runner_ref": "homeboy-lab"
+                }
+            }
+        });
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "automatic");
+        assert_eq!(value["placement"]["selected"], "runner");
+        assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
         assert!(value["placement"].get("effective").is_none());
     }
 
