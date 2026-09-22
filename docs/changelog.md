@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.8] - 2026-09-22
+
+### Fixed
+- retain nested provider model provenance
+- bound live repo artifact inventory
+- reuse durably captured base during concurrent admission
+- drain the child's stdout while it runs
+
 ## [0.383.7] - 2026-09-22
 
 ### Fixed
