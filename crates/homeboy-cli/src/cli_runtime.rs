@@ -3268,7 +3268,7 @@ fn preflight_hot_command_with_input(
             // guidance, whether policy selected the runner or the operator pinned
             // it. Controller pressure still matters for preparation and transport,
             // but it must not be presented as local provider execution.
-            let warning = (!required_lab_placement)
+            let warning = (!required_lab_placement && !runner_admits_offload)
                 .then(|| {
                     resource_policy::evaluate_with_runner_hint(
                         hot_command,
@@ -3278,7 +3278,11 @@ fn preflight_hot_command_with_input(
                 })
                 .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if let Some(runner_id) = required_lab_runner {
+            if let Some(runner_id) = required_lab_runner.or_else(|| {
+                runner_admits_offload
+                    .then_some(selected_lab_runner)
+                    .flatten()
+            }) {
                 if let Some(notice) = resource_policy::lab_routed_controller_notice_message(
                     hot_command,
                     &resources,
