@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.48.7] - 2026-09-22
+
+### Fixed
+- decouple build tooling PHP interpreter from component floor
+- remove the build staging tree instead of shipping it
+
 ## [3.48.6] - 2026-09-21
 
 ### Fixed
