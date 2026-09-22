@@ -671,11 +671,7 @@ fn staged_component_path(component_path: &str, worktree_path: &str) -> Result<St
 /// (for example `/tmp` against `/private/tmp` on macOS) still yields the
 /// component's real offset instead of an empty one. Returns `None` when `path`
 /// is not under `from_root`, rather than guessing a location.
-fn rebase_under_root(
-    path: &Path,
-    from_root: &Path,
-    to_root: &Path,
-) -> Option<std::path::PathBuf> {
+fn rebase_under_root(path: &Path, from_root: &Path, to_root: &Path) -> Option<std::path::PathBuf> {
     let canonical = |value: &Path| value.canonicalize().unwrap_or_else(|_| value.to_path_buf());
     let relative = canonical(path)
         .strip_prefix(canonical(from_root))
@@ -691,9 +687,9 @@ fn rebase_under_root(
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_record, in_place_eligible, operation_record, reconcile_pending,
-        rebase_under_root, staged_component_path, NativeProvisionIntent, NativeWorkspace,
-        ReleaseWorkspace, WorktreeTerminalDisposition,
+        finalize_record, in_place_eligible, operation_record, rebase_under_root, reconcile_pending,
+        staged_component_path, NativeProvisionIntent, NativeWorkspace, ReleaseWorkspace,
+        WorktreeTerminalDisposition,
     };
     use crate::release::operation_record::OperationRecordStore;
     use homeboy_core::component::Component;
