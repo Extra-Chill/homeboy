@@ -177,7 +177,18 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
-  id-token: write
+  # id-token is deliberately NOT requested here. A called reusable workflow
+  # cannot hold more permissions than its caller grants, so every scope listed
+  # at this level is a scope every caller is forced to grant. Adding one is a
+  # breaking change that callers cannot absorb by doing nothing: the run is
+  # rejected before any job exists, with no log, no annotation, and a bare
+  # startup_failure (#494).
+  #
+  # npm trusted publishing needs id-token: write, but only consumers that
+  # actually publish to npm need it. Those consumers grant it in their own
+  # caller workflow; see fixtures/reusable-release-npm-consumer.yml. Requiring
+  # it from everyone took ~30 WordPress repositories offline that will never
+  # publish an npm package.
 
 jobs:
   # ── Step 1: Check for releasable commits ──
