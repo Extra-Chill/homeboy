@@ -936,11 +936,17 @@ pub struct SecretEnvCredentialSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_value: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1125,10 +1131,13 @@ mod tests {
                     "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
                     SecretEnvCredentialSource {
                         source: "keychain-bundle".to_string(),
+                        path: None,
                         scope: Some("agent-task".to_string()),
                         name: Some("example-oauth".to_string()),
                         field: Some("refresh_token".to_string()),
                         env_var: None,
+                        fallback_fields: Vec::new(),
+                        fallback_value: None,
                     },
                 )]),
             },
@@ -1154,6 +1163,25 @@ mod tests {
             redacted.get("EXAMPLE_PROVIDER_REFRESH_TOKEN"),
             Some(&"[REDACTED]".to_string())
         );
+    }
+
+    #[test]
+    fn secret_env_plan_rejects_string_credential_fallback_values() {
+        let error = serde_json::from_value::<SecretEnvPlan>(serde_json::json!({
+            "provider_credentials": {
+                "provider": {
+                    "sources": {
+                        "PROVIDER_FEDRAMP": {
+                            "source": "json-file",
+                            "fallback_value": "false"
+                        }
+                    }
+                }
+            }
+        }))
+        .expect_err("credential fallback values must be JSON booleans");
+
+        assert!(error.to_string().contains("invalid type"));
     }
 
     #[test]

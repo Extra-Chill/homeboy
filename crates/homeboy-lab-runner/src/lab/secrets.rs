@@ -80,8 +80,12 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         .into_iter()
         .filter(|(name, _)| !secret_env_names.contains(name))
         .collect::<BTreeMap<_, _>>();
-    let mut secret_env_plan =
-        materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
+    let provider_credentials = declared_agent_task_provider_credentials(args)?;
+    let mut secret_env_plan = materialized_lab_secret_env_plan(
+        public_env,
+        secret_env_names.clone(),
+        provider_credentials,
+    )?;
     let resolved_secret_env_names = secret_env_plan.secret_env_names();
     let secret_values = env_delta
         .iter()
@@ -227,6 +231,10 @@ fn empty_tunnel_secret_env_metadata() -> serde_json::Value {
 fn materialized_lab_secret_env_plan(
     public_env: BTreeMap<String, String>,
     secret_env_names: Vec<String>,
+    provider_credentials: BTreeMap<
+        String,
+        homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping,
+    >,
 ) -> Result<SecretEnvPlan> {
     SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
         public_env,
@@ -234,7 +242,11 @@ fn materialized_lab_secret_env_plan(
         diagnostic_source: Some("lab-secret-env-handoff".to_string()),
         ..SecretEnvPlanMaterializeRequest::default()
     })
-    .map(|materialization| materialization.plan)
+    .map(|materialization| {
+        let mut plan = materialization.plan;
+        plan.provider_credentials = provider_credentials;
+        plan
+    })
     .map_err(|error| {
         Error::validation_invalid_argument(
             "secret-env-plan",
@@ -246,6 +258,21 @@ fn materialized_lab_secret_env_plan(
             ]),
         )
     })
+}
+
+fn declared_agent_task_provider_credentials(
+    args: &[String],
+) -> Result<BTreeMap<String, homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping>> {
+    let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)?
+        .or_else(|| agent_task_run_plan_from_args(args))
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    homeboy_agents::agent_tasks::provider::provider_secret_credential_mappings_for_plan_with_providers(
+        &plan,
+        providers.providers(),
+    )
 }
 
 fn redacted_lab_secret_env_plan(plan: &SecretEnvPlan) -> SecretEnvPlan {
@@ -389,6 +416,12 @@ fn hydrate_agent_task_secret_env_with_providers(
         })
         .transpose()?
         .unwrap_or_default();
+    let runner_source = |name: &str| {
+        fallback_sources
+            .get(name)
+            .map(|source| source.source.as_str())
+            .unwrap_or("runner")
+    };
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
         "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),
@@ -396,7 +429,7 @@ fn hydrate_agent_task_secret_env_with_providers(
             .into_iter()
             .map(|name| serde_json::json!({
                 "name": name,
-                "source": "runner",
+                "source": runner_source(&name),
             }))
             .collect::<Vec<_>>(),
     }))
@@ -540,7 +573,10 @@ pub(crate) fn preflight_lab_secret_env_handoff(
         let configured = match entry.owner.as_str() {
             "controller" => env.contains_key(&entry.name),
             "runner" => runner
-                .map(|runner| runner.secret_env.contains_key(&entry.name))
+                .map(|runner| {
+                    runner.secret_env.contains_key(&entry.name)
+                        || runner_declared_source_is_delivery(&entry.source)
+                })
                 .unwrap_or(true),
             _ => true,
         };
@@ -587,6 +623,13 @@ pub(crate) fn preflight_lab_secret_env_handoff(
         );
     }
     Err(error)
+}
+
+fn runner_declared_source_is_delivery(source: &str) -> bool {
+    matches!(
+        source,
+        "env" | "json-file" | "json-file-jwt-expiration" | "keychain" | "keychain-bundle"
+    )
 }
 
 fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {

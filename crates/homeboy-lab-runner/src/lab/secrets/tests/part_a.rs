@@ -329,6 +329,35 @@ fn preflight_lab_secret_env_handoff_reports_missing_runner_deferred_secret() {
 }
 
 #[test]
+fn preflight_lab_secret_env_handoff_accepts_declared_runner_provider_source() {
+    let handoff = LabSecretEnvHandoffPlan {
+        env_delta: HashMap::new(),
+        diagnostics: serde_json::Value::Null,
+        entries: vec![SecretEnvHandoffEntry {
+            name: "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            owner: "runner".to_string(),
+            source: "json-file".to_string(),
+            destination: "runner".to_string(),
+            status: "deferred".to_string(),
+            remediation: None,
+        }],
+        secret_env_plan: SecretEnvPlan::from_secret_env_names([
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        ]),
+        secret_env_names: vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+        runner_deferred_secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+    };
+
+    preflight_lab_secret_env_handoff(
+        "lab-a",
+        Some(&fixture_runner(HashMap::new())),
+        &HashMap::new(),
+        &handoff,
+    )
+    .expect("declared runner provider source is a valid delivery route");
+}
+
+#[test]
 fn preflight_lab_secret_env_handoff_preserves_unknown_runner_side_status() {
     let args = vec![
         "homeboy".to_string(),

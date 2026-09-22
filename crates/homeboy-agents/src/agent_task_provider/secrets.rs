@@ -1,5 +1,8 @@
 use super::resolution::select_provider;
 use super::*;
+use homeboy_core::secret_env_plan::{
+    SecretEnvCredentialSource, SecretEnvProviderCredentialMapping,
+};
 
 pub(super) fn apply_provider_runner_secret_env_contracts_with_providers(
     plan: &mut AgentTaskPlan,
@@ -81,6 +84,67 @@ pub fn provider_secret_sources_for_plan_with_providers(
         sources.extend(provider_secret_sources(provider, Some(request)));
     }
     sources
+}
+
+pub fn provider_secret_credential_mappings_for_plan_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> homeboy_core::Result<BTreeMap<String, SecretEnvProviderCredentialMapping>> {
+    let mut mappings: BTreeMap<String, SecretEnvProviderCredentialMapping> = BTreeMap::new();
+    for request in &plan.tasks {
+        let Some(provider) = select_provider(providers, request) else {
+            continue;
+        };
+        let secret_env = provider_secret_env_plan(provider, request).secret_env_names();
+        let sources = provider_secret_sources(provider, Some(request))
+            .into_iter()
+            .map(|(name, source)| {
+                (
+                    name,
+                    SecretEnvCredentialSource {
+                        source: source.source,
+                        env_var: source.env_var,
+                        path: source.path,
+                        scope: source.scope,
+                        name: source.name,
+                        field: source.field,
+                        fallback_fields: source.fallback_fields,
+                        fallback_value: source.value.and_then(|value| value.parse::<bool>().ok()),
+                    },
+                )
+            })
+            .collect();
+        let mapping = SecretEnvProviderCredentialMapping {
+            secret_env,
+            sources,
+        };
+        if let Some(existing) = mappings.get_mut(&provider.id) {
+            for (name, source) in &mapping.sources {
+                if existing
+                    .sources
+                    .get(name)
+                    .is_some_and(|current| current != source)
+                {
+                    return Err(homeboy_core::Error::validation_invalid_argument(
+                        "provider_credentials",
+                        format!(
+                            "provider {} has conflicting credential source mappings for {}",
+                            provider.id, name
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+            }
+            existing.secret_env.extend(mapping.secret_env);
+            existing.secret_env.sort();
+            existing.secret_env.dedup();
+            existing.sources.extend(mapping.sources);
+        } else {
+            mappings.insert(provider.id.clone(), mapping);
+        }
+    }
+    Ok(mappings)
 }
 
 fn provider_secret_env(

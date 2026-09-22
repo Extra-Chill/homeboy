@@ -127,6 +127,7 @@ pub(super) fn json_file_source(path: &str, field: &str) -> AgentTaskSecretSource
         scope: None,
         name: None,
         field: Some(field.to_string()),
+        fallback_fields: Vec::new(),
         value: None,
     }
 }

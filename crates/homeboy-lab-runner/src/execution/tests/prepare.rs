@@ -111,6 +111,230 @@ fn prepare_runner_process_uses_embedded_runner_snapshot() {
 }
 
 #[test]
+fn prepare_runner_process_defers_runner_owned_secret_plan_entries() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut runner = ssh_runner();
+        runner.id = "homeboy-lab".to_string();
+        runner.secret_env.insert(
+            "ACCESS_TOKEN".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("ACCESS_TOKEN".to_string()),
+                file: None,
+                secret: None,
+            },
+        );
+        let mut secret_env_plan =
+            SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
+        secret_env_plan.env_materialization = Some(
+            homeboy_core::env_materialization_plan::EnvMaterializationPlan {
+                secret_refs: vec![homeboy_core::env_materialization_plan::EnvSecretRef {
+                    name: "ACCESS_TOKEN".to_string(),
+                    owner: Some("runner".to_string()),
+                }],
+                ..Default::default()
+            },
+        );
+
+        let prepared = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(runner),
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: vec!["ACCESS_TOKEN".to_string()],
+            secret_env_plan: Some(secret_env_plan),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("runner-owned secret must not be resolved by the controller");
+
+        assert!(!prepared.env.contains_key("ACCESS_TOKEN"));
+    });
+}
+
+#[test]
+fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let auth_dir = home.path().join(".codex");
+        std::fs::create_dir_all(&auth_dir).expect("auth directory");
+        std::fs::write(
+            auth_dir.join("auth.json"),
+            serde_json::json!({
+                "tokens": {
+                    "access_token": "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.signature",
+                    "refresh_token": "runner-refresh-secret",
+                    "account_id": "runner-account"
+                }
+            })
+            .to_string(),
+        )
+        .expect("auth file");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let names = vec![
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+        ];
+        let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(names.clone());
+        secret_env_plan.provider_credentials.insert(
+            "opencode.agent-task-executor".to_string(),
+            homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
+                secret_env: names.clone(),
+                sources: [
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.access_token".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.refresh_token".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file-jwt-expiration".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.access_token".to_string()),
+                            fallback_fields: vec![
+                                "tokens.expires_at".to_string(),
+                                "tokens.expiresAt".to_string(),
+                            ],
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.account_id".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.fedramp".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: Some(false),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let serialized = serde_json::to_string(&secret_env_plan).expect("serialize sealed plan");
+        let secret_env_plan: SecretEnvPlan =
+            serde_json::from_str(&serialized).expect("deserialize sealed plan");
+        assert!(!serialized.contains("runner-refresh-secret"));
+        assert!(serialized.contains("tokens.expires_at"));
+        let mapping = secret_env_plan
+            .provider_credentials
+            .get("opencode.agent-task-executor")
+            .expect("selected provider credential mapping");
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"]
+                .path
+                .as_deref(),
+            Some("~/.codex/auth.json")
+        );
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"]
+                .field
+                .as_deref(),
+            Some("tokens.access_token")
+        );
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT"].fallback_fields,
+            vec!["tokens.expires_at", "tokens.expiresAt"]
+        );
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"].fallback_value,
+            Some(false)
+        );
+
+        let prepared = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(local_runner(workspace.path().display().to_string())),
+            cwd: Some(workspace.path().display().to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: names,
+            secret_env_plan: Some(secret_env_plan),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("daemon preparation resolves the sealed runner source");
+
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"),
+            Some(&"runner-refresh-secret".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT"),
+            Some(&"4102444800".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID"),
+            Some(&"runner-account".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_FEDRAMP"),
+            Some(&"false".to_string())
+        );
+    });
+}
+
+#[test]
 fn ssh_runner_prep_leaves_default_path_to_runner_side() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {

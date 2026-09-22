@@ -20,6 +20,7 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
                 scope: None,
                 name: None,
                 field: None,
+                fallback_fields: Vec::new(),
                 value: None,
             },
         ),
@@ -112,6 +113,24 @@ fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sourc
 }
 
 #[test]
+fn runner_resolved_provider_source_is_refreshed_from_controller() {
+    // Runner-side resolution still reads the declared file, so the controller
+    // must keep that file current before every run instead of leaving a stale copy.
+    let sources = HashMap::from([(
+        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        json_file_source("~/.codex/auth.json", "tokens.access_token"),
+    )]);
+
+    let provisions = super::super::provider_file_secret_source_provisions(
+        &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
+        &sources,
+    );
+
+    assert_eq!(provisions.len(), 1);
+    assert_eq!(provisions[0].path, "~/.codex/auth.json");
+}
+
+#[test]
 fn runner_secret_env_resolution_uses_provider_json_file_source_values() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
@@ -179,6 +198,84 @@ fn controller_secret_env_resolution_errors_when_required_name_has_no_ref() {
 }
 
 #[test]
+fn runner_secret_env_resolution_preserves_fallback_source_errors() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let sources = HashMap::from([(
+            "ACCESS_TOKEN".to_string(),
+            json_file_source("~/.missing-provider/auth.json", "tokens.access_token"),
+        )]);
+
+        let err = resolve_runner_secret_env_for_command_with_fallbacks(
+            &HashMap::new(),
+            &["ACCESS_TOKEN".to_string()],
+            &HashMap::new(),
+            &sources,
+        )
+        .expect_err("an unreadable configured source must fail closed");
+
+        assert!(err.message.contains("ACCESS_TOKEN"));
+        assert!(err.message.contains("failed") || err.message.contains("missing"));
+        assert!(!err.message.contains("missing runner secret env ref"));
+    });
+}
+
+#[test]
+fn runner_secret_env_plan_source_failure_stays_fail_closed_without_runner_ref() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut plan = SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
+        plan.provider_credentials.insert(
+            "opencode.agent-task-executor".to_string(),
+            homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
+                secret_env: vec!["ACCESS_TOKEN".to_string()],
+                sources: [(
+                    "ACCESS_TOKEN".to_string(),
+                    homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                        source: "json-file".to_string(),
+                        env_var: None,
+                        path: Some("~/.missing-provider/auth.json".to_string()),
+                        scope: None,
+                        name: None,
+                        field: Some("tokens.access_token".to_string()),
+                        fallback_fields: Vec::new(),
+                        fallback_value: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        let err = resolve_runner_secret_env_for_plan_with_sources(
+            &HashMap::new(),
+            &plan,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect_err("sealed source failure must stop before provider execution");
+
+        assert!(err
+            .message
+            .contains("runner secret source for ACCESS_TOKEN failed"));
+        assert!(!err.message.contains("missing runner secret env ref"));
+    });
+}
+
+#[test]
+fn runner_secret_env_resolution_stays_fail_closed_without_runner_ref_or_source() {
+    let err = resolve_runner_secret_env_for_command_with_fallbacks(
+        &HashMap::new(),
+        &["ACCESS_TOKEN".to_string()],
+        &HashMap::new(),
+        &HashMap::new(),
+    )
+    .expect_err("missing runner secret ref must fail closed");
+
+    assert!(err
+        .message
+        .contains("missing runner secret env ref for ACCESS_TOKEN"));
+}
+
+#[test]
 fn controller_secret_env_resolution_uses_fallback_sources() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let provider_dir = home.path().join(".provider");
@@ -208,6 +305,49 @@ fn controller_secret_env_resolution_uses_fallback_sources() {
 
         assert_eq!(
             resolved.get("PROVIDER_ACCESS_TOKEN"),
+            Some(&"controller-access-secret".to_string())
+        );
+    });
+}
+
+#[test]
+fn controller_secret_env_resolution_keeps_controller_owned_plan_entries_local() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let provider_dir = home.path().join(".provider");
+        std::fs::create_dir_all(&provider_dir).expect("provider dir");
+        std::fs::write(
+            provider_dir.join("auth.json"),
+            serde_json::json!({
+                "tokens": { "access_token": "controller-access-secret" }
+            })
+            .to_string(),
+        )
+        .expect("auth json");
+        let sources = HashMap::from([(
+            "ACCESS_TOKEN".to_string(),
+            json_file_source("~/.provider/auth.json", "tokens.access_token"),
+        )]);
+        let mut plan = SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
+        plan.env_materialization = Some(
+            homeboy_core::env_materialization_plan::EnvMaterializationPlan {
+                secret_refs: vec![homeboy_core::env_materialization_plan::EnvSecretRef {
+                    name: "ACCESS_TOKEN".to_string(),
+                    owner: Some("controller".to_string()),
+                }],
+                ..Default::default()
+            },
+        );
+
+        let resolved = super::super::resolve_controller_secret_env_for_plan_with_fallbacks(
+            &HashMap::new(),
+            &plan,
+            &HashMap::new(),
+            &sources,
+        )
+        .expect("controller-owned source resolves locally");
+
+        assert_eq!(
+            resolved.get("ACCESS_TOKEN"),
             Some(&"controller-access-secret".to_string())
         );
     });
