@@ -3868,6 +3868,10 @@ pub fn project_record(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
+    // Status reads must expose a dead adoption owner without persisting the
+    // interruption; the reconcile action remains the mutating path.
+    let projected_record = project_dead_candidate_adoption(record);
+    let record = &projected_record;
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(format!("durable run id: {error}")))?;
     let identities = identities_for_record(record)?;
@@ -3907,6 +3911,34 @@ pub fn project_record(
     resource.evidence = evidence_refs(record);
     resource.artifacts = artifact_refs(record);
     Ok(resource)
+}
+
+fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
+    let mut projected = record.clone();
+    let Some(adoption) = projected.candidate_adoption.as_mut() else {
+        return projected;
+    };
+    if adoption.state != "verification_running"
+        || homeboy_core::process::pid_is_running(adoption.owner_pid)
+    {
+        return projected;
+    }
+    adoption.state = "interrupted".to_string();
+    adoption.phase = if adoption.gate_process_group.is_some_and(|pgid| {
+        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+    }) {
+        "gate_orphaned"
+    } else {
+        "owner_stale"
+    }
+    .to_string();
+    adoption.terminal_error = Some(if adoption.phase == "gate_orphaned" {
+        "adoption controller stopped while its gate process group remains live; cancel the adoption before resuming"
+    } else {
+        "adoption owner process is not running; rerun adopt with the recorded candidate SHA to resume"
+    }
+    .to_string());
+    projected
 }
 
 /// Apply one opaque resume cursor and a fixed page bound to an ordered stream.
@@ -4376,12 +4408,13 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
         let message = quarantine
             .get("reason")
             .and_then(|value| value.as_str())
+            .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
             .unwrap_or("run is quarantined");
         return Some(ControlPlaneBlocker {
             code: Some("quarantine".to_string()),
             message: redacted_bounded(message, MESSAGE_BOUND),
             state: None,
-            reason: None,
+            reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
         });
     }
@@ -7108,22 +7141,36 @@ mod tests {
                 first
             );
             let durable_events = service.events(&run, None).expect("durable action events");
+            let event_kinds = durable_events
+                .events
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>();
             assert_eq!(
-                durable_events
-                    .events
+                &event_kinds[..3],
+                ["gate.started", "gate.result", "gate.completed"]
+            );
+            assert_eq!(
+                event_kinds
                     .iter()
-                    .map(|event| event.kind.as_str())
+                    .copied()
+                    .filter(|kind| kind.starts_with("action."))
                     .collect::<Vec<_>>(),
                 vec!["action.accepted", "action.already_satisfied"]
             );
-            assert_eq!(durable_events.events[0].data["actor"], "test");
-            assert_eq!(durable_events.events[0].data["confirmed"], true);
+            let accepted_event = durable_events
+                .events
+                .iter()
+                .find(|event| event.kind == "action.accepted")
+                .expect("accepted action event");
+            assert_eq!(accepted_event.data["actor"], "test");
+            assert_eq!(accepted_event.data["confirmed"], true);
             assert_eq!(
-                durable_events.events[0].data["expected_updated_at"],
+                accepted_event.data["expected_updated_at"],
                 "2026-01-01T00:01:00Z"
             );
             assert_eq!(
-                durable_events.events[0].data["acknowledgement"],
+                accepted_event.data["acknowledgement"],
                 first.acknowledgement
             );
             let logs =
@@ -7153,7 +7200,7 @@ mod tests {
                     .expect("conflict does not append events")
                     .events
                     .len(),
-                2
+                durable_events.events.len()
             );
 
             let stale = ControlPlaneActionRequest {
@@ -7173,7 +7220,7 @@ mod tests {
                     .expect("stale fence does not append events")
                     .events
                     .len(),
-                2
+                durable_events.events.len()
             );
 
             let reconcile = ControlPlaneActionRequest {
@@ -7580,7 +7627,7 @@ mod tests {
                     .iter()
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
-                vec!["action.accepted", "action.succeeded"]
+                vec!["action.accepted", "run.cancelled", "action.succeeded"]
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
@@ -8670,6 +8717,52 @@ mod tests {
         let resource = project_record(&record, None).expect("project completed run");
         assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
         assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
+    fn dead_candidate_adoption_owner_is_projected_interrupted_without_writing() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.candidate_adoption = Some(
+            serde_json::from_value(json!({
+                "candidate_sha": "candidate-sha",
+                "ai_model": "openai/gpt-5.6-terra",
+                "state": "verification_running",
+                "phase": "verification",
+                "active_gate": "cargo test",
+                "started_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "owner_pid": u32::MAX,
+                "heartbeat_at": "2026-01-01T00:00:00Z"
+            }))
+            .expect("candidate adoption"),
+        );
+
+        let resource = project_record(&record, None).expect("project stale adoption");
+        assert_eq!(resource.candidate.expect("candidate").state, "interrupted");
+        assert_eq!(
+            record.candidate_adoption.expect("durable adoption").state,
+            "verification_running"
+        );
+        let actions = resource
+            .action_eligibility
+            .expect("action eligibility")
+            .actions;
+        let reconcile = actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Reconcile)
+            .expect("reconcile action");
+        assert_eq!(
+            reconcile.availability,
+            ControlPlaneActionAvailability::Available
+        );
+        let resume = actions
+            .iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Available
+        );
     }
 
     #[test]

@@ -1621,6 +1621,17 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
     );
     assert_eq!(record.metadata["runner_handoff"]["state"], "terminal");
     assert_eq!(record.metadata["runner_job_events"], json!(snapshot.events));
+    assert_eq!(
+        record.metadata["cancellation_provenance"]["cause"],
+        "pre_provider_cancellation"
+    );
+    let events = logs_in_store(&lifecycle_store, run_id)
+        .expect("cancellation event projection")
+        .events;
+    assert!(events.iter().any(|event| {
+        event.kind == "run.cancelled"
+            && event.data["provenance"]["cause"] == "pre_provider_cancellation"
+    }));
     assert!(lifecycle_store.read_aggregate(run_id).is_err());
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
@@ -2835,6 +2846,7 @@ fn acceptance_is_created_after_green_promotion_and_persists_verifier_provenance(
         }),
     )
     .expect("pending promotion recorded");
+    assert_eq!(before_gates.state, AgentTaskRunState::CandidateRecoverable);
     assert!(before_gates.acceptance.is_none());
 
     let pending = record_promotion_in_store(
@@ -3987,10 +3999,11 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The durable provider success the recovery must preserve is recorded
 /// in the same store the dead-owner fixture is planted in and the recovery reads
-/// back, so `CandidateRecoverable` is decided from the evidence this test wrote.
+/// back, so the interrupted-owner classification is decided from the evidence
+/// this test wrote rather than provider completion alone.
 #[cfg(unix)]
 #[test]
-fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
+fn dead_owner_does_not_call_late_provider_success_a_candidate_without_artifact() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-late-success")).expect("submitted");
@@ -4023,7 +4036,11 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         owner.wait().expect("reap provider owner");
 
         let recovered = reconcile_status("owner-late-success").expect("recovered status");
-        assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);
+        assert_ne!(
+            recovered.state,
+            AgentTaskRunState::CandidateRecoverable,
+            "provider completion without a harvested artifact is not a recoverable candidate"
+        );
         assert_eq!(
             recovered.metadata["provider_executions"][0]["state"],
             json!("succeeded")
@@ -4031,6 +4048,10 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         assert_eq!(
             recovered.metadata["terminal_failure_classification"],
             json!("interrupted_owner")
+        );
+        assert_eq!(
+            recovered.metadata["interrupted_owner"]["candidate_status"],
+            json!("unavailable")
         );
         test_lifecycle_store()
             .read_aggregate("owner-late-success")

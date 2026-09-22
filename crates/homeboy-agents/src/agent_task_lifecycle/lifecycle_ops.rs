@@ -5086,10 +5086,15 @@ fn quarantine_queued_run_in_store(
                 "category": diagnostic.category,
                 "error_code": diagnostic.error_code,
                 "summary": diagnostic.summary,
+                "reason": diagnostic.summary,
+                "actor": "fleet-reconciler",
+                "cause": "admission_preflight_failed",
                 "provider_id": diagnostic.provider_id,
                 "required_environment_variables": diagnostic.required_environment_variables,
                 "quarantined_at": now,
+                "timestamp": now,
                 "remediation": remediation,
+                "recovery_action": remediation,
             }),
         );
         true
@@ -5243,9 +5248,14 @@ pub fn quarantine_queued_run_exact_in_store(
                     "category": "operator_quarantine",
                     "error_code": "operator_quarantine",
                     "summary": "operator quarantined this queued run",
+                    "reason": operator_reason,
+                    "actor": "operator",
+                    "cause": "operator_requested",
                     "operator_reason": operator_reason,
                     "quarantined_at": quarantined_at,
+                    "timestamp": quarantined_at,
                     "remediation": remediation,
+                    "recovery_action": remediation,
                 }),
             );
             true
@@ -8030,9 +8040,15 @@ pub fn record_promotion_in_store(
             .expect("promotions array")
             .push(promotion.clone());
         metadata.insert("latest_promotion".to_string(), promotion.clone());
-        // A promoted patch blocked by deterministic gates is still the durable
-        // candidate, but it cannot be reported as a successful completed run.
-        if promotion.get("status").and_then(Value::as_str) == Some("gate_failed") {
+        // A candidate that has not completed controller-owned verification is
+        // recoverable evidence, not a successful completed run. In particular,
+        // the verification-pending checkpoint is written before gates start;
+        // leaving the provider's Succeeded state in place made Cook report
+        // success while the destination was still unverified (#14315).
+        if matches!(
+            promotion.get("status").and_then(Value::as_str),
+            Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
+        ) {
             set_run_state(record, AgentTaskRunState::CandidateRecoverable);
         }
         if let Some(acceptance) = record.acceptance.as_mut() {

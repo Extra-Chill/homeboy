@@ -1061,7 +1061,7 @@ impl CliRuntime {
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
                     delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
-                    detach_after_handoff: matches.get_flag("detach_after_handoff"),
+                    detach_after_handoff: matches.get_flag("wait"),
                     runner_env: &runner_env,
                     runner_secret_env: &runner_secret_env,
                     lab_env_json: matches
@@ -1299,6 +1299,8 @@ impl CliRuntime {
         }
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
+        // Restore command-scoped runner intent before admission and placement
+        // routing inspect the typed command. Provider readiness is runner-scoped.
         normalize_agent_task_runner_option(&mut cli, &normalized);
         if let Commands::AgentTask(agent_task) = &mut cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
@@ -1388,7 +1390,14 @@ impl CliRuntime {
             }
         }
 
-        if Self::admits_ambient_notification_route(&cli.command) && notification_route.is_none() {
+        // A resolved-but-route-less transport (evidence.transport is set) was
+        // an explicit caller choice, even though it carries no route; ambient
+        // discovery must not override that choice with an unrelated
+        // installed transport. Only truly empty context falls through here.
+        if Self::admits_ambient_notification_route(&cli.command)
+            && notification_route.is_none()
+            && notification_resolution.evidence.transport.is_none()
+        {
             notification_resolution =
                 match crate::core::notification_route_resolver::resolve_installed_with_evidence() {
                     Ok(resolution) => resolution,
@@ -3243,7 +3252,6 @@ fn preflight_hot_command_with_input(
             // controller-local resource refusal, never selects local execution.
             let runner_admits_offload = runner_admits_offload
                 || (hot_command.allows_warm_runner_coordination
-                    && cli.detach_after_handoff
                     && cli.runner.is_none()
                     && matches!(
                         cli.command,
@@ -4126,6 +4134,7 @@ mod tests {
     }
     use super::*;
     use clap::Parser;
+    use homeboy::core::parsed_command_preflight::RunnerIntent;
     use sha2::{Digest, Sha256};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -6553,6 +6562,72 @@ mod tests {
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert_eq!(resource_policy_runner_hint(&cli, None), Some("homeboy-lab"));
+        }
+    }
+
+    #[test]
+    fn provider_readiness_runner_intent_reaches_generic_route_selection() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--validate-readiness".to_string(),
+        ];
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "providers",
+            "--backend",
+            "opencode",
+            "--validate-readiness",
+        ]);
+        normalize_agent_task_runner_option(&mut cli, &argv);
+
+        let input = resource_policy::parsed_command_preflight_input(&cli, &argv);
+        let route = generic_route_policy_snapshot(&cli, Some("homeboy-lab".to_string()));
+
+        assert!(route.command_supports_lab);
+        assert_eq!(
+            input.runner,
+            RunnerIntent::Explicit("homeboy-lab".to_string())
+        );
+        assert_eq!(
+            homeboy::core::parsed_command_preflight::resolve_generic_route_runner(&input, &route),
+            Some("homeboy-lab".to_string())
+        );
+    }
+
+    #[test]
+    fn local_provider_readiness_stays_controller_owned_without_runner_pin() {
+        for (args, expected) in [
+            (
+                vec!["homeboy", "--placement", "local", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec![
+                    "homeboy",
+                    "--placement",
+                    "lab-or-local",
+                    "agent-task",
+                    "providers",
+                ],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec!["homeboy", "--placement", "lab", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::Ordinary,
+            ),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let cli = Cli::parse_from(args.clone());
+            let input = resource_policy::parsed_command_preflight_input(&cli, &args);
+
+            assert_eq!(input.controller_execution, expected);
         }
     }
 

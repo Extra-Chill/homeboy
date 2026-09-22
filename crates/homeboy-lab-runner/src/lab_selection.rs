@@ -1455,6 +1455,11 @@ fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
 ) -> Option<String> {
+    if status.session.is_none() {
+        return Some(format!(
+            "connected runner `{runner_id}` has no connected daemon session; reconnect it with `homeboy runner connect {runner_id}`"
+        ));
+    }
     if let Some(report) = status
         .daemon_freshness
         .as_ref()

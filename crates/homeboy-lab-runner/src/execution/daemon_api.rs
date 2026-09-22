@@ -186,13 +186,11 @@ pub(crate) fn daemon_api_post_json_for_session_with_broker_token(
         "parse daemon response",
     )?;
     if !envelope.success {
-        return Err(Error::new(
-            ErrorCode::InternalUnexpected,
-            format!(
-                "daemon request failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ),
-            json!({ "http_status": response.status_code, "path": path }),
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "daemon request failed",
+            Some(response.status_code),
+            path,
         ));
     }
     envelope
@@ -336,6 +334,8 @@ mod tests {
     use super::*;
     use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
     use homeboy_core::test_support;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn session(lease: &str, endpoint: &str) -> RunnerSession {
         RunnerSession {
@@ -397,6 +397,50 @@ mod tests {
         let data = reverse_broker_daemon_data(json!({ "job": { "id": "job-1" } }));
         let body = canonical_daemon_body(&data, "reverse broker job").expect("canonical body");
         assert_eq!(body["job"]["id"], "job-1");
+    }
+
+    #[test]
+    fn daemon_post_preserves_structured_remote_storage_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind daemon fixture");
+        let address = listener.local_addr().expect("daemon fixture address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept daemon request");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read daemon request");
+            let body = serde_json::json!({
+                "success": false,
+                "error": {
+                    "error": "internal.json_error",
+                    "message": "staging record schema is invalid",
+                    "details": {"phase": "lab_staging_submission"},
+                    "hints": [{"message": "repair the staging record"}]
+                }
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write daemon response");
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .build()
+            .expect("daemon fixture client");
+
+        let error = daemon_post(
+            &client,
+            &format!("http://{address}"),
+            "/runner/staging/submit",
+        )
+        .expect_err("typed daemon error");
+        server.join().expect("daemon fixture server");
+
+        assert_eq!(error.code, ErrorCode::InternalJsonError);
+        assert_eq!(error.details["phase"], "lab_staging_submission");
+        assert_eq!(error.hints[0].message, "repair the staging record");
     }
 
     fn reverse_session() -> RunnerSession {
@@ -474,10 +518,12 @@ pub(super) fn daemon_post(client: &Client, local_url: &str, path: &str) -> Resul
     let envelope: DaemonEnvelope =
         parse_daemon_response_json(&body, status_code, path, "parse daemon response")?;
     if !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "daemon request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(crate::remote_error::from_wire(
+            envelope.error.unwrap_or(Value::Null),
+            "daemon request failed",
+            Some(status_code),
+            path,
+        ));
     }
     envelope
         .data

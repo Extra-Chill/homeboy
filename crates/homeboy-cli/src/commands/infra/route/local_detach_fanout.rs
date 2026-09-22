@@ -1,18 +1,9 @@
 //! Local-placement fanout detachment.
 //!
-//! `--detach-after-handoff` is a global flag, and it is advertised on
-//! `fanout cook-batch` and `fanout run-plan`. It did not work there. Every gate
-//! that acted on it tested for Cook specifically — `detached_cook_can_queue`,
-//! `is_local_detached_cook` — and fanout returned from
-//! `run_split_placement_fanout` before any detach handling. So a Lab-routed
-//! `fanout cook-batch --detach-after-handoff` accepted a flag promising the
-//! caller could disconnect, then blocked that caller for hours and died with its
-//! terminal, orphaning every in-flight child.
-//!
-//! This module makes the flag mean what it says, on the same terms as the Cook
-//! launcher next door: re-execute the coordinator in its own session, hand
-//! durable ownership of its lifecycle to the daemon as a typed controller job,
-//! and return a bounded handoff naming the batch.
+//! By default, executable fanout waves re-execute their coordinator in its own
+//! session, hand durable ownership to the daemon as a typed controller job,
+//! and return a bounded handoff naming the batch. `--wait` executes the wave to
+//! completion. Planning, previews, and runner-owned children stay synchronous.
 //!
 //! # Why the launcher spawns and the daemon only supervises
 //!
@@ -85,18 +76,12 @@ pub(super) struct DetachableFanout {
     pin_fanout_id: bool,
 }
 
-/// Whether this invocation is a controller-owned fanout wave asking to detach,
-/// and the coordinator it would detach.
-///
-/// `Ok(None)` means "not this interceptor's business". `Err` means the request
-/// was addressed to this interceptor and cannot be honoured.
+/// Whether this invocation owns an executable fanout coordinator. Wait policy
+/// changes observation, not eligibility for durable ownership.
 fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<DetachableFanout>> {
     // Placement belongs to each provider attempt. The coordinator is always
     // controller-owned, so detach it before Lab selection and preserve the
     // request on the child argv for split-placement routing.
-    if !cli.detach_after_handoff {
-        return Ok(None);
-    }
     let Commands::AgentTask(AgentTaskArgs {
         command: AgentTaskCommand::Fanout(AgentTaskFanoutArgs { command }),
     }) = &cli.command
@@ -127,16 +112,10 @@ fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<Detachable
         }
         AgentTaskFanoutCommand::CookBatch(args) => {
             if !args.run_plan {
-                return Err(no_coordinator_error(
-                    "agent-task fanout cook-batch",
-                    "Add `--run-plan` to execute the wave from this machine, which is the coordinator that can be detached.",
-                ));
+                return Ok(None);
             }
             if args.preview {
-                return Err(no_coordinator_error(
-                    "agent-task fanout cook-batch --preview",
-                    "A preview plans without executing, so it owns no coordinator. Drop `--preview` to detach a real wave.",
-                ));
+                return Ok(None);
             }
             Ok(Some(match &args.fanout_id {
                 Some(fanout_id) => DetachableFanout {
@@ -149,29 +128,10 @@ fn detachable_local_fanout(cli: &Cli) -> homeboy::core::Result<Option<Detachable
                 },
             }))
         }
-        // Long-running, and currently orphaned by detachment exactly as a wave
-        // was: resume rebases, re-runs gates, pushes, and opens pull requests,
-        // which can take hours. It is not daemon-owned yet, and silently
-        // ignoring the flag here would reproduce the defect this module exists
-        // to remove, so it refuses and names what to do instead.
-        AgentTaskFanoutCommand::Resume(_) => Err(no_coordinator_error(
-            "agent-task fanout resume",
-            "Resume harvests terminal children through their existing gate and finalization contract, and is not yet daemon-owned. Run it attached, or detach the wave itself with `fanout run-plan --detach-after-handoff`.",
-        )),
-        // Deliberately not this interceptor's business, and deliberately not an
-        // error either.
-        //
-        // The defect being fixed is a flag that *lies*: one that promises the
-        // caller can disconnect while real work is in flight, then orphans that
-        // work. These commands own no work. `plan` normalizes and prints,
-        // `submit`/`submit-batch` hand work to another executor, `status` and
-        // `artifacts` are read-only projections — every one of them returns
-        // promptly and leaves nothing running. The flag is inert here, not
-        // false.
-        //
-        // Rejecting it anyway would break the common shape of setting a global
-        // flag once in a wrapper and running several subcommands under it, and
-        // would buy no safety, so it falls through to normal routing.
+        // Resume has no durable coordinator handoff yet; complete it synchronously.
+        AgentTaskFanoutCommand::Resume(_) => Ok(None),
+        // These commands plan, submit, or read records without owning a running
+        // coordinator. Their ordinary synchronous result remains meaningful.
         AgentTaskFanoutCommand::Plan(_)
         | AgentTaskFanoutCommand::Submit(_)
         | AgentTaskFanoutCommand::SubmitBatch(_)
@@ -190,49 +150,26 @@ fn generated_fanout_id() -> String {
     format!("fanout-detached-{}", uuid::Uuid::new_v4())
 }
 
-fn no_coordinator_error(subject: &str, remedy: &str) -> Error {
-    Error::validation_invalid_argument(
-        "detach-after-handoff",
-        format!(
-            "{subject} cannot detach after handoff with `--placement local` because it owns no long-running coordinator to hand to the daemon"
-        ),
-        None,
-        Some(vec![remedy.to_string()]),
-    )
-}
-
-/// The one context where fanout detachment stays a rejection outright.
-fn runner_side_detach_error() -> Error {
-    Error::validation_invalid_argument(
-        "detach-after-handoff",
-        "agent-task fanout cannot detach after handoff with --placement local inside a runner-owned execution because the runner already owns this work",
-        None,
-        Some(vec![
-            "Detach from the controller that coordinates the wave, not from the runner process executing one of its attempts.".to_string(),
-        ]),
-    )
-}
-
-/// Serve `--detach-after-handoff` for a controller-owned fanout wave by
+/// Serve default durable handoff for a controller-owned fanout wave by
 /// re-executing its coordinator in its own session and returning a bounded
 /// handoff. The child retains its requested placement and routes provider
 /// attempts through the normal split-placement path.
 ///
 /// `runner_side` is true when this process is a Lab offload subprocess, a
-/// managed-runner placement, or a runner-resident execution. There the request
-/// is genuinely unserveable: the process is already the runner's owned
-/// execution and has no controller lifecycle to hand off.
+/// managed-runner placement, or a runner-resident execution. Those children
+/// complete their assigned work under the existing owner.
 pub(super) fn intercept_local_detached_fanout(
     cli: &Cli,
     normalized_args: &[String],
     runner_side: bool,
 ) -> homeboy::core::Result<Option<i32>> {
+    if runner_side || std::env::var_os(agent_task_service::DETACHED_BATCH_COORDINATOR_ENV).is_some()
+    {
+        return Ok(None);
+    }
     let Some(target) = detachable_local_fanout(cli)? else {
         return Ok(None);
     };
-    if runner_side {
-        return Err(runner_side_detach_error());
-    }
 
     let DetachableFanout {
         fanout_id,
@@ -265,6 +202,10 @@ pub(super) fn intercept_local_detached_fanout(
         &mut child,
         submit_batch_controller_job(&fanout_id, pid, &start_identity),
     )?;
+    if !cli.detach_after_handoff {
+        let status = super::local_detach::stream_attached_cook_log(&mut child, &log_path)?;
+        return Ok(Some(status.code().unwrap_or(1)));
+    }
     let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout());
     let child_workload_placement = child_workload_placement(&fanout_id)
         .or_else(invocation_child_workload_placement)
@@ -347,12 +288,8 @@ fn submit_batch_controller_job_inner(
 
 /// The argv the detached coordinator executes.
 ///
-/// It is the caller's own argv with at most two edits: the detach request is
-/// consumed by the launcher, and the fanout id is pinned when the caller did
-/// not name one. Dropping `--detach-after-handoff` is what makes the child
-/// coordinate its own wave to a terminal report, because coordinating is the
-/// default. The parent is the only process authorized to detach. Everything
-/// else is preserved byte for byte.
+/// Explicit `--wait` keeps the child coordinating to terminal completion.
+/// Pin the fanout id when unnamed and preserve the forwarded argument tail.
 fn detached_fanout_child_args(
     normalized_args: &[String],
     fanout_id: &str,
@@ -362,11 +299,10 @@ fn detached_fanout_child_args(
     let mut args: Vec<String> = owned_args
         .iter()
         .skip(1)
-        .filter(|arg| {
-            arg.as_str() != "--detach-after-handoff" && !arg.starts_with("--detach-after-handoff=")
-        })
+        .filter(|arg| arg.as_str() != "--wait")
         .cloned()
         .collect();
+    args.insert(0, "--wait".to_string());
     if pin_fanout_id {
         args.push("--fanout-id".to_string());
         args.push(fanout_id.to_string());
@@ -390,7 +326,7 @@ fn detached_route(cli: &Cli) -> Option<homeboy::core::notification_route::Notifi
         cli.notification_route.as_deref(),
     )
     .ok()
-    .flatten()
+    .and_then(homeboy::core::notification_route::NotificationRouteContext::into_route)
 }
 
 /// Replace an `--input -` stdin request with a file the detached coordinator
@@ -836,7 +772,6 @@ mod tests {
         let cli = cli(&[
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "run-plan",
@@ -860,7 +795,6 @@ mod tests {
         let cli = cli(&[
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "cook-batch",
@@ -890,7 +824,6 @@ mod tests {
         let cli = cli(&[
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "run-plan",
@@ -909,14 +842,9 @@ mod tests {
         assert!(!target.pin_fanout_id);
     }
 
-    /// The heart of the fix: where the operator plausibly believes they are
-    /// detaching a wave and are not, the flag must refuse rather than pretend.
-    ///
-    /// `resume` is in this set because it genuinely runs for hours — gates,
-    /// pushes, pull requests — and is not daemon-owned, so ignoring the flag
-    /// there would reproduce the exact defect being fixed.
+    /// Planning and commands without a durable coordinator remain synchronous.
     #[test]
-    fn a_fanout_that_cannot_detach_refuses_rather_than_lying() {
+    fn a_fanout_without_durable_ownership_remains_synchronous() {
         for (label, extra) in [
             (
                 "cook-batch without --run-plan",
@@ -931,14 +859,12 @@ mod tests {
             ),
             ("resume", vec!["agent-task", "fanout", "resume", "wave-7"]),
         ] {
-            let mut argv = vec!["--placement", "local", "--detach-after-handoff"];
+            let mut argv = vec!["--placement", "local"];
             argv.extend_from_slice(&extra);
-            let error = detachable_local_fanout(&cli(&argv))
-                .expect_err(&format!("{label} must refuse to detach"));
-            assert!(
-                error.message.contains("owns no long-running coordinator"),
-                "{label}: {}",
-                error.message
+            assert_eq!(
+                detachable_local_fanout(&cli(&argv)).unwrap(),
+                None,
+                "{label}"
             );
         }
     }
@@ -963,7 +889,7 @@ mod tests {
                 vec!["agent-task", "fanout", "artifacts", "wave-7"],
             ),
         ] {
-            let mut argv = vec!["--placement", "local", "--detach-after-handoff"];
+            let mut argv = vec!["--placement", "local"];
             argv.extend_from_slice(&extra);
             assert_eq!(
                 detachable_local_fanout(&cli(&argv))
@@ -977,11 +903,10 @@ mod tests {
     /// A dry run plans without executing. Detaching it would hand the daemon a
     /// coordinator that exits immediately.
     #[test]
-    fn a_dry_run_cook_batch_refuses_to_detach() {
+    fn a_dry_run_cook_batch_remains_synchronous() {
         let cli = cli(&[
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "cook-batch",
@@ -992,8 +917,7 @@ mod tests {
             "https://github.com/acme/widget/issues/1",
         ]);
 
-        let error = detachable_local_fanout(&cli).expect_err("a dry run must refuse to detach");
-        assert!(error.message.contains("owns no long-running coordinator"));
+        assert_eq!(detachable_local_fanout(&cli).unwrap(), None);
     }
 
     /// The coordinator is controller-owned at every placement. The detached
@@ -1005,7 +929,6 @@ mod tests {
             let wave = cli(&[
                 "--placement",
                 placement,
-                "--detach-after-handoff",
                 "agent-task",
                 "fanout",
                 "run-plan",
@@ -1021,6 +944,7 @@ mod tests {
         }
 
         let attached = cli(&[
+            "--wait",
             "--placement",
             "local",
             "agent-task",
@@ -1029,19 +953,11 @@ mod tests {
             "--input",
             "@plan.json",
         ]);
-        assert_eq!(
-            detachable_local_fanout(&attached).expect("attached is not ours"),
-            None
-        );
+        assert!(detachable_local_fanout(&attached)
+            .expect("wait preserves durable ownership")
+            .is_some());
 
-        let not_fanout = cli(&[
-            "--placement",
-            "local",
-            "--detach-after-handoff",
-            "agent-task",
-            "status",
-            "cook-1",
-        ]);
+        let not_fanout = cli(&["--placement", "local", "agent-task", "status", "cook-1"]);
         assert_eq!(
             detachable_local_fanout(&not_fanout).expect("non-fanout is not ours"),
             None
@@ -1056,7 +972,6 @@ mod tests {
             "homeboy",
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "run-plan",
@@ -1073,17 +988,16 @@ mod tests {
     }
 
     #[test]
-    fn the_child_argv_preserves_forwarded_detach_named_arguments() {
+    fn the_child_argv_preserves_forwarded_wait_named_arguments() {
         let normalized = [
             "homeboy",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "run-plan",
             "--input",
             "@plan.json",
             "--",
-            "--detach-after-handoff",
+            "--wait",
         ]
         .map(str::to_string);
         let args = detached_fanout_child_args(&normalized, "wave-9", false);
@@ -1091,13 +1005,14 @@ mod tests {
         assert_eq!(
             args,
             [
+                "--wait",
                 "agent-task",
                 "fanout",
                 "run-plan",
                 "--input",
                 "@plan.json",
                 "--",
-                "--detach-after-handoff",
+                "--wait",
             ]
         );
     }
@@ -1107,7 +1022,6 @@ mod tests {
     fn an_already_named_wave_is_not_re_pinned() {
         let normalized = [
             "homeboy",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "run-plan",
@@ -1457,7 +1371,6 @@ mod tests {
             "homeboy",
             "--placement",
             "lab",
-            "--detach-after-handoff",
             "agent-task",
             "fanout",
             "cook-batch",

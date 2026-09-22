@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.13] - 2026-09-22
+
+### Fixed
+- separate split timeout from git calls
+- allow a transport-only route, consult its resolver
+- harvest interrupted provider candidates
+- do not claim artifact cleanup completion
+
+## [0.383.12] - 2026-09-22
+
+### Changed
+- preserve gate events in cancel replay
+
+### Fixed
+- prefer typed provider timeout diagnostics
+- reject incomplete connected runner status
+
+## [0.383.11] - 2026-09-22
+
+### Fixed
+- return after durable handoff unless --wait
+- accept a detached default tip in every default-branch check
+- separate provider success from gate completion
+- expose quarantine and cancellation provenance
+- bind adoption merges to immutable remote base
+- route explicit provider readiness to runner
+- preserve typed daemon staging errors
+
 ## [0.383.10] - 2026-09-22
 
 ### Fixed

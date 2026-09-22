@@ -112,7 +112,6 @@ fn failed_detached_bench_retry_replays_the_persisted_workspace_and_inputs() {
             "homeboy",
             "--placement",
             "lab",
-            "--detach-after-handoff",
             "bench",
             "blocks-engine",
             "--run-id",
@@ -219,7 +218,6 @@ fn generic_lab_replay_retry_rejects_a_changed_workspace_before_reserving_a_succe
             "homeboy".to_string(),
             "--placement".to_string(),
             "lab".to_string(),
-            "--detach-after-handoff".to_string(),
             "bench".to_string(),
             "blocks-engine".to_string(),
             "--run-id".to_string(),
@@ -274,7 +272,6 @@ fn generic_lab_replay_retry_rejects_a_missing_workspace_before_reserving_a_succe
             "homeboy".to_string(),
             "--placement".to_string(),
             "lab".to_string(),
-            "--detach-after-handoff".to_string(),
             "bench".to_string(),
             "blocks-engine".to_string(),
             "--run-id".to_string(),
@@ -1845,7 +1842,6 @@ fn provider_discovery_dispatch_timeout_reads_env_override() {
 fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
     let cook = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--repo",
@@ -1861,7 +1857,6 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
     ]);
     let batch = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "fanout",
         "cook-batch",
@@ -1874,7 +1869,6 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
     ]);
     let retry = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "retry",
         "failed-run",
@@ -2150,7 +2144,6 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 
         let normalized = [
             "homeboy",
-            "--detach-after-handoff",
             "--cwd",
             "/controller/homeboy",
             "agent-task",
@@ -2167,7 +2160,6 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         .collect::<Vec<_>>();
         let cli = Cli::parse_from([
             "homeboy",
-            "--detach-after-handoff",
             "agent-task",
             "retry",
             "failed-run",
@@ -2520,7 +2512,6 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
 fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
     let cli = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3089,7 +3080,7 @@ fn runner_rig_source_management_remote_preflight_strips_controller_globals() {
         "--placement".to_string(),
         "lab-or-local".to_string(),
         "--placement=lab".to_string(),
-        "--detach-after-handoff".to_string(),
+        "--wait".to_string(),
     ];
 
     let command = runner_rig_source_management_command("/usr/local/bin/homeboy", &normalized);
@@ -3353,7 +3344,7 @@ fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
 }
 
 #[test]
-fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authorized() {
+fn cook_admission_placement_is_independent_of_wait_policy() {
     use homeboy::core::parsed_command_preflight::{
         DeferredWorkloadDecision, FallbackDirective, ParsedCommandPreflightResult,
         ResourceAdmissionDecision, ResourceAdmissionEvidence, ResourceHeat,
@@ -3382,7 +3373,6 @@ fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authoriz
     };
     let queued = Cli::parse_from([
         "homeboy",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3396,12 +3386,46 @@ fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authoriz
         &queued,
         &preflight(&queued, FallbackDirective::None),
     ));
+    for wait in [false, true] {
+        let mut argv = vec![
+            "homeboy",
+            "--runner",
+            "lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "durable Lab work",
+        ];
+        if wait {
+            argv.push("--wait");
+        }
+        let cli = Cli::parse_from(argv);
+        assert_eq!(cli.detach_after_handoff, !wait);
+        assert!(cook_requires_unmaterialized_admission(
+            &cli,
+            &preflight(&cli, FallbackDirective::None)
+        ));
+
+        let mut argv = vec![
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "admitted local work",
+        ];
+        if wait {
+            argv.push("--wait");
+        }
+        let cli = Cli::parse_from(argv);
+        let mut admitted = preflight(&cli, FallbackDirective::None);
+        admitted.resource_admission = ResourceAdmissionDecision::Admitted;
+        assert!(!cook_requires_unmaterialized_admission(&cli, &admitted));
+    }
 
     let local = Cli::parse_from([
         "homeboy",
         "--placement",
         "local",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3420,7 +3444,6 @@ fn cook_requires_unmaterialized_admission_when_detached_or_local_is_not_authoriz
         "homeboy",
         "--placement",
         "lab-or-local",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--to-worktree",
@@ -3637,7 +3660,6 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
         .expect("provider config");
         let args = vec![
             "homeboy".to_string(),
-            "--detach-after-handoff".to_string(),
             "--placement".to_string(),
             "auto".to_string(),
             "--runner-secret-env".to_string(),
@@ -3670,10 +3692,6 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
         );
         assert!(intent
             .argv
-            .iter()
-            .any(|arg| arg == "--detach-after-handoff"));
-        assert!(intent
-            .argv
             .windows(2)
             .any(|pair| pair[0] == "--placement" && pair[1] == "auto"));
         assert!(intent.argv.iter().any(|arg| arg == "--prompt"));
@@ -3695,6 +3713,10 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
         replay.extend(["--runner".to_string(), "lab".to_string()]);
         let replay =
             Cli::try_parse_from(replay).expect("intent reconstructs normal Cook CLI inputs");
+        assert!(
+            replay.detach_after_handoff,
+            "replay retains default handoff"
+        );
         assert_eq!(replay.runner.as_deref(), Some("lab"));
         assert!(
             replay.runner.is_some() && !replay.placement.is_explicit_local_override(),

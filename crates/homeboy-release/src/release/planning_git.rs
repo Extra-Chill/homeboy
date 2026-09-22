@@ -110,10 +110,17 @@ pub(super) fn release_push_branch(component: &Component) -> Result<String> {
         return Ok(default_branch);
     }
 
-    let current_branch = current_branch(component)?;
+    // A detached HEAD is not disqualifying on its own. The property this check
+    // cares about is whether the commit being released is the default branch,
+    // which `head_matches_remote_default` answers by commit identity below.
+    let current_branch = command::run_in_optional(
+        &component.local_path,
+        "git",
+        &["symbolic-ref", "--short", "HEAD"],
+    );
 
-    if current_branch == default_branch {
-        return Ok(current_branch);
+    if current_branch.as_deref() == Some(default_branch.as_str()) {
+        return Ok(default_branch);
     }
 
     if head_matches_remote_default(component, &default_branch)? {
@@ -123,8 +130,12 @@ pub(super) fn release_push_branch(component: &Component) -> Result<String> {
     Err(Error::validation_invalid_argument(
         "release",
         format!(
-            "Refusing to plan release push from branch '{}' because the repo default branch is '{}'",
-            current_branch, default_branch
+            "Refusing to plan release push from {} because the repo default branch is '{}'",
+            current_branch
+                .as_deref()
+                .map(|branch| format!("branch '{branch}'"))
+                .unwrap_or_else(|| "detached HEAD".to_string()),
+            default_branch
         ),
         None,
         Some(vec![format!(
@@ -135,7 +146,16 @@ pub(super) fn release_push_branch(component: &Component) -> Result<String> {
 }
 
 pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<()> {
-    let current_branch = current_branch(component)?;
+    // Detachment is only a naming detail here: the check below is an ancestry
+    // test against the remote default revision, which is meaningful whether or
+    // not HEAD carries a symbolic name.
+    let current_branch = command::run_in_optional(
+        &component.local_path,
+        "git",
+        &["symbolic-ref", "--short", "HEAD"],
+    )
+    .map(|branch| format!("branch '{branch}'"))
+    .unwrap_or_else(|| "detached HEAD".to_string());
     let remote = source_remote(component);
     let default_branch = default_branch(component);
     let remote_default_ref = format!("{remote}/{default_branch}");
@@ -152,7 +172,7 @@ pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<
         Error::validation_invalid_argument(
             "release",
             format!(
-                "Refusing to release from branch '{}' because the repo default branch '{}' is not available as '{}'",
+                "Refusing to release from {} because the repo default branch '{}' is not available as '{}'",
                 current_branch, default_branch, remote_default_ref
             ),
             None,
@@ -176,7 +196,7 @@ pub(super) fn validate_default_branch_ancestry(component: &Component) -> Result<
     Err(Error::validation_invalid_argument(
         "release",
         format!(
-            "Refusing to release from branch '{}' because it is not safely based on the repo default branch '{}'",
+            "Refusing to release from {} because it is not safely based on the repo default branch '{}'",
             current_branch, default_branch
         ),
         None,
@@ -393,6 +413,81 @@ mod tests {
 
         validate_default_branch(&git_component(&checkout))
             .expect("detached default tip should be allowed");
+    }
+
+    /// The release plan detaches by construction when a caller nominates a
+    /// prepared ref, so every default-branch check on that path has to agree
+    /// that a detached tip is the default branch. `validate_default_branch`
+    /// alone is not enough: planning the push and the ancestry check run
+    /// against the same detached checkout.
+    #[test]
+    fn test_detached_default_tip_passes_every_default_branch_check() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main"]);
+
+        let component = git_component(&checkout);
+
+        validate_default_branch(&component).expect("detached default tip should be allowed");
+        validate_default_branch_ancestry(&component)
+            .expect("detached default tip should satisfy ancestry");
+        assert_eq!(
+            release_push_branch(&component).expect("detached default tip should plan a push"),
+            "main"
+        );
+    }
+
+    /// A detached HEAD that is not the default branch must still be refused,
+    /// and the refusal has to name the branch it would push to rather than
+    /// reporting only that HEAD is detached.
+    #[test]
+    fn test_release_push_branch_blocks_detached_non_default_commits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = temp.path().join("remote.git");
+        let seed = temp.path().join("seed");
+        let checkout = temp.path().join("checkout");
+        let remote_str = remote.to_string_lossy().to_string();
+
+        run_git(
+            temp.path(),
+            &["init", "--bare", "--initial-branch", "main", &remote_str],
+        );
+        run_git(temp.path(), &["clone", &remote_str, "seed"]);
+        configure_git_user(&seed);
+        std::fs::write(seed.join("README.md"), "initial\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Initial commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+        std::fs::write(seed.join("README.md"), "tip\n").expect("write fixture");
+        run_git(&seed, &["add", "."]);
+        run_git(&seed, &["commit", "-q", "-m", "Tip commit"]);
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+
+        run_git(temp.path(), &["clone", &remote_str, "checkout"]);
+        configure_git_user(&checkout);
+        run_git(&checkout, &["checkout", "-q", "--detach", "origin/main~1"]);
+
+        let err = release_push_branch(&git_component(&checkout))
+            .expect_err("detached older commit should not plan a push");
+        assert!(err.message.contains("detached HEAD"));
+        assert!(err.message.contains("main"));
     }
 
     #[test]

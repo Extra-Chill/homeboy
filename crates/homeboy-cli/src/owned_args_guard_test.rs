@@ -86,10 +86,6 @@ const ACKNOWLEDGED_RAW_ARGV_FLAG_SCANS: &[(&str, &str)] = &[
         "stops at the separator itself: flips to verbatim passthrough on reaching it",
     ),
     (
-        "commands/infra/route/local_detach.rs::detached_cook_child_args",
-        "scans past the separator: filters a detach flag out of forwarded arguments too",
-    ),
-    (
         "commands/infra/route/local_detach.rs::stdin_prompt_index",
         "scans past the separator: a forwarded prompt flag is read as Homeboy's own",
     ),

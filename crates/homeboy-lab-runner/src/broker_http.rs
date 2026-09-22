@@ -43,13 +43,10 @@ pub(crate) fn post_json(
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::new(
-            homeboy_core::ErrorCode::InternalUnexpected,
-            format!(
-                "broker request failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ),
-            json!({ "http_status": status_code, "path": path }),
+        return Err(broker_wire_error(
+            envelope.error.unwrap_or(Value::Null),
+            Some(status_code),
+            path,
         ));
     }
     let data = envelope
@@ -74,10 +71,11 @@ pub(crate) fn get_json(
     let status_code = response.status().as_u16();
     let envelope: BrokerEnvelope = response.json().map_err(broker_response_error)?;
     if status_code >= 400 || !envelope.success {
-        return Err(Error::internal_unexpected(format!(
-            "broker request failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        )));
+        return Err(broker_wire_error(
+            envelope.error.unwrap_or(Value::Null),
+            Some(status_code),
+            path,
+        ));
     }
     let data = envelope
         .data
@@ -89,6 +87,17 @@ fn canonical_broker_body(data: &Value) -> Result<Value> {
     data.get("body")
         .cloned()
         .ok_or_else(|| Error::internal_unexpected("broker response missing canonical data.body"))
+}
+
+fn broker_wire_error(value: Value, status_code: Option<u16>, path: &str) -> Error {
+    let mut error =
+        crate::remote_error::from_wire(value, "broker request failed", status_code, path);
+    if error.message != "broker request failed"
+        && !error.message.starts_with("broker request failed: ")
+    {
+        error.message = format!("broker request failed: {}", error.message);
+    }
+    error
 }
 
 fn broker_transport_error(action: &str, err: reqwest::Error) -> Error {
