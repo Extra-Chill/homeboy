@@ -376,6 +376,34 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 None,
             ));
         }
+        // Deserialization performs narrow migrations for supported nested
+        // records. Publish the canonical form before admitting new work so a
+        // recovered active intent or stage is not parsed twice on restart.
+        if store.path.exists() {
+            let raw = serde_json::from_slice::<serde_json::Value>(&fs::read(&store.path).map_err(
+                |error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(format!("read {}", store.path.display())),
+                    )
+                },
+            )?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some(format!("parse {}", store.path.display())),
+                )
+            })?;
+            let canonical = serde_json::to_value(&state).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize migrated remote runner staging store".to_string()),
+                )
+            })?;
+            if raw != canonical {
+                store.persist(&state)?;
+            }
+        }
         Ok(store)
     }
 
@@ -1223,6 +1251,122 @@ mod tests {
         disconnected.connected = false;
         assert!(submit_remote_runner_staging(&mut disconnected, &request).is_err());
         assert_eq!(disconnected.store.materializer.calls, 0);
+    }
+
+    #[test]
+    fn opens_and_canonicalizes_legacy_retention_records_without_losing_active_state() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        initial.store.stage_durable(&request).expect("stage");
+
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+        let staged_envelope = stored["stages"]
+            .as_object()
+            .expect("stages")
+            .values()
+            .next()
+            .expect("stage")
+            .get("envelope")
+            .expect("envelope")
+            .clone();
+        let legacy_recipe = staged_envelope["handoff"]["recipe"].clone();
+        let mut legacy_recipe = legacy_recipe.as_object().cloned().expect("recipe object");
+        let delete = legacy_recipe
+            .remove("delete_workspace_on_failure")
+            .expect("current retention field");
+        legacy_recipe.insert(
+            "preserve_workspace_on_failure".to_string(),
+            serde_json::Value::Bool(!delete.as_bool().expect("delete bool")),
+        );
+        let legacy_recipe = serde_json::Value::Object(legacy_recipe);
+        let mut delete_on_failure_recipe = legacy_recipe.clone();
+        delete_on_failure_recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(false);
+        assert!(
+            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
+                delete_on_failure_recipe
+            )
+            .expect("legacy delete policy")
+            .delete_workspace_on_failure
+        );
+
+        let stage = stored["stages"]
+            .as_object_mut()
+            .expect("stages")
+            .values_mut()
+            .next()
+            .expect("stage");
+        stage["envelope"]["handoff"]["recipe"] = legacy_recipe.clone();
+        let mut active_envelope = staged_envelope;
+        active_envelope["handoff"]["recipe"] = legacy_recipe.clone();
+        stored["intents"] = serde_json::json!({
+            "active-intent": {
+                "envelope": active_envelope,
+                "source_artifact": null,
+                "state": "job_submitted",
+                "runner_job_id": "runner-job-active"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&stored).expect("legacy bytes")).expect("legacy store");
+
+        let reopened = transport(&path);
+        assert_eq!(reopened.store.materializer.calls, 0);
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("canonical state")).expect("json");
+        let canonical_text = canonical.to_string();
+        assert!(!canonical_text.contains("preserve_workspace_on_failure"));
+        assert!(canonical_text.contains("delete_workspace_on_failure"));
+        assert!(canonical["intents"].get("active-intent").is_some());
+        assert_eq!(
+            canonical["intents"]["active-intent"]["envelope"]["handoff"]["recipe"]
+                ["delete_workspace_on_failure"],
+            delete
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_or_conflicting_retention_fields() {
+        let temp = tempfile::tempdir().expect("temp");
+        let path = temp.path().join("staging.json");
+        let request = envelope();
+        let mut initial = transport(&path);
+        initial.store.stage_durable(&request).expect("stage");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+        let recipe = stored["stages"]
+            .as_object_mut()
+            .expect("stages")
+            .values_mut()
+            .next()
+            .expect("stage")
+            .get_mut("envelope")
+            .expect("envelope")
+            .get_mut("handoff")
+            .expect("handoff")
+            .get_mut("recipe")
+            .expect("recipe");
+        recipe["preserve_workspace_on_failure"] = serde_json::Value::Bool(true);
+        assert!(recipe.get("delete_workspace_on_failure").is_some());
+        let parse_error =
+            serde_json::from_value::<crate::lab_staging_controller::LabStagingRecipe>(
+                recipe.clone(),
+            )
+            .expect_err("conflicting retention fields must fail");
+        assert!(parse_error
+            .to_string()
+            .contains("both preserve_workspace_on_failure"));
+        fs::write(
+            &path,
+            serde_json::to_vec(&stored).expect("conflicting bytes"),
+        )
+        .expect("conflicting store");
+        let error = match RunnerStagingStore::open(path, "runner-1", Materializer::default()) {
+            Ok(_) => panic!("conflicting retention fields must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, homeboy_core::ErrorCode::InternalJsonError);
     }
 
     #[derive(Clone)]

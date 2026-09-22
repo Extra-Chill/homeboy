@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -106,7 +107,7 @@ impl From<&LabOffloadCommand> for LabStagingCommand {
 }
 
 /// Immutable pre-staging input stored privately against an agent-task attempt.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct LabStagingRecipe {
     pub schema: String,
@@ -148,6 +149,98 @@ pub struct LabStagingRecipe {
     pub job_override_env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
     pub workspace_root: Option<String>,
+}
+
+// The retention flag was renamed after records had already been persisted.
+// Keep this migration explicit so unrelated fields remain strict and the old
+// intent is not accidentally inverted during recovery.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LabStagingRecipeWire {
+    schema: String,
+    run_id: String,
+    runner_id: String,
+    placement_decision: homeboy_lab_runner_contract::ExecutionPlacementDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    required_homeboy_build_identity: Option<String>,
+    #[serde(default = "default_lab_staging_tunnel_mode")]
+    tunnel_mode: crate::RunnerTunnelMode,
+    command: LabStagingCommand,
+    normalized_args: Vec<String>,
+    placement: homeboy_lab_runner_contract::Placement,
+    allow_local_fallback: bool,
+    allow_dirty_lab_workspace: bool,
+    skip_deps_hydration: bool,
+    #[serde(default)]
+    delete_workspace_on_failure: Option<bool>,
+    #[serde(default)]
+    preserve_workspace_on_failure: Option<bool>,
+    capture_patch: bool,
+    mutation_flag: Option<String>,
+    detach_after_handoff: bool,
+    output_file_requested: bool,
+    local_output_run_id_emitted: bool,
+    read_only_polling: bool,
+    require_controller_git_bundle: bool,
+    reuse_compatible_snapshot: bool,
+    source_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_source_snapshot_identity: Option<String>,
+    verified_cook_baseline: Option<Value>,
+    job_override_env: HashMap<String, String>,
+    secret_env_names: Vec<String>,
+    workspace_root: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LabStagingRecipe {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = LabStagingRecipeWire::deserialize(deserializer)?;
+        let delete_workspace_on_failure = match (
+            wire.delete_workspace_on_failure,
+            wire.preserve_workspace_on_failure,
+        ) {
+            (Some(_), Some(_)) => {
+                return Err(D::Error::custom(
+                    "retention record contains both preserve_workspace_on_failure and delete_workspace_on_failure",
+                ));
+            }
+            (None, Some(preserve)) => !preserve,
+            (Some(delete), None) => delete,
+            (None, None) => false,
+        };
+        Ok(Self {
+            schema: wire.schema,
+            run_id: wire.run_id,
+            runner_id: wire.runner_id,
+            placement_decision: wire.placement_decision,
+            required_homeboy_build_identity: wire.required_homeboy_build_identity,
+            tunnel_mode: wire.tunnel_mode,
+            command: wire.command,
+            normalized_args: wire.normalized_args,
+            placement: wire.placement,
+            allow_local_fallback: wire.allow_local_fallback,
+            allow_dirty_lab_workspace: wire.allow_dirty_lab_workspace,
+            skip_deps_hydration: wire.skip_deps_hydration,
+            delete_workspace_on_failure,
+            capture_patch: wire.capture_patch,
+            mutation_flag: wire.mutation_flag,
+            detach_after_handoff: wire.detach_after_handoff,
+            output_file_requested: wire.output_file_requested,
+            local_output_run_id_emitted: wire.local_output_run_id_emitted,
+            read_only_polling: wire.read_only_polling,
+            require_controller_git_bundle: wire.require_controller_git_bundle,
+            reuse_compatible_snapshot: wire.reuse_compatible_snapshot,
+            source_path: wire.source_path,
+            expected_source_snapshot_identity: wire.expected_source_snapshot_identity,
+            verified_cook_baseline: wire.verified_cook_baseline,
+            job_override_env: wire.job_override_env,
+            secret_env_names: wire.secret_env_names,
+            workspace_root: wire.workspace_root,
+        })
+    }
 }
 
 impl LabStagingRecipe {
