@@ -181,18 +181,6 @@ if [ "${RELEASE_HEAD}" != "true" ] && [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH
   exit 0
 fi
 
-DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
-if [ -z "${DEFAULT_BRANCH}" ]; then
-  DEFAULT_BRANCH="main"
-fi
-
-if [ "${RELEASE_HEAD}" != "true" ] && [ "${CURRENT_BRANCH}" != "${DEFAULT_BRANCH}" ]; then
-  echo "::error::Refusing to release from non-default branch '${CURRENT_BRANCH}' (default: '${DEFAULT_BRANCH}')"
-  write_output "released" "false"
-  write_output "skipped-reason" "wrong-default-branch"
-  exit 1
-fi
-
 # Tip-sync handled in core: `homeboy release` runs `validate_remote_sync`
 # which fetches and fast-forwards from origin before the working-tree check,
 # and `get_uncommitted_changes` runs `git update-index --refresh` so any

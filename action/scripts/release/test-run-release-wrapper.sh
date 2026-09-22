@@ -90,6 +90,7 @@ case "$1 $2" in
     echo "${MOCK_RELEASE_BRANCH_SHA}"
     ;;
   "symbolic-ref --short")
+    [ "${MOCK_DEFAULT_BRANCH_STATE:-known}" = "known" ] || exit 1
     echo "origin/${MOCK_DEFAULT_BRANCH:-main}"
     ;;
   *)
@@ -220,9 +221,12 @@ run_wrapper() {
   RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
   RELEASE_HEAD="${RELEASE_HEAD:-false}" \
   RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  RELEASE_BRANCH="${RELEASE_BRANCH:-main}" \
   MOCK_BRANCH="${MOCK_BRANCH:-main}" \
   MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
   MOCK_RELEASE_BRANCH_SHA="${MOCK_RELEASE_BRANCH_SHA:-}" \
+  MOCK_DEFAULT_BRANCH="${MOCK_DEFAULT_BRANCH:-main}" \
+  MOCK_DEFAULT_BRANCH_STATE="${MOCK_DEFAULT_BRANCH_STATE:-known}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
 }
@@ -245,9 +249,12 @@ run_liveness_wrapper() {
   RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
   RELEASE_HEAD="${RELEASE_HEAD:-false}" \
   RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  RELEASE_BRANCH="${RELEASE_BRANCH:-main}" \
   MOCK_BRANCH="${MOCK_BRANCH:-main}" \
   MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
   MOCK_RELEASE_BRANCH_SHA="${MOCK_RELEASE_BRANCH_SHA:-}" \
+  MOCK_DEFAULT_BRANCH="${MOCK_DEFAULT_BRANCH:-main}" \
+  MOCK_DEFAULT_BRANCH_STATE="${MOCK_DEFAULT_BRANCH_STATE:-known}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS="${HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:-10}" \
   HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-1}" \
@@ -497,6 +504,42 @@ if [ -f "${HOMEBOY_ARGS_FILE}" ]; then
 fi
 printf 'PASS: homeboy does not run for a commit that is not the release branch\n'
 unset MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
+
+# A release branch may be named trunk. The release guard must validate the
+# caller's nominated branch, not infer a second default from local git state.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_BRANCH="trunk"
+MOCK_BRANCH="trunk"
+MOCK_DEFAULT_BRANCH="trunk"
+GH_TOKEN="secret123"
+run_wrapper
+assert_output_line 'released=true' "${OUTPUT_FILE}" "a release from the trunk default branch proceeds"
+if [ ! -f "${HOMEBOY_ARGS_FILE}" ]; then
+  printf 'FAIL: homeboy release was not invoked for the trunk default branch\n'
+  exit 1
+fi
+printf 'PASS: homeboy release is invoked for the trunk default branch\n'
+unset RELEASE_BRANCH MOCK_BRANCH MOCK_DEFAULT_BRANCH
+
+# The default branch is not available in an actions/checkout workspace. That
+# missing fact must not turn into a fabricated "main" default or block the
+# explicitly selected release branch.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_BRANCH="trunk"
+MOCK_BRANCH="trunk"
+MOCK_DEFAULT_BRANCH_STATE="unknown"
+GH_TOKEN="secret123"
+run_wrapper
+assert_output_line 'released=true' "${OUTPUT_FILE}" "an unknown repository default does not block the selected branch"
+if grep -q '^symbolic-ref ' "${MOCK_GIT_LOG}"; then
+  printf 'FAIL: release wrapper rediscovered the unavailable default branch\n'
+  cat "${MOCK_GIT_LOG}"
+  exit 1
+fi
+printf 'PASS: release wrapper does not require an available repository default branch\n'
+unset RELEASE_BRANCH MOCK_BRANCH MOCK_DEFAULT_BRANCH_STATE
 
 # HEAD detached and NO ref for the release branch exists: the branch cannot be
 # determined at all. Extra-Chill/homeboy#10685 — absence of evidence must never
