@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::command_execution_plan::{
     CommandSourceMaterialization, CommandSourcePolicy, CommandWorkspacePolicy, LabRoutePlan,
@@ -13,7 +13,7 @@ use crate::lab_contract::{
 };
 use crate::observation::records::RunEvidenceCommands;
 use crate::observation::RunStatus;
-use crate::Result;
+use crate::{Error, ErrorCode, Result};
 
 pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
 /// Periodic "still dispatching" announcement during a bounded Lab dispatch.
@@ -389,6 +389,9 @@ fn lab_offload_outcome_to_route_outcome(
             output_file_content,
             ..
         }) => {
+            if preserve_result_payload {
+                validate_runner_provider_scope(&stdout, runner_id)?;
+            }
             let mut finish_metadata = json!({ "exit_code": exit_code });
             attach_handoff_metadata(&mut finish_metadata, &stdout);
             let retrieval = observer.finish(
@@ -693,6 +696,45 @@ fn command_result_payload(stream: &str) -> Option<String> {
             payload.push('\n');
             payload
         })
+}
+
+/// A runner-scoped provider result is only useful when its own catalog says it
+/// was observed on the selected runner. Do not let a controller-local result
+/// masquerade as runner readiness after a transport or placement failure.
+fn validate_runner_provider_scope(stream: &str, runner_id: Option<&str>) -> Result<()> {
+    let Some(runner_id) = runner_id else {
+        return Ok(());
+    };
+    let value = serde_json::from_str::<serde_json::Value>(stream).map_err(|error| {
+        Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            "runner provider readiness returned invalid JSON",
+            json!({ "field": "observed_scope", "runner_id": runner_id, "parse_error": error.to_string() }),
+        )
+    })?;
+    let scope = value
+        .get("data")
+        .and_then(|data| data.get("observed_scope"))
+        .or_else(|| value.get("observed_scope"));
+    let location = scope
+        .and_then(|scope| scope.get("location"))
+        .and_then(|value| value.as_str());
+    let observed_runner_id = scope
+        .and_then(|scope| scope.get("runner_id"))
+        .and_then(|value| value.as_str());
+    if location != Some("runner") || observed_runner_id != Some(runner_id) {
+        return Err(Error::new(
+            ErrorCode::ValidationInvalidArgument,
+            format!("runner provider readiness did not observe selected runner `{runner_id}`"),
+            json!({
+                "field": "observed_scope",
+                "expected": { "location": "runner", "runner_id": runner_id },
+                "observed": scope.cloned().unwrap_or(Value::Null),
+                "reason": "controller-local or unscoped readiness cannot prove runner-owned credentials"
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn command_result_root_cause(value: &serde_json::Value) -> Option<String> {
@@ -1684,6 +1726,39 @@ mod tests {
         assert_eq!(value["scope"]["matched"], 0);
         assert_eq!(value["providers"], serde_json::json!([]));
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn runner_provider_readiness_rejects_controller_ready_result() {
+        let result = validate_runner_provider_scope(
+            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"controller","runner_id":null},"dispatchability":{"ready":true}}}"#,
+            Some("homeboy-lab"),
+        );
+
+        let error = result.expect_err("controller readiness cannot prove runner readiness");
+        assert_eq!(error.details["expected"]["runner_id"], "homeboy-lab");
+        assert_eq!(error.details["observed"]["location"], "controller");
+    }
+
+    #[test]
+    fn runner_provider_readiness_accepts_selected_runner_and_preserves_metadata() {
+        validate_runner_provider_scope(
+            r#"{"schema":"homeboy/command-result/v3","data":{"observed_scope":{"location":"runner","runner_id":"homeboy-lab","homeboy_identity":{"git_commit":"runner-sha"}},"readiness_validation":{"effective_model":"openai/gpt-5.6-luna"},"secret_env":[{"name":"OPENCODE_TOKEN","configured":false}]}}"#,
+            Some("homeboy-lab"),
+        )
+        .expect("runner readiness scope");
+    }
+
+    #[test]
+    fn runner_provider_readiness_rejects_missing_scope_for_disconnected_runner() {
+        let result = validate_runner_provider_scope(
+            r#"{"schema":"homeboy/command-result/v3","data":{"dispatchability":{"ready":false}}}"#,
+            Some("homeboy-lab"),
+        );
+
+        let error = result.expect_err("unscoped readiness must fail closed");
+        assert!(error.message.contains("did not observe selected runner"));
+        assert_eq!(error.details["observed"], Value::Null);
     }
 
     /// Renamed from `detached_handoff_maps_to_in_flight_output_and_leaves_run_running`,

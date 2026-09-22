@@ -1871,7 +1871,7 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
 
     serde_json::json!({
         "schema": AGENT_TASK_PROVIDER_SCOPE_SCHEMA,
-        "location": location,
+        "location": if runner_id.is_some() { "runner" } else { location },
         "runner_id": runner_id,
         "label": label,
         "homeboy_identity": {

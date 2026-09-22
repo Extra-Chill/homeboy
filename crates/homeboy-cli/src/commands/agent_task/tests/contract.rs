@@ -99,6 +99,42 @@ fn providers_output_declares_the_scope_it_observed() {
 }
 
 #[test]
+fn providers_output_labels_runner_scope_without_exposing_secret_values() {
+    with_isolated_home(|_| {
+        let execution_runner = homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let previous = std::env::var_os(execution_runner);
+        std::env::set_var(execution_runner, "homeboy-lab");
+
+        let result = review::providers(ProvidersArgs {
+            backend: Some("opencode".to_string()),
+            selector: Some("opencode.agent-task-executor".to_string()),
+            model: Some("openai/gpt-5.6-luna".to_string()),
+            runtime: None,
+            status: None,
+            secret_env: vec!["OPENCODE_TOKEN".to_string()],
+            validate_readiness: false,
+            refresh: false,
+            catalog: false,
+            full: false,
+            machine_catalog: false,
+            set_default: false,
+        });
+
+        match previous {
+            Some(value) => std::env::set_var(execution_runner, value),
+            None => std::env::remove_var(execution_runner),
+        }
+        let (value, status) = result.expect("runner-scoped provider output");
+
+        assert_eq!(status, 0);
+        assert_eq!(value["observed_scope"]["location"], "runner");
+        assert_eq!(value["observed_scope"]["runner_id"], "homeboy-lab");
+        let rendered = serde_json::to_string(&value).expect("provider output JSON");
+        assert!(!rendered.contains("secret-value"));
+    });
+}
+
+#[test]
 fn contract_output_exports_core_agent_task_metadata() {
     let (value, status) = contract::contract(ContractArgs {
         format: ContractFormat::Json,
