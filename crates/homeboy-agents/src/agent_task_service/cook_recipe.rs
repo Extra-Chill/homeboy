@@ -534,6 +534,7 @@ pub fn persist_initial_recipe_in_store(
     if let Some(barrier) = barrier {
         barrier.wait();
     }
+    let recipe_existed_before_admission = store.recipe_exists(&recipe.cook_id);
     if let Some(existing) = compatible_existing_recipe(store, &recipe)? {
         return Ok(InitialRecipeMaterialization {
             recipe: existing,
@@ -542,6 +543,14 @@ pub fn persist_initial_recipe_in_store(
     }
     if store.recipe_exists(&recipe.cook_id) {
         let existing = store.load_recipe(&recipe.cook_id)?;
+        if !recipe_existed_before_admission {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe",
+                "concurrent Cook creation conflicts with the durable recipe",
+                Some(recipe.cook_id),
+                None,
+            ));
+        }
         let mismatches = recipe_mismatch_fields(&existing, &recipe);
         let lifecycle_store =
             agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
