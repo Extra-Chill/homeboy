@@ -505,6 +505,53 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     .expect("explicit recipe policy permits a completed gate rerun");
 }
 
+#[test]
+fn candidate_adoption_start_reconciles_dead_owner_without_status_poll() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "adoption-owner-death-direct-resume";
+    let candidate = "a3c3ad9c2b75f8b03d503f4a09f0e2c4d47b57e1";
+    let model = "openai/gpt-5.6-terra";
+    let record = lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        &record.run_id,
+        candidate,
+        model,
+        "candidate verification",
+        false,
+        false,
+    )
+    .expect("start adoption");
+    rewrite_record_for_test_in_store(&lifecycle_store, run_id, |record| {
+        record
+            .candidate_adoption
+            .as_mut()
+            .expect("adoption")
+            .owner_pid = u32::MAX;
+    })
+    .expect("simulate dead owner");
+
+    let resumed = start_candidate_adoption_with_policy_in_store(
+        &lifecycle_store,
+        run_id,
+        candidate,
+        model,
+        "candidate verification",
+        false,
+        false,
+    )
+    .expect("same adoption resumes without a status poll");
+    let adoption = resumed.candidate_adoption.expect("adoption");
+    assert_eq!(adoption.state, "verification_running");
+    assert_eq!(adoption.phase, "verification");
+    assert_eq!(adoption.resume_count, 1);
+    assert!(adoption.terminal_error.is_none());
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The audit history asserted at the end is the *original* adoption
 /// preserved alongside its replacement, so the record that gets replaced and

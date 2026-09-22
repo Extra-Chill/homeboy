@@ -970,10 +970,19 @@ fn adoption_accepts_a_two_parent_merge_and_exports_only_the_candidate_delta() {
     git(&repo, &["commit", "-m", "base advance"]);
     let resolved_base_parent = git_head(&repo, "HEAD");
     git(&repo, &["push", "origin", "main"]);
+    // The operator's local branch may still be stale when the recovery merge
+    // is made from the freshly resolved origin/main commit.
+    git(&repo, &["reset", "--hard", &historical_base]);
     git(&repo, &["checkout", "candidate"]);
     git(
         &repo,
-        &["merge", "--no-ff", "main", "-m", "merge verified base"],
+        &[
+            "merge",
+            "--no-ff",
+            &resolved_base_parent,
+            "-m",
+            "merge verified base",
+        ],
     );
     let merged_candidate = git_head(&repo, "HEAD");
     let (source_path, source) = write_empty_patch_source(&temp);
