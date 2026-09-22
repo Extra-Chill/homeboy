@@ -123,7 +123,7 @@ pub(super) fn resolve_runner_secret_env_for_command_with_fallbacks(
     Ok(resolved)
 }
 
-pub(super) fn provision_provider_file_secret_sources_for_runner(
+pub(crate) fn provision_provider_file_secret_sources_for_runner(
     runner: &Runner,
     command: &[String],
     required_names: &[String],
