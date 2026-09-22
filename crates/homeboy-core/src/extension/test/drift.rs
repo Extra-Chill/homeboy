@@ -498,7 +498,15 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
 /// source file, or declares no test function returns `false` so the caller
 /// never emits a filter that would match zero tests. (#10465)
 pub fn is_inline_test_source(opts: &DriftOptions, path: &str) -> bool {
-    if !opts.inline_tests || is_test_path(path) {
+    if !opts.inline_tests {
+        return false;
+    }
+    // Exclude only what the test-file selector already claims. Excluding every
+    // `is_test_path` name dropped inline modules that live beside their source
+    // — `src/**/tests.rs` is a test path by name, matches no `tests/` pattern,
+    // and so was selected by neither selector. The changed scope then reported
+    // zero selected tests for a real source change and failed closed. (#14867)
+    if matches_any_pattern(path, &opts.test_patterns) {
         return false;
     }
     if !matches_any_pattern(path, &opts.source_patterns) {
@@ -1761,6 +1769,48 @@ mod workspace_layout_tests {
             is_inline_test_source(&opts, changed),
             "a changed source carrying its own tests must be selectable"
         );
+    }
+
+    /// A sibling `tests.rs` module beside its source is a test path by name but
+    /// lives under `src/`, so it matches no `tests/` pattern. Excluding every
+    /// test-path name left it selected by neither selector: the changed scope
+    /// reported zero selected tests for a real source change and failed closed,
+    /// which blocked every workspace-crate change and the release train with
+    /// it. (#14867)
+    #[test]
+    fn changed_inline_tests_module_beside_its_source_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/member/src/commands/git")).unwrap();
+        let changed = "crates/member/src/commands/git/tests.rs";
+        std::fs::write(
+            root.join(changed),
+            "use super::*;\n\n#[test]\nfn publishes() {}\n",
+        )
+        .unwrap();
+
+        let opts = rust_extension_options_at(root);
+
+        assert!(
+            is_inline_test_source(&opts, changed),
+            "an inline tests module beside its source must be selectable"
+        );
+    }
+
+    /// An integration test under `tests/` is already claimed by the test-file
+    /// selector, so the inline selector must leave it alone rather than select
+    /// it twice.
+    #[test]
+    fn changed_integration_test_stays_with_the_test_file_selector() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/member/tests")).unwrap();
+        let changed = "crates/member/tests/integration.rs";
+        std::fs::write(root.join(changed), "#[test]\nfn integrates() {}\n").unwrap();
+
+        let opts = rust_extension_options_at(root);
+
+        assert!(!is_inline_test_source(&opts, changed));
     }
 
     /// A source file with no tests of its own must not be selected: it would
