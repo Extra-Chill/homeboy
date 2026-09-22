@@ -33,7 +33,6 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
             "UNRELATED_SECRET".to_string(),
         ],
         &sources,
-        None,
     );
 
     // Production groups the two json-file sources that share one path into a
@@ -92,7 +91,6 @@ fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sourc
             "AI_PROVIDER_OPENAI_CODEX_VAULT_TOKEN".to_string(),
         ],
         &sources,
-        None,
     );
 
     // Production accepts BOTH `json-file` and `json-file-jwt-expiration` kinds,
@@ -115,30 +113,21 @@ fn provider_file_secret_source_provisions_include_json_file_jwt_expiration_sourc
 }
 
 #[test]
-fn runner_owned_provider_source_is_not_copied_from_controller() {
+fn runner_resolved_provider_source_is_refreshed_from_controller() {
+    // Runner-side resolution still reads the declared file, so the controller
+    // must keep that file current before every run instead of leaving a stale copy.
     let sources = HashMap::from([(
         "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
         json_file_source("~/.codex/auth.json", "tokens.access_token"),
     )]);
-    let mut plan =
-        SecretEnvPlan::from_secret_env_names(["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()]);
-    plan.env_materialization = Some(
-        homeboy_core::env_materialization_plan::EnvMaterializationPlan {
-            secret_refs: vec![homeboy_core::env_materialization_plan::EnvSecretRef {
-                owner: Some("runner".to_string()),
-                name: "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
-            }],
-            ..Default::default()
-        },
-    );
 
     let provisions = super::super::provider_file_secret_source_provisions(
         &["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
         &sources,
-        Some(&plan),
     );
 
-    assert!(provisions.is_empty());
+    assert_eq!(provisions.len(), 1);
+    assert_eq!(provisions[0].path, "~/.codex/auth.json");
 }
 
 #[test]
