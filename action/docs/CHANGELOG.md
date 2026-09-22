@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.1] - 2026-09-22
+
+### Fixed
+- stop forcing id-token on every reusable-release caller
+
 ## [2.20.0] - 2026-09-22
 
 ### Added
