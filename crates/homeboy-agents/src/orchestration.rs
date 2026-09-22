@@ -107,6 +107,8 @@ pub type FanoutResumeExecutionContextFactory = fn(
     FanoutResumeDispatcherFactory,
 )>;
 
+pub const FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA: &str = "homeboy/agent-task-fanout-child-resume/v1";
+
 static FANOUT_RESUME_CONTEXT_FACTORY: OnceLock<
     RwLock<Option<FanoutResumeExecutionContextFactory>>,
 > = OnceLock::new();
@@ -295,6 +297,7 @@ mod fanout_batch_read_tests {
                 projection.children.is_empty(),
                 "missing child is not invented"
             );
+
             assert_eq!(before, fs::read(path).expect("batch bytes after read"));
         });
     }
@@ -3285,6 +3288,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
             action_name(request.action),
             request.idempotency_key
         );
+        let fanout_child_resume = request.action == ControlPlaneAction::Resume
+            && request.parameters.schema == FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA;
         let (outcome, resource, result, message) = if let Some(reason) =
             action_unavailability(&record, request.action)
         {
@@ -3706,7 +3711,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         crate::agent_task_service::terminal_transport_recovery_required(
                             requested_id.as_str(),
                         );
-                    let terminal_projection_recovery = record.state.is_terminal()
+                    let terminal_projection_recovery = !fanout_child_resume
+                        && record.state.is_terminal()
                         && record.runner_id().is_some()
                         && record.runner_job_id().is_some();
                     let resumed = (|| -> homeboy_core::Result<_> {
@@ -3881,6 +3887,8 @@ fn recover_interrupted_action_acknowledgement(
     request: &ControlPlaneActionRequest,
     accepted_at: &str,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    let fanout_child_resume = request.action == ControlPlaneAction::Resume
+        && request.parameters.schema == FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA;
     let current = store
         .read_record(&original.run_id)
         .map_err(map_lifecycle_error)?;
@@ -4005,7 +4013,37 @@ fn recover_interrupted_action_acknowledgement(
                 Some("recovered from the durable terminal admission state".to_string()),
             )
         }
-        ControlPlaneAction::Resume if current.state.is_terminal() => {
+                ControlPlaneAction::Resume if current.state.is_terminal() && fanout_child_resume => {
+                    match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id)
+                    {
+                        Ok(aggregate) => {
+                            let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
+                            let aggregate =
+                                crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate);
+                            (
+                                if exit_code == 0 {
+                                    ControlPlaneActionOutcome::Succeeded
+                                } else {
+                                    ControlPlaneActionOutcome::Failed
+                                },
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                                    data: serde_json::json!({
+                                        "aggregate": aggregate,
+                                        "exit_code": exit_code,
+                                        "recovered": true,
+                                    }),
+                                },
+                                Some("recovered from the durable child aggregate".to_string()),
+                            )
+                        }
+                        Err(_) => failed(
+                            "fanout child resume was interrupted without an authoritative aggregate; no second execution was attempted",
+                        )?,
+                    }
+                }
+                ControlPlaneAction::Resume if current.state.is_terminal() => {
             match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id) {
                 Ok(aggregate) => {
                     let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
@@ -5156,6 +5194,71 @@ pub fn execute_resume_action_from_current_environment(
         |resolved, _intent| crate::agent_task_service::resume(resolved.to_string(), executor),
         |promotion, _intent| default_promote(promotion),
     )
+}
+
+/// Execute a fanout child continuation through the canonical action outbox,
+/// retaining the admission-time executor and dispatcher supplied by the owner.
+pub fn execute_fanout_child_resume_action(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    dispatcher: FanoutResumeDispatcherFactory,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .execute_action_with_delegates(
+            &requested_id,
+            request,
+            |resolved, parameters, _intent| default_retry(resolved, parameters),
+            move |resolved, action_request| {
+                let rerun_completed_gates = action_request
+                    .parameters
+                    .data
+                    .get("rerun_completed_gates")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        homeboy_core::Error::validation_invalid_argument(
+                            "parameters.rerun_completed_gates",
+                            "fanout child resume requires an explicit gate invalidation decision",
+                            None,
+                            None,
+                        )
+                    })?;
+                let cooked = crate::agent_task_service::resume_cook(
+                    resolved,
+                    executor,
+                    dispatcher,
+                    rerun_completed_gates,
+                )?;
+                let aggregate = crate::agent_task_lifecycle::read_aggregate(resolved)?;
+                Ok(crate::agent_task_service::AgentTaskRunResult {
+                    exit_code: cooked.exit_code,
+                    value: aggregate,
+                })
+            },
+            |promotion, _intent| default_promote(promotion),
+        )
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound
+            | ControlPlaneErrorClass::InvalidArgument
+            | ControlPlaneErrorClass::CursorExpired => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "action",
+                    error.message,
+                    None,
+                    None,
+                )
+            }
+            _ => homeboy_core::Error::internal_unexpected(error.message),
+        })
 }
 
 pub fn execute_promotion_action_from_current_environment(

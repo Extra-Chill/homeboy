@@ -152,8 +152,8 @@ pub mod batch {
     pub use super::super::agent_task_batch::status;
     pub use super::super::agent_task_batch::{
         artifacts, claim_fanout_run_batch, fanout_dependency_graph_with_finalization_statuses,
-        finalize_provider_worktree_for_child, heartbeat_fanout_run_batch, owned_child_run_ids,
-        persist_fanout_run_batch, read_batch_record, record_fanout_run_batch_failure,
+        finalize_provider_worktree_for_child, heartbeat_fanout_run_batch, persist_fanout_run_batch,
+        read_batch_record, record_fanout_run_batch_failure,
         record_provider_worktree_finalization_deferred,
         record_provider_worktree_finalization_preflight_error, start_fanout_run_batch,
         BatchProviderWorktreeFinalization,

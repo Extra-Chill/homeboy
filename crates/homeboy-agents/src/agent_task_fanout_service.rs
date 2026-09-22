@@ -21,7 +21,10 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_provider::{self as provider, AgentTaskProviderCatalog};
 use crate::agent_task_service;
 use crate::agent_task_service::{CookProviderTransport, CookRequest};
-use crate::orchestration::{FanoutBatchResumeActionResult, FanoutResumeDispatcherFactory};
+use crate::orchestration::{
+    FanoutBatchResumeActionResult, FanoutResumeDispatcherFactory,
+    FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA,
+};
 use homeboy_core::{Error, Result};
 
 #[derive(Clone)]
@@ -734,12 +737,48 @@ fn resume_fanout_child(
     child: &supervisor::AgentTaskFanoutPortfolioChild,
     rerun_completed_gates: bool,
 ) -> Result<()> {
-    agent_task_service::resume_cook(
+    let record = agent_task_lifecycle::status(&child.run_id)?;
+    let generation = record
+        .updated_at
+        .clone()
+        .unwrap_or_else(|| record.submitted_at.clone());
+    let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+        schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+        effect_id: homeboy_control_plane_contract::action_effect_id(
+            "fanout-child",
+            &child.run_id,
+            "resume",
+            &generation,
+        ),
+        action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+        idempotency_key: format!("fanout-child-resume:{}:{}", child.run_id, generation),
+        actor: "agent-task-fanout-supervisor".to_string(),
+        expected_updated_at: Some(generation),
+        parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+            schema: FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA.to_string(),
+            data: serde_json::json!({
+                "rerun_completed_gates": rerun_completed_gates,
+                "invalidated_action_payload": {
+                    "gates": { "rerun_completed_gates": rerun_completed_gates }
+                }
+            }),
+        },
+        confirmed: true,
+    };
+    let acknowledgement = crate::orchestration::execute_fanout_child_resume_action(
         &child.run_id,
+        &request,
         transport.executor.clone(),
         transport.dispatcher,
-        rerun_completed_gates,
     )?;
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Err(Error::internal_unexpected(
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "fanout child resume action failed".to_string()),
+        ));
+    }
     Ok(())
 }
 

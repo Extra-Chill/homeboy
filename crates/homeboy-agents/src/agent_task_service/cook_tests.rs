@@ -496,7 +496,12 @@ fn scoped_run_next_claims_its_fanout_cook_continuation_by_exact_identity() {
             &options.identity.initial_run_id,
         )
         .expect("continuation queued");
-        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-fanout")
+        let service = crate::orchestration::FanoutBatchDomainService::from_current_environment()
+            .expect("fanout service");
+        let canonical = crate::orchestration::run_from_current_environment("scoped-fanout")
+            .expect("canonical fanout");
+        let scope = service
+            .owned_child_run_ids(&canonical)
             .expect("owned fanout child");
 
         let result = super::super::run_next_with_cook_dispatcher(
@@ -578,7 +583,12 @@ fn scoped_run_next_skips_bad_fanout_continuation_and_claims_queued_child() {
             serde_json::json!({}),
         )
         .expect("fanout persisted");
-        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-recovery")
+        let service = crate::orchestration::FanoutBatchDomainService::from_current_environment()
+            .expect("fanout service");
+        let canonical = crate::orchestration::run_from_current_environment("scoped-recovery")
+            .expect("canonical fanout");
+        let scope = service
+            .owned_child_run_ids(&canonical)
             .expect("owned children");
 
         let result = super::super::run_next_with_cook_dispatcher(
