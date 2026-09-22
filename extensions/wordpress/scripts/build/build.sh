@@ -30,12 +30,30 @@ set -e
 # and using the same directory causes compiled JS/CSS to be silently dropped.
 STAGING_ROOT=".homeboy-build"
 
+# Remove the staging tree, including the staging root itself.
+#
+# The root has to go too, not just the project subdirectory. Deployment does not
+# use the ZIP exclude list — homeboy rsyncs the component directory to the
+# server — so anything left beside the built output is copied verbatim. An empty
+# `.homeboy-build/` therefore reaches production, where WordPress plugins that
+# walk the plugin/theme tree descend into it. Imagify's media scanner did
+# exactly that on extrachill.com and fatalled with
+# `RecursiveDirectoryIterator ... Failed to open directory: Permission denied`,
+# which accounted for every PHP fatal on the network (#2861).
+remove_staging_tree() {
+    [ -n "${STAGING_ROOT:-}" ] || return 0
+    rm -rf "${STAGING_ROOT:?}/${PROJECT_NAME:-}" 2>/dev/null || true
+    # Only when empty: a non-empty root means something unexpected lives there
+    # and deleting it blindly would be worse than leaving it.
+    rmdir "${STAGING_ROOT}" 2>/dev/null || true
+}
+
 # Cleanup on exit (restore dev deps if build fails unexpectedly)
 cleanup() {
     local exit_code=$?
-    if [ -d "${STAGING_ROOT}/${PROJECT_NAME:-}" ] && [ $exit_code -ne 0 ]; then
-        rm -rf "${STAGING_ROOT}/${PROJECT_NAME}"
-    fi
+    # Unconditionally, not only on failure. A successful build previously left
+    # its entire staging tree in the component directory.
+    remove_staging_tree
     if [ -f "composer.json" ]; then
         composer install --no-interaction --quiet 2>&1 || true
     fi
@@ -1406,6 +1424,9 @@ build_project() {
 
     create_production_zip
     restore_dev_deps
+    # The artifact is written; the staging copy has no further use. Leaving it
+    # is what shipped `.homeboy-build/` to production (#2861).
+    remove_staging_tree
 
     print_success "Build process completed successfully!"
     print_success "Production package: build/$PROJECT_NAME.zip"
