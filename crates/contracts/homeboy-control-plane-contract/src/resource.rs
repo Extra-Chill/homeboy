@@ -299,6 +299,7 @@ pub enum ControlPlaneRunPlacementRequested {
     Automatic,
     Controller,
     Runner,
+    LabOrLocal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
