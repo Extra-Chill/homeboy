@@ -618,7 +618,13 @@ pub fn download(
     }
 
     if let Some(identity_file) = &ctx.client.identity_file {
-        scp_args.extend(["-i".to_string(), identity_file.clone()]);
+        // See #14881: a configured identity must not race the agent's keys.
+        scp_args.extend([
+            "-i".to_string(),
+            identity_file.clone(),
+            "-o".to_string(),
+            "IdentitiesOnly=yes".to_string(),
+        ]);
     }
 
     if ctx.client.port != deploy_defaults.default_ssh_port {
