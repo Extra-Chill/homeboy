@@ -5657,8 +5657,8 @@ pub fn register() {
 #[cfg(test)]
 mod loop_control_plane_tests {
     use crate::agent_task_loop_controller::{
-        control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
-        stamp_loop_runtime_metadata, stop_loop, write_controller,
+        control_plane_run_id, create_controller, loop_read, loop_runtime_metadata,
+        loop_work_status, stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
     use homeboy_control_plane_contract::ControlPlaneActionOutcome;
     use homeboy_core::test_support::with_isolated_home;
@@ -5689,6 +5689,22 @@ mod loop_control_plane_tests {
                 .expect("status");
             let after = std::fs::read(path).expect("controller bytes");
             assert_eq!(before, after);
+        });
+    }
+
+    #[test]
+    fn loop_read_uses_the_canonical_resource_with_domain_adjuncts() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop/canonical-read", "repair", "v1").expect("created");
+            let read = loop_read(&record.loop_id).expect("canonical loop read");
+            let canonical = homeboy_core::control_plane::run(
+                &control_plane_run_id(&record.loop_id).expect("canonical id"),
+            )
+            .expect("canonical resource");
+            assert_eq!(read.resource, canonical);
+            assert_eq!(read.controller.loop_id, record.loop_id);
+            assert_eq!(read.work, serde_json::Value::Null);
         });
     }
 

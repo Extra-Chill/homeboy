@@ -4,8 +4,8 @@ use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionPayload, ControlPlaneActionRequest, RunId,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneRun, ControlPlaneRunState,
+    RunId, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{
     register_control_plane_action_delegate as register_core_action_delegate,
@@ -333,6 +333,54 @@ pub fn controller_status_report(loop_id: &str) -> Result<AgentTaskLoopController
         controller,
         diagnostics,
     })
+}
+
+/// Read the canonical loop resource and its compatibility/domain adjuncts.
+/// This function is deliberately bounded and non-reconciling: legacy JSON is
+/// read in memory when its SQLite projection has not yet been prepared.
+pub fn loop_read(loop_id: &str) -> Result<AgentTaskLoopReadResult> {
+    let report = controller_status_report(loop_id)?;
+    let run_id = control_plane_run_id(loop_id)?;
+    let resource = match homeboy_core::control_plane::run(&run_id) {
+        Ok(resource) => resource,
+        Err(error)
+            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
+        {
+            legacy_loop_resource(&run_id, &report.controller)
+        }
+        Err(error) => {
+            return Err(Error::internal_unexpected(error.message));
+        }
+    };
+    Ok(AgentTaskLoopReadResult {
+        schema: "homeboy/agent-task-loop-read-result/v1".to_string(),
+        work: loop_work_status(&report.controller.metadata),
+        resource,
+        controller: report.controller,
+        diagnostics: report.diagnostics,
+    })
+}
+
+fn legacy_loop_resource(run_id: &RunId, record: &AgentTaskLoopControllerRecord) -> ControlPlaneRun {
+    let mut resource = ControlPlaneRun::new(run_id.clone());
+    resource.state = match record.state {
+        AgentTaskLoopControllerState::Running
+        | AgentTaskLoopControllerState::Waiting
+        | AgentTaskLoopControllerState::HumanReady => ControlPlaneRunState::Running,
+        AgentTaskLoopControllerState::Completed => ControlPlaneRunState::Succeeded,
+        AgentTaskLoopControllerState::Failed | AgentTaskLoopControllerState::Escalated => {
+            ControlPlaneRunState::Failed
+        }
+        AgentTaskLoopControllerState::Abandoned => ControlPlaneRunState::Cancelled,
+    };
+    resource.phase = Some(record.phase.clone());
+    resource.created_at = record.created_at.clone();
+    resource.updated_at = Some(record.updated_at.clone());
+    resource.finished_at = (record.state != AgentTaskLoopControllerState::Running
+        && record.state != AgentTaskLoopControllerState::Waiting
+        && record.state != AgentTaskLoopControllerState::HumanReady)
+        .then(|| record.updated_at.clone());
+    resource
 }
 
 pub fn controller_status_diagnostics(

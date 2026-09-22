@@ -115,18 +115,9 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
 fn controller_status_report_value(
     args: AgentTaskControllerStatusArgs,
 ) -> homeboy::core::Result<Value> {
-    let report =
-        homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
+    let report = homeboy::agents::agent_task_loop_controller::loop_read(&args.loop_id)?;
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    if let Some(record) = value.get("controller") {
-        let work = homeboy::agents::agent_task_loop_controller::loop_work_status(
-            record.get("metadata").unwrap_or(&Value::Null),
-        );
-        if let Some(object) = value.as_object_mut() {
-            object.insert("work".to_string(), work);
-        }
-    }
     if args.spec.is_some()
         || args.dispatch.dispatch_backend.is_some()
         || args.dispatch.dispatch_selector.is_some()
@@ -299,19 +290,14 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
 }
 
 fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let report =
-        homeboy::agents::agent_tasks::loop_controller::controller_status_report(&args.loop_id)?;
-    let controller = serde_json::to_value(&report.controller)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let report = homeboy::agents::agent_task_loop_controller::loop_read(&args.loop_id)?;
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
             "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
                 &report.controller.metadata,
             ),
-            "work": homeboy::agents::agent_task_loop_controller::loop_work_status(
-                &controller["metadata"],
-            ),
+            "work": report.work,
             "status": report,
         }))?,
         0,

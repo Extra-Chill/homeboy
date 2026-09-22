@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_task::AgentTaskEvidenceRef;
+use homeboy_control_plane_contract::ControlPlaneRun;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -31,6 +32,18 @@ pub struct AgentTaskLoopControllerStatusReport {
     pub schema: String,
     pub controller: AgentTaskLoopControllerRecord,
     pub diagnostics: AgentTaskLoopControllerDiagnostics,
+}
+
+/// One bounded loop read shared by CLI adapters and the control-plane route.
+/// The controller and diagnostics fields are compatibility/domain adjuncts; the
+/// canonical resource is always the primary lifecycle projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskLoopReadResult {
+    pub schema: String,
+    pub resource: ControlPlaneRun,
+    pub controller: AgentTaskLoopControllerRecord,
+    pub diagnostics: AgentTaskLoopControllerDiagnostics,
+    pub work: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
