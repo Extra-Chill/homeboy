@@ -120,7 +120,9 @@ fn controller_status_report_value(
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     if let Some(record) = value.get("controller") {
-        let work = loop_work_projection(record);
+        let work = homeboy::agents::agent_task_loop_controller::loop_work_status(
+            record.get("metadata").unwrap_or(&Value::Null),
+        );
         if let Some(object) = value.as_object_mut() {
             object.insert("work".to_string(), work);
         }
@@ -248,7 +250,12 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
         )
     })?;
     agent_task_controller_service::apply_spec_dispatch_defaults(&mut spec, &args.spec);
-    stamp_loop_runtime_metadata(&mut spec.metadata, !args.off, args.revolution_limit, false)?;
+    homeboy::agents::agent_task_loop_controller::stamp_loop_runtime_metadata(
+        &mut spec.metadata,
+        !args.off,
+        args.revolution_limit,
+        false,
+    )?;
 
     let report = agent_task_controller_service::init_from_spec(ControllerFromSpecRequest { spec })?;
     if !args.resume {
@@ -299,8 +306,12 @@ fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
-            "runtime": loop_runtime_metadata(&report.controller.metadata),
-            "work": loop_work_projection(&controller),
+            "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
+                &report.controller.metadata,
+            ),
+            "work": homeboy::agents::agent_task_loop_controller::loop_work_status(
+                &controller["metadata"],
+            ),
             "status": report,
         }))?,
         0,
@@ -318,7 +329,8 @@ fn submit_loop_resume(
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
     let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&loop_id)?;
-    let runtime = loop_runtime_metadata(&record.metadata);
+    let runtime =
+        homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(&record.metadata);
     if !runtime["on"].as_bool().unwrap_or(true) {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "loop_id",
@@ -347,14 +359,21 @@ fn submit_loop_resume(
         ));
     }
 
-    stamp_record_loop_runtime_metadata(&mut record, true, limit, true)?;
+    homeboy::agents::agent_task_loop_controller::stamp_loop_runtime_metadata(
+        &mut record.metadata,
+        true,
+        limit,
+        true,
+    )?;
     homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
     let resumed_loop_id = loop_id.clone();
     let (value, exit_code) = detach_loop_coordinator(loop_id, defaults)?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-resume-result/v1",
-            "runtime": loop_runtime_metadata(&homeboy::agents::agent_tasks::loop_controller::load_controller(&resumed_loop_id)?.metadata),
+            "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
+                &homeboy::agents::agent_tasks::loop_controller::load_controller(&resumed_loop_id)?.metadata,
+            ),
             "resume": value,
         }),
         exit_code,
@@ -362,70 +381,23 @@ fn submit_loop_resume(
 }
 
 fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let mut record = homeboy::agents::agent_tasks::loop_controller::load_controller(&args.loop_id)?;
-    let runtime = loop_runtime_metadata(&record.metadata);
-    let limit = runtime["revolution_limit"]
-        .as_u64()
-        .map(|value| value as u32);
-    stamp_record_loop_runtime_metadata(&mut record, false, limit, false)?;
-    homeboy::agents::agent_tasks::loop_controller::write_controller(&record)?;
-    let work = cancel_loop_work(&record, "agent-task loop stop requested")?;
+    let (record, work) = homeboy::agents::agent_task_loop_controller::stop_loop(
+        &args.loop_id,
+        "agent-task loop stop requested",
+    )?;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-loop-stop-result/v1",
             "loop_id": record.loop_id,
             "on": false,
-            "runtime": loop_runtime_metadata(&record.metadata),
+            "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
+                &record.metadata,
+            ),
             "work": work,
             "controller": record,
         }),
         0,
     ))
-}
-
-fn loop_work_projection(controller: &Value) -> Value {
-    let Some(job_id) = controller
-        .pointer("/metadata/work_job/job_id")
-        .and_then(Value::as_str)
-    else {
-        return Value::Null;
-    };
-    match homeboy::core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
-        .and_then(|client| client.status(job_id))
-    {
-        Ok(job) => serde_json::json!({
-            "job_id": job_id,
-            "status": job.status,
-            "event_count": job.event_count,
-            "updated_at_ms": job.updated_at_ms,
-        }),
-        Err(error) => serde_json::json!({
-            "job_id": job_id,
-            "status": "unavailable",
-            "error": {
-                "code": format!("{:?}", error.code),
-            },
-        }),
-    }
-}
-
-fn cancel_loop_work(
-    record: &homeboy::agents::agent_task_loop_controller::AgentTaskLoopControllerRecord,
-    reason: &str,
-) -> homeboy::core::Result<Value> {
-    let Some(job_id) = record
-        .metadata
-        .pointer("/work_job/job_id")
-        .and_then(Value::as_str)
-    else {
-        return Ok(Value::Null);
-    };
-    let job = homeboy::core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
-        .cancel(job_id, reason)?;
-    Ok(serde_json::json!({
-        "job_id": job_id,
-        "status": job.status,
-    }))
 }
 
 /// One-command end-to-end controller proof (#6222).
@@ -1280,93 +1252,6 @@ fn insert_default_string(map: &mut serde_json::Map<String, Value>, key: &str, va
     if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
         map.insert(key.to_string(), Value::String(value.to_string()));
     }
-}
-
-fn stamp_loop_runtime_metadata(
-    metadata: &mut Value,
-    on: bool,
-    revolution_limit: Option<u32>,
-    increment_revolution: bool,
-) -> homeboy::core::Result<()> {
-    if metadata.is_null() {
-        *metadata = serde_json::json!({});
-    }
-    let Some(object) = metadata.as_object_mut() else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "metadata",
-            "loop runtime metadata requires object metadata",
-            Some(metadata.to_string()),
-            None,
-        ));
-    };
-    let runtime = object
-        .entry("runtime".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !runtime.is_object() {
-        *runtime = serde_json::json!({});
-    }
-    let runtime = runtime.as_object_mut().expect("runtime object");
-    let current = runtime
-        .get("revolutions")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    runtime.insert("on".to_string(), Value::Bool(on));
-    runtime.insert(
-        "state".to_string(),
-        Value::String(if on { "on" } else { "off" }.to_string()),
-    );
-    runtime.insert(
-        "revolutions".to_string(),
-        Value::Number(serde_json::Number::from(if increment_revolution {
-            current + 1
-        } else {
-            current
-        })),
-    );
-    if let Some(limit) = revolution_limit {
-        runtime.insert(
-            "revolution_limit".to_string(),
-            Value::Number(serde_json::Number::from(limit)),
-        );
-    }
-    runtime.insert(
-        "continuation_policy".to_string(),
-        serde_json::json!({
-            "mode": "until_stopped_or_revolution_limit",
-            "resume_command": "homeboy agent-task loop resume <loop-id>",
-            "stop_command": "homeboy agent-task loop stop <loop-id>"
-        }),
-    );
-    Ok(())
-}
-
-fn stamp_record_loop_runtime_metadata(
-    record: &mut homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerRecord,
-    on: bool,
-    revolution_limit: Option<u32>,
-    increment_revolution: bool,
-) -> homeboy::core::Result<()> {
-    stamp_loop_runtime_metadata(
-        &mut record.metadata,
-        on,
-        revolution_limit,
-        increment_revolution,
-    )
-}
-
-fn loop_runtime_metadata(metadata: &Value) -> Value {
-    metadata.get("runtime").cloned().unwrap_or_else(|| {
-        serde_json::json!({
-            "on": true,
-            "state": "on",
-            "revolutions": 0,
-            "continuation_policy": {
-                "mode": "until_stopped_or_revolution_limit",
-                "resume_command": "homeboy agent-task loop resume <loop-id>",
-                "stop_command": "homeboy agent-task loop stop <loop-id>"
-            }
-        })
-    })
 }
 
 impl ControllerDispatchHook for CliDispatchHook {

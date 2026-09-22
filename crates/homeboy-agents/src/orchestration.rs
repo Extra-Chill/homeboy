@@ -4879,6 +4879,7 @@ fn generic_observation_state(status: &str) -> ControlPlaneRunState {
         "running" => ControlPlaneRunState::Running,
         "pass" => ControlPlaneRunState::Succeeded,
         "fail" | "error" => ControlPlaneRunState::Failed,
+        "cancelled" => ControlPlaneRunState::Cancelled,
         "skipped" => ControlPlaneRunState::Skipped,
         _ => ControlPlaneRunState::Unknown,
     }
@@ -5070,15 +5071,24 @@ impl ControlPlaneProvider for RegisteredProvider {
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
+        let resolved_id = observation
+            .control_plane_resource_projection(
+                crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                requested_id.as_str(),
+            )
+            .map_err(map_lifecycle_error)?
+            .map(|projection| projection.resource_id)
+            .unwrap_or_else(|| requested_id.to_string());
         if let Some(record) = observation
-            .get_run(requested_id.as_str())
+            .get_run(&resolved_id)
             .map_err(map_lifecycle_error)?
         {
             if record.kind != "agent-task" {
-                if observation
-                    .get_run_mission(&record.id)
-                    .map_err(map_lifecycle_error)?
-                    .is_none()
+                if record.kind != "agent-task-loop"
+                    && observation
+                        .get_run_mission(&record.id)
+                        .map_err(map_lifecycle_error)?
+                        .is_none()
                 {
                     return Err(ControlPlaneError::not_found(format!(
                         "control-plane run not found: {requested_id}"
@@ -5529,11 +5539,57 @@ impl ControlPlaneProvider for RegisteredProvider {
         let observation = store
             .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
+        let resolved_id = observation
+            .control_plane_resource_projection(
+                crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                requested_id.as_str(),
+            )
+            .map_err(map_lifecycle_error)?
+            .map(|projection| projection.resource_id)
+            .unwrap_or_else(|| requested_id.to_string());
         if let Some(record) = observation
-            .get_run(requested_id.as_str())
+            .get_run(&resolved_id)
             .map_err(map_lifecycle_error)?
         {
             if record.kind != "agent-task" {
+                if record.kind == "agent-task-loop" {
+                    let resource = generic_observation_run(&observation, &record)?;
+                    let available = request.action == ControlPlaneAction::Cancel
+                        && resource.action_eligibility.as_ref().is_some_and(|report| {
+                            report.actions.iter().any(|eligibility| {
+                                eligibility.action == request.action
+                                    && eligibility.availability
+                                        == ControlPlaneActionAvailability::Available
+                            })
+                        });
+                    return homeboy_core::control_plane::execute_delegated_action(
+                        &observation,
+                        &record,
+                        request,
+                        crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                        record
+                            .metadata_json
+                            .pointer("/controller/updated_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&record.started_at),
+                        available,
+                        (!available).then(|| "loop stop is not currently available".to_string()),
+                        || {
+                            let current = observation
+                                .get_run(&record.id)
+                                .map_err(map_lifecycle_error)?
+                                .ok_or_else(|| {
+                                    ControlPlaneError::not_found("loop resource not found")
+                                })?;
+                            generic_observation_run(&observation, &current)
+                        },
+                    )?
+                    .ok_or_else(|| {
+                        ControlPlaneError::invalid_argument(
+                            "loop action delegate is not registered",
+                        )
+                    });
+                }
                 let resource = generic_observation_run(&observation, &record)?;
                 if resource.mission.is_none() {
                     return Err(ControlPlaneError::not_found(format!(
@@ -5594,7 +5650,186 @@ impl ControlPlaneProvider for RegisteredProvider {
 
 /// Register the orchestration service as the HTTP control-plane provider.
 pub fn register() {
+    crate::agent_task_loop_controller::register_control_plane_action_delegate();
     register_control_plane_provider(Box::new(RegisteredProvider));
+}
+
+#[cfg(test)]
+mod loop_control_plane_tests {
+    use crate::agent_task_loop_controller::{
+        control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
+        stamp_loop_runtime_metadata, stop_loop, write_controller,
+    };
+    use homeboy_core::test_support::with_isolated_home;
+    use serde_json::json;
+
+    #[test]
+    fn loop_status_is_read_only_and_does_not_infer_missing_work_success() {
+        let metadata = json!({
+            "runtime": { "on": true },
+            "work_job": { "job_id": "missing-loop-work" }
+        });
+        let before = metadata.clone();
+        let work = loop_work_status(&metadata);
+
+        assert_eq!(metadata, before);
+        assert_eq!(work["job_id"], "missing-loop-work");
+        assert_eq!(work["status"], "unavailable");
+    }
+
+    #[test]
+    fn loop_status_does_not_rewrite_controller_bytes() {
+        with_isolated_home(|_| {
+            let record = create_controller("loop/read-only", "repair", "v1").expect("created");
+            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
+                .expect("path");
+            let before = std::fs::read(&path).expect("controller bytes");
+            crate::agent_task_loop_controller::controller_status_report(&record.loop_id)
+                .expect("status");
+            let after = std::fs::read(path).expect("controller bytes");
+            assert_eq!(before, after);
+        });
+    }
+
+    #[test]
+    fn loop_runtime_projection_preserves_legacy_defaults_without_writing() {
+        let metadata = json!({ "legacy": true });
+        assert_eq!(loop_runtime_metadata(&metadata)["on"], true);
+        assert_eq!(metadata, json!({ "legacy": true }));
+    }
+
+    #[test]
+    fn loop_control_plane_mapping_does_not_sanitize_colliding_legacy_ids() {
+        assert_ne!(
+            control_plane_run_id("legacy/a").expect("slash id"),
+            control_plane_run_id("legacy_a").expect("underscore id")
+        );
+    }
+
+    #[test]
+    fn loop_runtime_stop_marker_is_owned_by_the_loop_service() {
+        let mut metadata = json!({ "runtime": { "revolutions": 2 } });
+        stamp_loop_runtime_metadata(&mut metadata, false, Some(3), false).expect("marker");
+        assert_eq!(metadata["runtime"]["on"], false);
+        assert_eq!(metadata["runtime"]["revolutions"], 2);
+        assert_eq!(metadata["runtime"]["revolution_limit"], 3);
+    }
+
+    #[test]
+    fn loop_stop_uses_canonical_action_ack_and_replays_without_effect() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop/action", "repair", "v1").expect("created");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+
+            let direct_before = homeboy_core::control_plane::run(&canonical).expect("direct read");
+            assert_eq!(direct_before.run, canonical);
+
+            let (stopped, first_work) = stop_loop(&record.loop_id, "test stop").expect("stop");
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            assert_eq!(first_work, serde_json::Value::Null);
+
+            let mut resumed = stopped.clone();
+            stamp_loop_runtime_metadata(&mut resumed.metadata, true, None, true).expect("resume");
+            resumed.updated_at = chrono::Utc::now().to_rfc3339();
+            write_controller(&resumed).expect("persist new generation");
+            let (replayed, second_work) =
+                stop_loop(&record.loop_id, "test stop").expect("second stop");
+            assert_eq!(loop_runtime_metadata(&replayed.metadata)["on"], false);
+            assert_eq!(second_work, first_work);
+
+            let store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("store");
+            let observation = store.open_observation_readonly().expect("observation");
+            let exact = observation
+                .control_plane_resource_projection_exact(
+                    crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                    canonical.as_str(),
+                )
+                .expect("exact projection")
+                .expect("exact projection exists");
+            assert_eq!(exact.aliases, vec![record.loop_id.clone()]);
+            assert!(observation
+                .control_plane_resource_projection(
+                    crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                    &record.loop_id,
+                )
+                .expect("projection")
+                .is_some());
+
+            let daemon_visible = homeboy_core::control_plane::run(
+                &homeboy_control_plane_contract::RunId::new(&record.loop_id).expect("alias id"),
+            )
+            .expect("alias read");
+            assert_eq!(daemon_visible.run, canonical);
+            assert_eq!(
+                daemon_visible.state,
+                homeboy_control_plane_contract::ControlPlaneRunState::Running
+            );
+
+            let effect = homeboy_core::control_plane::effect_status(
+                &canonical,
+                &homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+            )
+            .expect("effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Succeeded
+            );
+
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: format!("/v1/control-plane/runs/{}", record.loop_id),
+                body: None,
+            })
+            .expect("in-process HTTP read");
+            assert_eq!(http.status, 200);
+            assert_eq!(http.body["resource"]["run"], canonical.to_string());
+
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("loop-stop:{}:{}", canonical, record.updated_at),
+                actor: "homeboy-agent-task-loop".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "test stop" }),
+                },
+                confirmed: true,
+            };
+            let http_action =
+                homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                    method: homeboy_core::http_api::HttpMethod::Post,
+                    path: format!("/v1/control-plane/runs/{}/actions", record.loop_id),
+                    body: Some(serde_json::to_value(&request).expect("action request")),
+                })
+                .expect("in-process HTTP action");
+            assert_eq!(http_action.status, 200);
+            assert_eq!(http_action.body["resource"]["outcome"], "succeeded");
+
+            let mut stale = request;
+            stale.effect_id =
+                homeboy_control_plane_contract::EffectId("loop-stale-precondition".to_string());
+            stale.idempotency_key = "loop-stale-precondition".to_string();
+            let stale_error = homeboy_core::control_plane::execute_action(&canonical, &stale)
+                .expect_err("stale stop must not be admitted");
+            assert_eq!(
+                stale_error.class,
+                homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+            );
+        });
+    }
 }
 
 #[cfg(test)]
