@@ -1350,8 +1350,9 @@ fn cleanup_block_reason_with_observation(
             "resource escaped its registered root bound".to_string(),
         ));
     }
-    let terminal = observation
-        .get_run(&resource.run_id)?
+    let owning_run = observation.get_run(&resource.run_id)?;
+    let terminal = owning_run
+        .as_ref()
         .map(|run| run.status != "running")
         .unwrap_or(true);
     if !terminal {
@@ -1359,6 +1360,23 @@ fn cleanup_block_reason_with_observation(
     }
     if homeboy_core::process::pid_is_running(resource.owner_pid) {
         return Ok(Some("owner process is still running".to_string()));
+    }
+    // A terminal observation is authoritative lifecycle evidence even when a
+    // crash interrupted the normal finalization callback. Preserve its age so
+    // cleanup does not restart retention from the repair attempt itself.
+    if resource.finalized_at.is_none() {
+        if let Some(run) = owning_run.as_ref() {
+            resource.lifecycle_state = "interrupted".to_string();
+            resource.finalized_at =
+                Some(run.finished_at.clone().unwrap_or_else(|| now.to_rfc3339()));
+            resource.interrupted_at = resource.finalized_at.clone();
+            resource.terminal_reason = Some("owning_run_terminalized".to_string());
+            resource.terminal_evidence = Some(serde_json::json!({
+                "run_id": resource.run_id,
+                "status": run.status,
+                "reconciled_by": "controller_scratch_cleanup",
+            }));
+        }
     }
     if resource.lifecycle_state == "active" {
         resource.lifecycle_state = "orphaned".to_string();
@@ -3158,6 +3176,45 @@ mod tests {
         assert_eq!(resource.lifecycle_state, "interrupted");
         assert!(resource.finalized_at.is_some());
         assert!(resource.interrupted_at.is_some());
+        assert_eq!(
+            resource.terminal_reason.as_deref(),
+            Some("owning_run_terminalized")
+        );
+    }
+
+    #[test]
+    fn cleanup_reconciles_an_unfinalized_terminal_run() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let run = observation
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .expect("start run");
+        observation
+            .finish_run(&run.id, homeboy_core::observation::RunStatus::Pass, None)
+            .expect("finish run");
+        let allocation = allocate_at(data_root.path(), &run.id, "plan", "task", 1);
+        abandon_attempt_for_test(&allocation).expect("dead owner");
+
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+                full: false,
+                retention_override_seconds: Some(0),
+            },
+        );
+
+        assert_eq!(output.applied_count, 1);
+        assert!(output.reclaimed_bytes > 0);
+        assert!(!allocation.path.exists());
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("terminal evidence");
+        assert_eq!(resource.lifecycle_state, "interrupted");
         assert_eq!(
             resource.terminal_reason.as_deref(),
             Some("owning_run_terminalized")
