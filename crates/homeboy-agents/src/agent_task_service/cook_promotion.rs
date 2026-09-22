@@ -6559,17 +6559,44 @@ pub(crate) fn cook_failure_context_with_stores(
             )
         })
         .unwrap_or_else(|| {
+            let retry_admitted = record.as_ref().is_some_and(|record| {
+                lifecycle_store
+                    .map(|store| super::retry_admission_in_root(store, &record.run_id))
+                    .unwrap_or_else(|| super::retry_admission(&record.run_id))
+                    .is_ok()
+            });
+            let continuation_pending = record.as_ref().is_some_and(|record| {
+                let state = lifecycle_store
+                    .map(|store| {
+                        super::cook_recipe::continuation_state_in_store(
+                            &super::cook_recipe::CookRecipeStore::from_data_root(store.data_root()),
+                            cook_id,
+                            &record.run_id,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| {
+                        super::cook_recipe::CookRecipeStore::from_current_data_root()
+                            .ok()
+                            .and_then(|store| {
+                                super::cook_recipe::continuation_state_in_store(
+                                    &store,
+                                    cook_id,
+                                    &record.run_id,
+                                )
+                                .ok()
+                            })
+                    });
+                state == Some(super::cook_recipe::CookContinuationState::Pending)
+            });
+            let continuation_admitted = retry_admitted
+                || (matches!(status, "gate_failed" | "no_op_gate_failed") && continuation_pending);
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
                 recovery_legal,
                 blocking_claim.is_some(),
-                record.as_ref().is_some_and(|record| {
-                    lifecycle_store
-                        .map(|store| super::retry_admission_in_root(store, &record.run_id))
-                        .unwrap_or_else(|| super::retry_admission(&record.run_id))
-                        .is_ok()
-                }),
+                continuation_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 ambiguous_promotion_artifact_ids(
                     lifecycle_store,
@@ -7197,6 +7224,43 @@ mod recovery_action_tests {
             actions(&recovery.next_actions),
             actions(&recovery.legal_actions)
         );
+    }
+
+    #[test]
+    fn recovery_actions_match_continuation_admission_for_failure_states() {
+        let actions = |status, admitted| {
+            cook_recovery_actions(
+                status,
+                "recovery-state-attempt-1",
+                true,
+                false,
+                admitted,
+                false,
+                Vec::new(),
+                None,
+            )
+            .legal_actions
+            .into_iter()
+            .map(|action| action.action)
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(actions("gate_failed", false), vec!["status", "diagnose"]);
+        assert!(actions("gate_failed", true).contains(&"resume".to_string()));
+        assert!(actions("durable_failure", true).contains(&"resume".to_string()));
+        assert!((cook_recovery_actions(
+            "gate_failed",
+            "recovery-state-attempt-1",
+            false,
+            false,
+            true,
+            false,
+            Vec::new(),
+            None,
+        )
+        .legal_actions)
+            .iter()
+            .all(|action| action.action != "resume"));
     }
 
     #[test]

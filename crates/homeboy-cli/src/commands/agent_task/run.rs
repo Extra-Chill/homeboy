@@ -3774,7 +3774,22 @@ where
                 &run_id,
             )?
         } else {
-            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
+            if claim.is_none()
+                && record
+                    .metadata
+                    .get("latest_promotion")
+                    .is_some_and(Value::is_object)
+            {
+                // A direct operator continuation must remain admissible even
+                // when status reconciliation has not materialized the queue
+                // entry yet. Finalization receipts are handled above and stay
+                // observation-only.
+                recipe_store.enqueue_terminal_continuation(&recipe.cook_id, &run_id)?;
+                recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            } else {
+                claim
+            }
         };
         let Some(claim) = claim else {
             return Ok((
