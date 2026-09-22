@@ -629,6 +629,18 @@ pub(crate) fn register_startup_providers_before_reconcile() {
 /// Takes the agent-task config rather than loading it so the completeness test
 /// can drive the full registration sequence without touching the ambient home
 /// directory.
+fn fanout_resume_execution_context() -> homeboy::core::Result<(
+    homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
+    homeboy::agents::orchestration::FanoutResumeDispatcherFactory,
+)> {
+    Ok((
+        std::sync::Arc::new(
+            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+        ),
+        crate::commands::route::reconstruct_cook_attempt_dispatcher,
+    ))
+}
+
 fn register_startup_providers_after_reconcile(
     agent_task: &crate::core::defaults::AgentTaskConfig,
     capabilities: &[&dyn CliCapability],
@@ -708,9 +720,7 @@ fn register_startup_providers_after_reconcile(
     // Register the orchestration service behind daemon HTTP control-plane
     // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
-    crate::agents::orchestration::register_fanout_resume_dispatcher(
-        crate::commands::route::reconstruct_cook_attempt_dispatcher,
-    );
+    crate::agents::orchestration::register_fanout_resume_context(fanout_resume_execution_context);
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.

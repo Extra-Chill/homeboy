@@ -612,10 +612,13 @@ fn batch_resume_locked(
     placement: Placement,
 ) -> CmdResult<Value> {
     let canonical = homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
-    let idempotency_key = args
-        .idempotency_key
-        .clone()
-        .unwrap_or_else(|| format!("fanout-resume:{}", args.batch_id));
+    let idempotency_key = args.idempotency_key.clone().unwrap_or_else(|| {
+        format!(
+            "fanout-resume:{}:{}",
+            args.batch_id,
+            canonical.updated_at.as_deref().unwrap_or("initial")
+        )
+    });
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
         &args.batch_id,
         &homeboy_control_plane_contract::ControlPlaneActionRequest {
@@ -634,11 +637,21 @@ fn batch_resume_locked(
             confirmed: true,
         },
     )?;
-    let result = acknowledgement.result.data.clone();
     let subject_exit_code = i32::from(
         acknowledgement.outcome
             == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
     );
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+    {
+        return Ok((
+            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
+            1,
+        ));
+    }
+    let result: homeboy::agents::orchestration::FanoutBatchResumeActionResult =
+        serde_json::from_value(acknowledgement.result.data.clone()).map_err(|error| {
+            Error::internal_unexpected(format!("canonical fanout resume result: {error}"))
+        })?;
     reconcile_fanout_pr_states(&args.batch_id, true)?;
     let batch = batch::read_batch_record(&args.batch_id)?;
     let portfolio = run_portfolio(&batch)?;
@@ -1638,28 +1651,29 @@ fn git_candidate_state(
 }
 
 fn batch_resume_result(
-    report: Value,
+    report: homeboy::agents::orchestration::FanoutBatchResumeActionResult,
     subject_exit_code: i32,
     batch_id: &str,
     portfolio: Option<supervisor::AgentTaskFanoutPortfolioRunReport>,
     placement: Placement,
 ) -> (Value, i32) {
+    let report_value = serde_json::to_value(&report).unwrap_or(Value::Null);
     (
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch-resume/v1",
-            "batch_id": report.get("batch_id").cloned().unwrap_or(Value::Null),
-            "status": report.get("status").cloned().unwrap_or(Value::Null),
+            "batch_id": report.batch_id,
+            "status": report.status,
             "exit_code": subject_exit_code,
             "summary": {
-                "total": report.get("total").cloned().unwrap_or(Value::Null),
-                "queued": report.get("queued").cloned().unwrap_or(Value::Null),
-                "running": report.get("running").cloned().unwrap_or(Value::Null),
-                "succeeded": report.get("succeeded").cloned().unwrap_or(Value::Null),
-                "failed": report.get("failed").cloned().unwrap_or(Value::Null),
-                "cancelled": report.get("cancelled").cloned().unwrap_or(Value::Null),
-                "timed_out": report.get("timed_out").cloned().unwrap_or(Value::Null),
+                "total": report.total,
+                "queued": report.queued,
+                "running": report.running,
+                "succeeded": report.succeeded,
+                "failed": report.failed,
+                "cancelled": report.cancelled,
+                "timed_out": report.timed_out,
             },
-            "cooks": report.get("cooks").cloned().unwrap_or(Value::Array(Vec::new())),
+            "cooks": report_value["cooks"].clone(),
             "portfolio": portfolio,
             "commands": {
                 "status": fanout_command(placement, "status", batch_id),
@@ -2095,7 +2109,10 @@ fn native_worktree_disposition(
     }
 }
 
-fn finalize_resumed_native_worktrees(batch_id: &str, resumed: Option<&Value>) -> Result<()> {
+fn finalize_resumed_native_worktrees(
+    batch_id: &str,
+    resumed: Option<&homeboy::agents::orchestration::FanoutBatchResumeActionResult>,
+) -> Result<()> {
     let batch = batch::read_batch_record(batch_id)?;
     for child in &batch.child_runs {
         let result = (|| {
@@ -2113,22 +2130,18 @@ fn finalize_resumed_native_worktrees(batch_id: &str, resumed: Option<&Value>) ->
             {
                 return Ok(());
             }
-            let resumed_cell = resumed
-                .and_then(|report| report.get("cooks"))
-                .and_then(Value::as_array)
-                .and_then(|cooks| {
-                    cooks.iter().find(|cook| {
-                        cook.get("initial_run_id").and_then(Value::as_str)
-                            == Some(child.run_id.as_str())
-                            && cook.get("exit_code").and_then(Value::as_i64).is_some()
-                    })
-                });
+            let resumed_cell = resumed.and_then(|report| {
+                report
+                    .cooks
+                    .iter()
+                    .find(|cook| cook.initial_run_id == child.run_id && cook.terminal)
+            });
             let state = live
                 .as_ref()
                 .map(|record| record.state)
                 .or_else(|| {
                     resumed_cell.map(|cook| {
-                        if cook.get("exit_code").and_then(Value::as_i64) == Some(0) {
+                        if cook.exit_code == 0 {
                             agent_task_lifecycle::AgentTaskRunState::Succeeded
                         } else {
                             agent_task_lifecycle::AgentTaskRunState::Failed
@@ -2160,7 +2173,7 @@ fn finalize_resumed_native_worktrees(batch_id: &str, resumed: Option<&Value>) ->
                     .and_then(|finalization| finalization.get("status"))
                     .and_then(Value::as_str)
                     .or(live_terminal_status),
-                None => resumed_cell.and_then(|cell| cell.get("status").and_then(Value::as_str)),
+                None => resumed_cell.map(|cell| cell.status.as_str()),
             };
             let disposition = match state {
                 agent_task_lifecycle::AgentTaskRunState::Succeeded => {

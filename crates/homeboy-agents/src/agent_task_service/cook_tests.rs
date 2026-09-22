@@ -21959,6 +21959,13 @@ fn test_reconstruct_dispatcher(
     }
 }
 
+fn test_resume_context() -> homeboy_core::Result<(
+    crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    crate::orchestration::FanoutResumeDispatcherFactory,
+)> {
+    Ok((Arc::new(UnusedExecutor), test_reconstruct_dispatcher))
+}
+
 /// Stage one batch child as if its provider attempt already succeeded on a
 /// runner but the coordinator exited before promotion/finalization: persist the
 /// durable recipe, a terminal Succeeded aggregate, and an applied promotion.
@@ -22120,29 +22127,53 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
 
         // UnusedExecutor asserts the provider is never dispatched again: a
         // terminal child is harvested straight through gates and finalization.
-        // The dispatcher is reconstructed only to satisfy the recipe contract.
-        let result = resume_cook_batch(
-            "batch-9525",
-            Arc::new(UnusedExecutor),
-            test_reconstruct_dispatcher,
-        )
-        .expect("resume harvests terminal children");
+        // Exercise the real registered control-plane delegate and outbox.
+        crate::orchestration::register_fanout_resume_context(test_resume_context);
+        crate::orchestration::register();
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "test",
+                "batch-9525",
+                "resume",
+                "resume-effect",
+            ),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+            idempotency_key: "resume-effect".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+        let requested = homeboy_control_plane_contract::RunId::new("batch-9525").unwrap();
+        let acknowledgement = homeboy_core::control_plane::execute_action(&requested, &request)
+            .expect("resume action harvests terminal children");
+        assert_eq!(
+            acknowledgement.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        );
+        let result: crate::orchestration::FanoutBatchResumeActionResult =
+            serde_json::from_value(acknowledgement.result.data.clone()).expect("typed result");
 
         assert_eq!(
-            result.exit_code, 0,
+            result
+                .cooks
+                .iter()
+                .map(|cook| cook.exit_code)
+                .max()
+                .unwrap_or(1),
+            0,
             "both children finalize green: {:#?}",
-            result.value
+            result
         );
-        assert_eq!(result.value.status, "succeeded");
-        assert_eq!(result.value.total, 3);
-        assert_eq!(result.value.succeeded, 3);
-        assert_eq!(result.value.failed, 0);
-        for cell in &result.value.cooks {
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(result.total, 3);
+        assert_eq!(result.succeeded, 3);
+        assert_eq!(result.failed, 0);
+        for cell in &result.cooks {
             assert_eq!(cell.exit_code, 0);
-            assert_eq!(
-                cell.result.as_ref().map(|report| report.status.as_str()),
-                Some("review_ready")
-            );
+            assert_eq!(cell.status, "review_ready");
+            assert!(cell.terminal);
         }
 
         // Per-child finalization state is reconciled into the durable batch
@@ -22156,16 +22187,11 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         assert!(finalizations.contains_key(&child_b));
         assert!(finalizations.contains_key(&child_partial));
 
-        // Resume is idempotent: a second call still succeeds and does not
-        // redispatch or duplicate a PR (finalization is loaded, not recreated).
-        let second = resume_cook_batch(
-            "batch-9525",
-            Arc::new(UnusedExecutor),
-            test_reconstruct_dispatcher,
-        )
-        .expect("second resume is idempotent");
-        assert_eq!(second.exit_code, 0);
-        assert_eq!(second.value.succeeded, 3);
+        // The second action is an outbox replay and returns the stored receipt;
+        // no Cook service or provider executor is entered again.
+        let replay = homeboy_core::control_plane::execute_action(&requested, &request)
+            .expect("resume action replay");
+        assert_eq!(replay, acknowledgement);
     });
 }
 

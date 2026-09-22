@@ -100,16 +100,20 @@ pub type FanoutResumeDispatcherFactory = fn(
     Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
 >;
 
-static FANOUT_RESUME_DISPATCHER_FACTORY: OnceLock<RwLock<Option<FanoutResumeDispatcherFactory>>> =
-    OnceLock::new();
+pub type FanoutResumeExecutionContextFactory = fn() -> homeboy_core::Result<(
+    crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    FanoutResumeDispatcherFactory,
+)>;
 
-/// Supply the runtime's durable runner-context reconstruction without making
-/// the domain service depend on a transport or CLI module.
-pub fn register_fanout_resume_dispatcher(factory: FanoutResumeDispatcherFactory) {
-    *FANOUT_RESUME_DISPATCHER_FACTORY
+static FANOUT_RESUME_CONTEXT_FACTORY: OnceLock<
+    RwLock<Option<FanoutResumeExecutionContextFactory>>,
+> = OnceLock::new();
+
+pub fn register_fanout_resume_context(factory: FanoutResumeExecutionContextFactory) {
+    *FANOUT_RESUME_CONTEXT_FACTORY
         .get_or_init(|| RwLock::new(None))
         .write()
-        .expect("fanout resume dispatcher registry poisoned") = Some(factory);
+        .expect("fanout resume context registry poisoned") = Some(factory);
 }
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -121,13 +125,14 @@ pub struct RunSnapshot {
 
 #[cfg(test)]
 mod fanout_batch_read_tests {
-    use super::FanoutBatchDomainService;
+    use super::{FanoutBatchActionDelegate, FanoutBatchDomainService};
     use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
     use homeboy_control_plane_contract::{
         action_effect_id, ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
         ControlPlaneActionRequest, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
         CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     };
+    use homeboy_core::control_plane::ControlPlaneActionDelegate;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
     use std::fs;
@@ -296,6 +301,67 @@ mod fanout_batch_read_tests {
                 http.body["resource"],
                 serde_json::to_value(first).expect("ack JSON")
             );
+        });
+    }
+
+    #[test]
+    fn batch_resume_recovery_reattaches_the_durable_receipt_without_context() {
+        with_isolated_home(|_| {
+            let effect_id =
+                action_effect_id("test", "resume-recovery-batch", "resume", "recovery-effect");
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let receipt = serde_json::json!({
+                "outcome": "failed",
+                "result": {
+                    "schema": "homeboy/control-plane-resume-result/v1",
+                    "data": {
+                        "schema": "homeboy/agent-task-cook-batch/v1",
+                        "batch_id": "resume-recovery-batch",
+                        "status": "partial_failure",
+                        "total": 1,
+                        "queued": 0,
+                        "running": 0,
+                        "succeeded": 0,
+                        "failed": 1,
+                        "cancelled": 0,
+                        "timed_out": 0,
+                        "cooks": []
+                    }
+                }
+            });
+            let mut actions = serde_json::Map::new();
+            actions.insert(effect_id.0.clone(), receipt);
+            store
+                .persist_fanout_run_batch(
+                    "resume-recovery-batch",
+                    "resume-recovery-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-recovery-child".to_string(),
+                    }],
+                    serde_json::json!({ "control_plane_actions": actions }),
+                )
+                .expect("persist batch");
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-recovery-batch".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id,
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "recovery-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let recovered = FanoutBatchActionDelegate
+                .recover(&run, &request)
+                .expect("stored receipt recovery");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(recovered.result.data["status"], "partial_failure");
         });
     }
 }
@@ -834,11 +900,67 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        if request.action == ControlPlaneAction::Resume {
+            if let Some(receipt) = Self::stored_resume_receipt(&run.id, &request.effect_id)? {
+                return Ok(receipt);
+            }
+        }
         self.execute_inner(run, request)
     }
 }
 
 impl FanoutBatchActionDelegate {
+    fn context() -> Result<
+        (
+            crate::agent_task_scheduler::SharedAgentTaskExecutor,
+            FanoutResumeDispatcherFactory,
+        ),
+        ControlPlaneError,
+    > {
+        let factory = FANOUT_RESUME_CONTEXT_FACTORY
+            .get_or_init(|| RwLock::new(None))
+            .read()
+            .expect("fanout resume context registry poisoned")
+            .as_ref()
+            .copied()
+            .ok_or_else(|| {
+                ControlPlaneError::unavailable(
+                    "fanout resume execution context is not registered for this runtime",
+                )
+            })?;
+        factory().map_err(|error| ControlPlaneError::unavailable(error.message))
+    }
+
+    fn stored_resume_receipt(
+        batch_id: &str,
+        effect_id: &EffectId,
+    ) -> Result<Option<ControlPlaneActionDelegateResult>, ControlPlaneError> {
+        let store = AgentTaskBatchStore::from_current_data_root()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let record = store
+            .read_batch_record(batch_id)
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let Some(receipt) = record.metadata.pointer(&format!(
+            "/control_plane_actions/{}",
+            effect_id.0.replace('~', "~0").replace('/', "~1")
+        )) else {
+            return Ok(None);
+        };
+        let outcome =
+            serde_json::from_value(receipt.get("outcome").cloned().unwrap_or(Value::Null))
+                .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+        let result = serde_json::from_value(receipt.get("result").cloned().unwrap_or(Value::Null))
+            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+        Ok(Some(ControlPlaneActionDelegateResult {
+            outcome,
+            result,
+            message: receipt
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }))
+    }
+
     fn execute_inner(
         &self,
         run: &homeboy_core::observation::RunRecord,
@@ -847,35 +969,41 @@ impl FanoutBatchActionDelegate {
         let batch_id = run.id.as_str();
         match request.action {
             ControlPlaneAction::Resume => {
-                let result = crate::agent_task_service::resume_cook_batch(
-                    batch_id,
-                    std::sync::Arc::new(
-                        crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                    ),
-                    |recipe| {
-                        FANOUT_RESUME_DISPATCHER_FACTORY
-                            .get_or_init(|| RwLock::new(None))
-                            .read()
-                            .expect("fanout resume dispatcher registry poisoned")
-                            .as_ref()
-                            .map(|factory| factory(recipe))
-                            .unwrap_or_else(|| Ok(None))
-                    },
-                )
-                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-                Ok(ControlPlaneActionDelegateResult {
-                    outcome: if result.exit_code == 0 {
-                        ControlPlaneActionOutcome::Succeeded
-                    } else {
-                        ControlPlaneActionOutcome::Failed
-                    },
+                let (executor, dispatcher) = Self::context()?;
+                let result =
+                    crate::agent_task_service::resume_cook_batch(batch_id, executor, dispatcher)
+                        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let outcome = if result.exit_code == 0 {
+                    ControlPlaneActionOutcome::Succeeded
+                } else {
+                    ControlPlaneActionOutcome::Failed
+                };
+                let action_result = ControlPlaneActionDelegateResult {
+                    outcome,
                     result: ControlPlaneActionPayload {
                         schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
-                        data: serde_json::to_value(result.value)
-                            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+                        data: serde_json::to_value(
+                            fanout_batch_resume_action_result(&result.value)
+                                .map_err(|error| ControlPlaneError::unavailable(error.message))?,
+                        )
+                        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
                     },
                     message: None,
-                })
+                };
+                let store = AgentTaskBatchStore::from_current_data_root()
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let receipt = serde_json::json!({
+                    "outcome": action_result.outcome,
+                    "result": &action_result.result,
+                    "message": &action_result.message,
+                });
+                store
+                    .mutate_batch(batch_id, |batch| {
+                        batch.metadata["control_plane_actions"][&request.effect_id.0] = receipt;
+                        Ok(())
+                    })
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                Ok(action_result)
             }
             ControlPlaneAction::Cancel => {
                 crate::agent_task_service::cook_batch_job::cancel_batch_children(batch_id)
@@ -906,6 +1034,80 @@ pub struct FanoutBatchArtifactsProjection {
     pub artifacts: AgentTaskBatchArtifactsReport,
     pub children: BTreeMap<String, ControlPlaneRun>,
     pub child_read_errors: BTreeMap<String, String>,
+}
+
+/// Typed wire result for a canonical fanout resume action. `terminal` is
+/// projected by Cook from its declared disposition; consumers must not infer
+/// it from an exit code or an open status string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutBatchResumeActionResult {
+    pub schema: String,
+    pub batch_id: String,
+    pub status: String,
+    pub total: usize,
+    pub queued: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub timed_out: usize,
+    pub cooks: Vec<FanoutBatchResumeCookResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutBatchResumeCookResult {
+    pub cook_id: String,
+    pub initial_run_id: String,
+    pub status: String,
+    pub exit_code: i32,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    pub terminal: bool,
+}
+
+fn fanout_batch_resume_action_result(
+    report: &crate::agent_task_service::AgentTaskCookBatchReport,
+) -> homeboy_core::Result<FanoutBatchResumeActionResult> {
+    let cooks = report
+        .cooks
+        .iter()
+        .map(|cook| {
+            Ok(FanoutBatchResumeCookResult {
+                cook_id: cook.cook_id.clone(),
+                initial_run_id: cook.initial_run_id.clone(),
+                status: cook.status.clone(),
+                exit_code: cook.exit_code,
+                result: cook
+                    .result
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+                error: cook
+                    .error
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+                terminal: cook.lifecycle().terminal,
+            })
+        })
+        .collect::<homeboy_core::Result<Vec<_>>>()?;
+    Ok(FanoutBatchResumeActionResult {
+        schema: report.schema.to_string(),
+        batch_id: report.batch_id.clone(),
+        status: report.status.clone(),
+        total: report.total,
+        queued: report.queued,
+        running: report.running,
+        succeeded: report.succeeded,
+        failed: report.failed,
+        cancelled: report.cancelled,
+        timed_out: report.timed_out,
+        cooks,
+    })
 }
 
 impl FanoutBatchDomainService {
@@ -6219,14 +6421,22 @@ impl ControlPlaneProvider for RegisteredProvider {
                 .map_err(map_lifecycle_error)?
                 .is_none()
             {
-                observation
-                    .start_run_with_id(
-                        homeboy_core::observation::NewRunRecord::builder("agent-task-fanout")
-                            .metadata(serde_json::json!({ "batch_id": record.batch_id }))
-                            .build(),
-                        record.batch_id.clone(),
-                    )
-                    .map_err(map_lifecycle_error)?;
+                if let Err(error) = observation.start_run_with_id(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task-fanout")
+                        .metadata(serde_json::json!({ "batch_id": record.batch_id }))
+                        .build(),
+                    record.batch_id.clone(),
+                ) {
+                    // Another action admission may have won the get-then-create
+                    // race. Re-read before treating the conflict as an outage.
+                    if observation
+                        .get_run(&record.batch_id)
+                        .map_err(map_lifecycle_error)?
+                        .is_none()
+                    {
+                        return Err(map_lifecycle_error(error));
+                    }
+                }
             }
             let synthetic = homeboy_core::observation::RunRecord {
                 id: record.batch_id.clone(),
