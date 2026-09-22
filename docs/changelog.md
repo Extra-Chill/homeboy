@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.15] - 2026-09-22
+
+### Fixed
+- preserve runner provider source delivery
+
 ## [0.383.14] - 2026-09-22
 
 ### Fixed
