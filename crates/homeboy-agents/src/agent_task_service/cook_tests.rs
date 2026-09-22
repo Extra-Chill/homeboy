@@ -7236,12 +7236,12 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
-    // #14733: the dispatched prompt no longer asks the agent to run or report
-    // its own verification; Homeboy runs the declared gates and derives
-    // `review_form.verification` from that evidence alone.
+    // The review form does not replace controller-owned gate evidence, while
+    // still allowing the agent to describe bounded diagnostic observations.
+    assert!(request.instructions.contains("Bounded checks are allowed"));
     assert!(request
         .instructions
-        .contains("Do not run or report verification commands"));
+        .contains("never as authoritative final gate results"));
     assert!(!request
         .instructions
         .contains("structured `verification` entries"));
@@ -7295,13 +7295,13 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
     assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
     assert!(instructions.contains("1 private deterministic gate(s)"));
     assert!(!instructions.contains("private-gate --token secret"));
-    // #14733: the agent is told not to run or report its own verification —
-    // never nudged toward "a focused check" or asked to report its result.
-    assert!(instructions.contains("not for running or improvising your own verification"));
-    assert!(instructions.contains("Do not run or report a verification command yourself"));
+    assert!(instructions.contains("bounded checks to reproduce behavior"));
+    assert!(instructions.contains("test a hypothesis"));
+    assert!(instructions.contains("develop regression coverage"));
+    assert!(instructions.contains("Treat those results as observations"));
+    assert!(instructions.contains("not as authoritative final gate results"));
     assert!(instructions.contains("authoritative gate evidence separately after harvest"));
-    assert!(!instructions.contains("focused check"));
-    assert!(!instructions.contains("Report any focused command"));
+    assert!(instructions.contains("Do not claim a focused check is a final gate result"));
 
     project_controller_owned_gate_contract(&mut options);
     assert_eq!(
@@ -7313,15 +7313,25 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
     );
 }
 
-/// #14733 end-to-end: the complete dispatched prompt — both the gate contract
-/// and the review-form dossier projections applied together, exactly as
-/// `materialize_initial_cook_attempt_with_stores` applies them before a
-/// provider is dispatched — asks the agent for the source change and the
-/// qualitative dossier fields only. It never asks the agent to run, choose, or
-/// report the result of any verification command, and the declared output
-/// schema has no `verification` slot for the agent to fill.
 #[test]
-fn dispatched_prompt_never_asks_the_agent_to_run_or_report_verification() {
+fn provider_prompt_without_declared_gates_preserves_existing_contract() {
+    let mut options = batch_cook_options(
+        "no-declared-gates-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    let original = options.identity.initial_plan.tasks[0].clone();
+
+    project_controller_owned_gate_contract(&mut options);
+
+    assert_eq!(options.identity.initial_plan.tasks[0], original);
+}
+
+/// End-to-end: the complete dispatched prompt — both the gate contract and the
+/// review-form dossier projections applied together — permits bounded checks
+/// without making them authoritative, and the declared output schema has no
+/// `verification` slot for the agent to fill.
+#[test]
+fn dispatched_prompt_allows_bounded_checks_without_authoritative_gate_claims() {
     let mut options = batch_cook_options(
         "dispatched-prompt-no-agent-verification",
         Arc::new(AcceptedDetachedAttemptDispatcher),
@@ -7334,20 +7344,9 @@ fn dispatched_prompt_never_asks_the_agent_to_run_or_report_verification() {
 
     let request = &options.identity.initial_plan.tasks[0];
     let instructions = &request.instructions;
-    for forbidden in [
-        "focused check",
-        "Report any focused command",
-        "optional structured `verification`",
-        "run a command",
-        "run your own test",
-    ] {
-        assert!(
-            !instructions.contains(forbidden),
-            "dispatched prompt must not ask the agent to run/report verification, found {forbidden:?} in {instructions}"
-        );
-    }
-    assert!(instructions.contains("Do not run or report a verification command yourself"));
-    assert!(instructions.contains("Do not run or report verification commands"));
+    assert!(instructions.contains("bounded checks to reproduce behavior"));
+    assert!(instructions.contains("describe those as observations"));
+    assert!(instructions.contains("never as authoritative final gate results"));
 
     let declaration = request
         .output_declarations
