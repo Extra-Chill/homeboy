@@ -90,6 +90,13 @@ fn client_connection_args(
     if let Some(identity_file) = identity_file {
         args.push("-i".to_string());
         args.push(shellexpand::tilde(identity_file).to_string());
+        // A configured identity is the identity. Without this, ssh still walks
+        // every key the agent holds before reaching -i, and an agent with as
+        // many keys as the server's MaxAuthTries (6 by default) exhausts the
+        // budget first: the host is reachable and the key is correct, but
+        // authentication never gets to try it (#14881).
+        args.push("-o".to_string());
+        args.push("IdentitiesOnly=yes".to_string());
     }
 
     if let Some(flag) = options.port_flag {
