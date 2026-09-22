@@ -4519,6 +4519,11 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
     let priority = if item.source == "current_lifecycle" {
         0
+    } else if class == "agent_task.provider_liveness_timeout" {
+        // The typed lifecycle timeout is authoritative. An unparsed provider
+        // stream can contain arbitrary words such as "error" and must not
+        // replace the recorded terminal state as the root cause.
+        0
     } else if is_policy_denial(&class, &text) {
         0
     } else if is_provider_structured_error(&class) {
@@ -5983,6 +5988,33 @@ fn diagnose_next_commands(
 mod tests {
     use super::*;
     use homeboy::core::Error;
+
+    #[test]
+    fn typed_provider_timeout_precedes_unparsed_provider_stream_error() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "task-a".to_string(),
+                class: "provider.process_stream".to_string(),
+                message: "provider error: stderr was truncated".to_string(),
+                source: "hydrated_process_stream".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "task-a".to_string(),
+                class: "agent_task.provider_liveness_timeout".to_string(),
+                message: "provider timed out after producing a recoverable candidate".to_string(),
+                source: "diagnostics".to_string(),
+                data: json!({"failure_classification": "timeout"}),
+            },
+        ]);
+
+        assert_eq!(
+            diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.class.as_str()),
+            Some("agent_task.provider_liveness_timeout")
+        );
+    }
 
     #[test]
     fn stale_generic_lab_replay_status_has_no_executable_action() {
