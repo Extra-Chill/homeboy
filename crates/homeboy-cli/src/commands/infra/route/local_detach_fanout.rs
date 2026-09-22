@@ -326,7 +326,7 @@ fn detached_route(cli: &Cli) -> Option<homeboy::core::notification_route::Notifi
         cli.notification_route.as_deref(),
     )
     .ok()
-    .flatten()
+    .and_then(homeboy::core::notification_route::NotificationRouteContext::into_route)
 }
 
 /// Replace an `--input -` stdin request with a file the detached coordinator

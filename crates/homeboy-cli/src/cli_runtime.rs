@@ -1390,7 +1390,14 @@ impl CliRuntime {
             }
         }
 
-        if Self::admits_ambient_notification_route(&cli.command) && notification_route.is_none() {
+        // A resolved-but-route-less transport (evidence.transport is set) was
+        // an explicit caller choice, even though it carries no route; ambient
+        // discovery must not override that choice with an unrelated
+        // installed transport. Only truly empty context falls through here.
+        if Self::admits_ambient_notification_route(&cli.command)
+            && notification_route.is_none()
+            && notification_resolution.evidence.transport.is_none()
+        {
             notification_resolution =
                 match crate::core::notification_route_resolver::resolve_installed_with_evidence() {
                     Ok(resolution) => resolution,
