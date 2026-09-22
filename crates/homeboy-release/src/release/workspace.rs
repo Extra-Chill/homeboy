@@ -141,7 +141,7 @@ impl ReleaseWorkspace {
         }
 
         let mut staged = component.clone();
-        staged.local_path = workspace.path.clone();
+        staged.local_path = staged_component_path(&component.local_path, &workspace.path)?;
         Ok(Self {
             component: staged,
             output: ReleaseWorkspaceOutput {
@@ -632,11 +632,64 @@ fn verify_staging_workspace(path: &str, source_sha: &str) -> Result<()> {
     Ok(())
 }
 
+/// Map a component's path onto the staging worktree, preserving where the
+/// component sits inside its repository.
+///
+/// The staging worktree is a checkout of the whole repository, so its path is
+/// the repository root. A monorepo component lives in a subdirectory of that
+/// root; rebinding it to the bare worktree path would drop the subdirectory
+/// and re-resolve the component against a root that carries no component
+/// config (#14947).
+fn staged_component_path(component_path: &str, worktree_path: &str) -> Result<String> {
+    let component_path = Path::new(component_path);
+    let source_root = git::repo_root(component_path).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "release.workspace",
+            "component path is not inside a git repository",
+            Some(component_path.display().to_string()),
+            None,
+        )
+    })?;
+    rebase_under_root(component_path, &source_root, Path::new(worktree_path))
+        .map(|path| path.display().to_string())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "release.workspace",
+                format!(
+                    "component path is not inside its repository root '{}'",
+                    source_root.display()
+                ),
+                Some(component_path.display().to_string()),
+                None,
+            )
+        })
+}
+
+/// Re-express `path` relative to `from_root`, anchored at `to_root`.
+///
+/// Both sides are canonicalized when possible so a symlinked checkout path
+/// (for example `/tmp` against `/private/tmp` on macOS) still yields the
+/// component's real offset instead of an empty one. Returns `None` when `path`
+/// is not under `from_root`, rather than guessing a location.
+fn rebase_under_root(path: &Path, from_root: &Path, to_root: &Path) -> Option<std::path::PathBuf> {
+    let canonical = |value: &Path| value.canonicalize().unwrap_or_else(|_| value.to_path_buf());
+    let relative = canonical(path)
+        .strip_prefix(canonical(from_root))
+        .ok()?
+        .to_path_buf();
+    Some(if relative.as_os_str().is_empty() {
+        to_root.to_path_buf()
+    } else {
+        to_root.join(relative)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        finalize_record, in_place_eligible, operation_record, reconcile_pending,
-        NativeProvisionIntent, NativeWorkspace, ReleaseWorkspace, WorktreeTerminalDisposition,
+        finalize_record, in_place_eligible, operation_record, rebase_under_root, reconcile_pending,
+        staged_component_path, NativeProvisionIntent, NativeWorkspace, ReleaseWorkspace,
+        WorktreeTerminalDisposition,
     };
     use crate::release::operation_record::OperationRecordStore;
     use homeboy_core::component::Component;
@@ -769,6 +822,93 @@ mod tests {
                 Some("")
             );
         });
+    }
+
+    /// A monorepo component lives in a subdirectory of its repository. The
+    /// staged worktree is a checkout of the whole repository, so the staged
+    /// component must point at the same subdirectory inside it, with its own
+    /// component config reachable — not at the worktree root (#14947).
+    #[test]
+    fn subdirectory_component_stages_at_the_same_subdirectory() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let mut component = fixture_component(home);
+            let source_root = Path::new(&component.local_path).to_path_buf();
+            let package = source_root.join("packages/example");
+            std::fs::create_dir_all(&package).expect("package dir");
+            std::fs::write(package.join("homeboy.json"), "{\"id\":\"fixture\"}\n")
+                .expect("package config");
+            git(&source_root, &["add", "."]);
+            git(&source_root, &["commit", "-qm", "add package"]);
+            git(&source_root, &["push", "origin", "main"]);
+            std::fs::write(source_root.join("README.md"), "dirty\n").expect("dirty source");
+            component.local_path = package.display().to_string();
+
+            let workspace = ReleaseWorkspace::select(&test_roots(), &component, false, false)
+                .expect("native staging");
+            let worktree_root = Path::new(&workspace.output.path);
+            let staged = Path::new(&workspace.component.local_path);
+
+            assert_ne!(
+                staged.canonicalize().expect("staged path"),
+                worktree_root.canonicalize().expect("worktree root"),
+                "staged component must not collapse to the worktree root"
+            );
+            assert_eq!(
+                staged.canonicalize().expect("staged path"),
+                worktree_root
+                    .join("packages/example")
+                    .canonicalize()
+                    .expect("expected staged path")
+            );
+            assert!(
+                staged.join("homeboy.json").is_file(),
+                "staged component must carry its own component config"
+            );
+        });
+    }
+
+    #[test]
+    fn rebase_under_root_preserves_subdirectory_offset() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let package = source.join("php-transformer");
+        std::fs::create_dir_all(&package).expect("package dir");
+        let worktree = temp.path().join("worktree");
+
+        assert_eq!(
+            rebase_under_root(&package, &source, &worktree),
+            Some(worktree.join("php-transformer"))
+        );
+        assert_eq!(
+            rebase_under_root(&source, &source, &worktree),
+            Some(worktree.clone()),
+            "a root-level component stays at the worktree root"
+        );
+    }
+
+    #[test]
+    fn rebase_under_root_refuses_paths_outside_the_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir_all(&source).expect("source dir");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere dir");
+
+        assert_eq!(
+            rebase_under_root(&elsewhere, &source, &temp.path().join("worktree")),
+            None
+        );
+    }
+
+    #[test]
+    fn staged_component_path_rejects_paths_outside_a_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = staged_component_path(
+            temp.path().to_str().expect("path"),
+            temp.path().join("worktree").to_str().expect("path"),
+        )
+        .expect_err("non-repository path must not be staged");
+        assert!(error.message.contains("not inside a git repository"));
     }
 
     #[test]
