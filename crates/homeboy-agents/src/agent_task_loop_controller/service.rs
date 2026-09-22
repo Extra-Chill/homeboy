@@ -20,7 +20,6 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 /// A bounded read of the shared detached work owner. Errors are deliberately
 /// represented as unavailable data: a failed daemon inspection is not success.
@@ -46,6 +45,7 @@ pub fn loop_work_status(metadata: &Value) -> Value {
 }
 
 pub const LOOP_CONTROL_PLANE_RESOURCE_TYPE: &str = "agent_task_loop";
+const LOOP_RESUME_PARAMETERS_SCHEMA: &str = "homeboy/agent-task-loop-resume-parameters/v1";
 
 /// The loop identity is not a work-job identity. This explicit mapping gives
 /// the loop domain a stable control-plane resource without aliasing either ID.
@@ -116,6 +116,7 @@ pub fn resume_loop(
 ) -> Result<ControlPlaneActionAcknowledgement> {
     let record = load_controller(loop_id)?;
     let run = control_plane_run_id(&record.loop_id)?;
+    let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults)?;
     let request = ControlPlaneActionRequest {
         schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
         effect_id: homeboy_control_plane_contract::EffectId(format!(
@@ -127,8 +128,7 @@ pub fn resume_loop(
         actor: "homeboy-agent-task-loop".to_string(),
         expected_updated_at: Some(record.updated_at.clone()),
         parameters: ControlPlaneActionPayload {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_RESUME_PARAMETERS_SCHEMA
-                .to_string(),
+            schema: LOOP_RESUME_PARAMETERS_SCHEMA.to_string(),
             data: serde_json::json!({
                 "revolution_limit": revolution_limit,
                 "dispatch_defaults": dispatch_defaults,
@@ -157,6 +157,27 @@ pub fn resume_loop(
     Ok(acknowledgement)
 }
 
+/// Only route selection is durable loop intent. Provider configuration and
+/// credential material belong to the caller's admitted catalog/Runner handoff,
+/// never to a generic control-plane action payload.
+fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
+    let object = value.as_object().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "dispatch_defaults",
+            "dispatch defaults must be an object",
+            None,
+            None,
+        )
+    })?;
+    let mut admitted = serde_json::Map::new();
+    for key in ["backend", "selector", "model"] {
+        if let Some(value) = object.get(key) {
+            admitted.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(Value::Object(admitted))
+}
+
 fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Result<Value> {
     let Some(job_id) = record
         .metadata
@@ -170,106 +191,19 @@ fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Resu
     Ok(serde_json::json!({ "job_id": job_id, "status": job.status }))
 }
 
-fn launch_loop_coordinator(loop_id: &str, dispatch_defaults: &Value) -> Result<Value> {
-    let controller_path = controller_record_path(loop_id)?;
-    let loop_root = controller_path.parent().ok_or_else(|| {
-        Error::internal_unexpected("loop controller record has no parent directory")
-    })?;
-    fs::create_dir_all(loop_root).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(loop_root.display().to_string()))
-    })?;
-    let log_path = loop_root.join("coordinator.log");
-    let ready_path = loop_root.join("coordinator.ready");
-    match fs::remove_file(&ready_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(ready_path.display().to_string()),
-            ))
-        }
-    }
-    let log = fs::File::create(&log_path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
-    })?;
-    let log_err = log.try_clone().map_err(|error| {
-        Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
-    })?;
-    let executable = std::env::var_os("HOMEBOY_AGENT_TASK_LOOP_EXECUTABLE")
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_exe().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("resolve loop coordinator executable".to_string()),
-            )
-        })?);
-    let mut command = Command::new(executable);
-    command
-        .args(loop_coordinator_args(loop_id, dispatch_defaults))
-        .env("HOMEBOY_AGENT_TASK_LOOP_COORDINATOR", loop_id)
-        .env("HOMEBOY_AGENT_TASK_LOOP_COORDINATOR_READY", &ready_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    homeboy_core::process::detach_from_caller_session(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("spawn detached loop coordinator".to_string()),
-        )
-    })?;
-    let start_identity = match homeboy_core::process::process_start_identity(child.id()) {
-        Ok(Some(identity)) => identity,
-        Ok(None) => {
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(Error::internal_unexpected(
-                "detached loop coordinator has no verifiable process identity",
-            ));
-        }
-        Err(error) => {
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(Error::internal_io(
-                error,
-                Some("inspect detached loop coordinator identity".to_string()),
-            ));
-        }
-    };
-    let submission =
-        crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &start_identity)?;
+fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value) -> Result<Value> {
+    let provider_catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let submission = crate::agent_task_service::loop_work_job_execution_submission(
+        loop_id,
+        generation,
+        dispatch_defaults,
+        provider_catalog,
+    )?;
     let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?;
-    let job = match client.submit(submission) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
-            return Err(error);
-        }
-    };
+    let job = client.submit(submission)?;
     let job_id = job.id.to_string();
-    if let Err(error) = persist_loop_work_identity(loop_id, &job_id) {
-        let _ = client.cancel(&job_id, "loop work identity could not be persisted");
-        let _ = homeboy_core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        return Err(error);
-    }
-    if let Err(error) = client.start(&job_id) {
-        let _ = client.cancel(&job_id, "loop coordinator could not start supervision");
-        let _ = homeboy_core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        return Err(error);
-    }
-    fs::write(&ready_path, format!("{job_id}\n")).map_err(|error| {
-        let _ = client.cancel(
-            &job_id,
-            "loop coordinator launch gate could not be released",
-        );
-        let _ = homeboy_core::process::terminate_process_tree(child.id());
-        let _ = child.wait();
-        Error::internal_io(error.to_string(), Some(ready_path.display().to_string()))
-    })?;
+    persist_loop_work_identity(loop_id, &job_id)?;
+    client.start(&job_id)?;
     Ok(serde_json::json!({
         "schema": "homeboy/agent-task-loop-work-submission/v1",
         "loop_id": loop_id,
@@ -288,28 +222,10 @@ fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> Result<()> {
         "job_id": job_id,
         "state": "submitted",
     });
-    write_controller(&record)
-}
-
-fn loop_coordinator_args(loop_id: &str, defaults: &Value) -> Vec<String> {
-    let mut args = vec![
-        "agent-task".to_string(),
-        "controller".to_string(),
-        "resume".to_string(),
-        loop_id.to_string(),
-    ];
-    for (key, flag) in [
-        ("backend", "--dispatch-backend"),
-        ("selector", "--dispatch-selector"),
-        ("model", "--dispatch-model"),
-        ("provider_config", "--dispatch-provider-config"),
-    ] {
-        if let Some(value) = defaults.get(key).and_then(Value::as_str) {
-            args.push(flag.to_string());
-            args.push(value.to_string());
-        }
+    if record.metadata["resume_operation"].is_object() {
+        record.metadata["resume_operation"]["state"] = Value::String("published".to_string());
     }
-    args
+    write_controller(&record)
 }
 
 fn work_job_is_terminal(work: &Value) -> bool {
@@ -509,24 +425,45 @@ impl LoopActionDelegate {
                 message: None,
             });
         }
-        stamp_loop_runtime_metadata(&mut record.metadata, true, limit, true).map_err(|error| {
-            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
-        })?;
-        record.updated_at = Utc::now().to_rfc3339();
-        write_controller(&record).map_err(|error| {
-            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
-        })?;
-        let work = launch_loop_coordinator(
-            loop_id,
-            request
+        let operation_id = request.effect_id.0.clone();
+        let reserved = record
+            .metadata
+            .get("resume_operation")
+            .filter(|operation| operation["effect_id"] == operation_id)
+            .cloned();
+        if reserved.is_none() {
+            let dispatch_defaults = request
                 .parameters
                 .data
                 .get("dispatch_defaults")
-                .unwrap_or(&Value::Null),
-        )
-        .map_err(|error| {
-            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
-        })?;
+                .cloned()
+                .unwrap_or(Value::Null);
+            let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults).map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.to_string())
+            })?;
+            stamp_loop_runtime_metadata(&mut record.metadata, true, limit, true).map_err(
+                |error| {
+                    homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+                },
+            )?;
+            record.updated_at = Utc::now().to_rfc3339();
+            record.metadata["resume_operation"] = serde_json::json!({
+                "schema": "homeboy/agent-task-loop-resume-operation/v1",
+                "effect_id": operation_id,
+                "generation": record.updated_at,
+                "state": "reserved",
+                "dispatch_defaults": dispatch_defaults,
+            });
+            write_controller(&record).map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+            })?;
+        }
+        let generation = record.updated_at.clone();
+        let dispatch_defaults = record.metadata["resume_operation"]["dispatch_defaults"].clone();
+        let work =
+            admit_loop_work_job(loop_id, &generation, dispatch_defaults).map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+            })?;
         Ok(ControlPlaneActionDelegateResult {
             outcome: ControlPlaneActionOutcome::Succeeded,
             result: ControlPlaneActionPayload {

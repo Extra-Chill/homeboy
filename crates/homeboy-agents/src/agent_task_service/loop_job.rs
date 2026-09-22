@@ -11,7 +11,11 @@ use super::work_job::{
     register_work_job_handler, work_job_submission, WorkJobHandler, WorkJobInvocation,
     WorkJobPhase, WorkJobStep,
 };
+use crate::agent_task_controller_service::{ControllerDispatchHook, ControllerDispatchOverrides};
+use crate::agent_task_dispatch_service;
 use crate::agent_task_loop_controller::{self, AgentTaskLoopControllerState};
+use crate::agent_task_provider::{AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor};
+use crate::agent_task_scheduler::SharedAgentTaskExecutor;
 
 pub const AGENT_TASK_LOOP_JOB_TYPE: &str = "agent-task-loop";
 pub const AGENT_TASK_LOOP_JOB_VERSION: u32 = 1;
@@ -23,8 +27,18 @@ const SUPERVISION_POLL: Duration = Duration::from_millis(500);
 pub struct AgentTaskLoopJobRequest {
     pub schema: String,
     pub loop_id: String,
-    pub child_pid: u32,
-    pub child_start_identity: ProcessStartIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_start_identity: Option<ProcessStartIdentity>,
+    #[serde(default)]
+    pub generation: String,
+    #[serde(default)]
+    pub dispatch_defaults: Value,
+    /// The caller's admitted provider catalog. The daemon must not rediscover
+    /// providers from its own environment while executing this job.
+    #[serde(default)]
+    pub provider_catalog: AgentTaskProviderCatalog,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -37,6 +51,8 @@ pub struct AgentTaskLoopJob {
     pub phase: WorkJobPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_state: Option<AgentTaskLoopControllerState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_result: Option<Value>,
 }
 
 impl AgentTaskLoopJob {
@@ -46,17 +62,27 @@ impl AgentTaskLoopJob {
                 "loop jobs require a recognized schema and durable loop id",
             ));
         }
-        if request.child_pid == 0 {
+        if request.child_pid == Some(0) {
             return Err(invalid_loop_job(
                 "loop jobs require the detached coordinator's process id",
             ));
         }
+        if request.child_pid.is_some() != request.child_start_identity.is_some() {
+            return Err(invalid_loop_job(
+                "loop jobs require both coordinator pid and start identity",
+            ));
+        }
         Ok(Self {
             schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
-            idempotency_key: format!("agent-task-loop:{}", request.loop_id),
+            idempotency_key: if request.generation.is_empty() {
+                format!("agent-task-loop:{}", request.loop_id)
+            } else {
+                format!("agent-task-loop:{}:{}", request.loop_id, request.generation)
+            },
             request,
             phase: WorkJobPhase::Queued,
             controller_state: None,
+            resume_result: None,
         })
     }
 
@@ -99,6 +125,7 @@ impl AgentTaskLoopJob {
             "phase": self.phase,
             "loop_id": self.request.loop_id,
             "controller_state": self.controller_state,
+            "generation": self.request.generation,
         })
     }
 
@@ -107,6 +134,7 @@ impl AgentTaskLoopJob {
             "phase": self.phase,
             "loop_id": self.request.loop_id,
             "controller_state": self.controller_state,
+            "resume": self.resume_result,
         })
     }
 
@@ -191,11 +219,14 @@ impl WorkJobHandler for LoopWorkHandler {
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
         let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
+        let Some(child_pid) = job.request.child_pid else {
+            return Ok(());
+        };
+        let Some(child_start_identity) = job.request.child_start_identity.as_ref() else {
+            return Ok(());
+        };
         if job.phase == WorkJobPhase::Completed
-            || !super::work_job::supervised_child_is_live(
-                job.request.child_pid,
-                &job.request.child_start_identity,
-            )
+            || !super::work_job::supervised_child_is_live(child_pid, child_start_identity)
         {
             return Ok(());
         }
@@ -204,7 +235,7 @@ impl WorkJobHandler for LoopWorkHandler {
         ) {
             return Ok(());
         }
-        homeboy_core::process::terminate_process_tree(job.request.child_pid).map(|_| ())
+        homeboy_core::process::terminate_process_tree(child_pid).map(|_| ())
     }
 }
 
@@ -212,7 +243,7 @@ impl LoopWorkHandler {
     fn observe(
         &self,
         job: &mut AgentTaskLoopJob,
-        _invocation: WorkJobInvocation,
+        invocation: WorkJobInvocation,
     ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
@@ -223,9 +254,61 @@ impl LoopWorkHandler {
             job.phase = WorkJobPhase::Completed;
             return Ok(WorkJobStep::Complete(job.result()));
         }
+        if job.request.child_pid.is_none() {
+            let executor: SharedAgentTaskExecutor = std::sync::Arc::new(
+                ExtensionProviderAgentTaskExecutor::from_catalog(
+                    job.request.provider_catalog.clone(),
+                ),
+            );
+            let dispatch = LoopDispatchHook {
+                executor: executor.clone(),
+                catalog: job.request.provider_catalog.clone(),
+                defaults: ControllerDispatchOverrides {
+                    backend: job.request.dispatch_defaults["backend"]
+                        .as_str()
+                        .map(str::to_string),
+                    selector: job.request.dispatch_defaults["selector"]
+                        .as_str()
+                        .map(str::to_string),
+                    model: job.request.dispatch_defaults["model"]
+                        .as_str()
+                        .map(str::to_string),
+                    provider_config: None,
+                },
+            };
+            let report = crate::agent_task_controller_service::resume_with_options(
+                &job.request.loop_id,
+                executor,
+                &dispatch,
+                crate::agent_task_controller_service::ControllerResumeOptions {
+                    max_actions: 1,
+                    stop_on_terminal: true,
+                },
+            )?;
+            job.resume_result = Some(serde_json::to_value(report.value).map_err(|error| {
+                homeboy_core::Error::internal_json(error.to_string(), None)
+            })?);
+            job.refresh_controller_state();
+            if job
+                .controller_state
+                .is_some_and(controller_state_is_terminal)
+            {
+                job.phase = WorkJobPhase::Completed;
+                return Ok(WorkJobStep::Complete(job.result()));
+            }
+            return Ok(WorkJobStep::Continue {
+                checkpoint: job.to_checkpoint()?,
+                progress: job.result(),
+                wait: SUPERVISION_POLL,
+            });
+        }
+        let _ = invocation;
         if !super::work_job::supervised_child_is_live(
-            job.request.child_pid,
-            &job.request.child_start_identity,
+            job.request.child_pid.expect("legacy child job"),
+            job.request
+                .child_start_identity
+                .as_ref()
+                .expect("legacy child identity"),
         ) {
             return Ok(WorkJobStep::Complete(terminalize_interrupted(
                 job,
@@ -237,6 +320,27 @@ impl LoopWorkHandler {
             progress: job.result(),
             wait: SUPERVISION_POLL,
         })
+    }
+}
+
+#[derive(Clone)]
+struct LoopDispatchHook {
+    executor: SharedAgentTaskExecutor,
+    catalog: AgentTaskProviderCatalog,
+    defaults: ControllerDispatchOverrides,
+}
+
+impl ControllerDispatchHook for LoopDispatchHook {
+    fn dispatch(&self, request: &Value) -> Result<(Value, i32)> {
+        let command = crate::agent_task_controller_service::controller_request_dispatch_command(
+            request,
+            &self.defaults,
+        )?;
+        agent_task_dispatch_service::run_dispatch_command_with_provider_catalog(
+            command,
+            self.executor.clone(),
+            &self.catalog,
+        )
     }
 }
 
@@ -285,14 +389,54 @@ pub fn loop_work_job_submission(
     let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
         schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
         loop_id: loop_id.to_string(),
-        child_pid,
-        child_start_identity: child_start_identity.clone(),
+        child_pid: Some(child_pid),
+        child_start_identity: Some(child_start_identity.clone()),
+        generation: String::new(),
+        dispatch_defaults: Value::Null,
+        provider_catalog: AgentTaskProviderCatalog::default(),
     })?;
     work_job_submission(
         &LoopWorkHandler,
         job.idempotency_key.clone(),
         job.to_checkpoint()?,
     )
+}
+
+/// Admit one daemon-owned loop execution without launching a public CLI child.
+pub fn loop_work_job_execution_submission(
+    loop_id: &str,
+    generation: &str,
+    dispatch_defaults: Value,
+    provider_catalog: AgentTaskProviderCatalog,
+) -> Result<Value> {
+    let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults)?;
+    let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+        schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+        loop_id: loop_id.to_string(),
+        child_pid: None,
+        child_start_identity: None,
+        generation: generation.to_string(),
+        dispatch_defaults,
+        provider_catalog,
+    })?;
+    work_job_submission(
+        &LoopWorkHandler,
+        job.idempotency_key.clone(),
+        job.to_checkpoint()?,
+    )
+}
+
+fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
+    let object = value.as_object().ok_or_else(|| {
+        invalid_loop_job("dispatch defaults must be an object")
+    })?;
+    let mut admitted = serde_json::Map::new();
+    for key in ["backend", "selector", "model"] {
+        if let Some(value) = object.get(key) {
+            admitted.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(Value::Object(admitted))
 }
 
 fn invalid_loop_job(message: &str) -> homeboy_core::Error {
@@ -342,6 +486,75 @@ mod tests {
         assert_eq!(public["loop_id"], "loop-shared");
         assert!(public.get("child_pid").is_none());
         assert!(!public.to_string().contains("starttime_ticks"));
+    }
+
+    #[test]
+    fn execution_submissions_admit_catalog_and_never_persist_provider_config() {
+        let submission = loop_work_job_execution_submission(
+            "loop-execution",
+            "generation-1",
+            json!({
+                "backend": "fixture",
+                "provider_config": "credential-value-must-not-cross-boundary"
+            }),
+            AgentTaskProviderCatalog::default(),
+        )
+        .expect("build execution submission");
+
+        let encoded = submission.to_string();
+        assert!(!encoded.contains("credential-value-must-not-cross-boundary"));
+        assert!(submission["request"]["request"]["request"]["provider_catalog"].is_object());
+    }
+
+    #[test]
+    fn mixed_legacy_process_identity_is_rejected_without_panicking() {
+        let request = serde_json::to_value(AgentTaskLoopJobRequest {
+            schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+            loop_id: "loop-invalid-identity".to_string(),
+            child_pid: Some(4242),
+            child_start_identity: None,
+            generation: String::new(),
+            dispatch_defaults: Value::Null,
+            provider_catalog: AgentTaskProviderCatalog::default(),
+        })
+        .expect("encode request");
+        let error = AgentTaskLoopJob::parse(json!({
+            "schema": AGENT_TASK_LOOP_JOB_SCHEMA,
+            "idempotency_key": "agent-task-loop:loop-invalid-identity",
+            "request": request,
+            "phase": "queued"
+        }))
+        .expect_err("mixed identity must be rejected");
+        assert!(format!("{error:?}").contains("both coordinator pid and start identity"));
+    }
+
+    #[test]
+    fn waiting_execution_stays_resumable_instead_of_becoming_completed() {
+        with_isolated_home(|_| {
+            let mut record = agent_task_loop_controller::create_controller(
+                "loop-waiting-execution",
+                "repair",
+                "v1",
+            )
+            .expect("create controller");
+            record.state = AgentTaskLoopControllerState::Waiting;
+            agent_task_loop_controller::write_controller(&record).expect("write waiting state");
+            let mut job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: record.loop_id.clone(),
+                child_pid: None,
+                child_start_identity: None,
+                generation: String::new(),
+                dispatch_defaults: json!({}),
+                provider_catalog: AgentTaskProviderCatalog::default(),
+            })?;
+
+            let step = LoopWorkHandler.observe(&mut job, WorkJobInvocation::Execute)?;
+            assert!(matches!(step, WorkJobStep::Continue { .. }));
+            assert_ne!(job.phase, WorkJobPhase::Completed);
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("waiting execution remains resumable");
     }
 
     #[test]

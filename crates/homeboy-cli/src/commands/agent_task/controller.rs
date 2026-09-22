@@ -3,7 +3,6 @@
 
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::Duration;
 
 use homeboy::agents::agent_task_controller_service::{
     build_run_failure_summary, controller_spec_fingerprint_for_status,
@@ -41,11 +40,6 @@ use super::args::{
     AgentTaskLoopStatusArgs,
 };
 use super::command_json_value;
-
-const LOOP_COORDINATOR_ENV: &str = "HOMEBOY_AGENT_TASK_LOOP_COORDINATOR";
-const LOOP_COORDINATOR_READY_ENV: &str = "HOMEBOY_AGENT_TASK_LOOP_COORDINATOR_READY";
-const LOOP_COORDINATOR_POLL: Duration = Duration::from_millis(500);
-const LOOP_COORDINATOR_READY_BUDGET: Duration = Duration::from_secs(30);
 
 pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
     match args.command {
@@ -1299,9 +1293,6 @@ fn controller_run_action(args: AgentTaskControllerRunArgs) -> CmdResult<Value> {
 
 fn controller_resume(args: AgentTaskControllerRunNextArgs) -> CmdResult<Value> {
     let defaults = ControllerDispatchDefaults::from_run_next_args(&args);
-    if std::env::var(LOOP_COORDINATOR_ENV).ok().as_deref() == Some(args.loop_id.as_str()) {
-        return run_loop_coordinator(args.loop_id, defaults);
-    }
     submit_loop_resume(args.loop_id, None, defaults)
 }
 
@@ -1357,57 +1348,6 @@ fn controller_run_action_with_executor_and_defaults(
     let result =
         agent_task_controller_service::run_action(&loop_id, &action_id, executor, &dispatch)?;
     Ok((command_json_value(result.value)?, result.exit_code))
-}
-
-fn run_loop_coordinator(loop_id: String, defaults: ControllerDispatchDefaults) -> CmdResult<Value> {
-    wait_for_loop_coordinator_release()?;
-    let executor: SharedAgentTaskExecutor =
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover());
-    loop {
-        let dispatch = CliDispatchHook {
-            executor: executor.clone(),
-            defaults: defaults.clone(),
-        };
-        let result = agent_task_controller_service::resume(&loop_id, executor.clone(), &dispatch)?;
-        let state = result.value.controller.state;
-        if result.exit_code != 0
-            || matches!(
-                state,
-                homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::HumanReady
-                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Completed
-                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Abandoned
-                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Escalated
-                    | homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Failed
-            )
-        {
-            return Ok((command_json_value(result.value)?, result.exit_code));
-        }
-        if result.value.stopped_reason == "idle"
-            && state
-                != homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopControllerState::Waiting
-        {
-            return Ok((command_json_value(result.value)?, result.exit_code));
-        }
-        std::thread::sleep(LOOP_COORDINATOR_POLL);
-    }
-}
-
-fn wait_for_loop_coordinator_release() -> homeboy::core::Result<()> {
-    let Some(path) = std::env::var_os(LOOP_COORDINATOR_READY_ENV) else {
-        return Ok(());
-    };
-    let path = std::path::PathBuf::from(path);
-    let started = std::time::Instant::now();
-    while started.elapsed() < LOOP_COORDINATOR_READY_BUDGET {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    Err(homeboy::core::Error::internal_unexpected(
-        "loop coordinator was not released by its durable Work owner",
-    ))
 }
 
 #[cfg(test)]
