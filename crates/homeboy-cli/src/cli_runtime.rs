@@ -1299,6 +1299,8 @@ impl CliRuntime {
         }
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
+        // Restore command-scoped runner intent before admission and placement
+        // routing inspect the typed command. Provider readiness is runner-scoped.
         normalize_agent_task_runner_option(&mut cli, &normalized);
         if let Commands::AgentTask(agent_task) = &mut cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
@@ -4126,6 +4128,7 @@ mod tests {
     }
     use super::*;
     use clap::Parser;
+    use homeboy::core::parsed_command_preflight::RunnerIntent;
     use sha2::{Digest, Sha256};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -6554,6 +6557,42 @@ mod tests {
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert_eq!(resource_policy_runner_hint(&cli, None), Some("homeboy-lab"));
         }
+    }
+
+    #[test]
+    fn provider_readiness_runner_intent_reaches_generic_route_selection() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--validate-readiness".to_string(),
+        ];
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "providers",
+            "--backend",
+            "opencode",
+            "--validate-readiness",
+        ]);
+        normalize_agent_task_runner_option(&mut cli, &argv);
+
+        let input = resource_policy::parsed_command_preflight_input(&cli, &argv);
+        let route = generic_route_policy_snapshot(&cli, Some("homeboy-lab".to_string()));
+
+        assert!(route.command_supports_lab);
+        assert_eq!(
+            input.runner,
+            RunnerIntent::Explicit("homeboy-lab".to_string())
+        );
+        assert_eq!(
+            homeboy::core::parsed_command_preflight::resolve_generic_route_runner(&input, &route),
+            Some("homeboy-lab".to_string())
+        );
     }
 
     #[test]
