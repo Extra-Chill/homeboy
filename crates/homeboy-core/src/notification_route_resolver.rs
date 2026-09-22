@@ -152,7 +152,8 @@ pub fn resolve_from_cli_or_env_with_evidence(
             }
         }
         NotificationRouteContext::TransportOnly(transport) => {
-            resolve_declared_transport_route(&transport).map_err(with_invalid_resolution_evidence)?
+            resolve_declared_transport_route(&transport)
+                .map_err(with_invalid_resolution_evidence)?
         }
         NotificationRouteContext::None => ResolvedNotificationRoute {
             route: None,
@@ -188,7 +189,10 @@ fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificat
             .find(|candidate| candidate.id == transport)?
             .route_resolver
             .as_ref()?;
-        Some((resolver, extension.extension_path.as_deref().unwrap_or_default()))
+        Some((
+            resolver,
+            extension.extension_path.as_deref().unwrap_or_default(),
+        ))
     });
     let Some((resolver, extension_path)) = declared else {
         let mut evidence = NotificationRouteResolution::new("route_less");
@@ -198,7 +202,12 @@ fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificat
             evidence,
         });
     };
-    match invoke(resolver, transport, extension_path, AMBIENT_DISCOVERY_TIMEOUT) {
+    match invoke(
+        resolver,
+        transport,
+        extension_path,
+        AMBIENT_DISCOVERY_TIMEOUT,
+    ) {
         Ok(ResolverResult::Matched(route)) => {
             let mut evidence = NotificationRouteResolution::new("resolver");
             evidence.transport = Some(route.transport.clone());
@@ -627,9 +636,8 @@ mod tests {
     fn transport_only_with_a_failing_resolver_is_a_real_error() {
         crate::test_support::with_isolated_home(|_| {
             install_resolver("resolver-test", "cat >/dev/null; printf not-json");
-            let error =
-                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), None)
-                    .unwrap_err();
+            let error = resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), None)
+                .unwrap_err();
             assert!(error.to_string().contains("malformed"));
         });
     }

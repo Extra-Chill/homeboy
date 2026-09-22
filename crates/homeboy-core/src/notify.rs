@@ -622,7 +622,9 @@ mod tests {
             let mut evidence = NotificationRouteResolution::new("route_less");
             evidence.transport = Some("chosen.transport".to_string());
             let outcome = with_current_resolution(Some(evidence), || {
-                dispatch(&NotifyEvent::run_completed_with_route("run-123", "pass", None))
+                dispatch(&NotifyEvent::run_completed_with_route(
+                    "run-123", "pass", None,
+                ))
             });
             assert!(outcome.delivered);
             let NotifyDelivery::Transport { transport_id, .. } = outcome.delivery else {
