@@ -1802,7 +1802,8 @@ pub(crate) fn persist_resolved_provider_model(
             (!outcome.metadata["model_identity"].is_object())
                 .then(|| outcome.selected_model().map(str::to_string))
                 .flatten()
-        });
+        })
+        .or_else(|| provider_run_result_model(outcome));
     let requested = request.metadata["model_selection"]["requested"]
         .as_str()
         .filter(|model| !model.trim().is_empty())
@@ -1855,6 +1856,28 @@ pub(crate) fn persist_resolved_provider_model(
         }
         artifact.metadata["provider_model"] = serde_json::json!(actual);
     }
+}
+
+/// Provider adapters may retain their runtime identity inside the generic
+/// provider run-result envelope instead of copying it to outcome metadata.
+/// That is still execution evidence, including for a timeout whose candidate
+/// is recovered from the attempt workspace.
+fn provider_run_result_model(outcome: &AgentTaskOutcome) -> Option<String> {
+    [
+        outcome
+            .outputs
+            .pointer("/provider_run_result/metadata/model"),
+        outcome.outputs.pointer("/provider_run_result/model"),
+        outcome
+            .metadata
+            .pointer("/provider_run_result/metadata/model"),
+        outcome.metadata.pointer("/provider_run_result/model"),
+    ]
+    .into_iter()
+    .filter_map(|value| value.and_then(serde_json::Value::as_str))
+    .map(str::trim)
+    .find(|model| !model.is_empty())
+    .map(str::to_string)
 }
 
 #[derive(Debug, Clone)]
