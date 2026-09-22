@@ -50,6 +50,7 @@ pub enum ChangesCommandOutput {
 }
 
 pub fn run(args: ChangesArgs) -> CmdResult<ChangesCommandOutput> {
+    eprintln!("[release] stage: resolving changes");
     // Priority: --json > --project flag > positional args
     if let Some(json) = &args.json {
         reject_path_for_bulk(args.path.as_deref(), "--json")?;
