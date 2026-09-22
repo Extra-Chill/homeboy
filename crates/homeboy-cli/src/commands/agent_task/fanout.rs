@@ -709,16 +709,10 @@ fn batch_resume_locked(
 ) -> CmdResult<Value> {
     let canonical = homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
     let idempotency_key = args.idempotency_key.clone().unwrap_or_else(|| {
-        let batch_updated_at = batch::read_batch_record(&args.batch_id)
-            .ok()
-            .and_then(|batch| batch.updated_at);
         format!(
             "fanout-resume:{}:{}",
             args.batch_id,
-            batch_updated_at
-                .as_deref()
-                .or(canonical.updated_at.as_deref())
-                .unwrap_or("initial")
+            canonical.updated_at.as_deref().unwrap_or("initial")
         )
     });
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(

@@ -100,14 +100,6 @@ pub type FanoutResumeDispatcherFactory = fn(
     Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
 >;
 
-fn no_fanout_resume_dispatcher(
-    _descriptor: &Value,
-) -> homeboy_core::Result<
-    Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
-> {
-    Ok(None)
-}
-
 pub type FanoutResumeExecutionContextFactory = fn(
     &Value,
 ) -> homeboy_core::Result<(
@@ -254,7 +246,9 @@ pub struct RunSnapshot {
 
 #[cfg(test)]
 mod fanout_batch_read_tests {
-    use super::{FanoutBatchActionDelegate, FanoutBatchDomainService};
+    use super::{
+        FanoutBatchActionDelegate, FanoutBatchDomainService, FanoutBatchResumeActionResult,
+    };
     use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
     use homeboy_control_plane_contract::{
         action_effect_id, ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -581,6 +575,85 @@ mod fanout_batch_read_tests {
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
             assert_eq!(recovered.result.data["status"], "partial_failure");
         });
+    }
+
+    #[test]
+    fn batch_resume_requires_admitted_authority_for_execution() {
+        with_isolated_home(|_| {
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "resume-without-authority",
+                    "resume-without-authority",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-without-authority-child".to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id(
+                    "test",
+                    "resume-without-authority",
+                    "resume",
+                    "missing-authority",
+                ),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "missing-authority".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-without-authority".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let error = FanoutBatchActionDelegate
+                .execute(&run, &request)
+                .expect_err("execution without admitted authority must fail closed");
+            assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
+            assert!(
+                error
+                    .message
+                    .contains("re-run the fanout with an admitted caller context"),
+                "unexpected authority error: {}",
+                error.message
+            );
+        });
+    }
+
+    #[test]
+    fn batch_resume_effects_follow_domain_outcome_state() {
+        let report = |status: &str| FanoutBatchResumeActionResult {
+            schema: "homeboy/agent-task-cook-batch/v1".to_string(),
+            batch_id: "batch".to_string(),
+            status: status.to_string(),
+            total: 1,
+            queued: 0,
+            running: 0,
+            succeeded: usize::from(status == "succeeded"),
+            failed: usize::from(status == "partial_failure"),
+            cancelled: 0,
+            timed_out: 0,
+            cooks: Vec::new(),
+        };
+
+        assert!(FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Succeeded,
+            &report("succeeded")
+        ));
+        assert!(FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Failed,
+            &report("partial_failure")
+        ));
+        assert!(!FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Failed,
+            &report("failed")
+        ));
     }
 
     #[test]
@@ -1273,6 +1346,14 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
 }
 
 impl FanoutBatchActionDelegate {
+    fn resume_effects_are_admitted(
+        outcome: ControlPlaneActionOutcome,
+        result: &FanoutBatchResumeActionResult,
+    ) -> bool {
+        outcome == ControlPlaneActionOutcome::Succeeded
+            || (outcome == ControlPlaneActionOutcome::Failed && result.status == "partial_failure")
+    }
+
     fn context(
         authority: &Value,
     ) -> Result<
@@ -1510,26 +1591,12 @@ impl FanoutBatchActionDelegate {
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?
                     .read_batch_record(batch_id)
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-                let (executor, dispatcher) = match batch.metadata.get("execution_authority") {
-                    Some(authority) => Self::context(authority)?,
-                    None => {
-                        let requires_authority = batch.child_runs.iter().any(|child| {
-                            crate::agent_task_service::recipe_exists(&child.run_id).unwrap_or(false)
-                        });
-                        if requires_authority {
-                            return Err(ControlPlaneError::unavailable(format!(
-                                "fanout resume execution authority for `{batch_id}` is unavailable; the batch contains resumable Cook work"
-                            )));
-                        }
-                        (
-                            std::sync::Arc::new(
-                                crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                            )
-                                as crate::agent_task_scheduler::SharedAgentTaskExecutor,
-                            no_fanout_resume_dispatcher as FanoutResumeDispatcherFactory,
-                        )
-                    }
-                };
+                let authority = batch.metadata.get("execution_authority").ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume execution authority for `{batch_id}` is unavailable; re-run the fanout with an admitted caller context"
+                    ))
+                })?;
+                let (executor, dispatcher) = Self::context(authority)?;
                 let result = crate::agent_task_service::resume_cook_batch(
                     batch_id,
                     executor.clone(),
@@ -1556,7 +1623,7 @@ impl FanoutBatchActionDelegate {
                 let result = fanout_batch_resume_action_result(&result.value)
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let mut action_result = action_result;
-                if action_result.outcome == ControlPlaneActionOutcome::Failed {
+                if Self::resume_effects_are_admitted(action_result.outcome, &result) {
                     let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
                         executor,
                         dispatcher,
@@ -5101,6 +5168,11 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
             None,
         )
     })?;
+    if let Some(batch) = batch_resource_from_current_environment(&requested_id)
+        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?
+    {
+        return Ok(batch);
+    }
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .run(&requested_id)
