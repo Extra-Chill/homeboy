@@ -1613,9 +1613,11 @@ pub fn adopt_orphaned_lease(
 ///
 /// PID death, by contrast, is proven here:
 /// `reconcile_dead_lease_orphans_with_operations` requires a `PidDead` freshness
-/// code, a non-running recorded PID, persisted unexpected-termination evidence
-/// bound to this exact lease and PID, and a second liveness proof taken under
-/// the owner lock.
+/// code, a non-running recorded PID, and a second liveness proof taken under
+/// the owner lock. Launcher termination evidence is retained when it proves this
+/// lease, but is not a prerequisite because the launcher may be the component
+/// that was lost. The operator attestation, exact active-job compare-and-swap,
+/// and owner probe are the explicit authority for that gap.
 pub fn reconcile_dead_lease_orphans(
     lease_id: &str,
     job_ids: &[uuid::Uuid],
@@ -1723,26 +1725,12 @@ where
             None,
         ));
     }
-    let termination = status.termination_evidence.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "termination_evidence",
-            "exact dead-lease recovery requires persisted unexpected-termination evidence",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    if termination.classification != DaemonTerminationClassification::UnexpectedExit
-        || termination.stop_requested
-        || termination.lease_id.as_deref() != Some(lease_id)
-        || termination.pid != Some(state.pid)
-    {
-        return Err(Error::validation_invalid_argument(
-            "termination_evidence",
-            "persisted termination evidence does not prove this lease's unexpected daemon exit",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
+    let termination = status.termination_evidence.filter(|evidence| {
+        evidence.classification == DaemonTerminationClassification::UnexpectedExit
+            && !evidence.stop_requested
+            && evidence.lease_id.as_deref() == Some(lease_id)
+            && evidence.pid == Some(state.pid)
+    });
     let owner_lock = acquire_owner()?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "lease_id",
@@ -1759,7 +1747,10 @@ where
             None,
         ));
     }
-    let ownership_proof = prove_no_owner()?;
+    let mut ownership_proof = prove_no_owner()?;
+    ownership_proof.push(
+        "operator supplied --confirm-workload-processes-absent; current lease and dead PID were re-proven under the owner lock".to_string(),
+    );
     let reconciled = reconcile(state.pid)?;
     drop(owner_lock);
     let replacement = start()?;

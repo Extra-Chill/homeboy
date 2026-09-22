@@ -25,7 +25,7 @@ pub const DAEMON_START: &str = "daemon_start";
 pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
 /// Reconcile durable jobs that outlived the lease that owned them.
 pub const DAEMON_RECONCILE_LEASELESS_ORPHANS: &str = "daemon_reconcile_leaseless_orphans";
-/// Reconcile an exact PID-less job set after a proven unexpected daemon exit.
+/// Reconcile an exact PID-less job set after an operator-authorized daemon loss.
 pub const DAEMON_RECONCILE_DEAD_LEASE_ORPHANS: &str = "daemon_reconcile_dead_lease_orphans";
 /// Preview/review unleased foreground candidates after a lease retirement.
 pub const DAEMON_RECONCILE_UNLEASED_CANDIDATES: &str = "daemon_reconcile_unleased_candidates";

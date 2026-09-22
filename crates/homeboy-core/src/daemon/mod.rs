@@ -970,7 +970,11 @@ pub struct DaemonExactOrphanRecoveryResult {
     pub recovered_lease_id: String,
     pub dead_pid: u32,
     pub reconciled_job_ids: Vec<Uuid>,
-    pub termination_evidence: DaemonTerminationEvidence,
+    /// Launcher evidence is optional because the launcher may be the component
+    /// that was lost. The ownership proof and durable job provenance describe
+    /// explicit operator authority when it is absent or stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<DaemonTerminationEvidence>,
     pub ownership_proof: Vec<String>,
     pub replacement: DaemonStartResult,
 }
