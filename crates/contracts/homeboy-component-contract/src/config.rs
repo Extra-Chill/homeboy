@@ -286,6 +286,10 @@ pub struct SubtreePublicationConfig {
     /// How an existing destination branch may change.
     #[serde(default)]
     pub branch_policy: SubtreeBranchPolicy,
+    /// Maximum wall-clock time for rewriting the source history during a split.
+    /// Defaults to five minutes; set this when the source history needs longer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_timeout_secs: Option<u64>,
 }
 
 impl Default for SubtreePublicationConfig {
@@ -297,6 +301,7 @@ impl Default for SubtreePublicationConfig {
             tag: true,
             tag_template: None,
             branch_policy: SubtreeBranchPolicy::default(),
+            split_timeout_secs: None,
         }
     }
 }

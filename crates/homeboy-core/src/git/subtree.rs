@@ -6,7 +6,8 @@ use std::time::Duration;
 use crate::component::{SubtreeBranchPolicy, SubtreePublicationConfig};
 use crate::error::{Error, Result};
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+const CHEAP_GIT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_SPLIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SubtreePublicationEvidence {
@@ -81,7 +82,7 @@ pub fn publish_subtree(
         )?
     };
     let source_tree = source_tree.trim().to_string();
-    let split = run(
+    let split = run_with_timeout(
         &repo_root,
         &[
             "subtree",
@@ -91,6 +92,10 @@ pub fn publish_subtree(
             &source_commit,
         ],
         "split subtree",
+        config
+            .split_timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_SPLIT_TIMEOUT),
     )?;
     let split_commit = split.lines().last().unwrap_or_default().trim().to_string();
     if split_commit.is_empty() {
@@ -236,7 +241,7 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
         &["merge-base", "--is-ancestor", ancestor, descendant],
         "verify subtree fast-forward",
         &[],
-        GIT_TIMEOUT,
+        CHEAP_GIT_TIMEOUT,
     )?;
     Ok(output.status.success())
 }
@@ -338,8 +343,16 @@ fn conflict(kind: &str, name: &str, commit: &str, actual_tree: &str, expected_tr
 }
 
 fn run(repo: &Path, args: &[&str], context: &str) -> Result<String> {
-    let output =
-        crate::git::run_git_output_with_env_timeout(repo, args, context, &[], GIT_TIMEOUT)?;
+    run_with_timeout(repo, args, context, CHEAP_GIT_TIMEOUT)
+}
+
+fn run_with_timeout(
+    repo: &Path,
+    args: &[&str],
+    context: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let output = crate::git::run_git_output_with_env_timeout(repo, args, context, &[], timeout)?;
     if !output.status.success() {
         return Err(Error::git_command_failed_with_details(
             format!("{context} failed"),
@@ -559,5 +572,132 @@ mod tests {
         );
         assert!(clone.path().join("file").is_file());
         assert!(!clone.path().join("packages/other/file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_budget_allows_real_split_to_run_past_previous_thirty_second_limit() {
+        let _lock = git_wrapper_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = subtree_fixture();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare", "-q"]);
+        let config = SubtreePublicationConfig {
+            prefix: "pkg".into(),
+            remote: remote.path().display().to_string(),
+            branch: "main".into(),
+            tag: false,
+            split_timeout_secs: Some(40),
+            ..Default::default()
+        };
+
+        with_delayed_git(&root, 31, || {
+            let evidence = publish_subtree(root.path(), &config, "v1", None, false)
+                .expect("split should outlive the old 30 second budget");
+            assert_eq!(evidence.branch_action, "create");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn split_timeout_terminates_the_delayed_process_group() {
+        let _lock = git_wrapper_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let root = subtree_fixture();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare", "-q"]);
+        let pid_file = root.path().join("delayed-child.pid");
+        let config = SubtreePublicationConfig {
+            prefix: "pkg".into(),
+            remote: remote.path().display().to_string(),
+            branch: "main".into(),
+            tag: false,
+            split_timeout_secs: Some(1),
+            ..Default::default()
+        };
+
+        with_delayed_git_and_pid(&root, 30, &pid_file, || {
+            let error = publish_subtree(root.path(), &config, "v1", None, false)
+                .expect_err("stuck split should be terminated");
+            assert!(error.message.contains("split subtree timed out"));
+        });
+
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let still_running = unsafe { libc::kill(pid, 0) == 0 };
+        assert!(
+            !still_running,
+            "delayed split descendant {pid} survived cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    fn subtree_fixture() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        git(root.path(), &["config", "user.email", "test@example.com"]);
+        git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(root.path().join("pkg")).unwrap();
+        std::fs::write(root.path().join("pkg/file"), "one").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-qm", "release"]);
+        git(root.path(), &["tag", "v1"]);
+        root
+    }
+
+    #[cfg(unix)]
+    fn git_wrapper_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    fn with_delayed_git(root: &tempfile::TempDir, seconds: u64, test: impl FnOnce()) {
+        with_delayed_git_and_pid(root, seconds, &root.path().join("unused.pid"), test);
+    }
+
+    #[cfg(unix)]
+    fn with_delayed_git_and_pid(
+        _root: &tempfile::TempDir,
+        seconds: u64,
+        pid_file: &Path,
+        test: impl FnOnce(),
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin = tempfile::tempdir().unwrap();
+        let real_git = std::env::var("PATH")
+            .unwrap()
+            .split(':')
+            .map(PathBuf::from)
+            .map(|path| path.join("git"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let wrapper = bin.path().join("git");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *subtree*split*)\n    echo \"$*\" > '{}.args'\n    sleep {seconds} &\n    sleep_pid=$!\n    echo $sleep_pid > '{}'\n    wait $sleep_pid\n    ;;\nesac\nexec '{}' \"$@\"\n",
+                pid_file.display(),
+                pid_file.display(),
+                real_git.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap();
+        std::env::set_var("PATH", format!("{}:{old_path}", bin.path().display()));
+        test();
+        assert!(
+            std::fs::read_to_string(format!("{}.args", pid_file.display()))
+                .unwrap()
+                .starts_with("subtree split --prefix pkg ")
+        );
+        std::env::set_var("PATH", old_path);
     }
 }
