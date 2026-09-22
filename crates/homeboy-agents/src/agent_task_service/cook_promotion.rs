@@ -6472,10 +6472,16 @@ pub(crate) fn cook_failure_context_with_stores(
             "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
         )
     {
+        let diagnostic = promotion.and_then(gate_failure_diagnostic).or_else(|| {
+            Some(json!({
+                "class": "agent_task.promotion_gate_failed",
+                "message": "Deterministic promotion gate failed",
+            }))
+        });
         (
             "deterministic_gate".to_string(),
             "gate_failed".to_string(),
-            None,
+            diagnostic,
         )
     } else if let Some(diagnostic) = finalization_diagnostic.as_ref() {
         (
@@ -6589,8 +6595,14 @@ pub(crate) fn cook_failure_context_with_stores(
                     });
                 state == Some(super::cook_recipe::CookContinuationState::Pending)
             });
-            let continuation_admitted = retry_admitted
-                || (matches!(status, "gate_failed" | "no_op_gate_failed") && continuation_pending);
+            let continuation_admitted = continuation_action_admitted(
+                record
+                    .as_ref()
+                    .and_then(|record| record.metadata.get("cook_continuation_admission")),
+                retry_admitted
+                    || (matches!(status, "gate_failed" | "no_op_gate_failed")
+                        && continuation_pending),
+            );
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -6636,6 +6648,54 @@ pub(crate) fn cook_failure_context_with_stores(
         next_actions: recovery_actions.next_actions,
         legal_actions: recovery_actions.legal_actions,
     })
+}
+
+/// Project the first failed controller-owned gate into the Cook-wide bounded
+/// cause. Provider output is evidence of candidate production, not the cause
+/// after promotion has reached deterministic verification.
+fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
+    let gate = promotion
+        .get("deterministic_gates")
+        .or_else(|| promotion.get("gate_results"))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|gate| {
+            matches!(
+                gate.get("status").and_then(Value::as_str),
+                Some("failed" | "failure")
+            )
+        })?;
+    let evidence = gate.get("failure_evidence");
+    let message = evidence
+        .and_then(|evidence| {
+            evidence
+                .get("summary")
+                .or_else(|| evidence.get("agent_feedback"))
+        })
+        .and_then(Value::as_str)
+        .or_else(|| gate.get("message").and_then(Value::as_str))
+        .or_else(|| {
+            evidence
+                .and_then(|evidence| evidence.get("stderr_tail"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Deterministic promotion gate failed");
+    Some(json!({
+        "class": "agent_task.promotion_gate_failed",
+        "message": message,
+        "details": {
+            "gate": gate.get("id").or_else(|| gate.get("name")),
+            "command": gate.get("command").or_else(|| evidence.and_then(|evidence| evidence.get("command"))),
+            "exit_code": gate.get("exit_code").or_else(|| evidence.and_then(|evidence| evidence.get("exit_code"))),
+            "failure_evidence": evidence,
+        },
+    }))
+}
+
+fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bool {
+    admission
+        .map(|admission| admission["first_authoritative_denial"].is_null())
+        .unwrap_or(fallback)
 }
 
 /// A persisted failure is normally not trusted to manufacture shell commands.
@@ -7261,6 +7321,24 @@ mod recovery_action_tests {
         .legal_actions)
             .iter()
             .all(|action| action.action != "resume"));
+    }
+
+    #[test]
+    fn denied_continuation_admission_withholds_resume_even_when_retry_is_admitted() {
+        let admission = serde_json::json!({
+            "schema": "homeboy/cook-continuation-admission/v1",
+            "first_authoritative_denial": "live_owner_in_progress"
+        });
+
+        assert!(!continuation_action_admitted(Some(&admission), true));
+        assert!(continuation_action_admitted(
+            Some(&serde_json::json!({
+                "schema": "homeboy/cook-continuation-admission/v1",
+                "first_authoritative_denial": null
+            })),
+            false
+        ));
+        assert!(continuation_action_admitted(None, true));
     }
 
     #[test]
