@@ -627,16 +627,16 @@ fn await_durable_handoff(
 /// coordinator start: it must not be reported as accepted before every child is
 /// either admitted or durably rejected.
 fn durable_handoff(fanout_id: &str) -> Option<DetachedFanoutHandoff> {
-    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
+    let service =
+        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment().ok()?;
+    let (report, _children) = service.status(fanout_id).ok()?;
+    let record = report.batch;
     let expected = record.child_runs.len();
     let terminal_failure = record.metadata["terminal_failure"].is_object();
     let admitted = record
         .child_runs
         .iter()
-        .filter(|child| {
-            homeboy::agents::agent_tasks::lifecycle::run_record_exists_readonly(&child.run_id)
-                .unwrap_or(false)
-        })
+        .filter(|child| service.child_run_exists(&child.run_id))
         .count();
     let rejected = terminal_failure
         .then_some(expected.saturating_sub(admitted))
@@ -745,16 +745,19 @@ fn summarize_child_placements(children: Vec<ChildPlacement>) -> ChildWorkloadPla
 /// while admission is still in progress. This is a read-only projection: it
 /// must not expire or otherwise mutate coordinator admission.
 fn child_workload_placement(fanout_id: &str) -> Option<ChildWorkloadPlacement> {
-    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
+    let service =
+        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment().ok()?;
+    let (report, _children) = service.status(fanout_id).ok()?;
+    let record = report.batch;
     let children = record
         .child_runs
         .iter()
         .filter_map(|child| {
-            let run = homeboy::agents::agent_tasks::lifecycle::status(&child.run_id).ok()?;
+            let metadata = service.child_placement_metadata(&child.run_id)?;
             Some(ChildPlacement {
                 task_id: child.task_id.clone(),
                 run_id: child.run_id.clone(),
-                placement: workload_from_child_record(&run.metadata)?,
+                placement: workload_from_child_record(&metadata)?,
             })
         })
         .collect::<Vec<_>>();

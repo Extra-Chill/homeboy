@@ -51,9 +51,14 @@ use homeboy_control_plane_contract::{
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::agent_task_batch::{
+    AgentTaskBatchArtifactsReport, AgentTaskBatchRecord, AgentTaskBatchStatusReport,
+    AgentTaskBatchStore,
+};
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -90,6 +95,42 @@ const RUN_CURSOR_BOUND: usize = 1024;
 pub struct RunSnapshot {
     pub record: AgentTaskRunRecord,
     pub plan: Option<AgentTaskPlan>,
+}
+
+#[cfg(test)]
+mod fanout_batch_read_tests {
+    use super::FanoutBatchReadService;
+    use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
+    use homeboy_core::test_support::with_isolated_home;
+    use serde_json::json;
+    use std::fs;
+
+    #[test]
+    fn batch_status_is_read_only_and_uses_the_durable_roster() {
+        with_isolated_home(|_| {
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "read-only-batch",
+                    "read-only-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "read-only-child".to_string(),
+                    }],
+                    json!({"declared_trackers": {"child": "tracker://child"}}),
+                )
+                .expect("persist batch");
+            let path = store.batch_path("read-only-batch");
+            let before = fs::read(&path).expect("batch bytes before read");
+
+            let service = FanoutBatchReadService::from_current_environment().expect("service");
+            let (report, children) = service.status("read-only-batch").expect("status");
+
+            assert_eq!(report.batch.child_runs.len(), 1);
+            assert!(children.is_empty(), "missing child is not invented");
+            assert_eq!(before, fs::read(path).expect("batch bytes after read"));
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +635,146 @@ impl<L: RunLookup> OrchestrationService<L> {
             reference_type,
             references: references_for_record(&snapshot.record, reference_type)?,
         })
+    }
+}
+
+/// Agent-owned read facade for a durable fanout. The batch record is a domain
+/// adjunct; every child lifecycle resource is still projected through the
+/// canonical control-plane run service. This facade is deliberately read-only:
+/// it does not expire admission, reconcile PR state, or write a projection.
+pub struct FanoutBatchReadService {
+    batch_store: AgentTaskBatchStore,
+    lifecycle: AgentTaskLifecycleStore,
+}
+
+impl FanoutBatchReadService {
+    pub fn from_current_environment() -> homeboy_core::Result<Self> {
+        Ok(Self {
+            batch_store: AgentTaskBatchStore::from_current_data_root()?,
+            lifecycle: AgentTaskLifecycleStore::from_current_environment()?,
+        })
+    }
+
+    pub fn status(
+        &self,
+        batch_id: &str,
+    ) -> homeboy_core::Result<(
+        AgentTaskBatchStatusReport,
+        BTreeMap<String, ControlPlaneRun>,
+    )> {
+        let report = self.batch_store.status_with(
+            batch_id,
+            |run_id| crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id),
+            |run_id| {
+                crate::agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+                    &self.lifecycle,
+                    run_id,
+                )
+            },
+            |run_id| {
+                crate::agent_task_lifecycle::run_record_exists_readonly_in_store(
+                    &self.lifecycle,
+                    run_id,
+                )
+            },
+        )?;
+        let children = self.canonical_children(&report.batch)?;
+        Ok((report, children))
+    }
+
+    pub fn artifacts(
+        &self,
+        batch_id: &str,
+    ) -> homeboy_core::Result<(
+        AgentTaskBatchArtifactsReport,
+        BTreeMap<String, ControlPlaneRun>,
+    )> {
+        let report = crate::agent_task_batch::artifacts_in_store(
+            &self.batch_store,
+            &self.lifecycle,
+            batch_id,
+        )?;
+        let batch = self.batch_store.read_batch_record(batch_id)?;
+        let children = self.canonical_children(&batch)?;
+        Ok((report, children))
+    }
+
+    pub fn child_run_exists(&self, run_id: &str) -> bool {
+        let Ok(run_id) = RunId::new(run_id) else {
+            return false;
+        };
+        OrchestrationService::new(LifecycleStoreLookup::new(self.lifecycle.clone()))
+            .run(&run_id)
+            .is_ok()
+    }
+
+    pub fn child_placement_metadata(&self, run_id: &str) -> Option<Value> {
+        crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id)
+            .ok()
+            .map(|record| record.metadata)
+    }
+
+    /// Project only the persisted portfolio snapshot. Live PR/Git observation
+    /// belongs to resume or background supervision, never to a status read.
+    pub fn durable_portfolio_status(&self, batch: &AgentTaskBatchRecord) -> Value {
+        match crate::agent_task_fanout_supervisor::read_portfolio(&batch.batch_id) {
+            Ok(portfolio) => {
+                serde_json::to_value(portfolio.status(&BTreeMap::new())).unwrap_or(Value::Null)
+            }
+            Err(_) => {
+                let portfolio = crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio::new(
+                    batch.batch_id.clone(),
+                    batch.child_runs.iter().map(|child| {
+                        let tracker_ref = self
+                            .child_placement_metadata(&child.run_id)
+                            .and_then(|metadata| {
+                                metadata
+                                    .get("declared_tracker")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                            })
+                            .or_else(|| {
+                                batch.metadata["declared_trackers"][&child.task_id]
+                                    .as_str()
+                                    .map(str::to_string)
+                            })
+                            .unwrap_or_else(|| {
+                                format!("homeboy://agent-task/run/{}", child.run_id)
+                            });
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioChild {
+                            child_id: child.task_id.clone(),
+                            tracker_ref,
+                            run_id: child.run_id.clone(),
+                            source_sha: None,
+                            base_sha: None,
+                            head_sha: None,
+                            evidence_generation: 0,
+                            finding_fingerprints: Default::default(),
+                            finding_fingerprint_recency: Default::default(),
+                            blocker: None,
+                            next_action: None,
+                        }
+                    }),
+                );
+                serde_json::to_value(portfolio.status(&BTreeMap::new())).unwrap_or(Value::Null)
+            }
+        }
+    }
+
+    fn canonical_children(
+        &self,
+        batch: &AgentTaskBatchRecord,
+    ) -> homeboy_core::Result<BTreeMap<String, ControlPlaneRun>> {
+        let service = OrchestrationService::new(LifecycleStoreLookup::new(self.lifecycle.clone()));
+        let children = batch
+            .child_runs
+            .iter()
+            .filter_map(|child| {
+                let id = RunId::new(&child.run_id).ok()?;
+                service.run(&id).ok().map(|run| (child.run_id.clone(), run))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(children)
     }
 }
 

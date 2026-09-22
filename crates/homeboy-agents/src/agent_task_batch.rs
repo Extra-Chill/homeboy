@@ -1203,7 +1203,7 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
 /// this report cannot fail while being wrong — it renders a batch roster from
 /// one home and child artifacts from another, and every count in it reads back
 /// self-consistent (#7505, #12619).
-fn artifacts_in_store(
+pub fn artifacts_in_store(
     store: &AgentTaskBatchStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     batch_id: &str,

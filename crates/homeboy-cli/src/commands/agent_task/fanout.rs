@@ -558,28 +558,12 @@ fn submit_fanout_batch(
 }
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> CmdResult<Value> {
-    let mut report = batch::status(&args.batch_id)?;
+    let batch_service =
+        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment()?;
+    let (report, _child_runs) = batch_service.status(&args.batch_id)?;
     // A terminal coordinator failure is the authoritative outcome even when it
     // happened before the first child record existed. Reconciling children first
     // would turn that diagnostic into a misleading "run record not found".
-    let admission_pending =
-        report.batch.state == batch::AgentTaskBatchState::Admitting && report.admission.absent > 0;
-    let observations = if report.admission_blocker.is_some() || admission_pending {
-        BTreeMap::new()
-    } else {
-        reconcile_fanout_pr_states(&args.batch_id, false)?
-    };
-    if !observations.is_empty() {
-        report.dependency_graph = batch::fanout_dependency_graph_with_finalization_statuses(
-            &args.batch_id,
-            &observations,
-        )?;
-        if let Some(graph) = &report.dependency_graph {
-            let state = batch::fanout_aggregate_state(&report.totals, graph);
-            report.batch.state = state;
-            report.status = state.outcome_status().to_string();
-        }
-    }
     // `status` is a read. The operation either returned the requested batch
     // projection (exit 0) or failed and names its cause through `Err`
     // (#13702). The batch's own aggregate state — including `failed` — is
@@ -587,31 +571,7 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = if report.admission_blocker.is_some() || admission_pending {
-        let observations = report
-            .batch
-            .child_runs
-            .iter()
-            .filter(|child| {
-                report.batch.metadata["declared_trackers"][&child.task_id]
-                    .as_str()
-                    .is_some()
-            })
-            .map(|child| {
-                (
-                    child.task_id.clone(),
-                    supervisor::AgentTaskFanoutPortfolioObservation {
-                        child_id: child.task_id.clone(),
-                        tracker: supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        load_portfolio(&report.batch)?.status(&observations)
-    } else {
-        reconcile_portfolio(&report.batch)?
-    };
+    let portfolio = batch_service.durable_portfolio_status(&report.batch);
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-fanout-status/v2",
@@ -979,29 +939,6 @@ fn dependency_command_output(path: &str, arguments: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
-}
-
-/// Collect current, provider-neutral observations from the durable cook record
-/// plus its real git candidate.
-fn reconcile_portfolio(
-    batch_record: &homeboy::agents::agent_tasks::AgentTaskBatchRecord,
-) -> Result<homeboy::agents::agent_tasks::fanout_supervisor::AgentTaskFanoutPortfolioStatus> {
-    let mut portfolio = load_portfolio(batch_record)?;
-    let observations = batch_record
-        .child_runs
-        .iter()
-        .map(|child| {
-            portfolio_observation(
-                &child.task_id,
-                &child.run_id,
-                false,
-                batch_record.metadata["declared_trackers"][&child.task_id].as_str(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let dependencies = durable_graph_dependencies(batch_record)?;
-    let status = portfolio.reconcile(observations, &dependencies);
-    Ok(status)
 }
 
 /// Mutating supervisor entrypoint. Constructing the production adapter here
@@ -1702,7 +1639,10 @@ fn batch_resume_result(
 }
 
 fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    Ok((command_json_value(batch::artifacts(&args.batch_id)?)?, 0))
+    let service =
+        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment()?;
+    let (report, _child_runs) = service.artifacts(&args.batch_id)?;
+    Ok((command_json_value(report)?, 0))
 }
 
 fn run_batch_cook_fanout(
