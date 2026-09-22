@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.3] - 2026-09-22
+
+### Fixed
+- authenticate prepared-ref resolution with Basic credentials
+
 ## [2.20.2] - 2026-09-22
 
 ### Fixed
