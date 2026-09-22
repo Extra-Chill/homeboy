@@ -4163,7 +4163,8 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
                 .pointer("/unmaterialized_cook_admission/binding/placement/requested")
                 .and_then(Value::as_str)
             {
-                Some("lab") | Some("lab_or_local") => ControlPlaneRunPlacementRequested::Runner,
+                Some("lab") => ControlPlaneRunPlacementRequested::Runner,
+                Some("lab_or_local") => ControlPlaneRunPlacementRequested::LabOrLocal,
                 _ => ControlPlaneRunPlacementRequested::Automatic,
             };
             return ControlPlaneRunPlacement::new(
@@ -4201,7 +4202,8 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
         match decision.requested {
             Placement::Auto => ControlPlaneRunPlacementRequested::Automatic,
             Placement::Local => ControlPlaneRunPlacementRequested::Controller,
-            Placement::Lab | Placement::LabOrLocal => ControlPlaneRunPlacementRequested::Runner,
+            Placement::Lab => ControlPlaneRunPlacementRequested::Runner,
+            Placement::LabOrLocal => ControlPlaneRunPlacementRequested::LabOrLocal,
         },
         selected,
         outcome.map(|outcome| match outcome.effective {
@@ -8360,6 +8362,18 @@ mod tests {
         assert_eq!(value["placement"]["selected"], "runner");
         assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
         assert!(value["placement"].get("effective").is_none());
+    }
+
+    #[test]
+    fn placement_preserves_lab_or_local_request() {
+        let mut record = record(AGENT_TASK_RUN);
+        let decision =
+            runner_placement_decision(homeboy_lab_runner_contract::Placement::LabOrLocal, true);
+        record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
+
+        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        assert_eq!(value["placement"]["requested"], "lab_or_local");
+        assert_eq!(value["placement"]["selected"], "runner");
     }
 
     #[test]

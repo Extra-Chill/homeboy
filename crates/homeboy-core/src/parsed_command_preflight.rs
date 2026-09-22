@@ -370,12 +370,24 @@ pub fn resolve_parsed_command_preflight(
             None,
         ));
     }
-    // Controller admission covers controller-owned work only. Once a connected
-    // ready runner is selected, the provider attempt is owned by Lab and must
-    // not be blocked by the controller's load; controller pressure remains
-    // available as transport/setup evidence in the policy snapshot.
-    let resource_admission = if policy.runner_admitted
-        && policy.selected_runner_id.is_some()
+    let selected_runner_id =
+        if auto_route_fallback || matches!(input.placement, PlacementIntent::Local) {
+            None
+        } else {
+            policy.selected_runner_id.clone()
+        };
+    let selected =
+        if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
+            EffectiveExecutionPlacement::Local
+        } else {
+            EffectiveExecutionPlacement::Lab
+        };
+    // Controller admission covers controller-owned work only. Once the
+    // resolved route is Lab and its selected runner passed readiness checks,
+    // controller load cannot block the provider attempt. Local and fallback
+    // routes remain subject to controller pressure.
+    let resource_admission = if selected_runner_admitted
+        && matches!(selected, EffectiveExecutionPlacement::Lab)
         && !matches!(
             input.controller_execution,
             ControllerExecution::ControllerOnly
@@ -409,11 +421,6 @@ pub fn resolve_parsed_command_preflight(
             Some(vec![lab_line, local_line]),
         ));
     }
-    let selected_runner_id = if auto_route_fallback {
-        None
-    } else {
-        policy.selected_runner_id.clone()
-    };
     let deferred_workload = match input.deferred_workload {
         DeferredWorkloadPolicy::Forbidden => {
             if policy.deferred_pressure_refusal || policy.runner_incompatible {
@@ -426,7 +433,7 @@ pub fn resolve_parsed_command_preflight(
             }
             DeferredWorkloadDecision::NotApplicable
         }
-        DeferredWorkloadPolicy::Eligible if policy.runner_admitted => {
+        DeferredWorkloadPolicy::Eligible if selected_runner_admitted => {
             DeferredWorkloadDecision::Dispatch
         }
         DeferredWorkloadPolicy::Eligible if policy.runner_incompatible => {
@@ -437,12 +444,6 @@ pub fn resolve_parsed_command_preflight(
         }
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
     };
-    let selected =
-        if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
-            EffectiveExecutionPlacement::Local
-        } else {
-            EffectiveExecutionPlacement::Lab
-        };
     if auto_split_placement_requires_lab && selected_runner_id.is_none() {
         return Err(crate::Error::validation_invalid_argument(
             "placement",
@@ -776,6 +777,51 @@ mod tests {
             result.resource_admission,
             ResourceAdmissionDecision::Rejected { .. }
         ));
+
+        let mut local_input = input(ControllerExecution::Ordinary);
+        local_input.placement = PlacementIntent::Local;
+        local_input.runner = RunnerIntent::Default;
+        let local = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            local_input,
+            policy(ControllerExecution::Ordinary),
+        )
+        .expect("explicit local route resolves");
+        assert_eq!(local.placement.selected, EffectiveExecutionPlacement::Local);
+        assert!(matches!(
+            local.resource_admission,
+            ResourceAdmissionDecision::Rejected { .. }
+        ));
+
+        let mut fallback_input = input(ControllerExecution::Ordinary);
+        fallback_input.placement = PlacementIntent::LabOrLocal;
+        fallback_input.runner = RunnerIntent::Default;
+        for (state, selected_runner_id, available_runner_ids) in [
+            ("stale", Some("lab-a"), vec!["lab-a"]),
+            ("connected_ready", Some("lab-b"), vec!["lab-b"]),
+        ] {
+            let mut blocked_policy = policy(ControllerExecution::Ordinary);
+            blocked_policy.lab_readiness.as_mut().unwrap().state = state.into();
+            blocked_policy
+                .lab_readiness
+                .as_mut()
+                .unwrap()
+                .selected_runner_id = selected_runner_id.map(str::to_string);
+            blocked_policy
+                .lab_readiness
+                .as_mut()
+                .unwrap()
+                .available_runner_ids = available_runner_ids
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            assert!(resolve_parsed_command_preflight(
+                vec!["homeboy".into()],
+                fallback_input.clone(),
+                blocked_policy,
+            )
+            .is_err());
+        }
     }
 
     #[test]
