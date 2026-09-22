@@ -5086,10 +5086,15 @@ fn quarantine_queued_run_in_store(
                 "category": diagnostic.category,
                 "error_code": diagnostic.error_code,
                 "summary": diagnostic.summary,
+                "reason": diagnostic.summary,
+                "actor": "fleet-reconciler",
+                "cause": "admission_preflight_failed",
                 "provider_id": diagnostic.provider_id,
                 "required_environment_variables": diagnostic.required_environment_variables,
                 "quarantined_at": now,
+                "timestamp": now,
                 "remediation": remediation,
+                "recovery_action": remediation,
             }),
         );
         true
@@ -5243,9 +5248,14 @@ pub fn quarantine_queued_run_exact_in_store(
                     "category": "operator_quarantine",
                     "error_code": "operator_quarantine",
                     "summary": "operator quarantined this queued run",
+                    "reason": operator_reason,
+                    "actor": "operator",
+                    "cause": "operator_requested",
                     "operator_reason": operator_reason,
                     "quarantined_at": quarantined_at,
+                    "timestamp": quarantined_at,
                     "remediation": remediation,
+                    "recovery_action": remediation,
                 }),
             );
             true

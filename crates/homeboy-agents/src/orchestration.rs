@@ -4345,12 +4345,13 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
         let message = quarantine
             .get("reason")
             .and_then(|value| value.as_str())
+            .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
             .unwrap_or("run is quarantined");
         return Some(ControlPlaneBlocker {
             code: Some("quarantine".to_string()),
             message: redacted_bounded(message, MESSAGE_BOUND),
             state: None,
-            reason: None,
+            reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
         });
     }

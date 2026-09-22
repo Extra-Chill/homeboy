@@ -1621,6 +1621,17 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
     );
     assert_eq!(record.metadata["runner_handoff"]["state"], "terminal");
     assert_eq!(record.metadata["runner_job_events"], json!(snapshot.events));
+    assert_eq!(
+        record.metadata["cancellation_provenance"]["cause"],
+        "pre_provider_cancellation"
+    );
+    let events = logs_in_store(&lifecycle_store, run_id)
+        .expect("cancellation event projection")
+        .events;
+    assert!(events.iter().any(|event| {
+        event.kind == "run.cancelled"
+            && event.data["provenance"]["cause"] == "pre_provider_cancellation"
+    }));
     assert!(lifecycle_store.read_aggregate(run_id).is_err());
 
     reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
