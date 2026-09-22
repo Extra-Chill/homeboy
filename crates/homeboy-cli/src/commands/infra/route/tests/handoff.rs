@@ -1313,19 +1313,28 @@ fn explicit_local_placement_keeps_a_retry_controller_owned() {
 fn an_explicit_runner_still_reaches_the_runner_for_provider_discovery() {
     // Pinning is its own authority: a runner catalog read is exactly what
     // `--runner` is for, and #9651/#9763 kept that probe available.
-    assert_eq!(
-        route_runner_for(
-            &[
-                "homeboy",
-                "--runner",
-                "homeboy-lab",
-                "agent-task",
-                "providers",
-            ],
-            &connected_default_lab_runner(),
-        ),
-        Some("homeboy-lab".to_string()),
-    );
+    for args in [
+        [
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "providers",
+        ],
+        [
+            "homeboy",
+            "agent-task",
+            "providers",
+            "--runner",
+            "homeboy-lab",
+        ],
+    ] {
+        assert_eq!(
+            route_runner_for(&args, &connected_default_lab_runner()),
+            Some("homeboy-lab".to_string()),
+            "explicit runner must remain load-bearing in the advertised invocation shape",
+        );
+    }
 }
 
 #[test]
