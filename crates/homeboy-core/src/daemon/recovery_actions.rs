@@ -210,7 +210,43 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
-    if !freshness.repair_plan.is_empty() {
+    // A dead lease is not enough to authorize adoption when an active job has
+    // no authoritative terminal evidence or persisted child identity. The
+    // freshness report cannot see that per-job distinction, so apply the same
+    // evidence predicate here that orphan adoption enforces in the store.
+    if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead)
+        && dead_lease_has_ambiguous_jobs(status)
+    {
+        let blockers = status
+            .active_job_recovery_evidence
+            .iter()
+            .filter(|evidence| {
+                !matches!(
+                    evidence.disposition,
+                    crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+                        | crate::api_jobs::DaemonActiveJobRecoveryDisposition::DeadChild
+                )
+            })
+            .map(|evidence| format!("{} ({:?})", evidence.job_id, evidence.disposition))
+            .collect::<Vec<_>>();
+        return DaemonRecoveryPlan {
+            steps: vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
+            reason: format!(
+                "dead daemon lease recovery is blocked for active job(s) {}; no authoritative terminal result or persisted child identity proves workload absence; re-read status after inspecting the named job evidence",
+                blockers.join(", ")
+            ),
+            required_confirmations: Vec::new(),
+            executable: false,
+        };
+    }
+
+    let requires_exact_dead_lease_recovery = freshness.stale_reason_code
+        == Some(super::DaemonStaleReasonCode::PidDead)
+        && status.active_job_recovery_evidence.iter().any(|evidence| {
+            evidence.disposition
+                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+        });
+    if !freshness.repair_plan.is_empty() && !requires_exact_dead_lease_recovery {
         let reason = match freshness.stale_reason_code {
             Some(code) => format!(
                 "daemon is stale ({code:?}) with {} active job(s); the freshness report authorizes this repair",
@@ -314,6 +350,16 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         required_confirmations: Vec::new(),
         executable: false,
     }
+}
+
+fn dead_lease_has_ambiguous_jobs(status: &DaemonStatus) -> bool {
+    status.active_job_recovery_evidence.iter().any(|evidence| {
+        matches!(
+            evidence.disposition,
+            crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
+                | crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+        )
+    })
 }
 
 /// Whether an admission preflight may apply this daemon's canonical idle
@@ -632,6 +678,53 @@ mod tests {
             vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
             "the ambiguous workload keeps the operator attestation"
         );
+    }
+
+    #[test]
+    fn dead_lease_pidless_jobs_do_not_advertise_rejected_adoption() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::PidDead),
+            vec![DaemonRepairStep::executable(
+                DAEMON_ADOPT_ORPHAN,
+                adopt_orphan(LEASE_ID),
+            )],
+            1,
+        );
+        let job_id = Uuid::from_u128(42);
+        status.active_job_recovery_evidence =
+            vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous,
+                ..recovery_evidence(job_id)
+            }];
+
+        let plan = plan_recovery(&status);
+
+        assert!(!plan.executable);
+        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+        assert!(plan.reason.contains(&job_id.to_string()), "{}", plan.reason);
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| step.code == DAEMON_ADOPT_ORPHAN));
+    }
+
+    #[test]
+    fn dead_lease_with_linked_terminal_child_keeps_adoption_eligible() {
+        let mut status = status(
+            Some(super::super::DaemonStaleReasonCode::PidDead),
+            vec![DaemonRepairStep::executable(
+                DAEMON_ADOPT_ORPHAN,
+                adopt_orphan(LEASE_ID),
+            )],
+            0,
+        );
+        status.active_job_recovery_evidence = vec![terminal_recovery_evidence(Uuid::from_u128(43))];
+
+        let plan = plan_recovery(&status);
+
+        assert!(plan.executable);
+        assert_eq!(plan.steps[0].code, DAEMON_ADOPT_ORPHAN);
+        assert!(plan.required_confirmations.is_empty());
     }
 
     #[test]
