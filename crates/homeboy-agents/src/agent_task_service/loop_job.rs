@@ -308,12 +308,10 @@ impl LoopWorkHandler {
             && job.resume_result.is_none()
             && job.request.child_pid.is_none()
         {
-            let active_provider =
-                agent_task_loop_controller::controller_status(&job.request.loop_id)
-                    .ok()
-                    .and_then(|record| record.metadata.get("active_provider_runs").cloned())
-                    .is_some_and(|runs| runs.as_array().is_some_and(|runs| !runs.is_empty()));
-            if !active_provider {
+            if matches!(
+                resume_dispatch_is_proven(&job.request.loop_id, &job.request.generation)?,
+                ResumeDispatchDecision::Unknown
+            ) {
                 job.resume_result = Some(json!({
                     "recovery": "unknown",
                     "reason": "daemon stopped after dispatch admission before WorkJob checkpoint"
@@ -353,6 +351,11 @@ impl LoopWorkHandler {
                         .map(|reference| format!("@{reference}")),
                 },
             };
+            write_loop_dispatch_receipt(
+                &job.request.loop_id,
+                &job.request.generation,
+                "dispatching",
+            )?;
             let report = match crate::agent_task_controller_service::resume_with_options(
                 &job.request.loop_id,
                 executor,
@@ -375,6 +378,7 @@ impl LoopWorkHandler {
                     return Err(error);
                 }
             };
+            write_loop_dispatch_completion_receipt(&job.request.loop_id, &job.request.generation)?;
             job.resume_result =
                 Some(serde_json::to_value(report.value).map_err(|error| {
                     homeboy_core::Error::internal_json(error.to_string(), None)
@@ -418,6 +422,196 @@ impl LoopWorkHandler {
             wait: SUPERVISION_POLL,
         })
     }
+}
+
+fn write_loop_dispatch_receipt(loop_id: &str, generation: &str, state: &str) -> Result<()> {
+    let mut record = agent_task_loop_controller::load_controller(loop_id)?;
+    if !record.metadata.is_object() {
+        record.metadata = json!({});
+    }
+    let action_id = record
+        .metadata
+        .pointer("/loop_dispatch_receipt/action_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            record
+                .next_actions
+                .iter()
+                .find(|action| {
+                    matches!(
+                        action.status,
+                        crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+                    )
+                })
+                .map(|action| action.action_id.clone())
+        })
+        .or_else(|| {
+            record
+                .terminal_outcomes
+                .last()
+                .and_then(|outcome| outcome.action_id.clone())
+        });
+    record.metadata["loop_dispatch_receipt"] = json!({
+        "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+        "generation": generation,
+        "state": state,
+        "action_id": action_id,
+    });
+    agent_task_loop_controller::write_controller(&record)
+}
+
+fn write_loop_dispatch_completion_receipt(loop_id: &str, generation: &str) -> Result<()> {
+    let record = agent_task_loop_controller::load_controller(loop_id)?;
+    let pending = record.next_actions.iter().any(|action| {
+        matches!(
+            action.status,
+            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+        )
+    });
+    write_loop_dispatch_receipt(
+        loop_id,
+        generation,
+        if pending { "ambiguous" } else { "completed" },
+    )
+}
+
+/// Classify a pre-checkpoint resume from durable controller and lifecycle
+/// evidence. The active-run list is only a reference: it is not ownership
+/// proof on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeDispatchDecision {
+    SafeContinuation,
+    Unknown,
+}
+
+fn resume_dispatch_is_proven(
+    loop_id: &str,
+    generation: &str,
+) -> Result<ResumeDispatchDecision> {
+    let record = agent_task_loop_controller::load_controller(loop_id)?;
+    let has_pending_action = record.next_actions.iter().any(|action| {
+        matches!(
+            action.status,
+            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+        )
+    });
+    let receipt = record.metadata.get("loop_dispatch_receipt");
+    let receipt_matches_generation = receipt.is_some_and(|receipt| {
+        receipt.get("schema").and_then(Value::as_str)
+            == Some("homeboy/agent-task-loop-dispatch-receipt/v1")
+            && receipt
+                .get("generation")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == generation)
+    });
+    let receipt_state = receipt
+        .filter(|_| receipt_matches_generation)
+        .and_then(|receipt| receipt.get("state"))
+        .and_then(Value::as_str);
+    let receipt_action_id = receipt
+        .filter(|_| receipt_matches_generation)
+        .and_then(|receipt| receipt.get("action_id"))
+        .and_then(Value::as_str);
+    let receipt_action = receipt_action_id.and_then(|action_id| {
+        record
+            .next_actions
+            .iter()
+            .find(|action| action.action_id == action_id)
+    });
+    if receipt_state == Some("completed")
+        && receipt_action.is_some_and(|action| {
+            !matches!(
+                action.status,
+                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Failed
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Cancelled
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+            )
+        })
+        && !has_pending_action
+    {
+        return Ok(ResumeDispatchDecision::SafeContinuation);
+    }
+    if receipt_state == Some("pre_dispatch")
+        && receipt_action.is_some_and(|action| {
+            matches!(
+                action.status,
+                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+            )
+        })
+    {
+        return Ok(ResumeDispatchDecision::SafeContinuation);
+    }
+    if receipt_state.is_none() {
+        // Missing, stale, malformed, or legacy receipts do not prove that
+        // this WorkJob was admitted before the restart boundary.
+        return Ok(ResumeDispatchDecision::Unknown);
+    }
+    let Some(active_runs_value) = record.metadata.get("active_provider_runs") else {
+        // A dispatch receipt exists but its owner projection is missing.
+        return Ok(ResumeDispatchDecision::Unknown);
+    };
+    let active_runs = active_runs_value
+        .as_array()
+        .map(|runs| runs.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if active_runs.is_empty() {
+        // The admission ledger exists but contains no verified owner. The
+        // dispatch may have completed before the WorkJob checkpoint, so this
+        // is ambiguous and must not be replayed.
+        return Ok(ResumeDispatchDecision::Unknown);
+    }
+    let Ok(store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return Ok(ResumeDispatchDecision::Unknown);
+    };
+    let lineage = record
+        .metadata
+        .get("active_provider_run_lineage")
+        .and_then(Value::as_object);
+    let owned_active_run = active_runs.iter().any(|run_id| {
+        let Some(lineage) = lineage
+            .and_then(|lineage| lineage.get(*run_id))
+            .and_then(Value::as_object)
+        else {
+            return false;
+        };
+        let exact_lineage = lineage.get("loop_id").and_then(Value::as_str) == Some(loop_id)
+            && lineage.get("generation").and_then(Value::as_str) == Some(generation)
+            && lineage.get("action_id").and_then(Value::as_str).is_some_and(|action_id| {
+                record.next_actions.iter().any(|action| {
+                    action.action_id == action_id
+                        && matches!(
+                            action.status,
+                            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+                        )
+                })
+            });
+        exact_lineage
+            && store.read_record(run_id).is_ok_and(|run| {
+                run.state == crate::agent_task_lifecycle::AgentTaskRunState::Running
+                    && run.local_owner_liveness()
+                        == crate::agent_task_lifecycle::LocalOwnerLiveness::Live
+            })
+    });
+    Ok(if owned_active_run {
+        ResumeDispatchDecision::SafeContinuation
+    } else {
+        ResumeDispatchDecision::Unknown
+    })
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -666,6 +860,114 @@ mod tests {
     fn submission(loop_id: &str, pid: u32) -> Value {
         register_loop_work_job_handler();
         loop_work_job_submission(loop_id, pid, &IDENTITY).expect("build loop work submission")
+    }
+
+    fn recovery_record(
+        loop_id: &str,
+        generation: &str,
+    ) -> crate::agent_task_loop_controller::AgentTaskLoopControllerRecord {
+        let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+            .expect("create recovery controller");
+        record.updated_at = generation.to_string();
+        record.record_action(
+            crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                dedupe_key: "provider-action".to_string(),
+                entity_id: None,
+                request: json!({
+                    "mode": "dispatch",
+                    "dispatch": { "backend": "fixture", "prompt": "recover" }
+                }),
+            },
+            "recovery fixture",
+        );
+        record
+    }
+
+    #[test]
+    fn resume_recovery_accepts_only_current_dispatch_receipts() {
+        with_isolated_home(|_| {
+            let generation = "generation-current";
+
+            let mut predispatch = recovery_record("loop-recovery-predispatch", generation);
+            predispatch.metadata["loop_dispatch_receipt"] = json!({
+                "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                "generation": generation,
+                "state": "pre_dispatch",
+                "action_id": "action-1",
+            });
+            agent_task_loop_controller::write_controller(&predispatch).expect("write predispatch");
+            assert_eq!(
+                resume_dispatch_is_proven("loop-recovery-predispatch", generation)
+                    .expect("classify predispatch"),
+                ResumeDispatchDecision::SafeContinuation
+            );
+
+            let mut completed = recovery_record("loop-recovery-completed", generation);
+            completed.next_actions[0].status =
+                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Completed;
+            completed.metadata["loop_dispatch_receipt"] = json!({
+                "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                "generation": generation,
+                "state": "completed",
+                "action_id": "action-1",
+            });
+            agent_task_loop_controller::write_controller(&completed).expect("write completed");
+            assert_eq!(
+                resume_dispatch_is_proven("loop-recovery-completed", generation)
+                    .expect("classify completed"),
+                ResumeDispatchDecision::SafeContinuation
+            );
+        });
+    }
+
+    #[test]
+    fn resume_recovery_rejects_legacy_stale_malformed_and_foreign_admission() {
+        with_isolated_home(|_| {
+            let generation = "generation-current";
+            for (loop_id, receipt) in [
+                ("loop-recovery-legacy", Value::Null),
+                (
+                    "loop-recovery-stale",
+                    json!({
+                        "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                        "generation": "generation-old",
+                        "state": "pre_dispatch",
+                    }),
+                ),
+                ("loop-recovery-malformed", json!({ "state": "completed" })),
+            ] {
+                let mut record = recovery_record(loop_id, generation);
+                if !receipt.is_null() {
+                    record.metadata["loop_dispatch_receipt"] = receipt;
+                }
+                agent_task_loop_controller::write_controller(&record).expect("write receipt fixture");
+                assert_eq!(
+                    resume_dispatch_is_proven(loop_id, generation).expect("classify receipt"),
+                    ResumeDispatchDecision::Unknown
+                );
+            }
+
+            let mut foreign = recovery_record("loop-recovery-foreign", generation);
+            foreign.metadata["loop_dispatch_receipt"] = json!({
+                "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                "generation": generation,
+                "state": "dispatching",
+            });
+            foreign.metadata["active_provider_runs"] = json!(["foreign-live-run"]);
+            foreign.metadata["active_provider_run_lineage"] = json!({
+                "foreign-live-run": {
+                    "loop_id": "other-loop",
+                    "action_id": foreign.next_actions[0].action_id,
+                    "generation": generation,
+                }
+            });
+            agent_task_loop_controller::write_controller(&foreign).expect("write foreign fixture");
+            assert_eq!(
+                resume_dispatch_is_proven("loop-recovery-foreign", generation)
+                    .expect("classify foreign"),
+                ResumeDispatchDecision::Unknown
+            );
+        });
     }
 
     #[test]
@@ -1004,7 +1306,6 @@ mod tests {
             let prepared = driver.prepare(work_request).expect("prepare provider job");
             let thread_driver = Arc::clone(&driver);
             let thread_harness = Arc::clone(&harness);
-            let started = std::time::Instant::now();
             let execution = std::thread::spawn(move || {
                 thread_driver
                     .execute(prepared, thread_harness.handle())
@@ -1033,6 +1334,7 @@ mod tests {
                 );
                 std::thread::sleep(Duration::from_millis(20));
             };
+            let cancellation_started = std::time::Instant::now();
             harness
                 .request_cancellation("cancel active provider")
                 .expect("request cancellation");
@@ -1046,7 +1348,7 @@ mod tests {
                 .expect("cancel active provider");
             let result = execution.join().expect("join provider execution");
             assert!(
-                started.elapsed() < Duration::from_secs(5),
+                cancellation_started.elapsed() < Duration::from_secs(5),
                 "provider cancellation did not interrupt the active execution"
             );
             assert_eq!(result["result"]["controller_state"], "abandoned");

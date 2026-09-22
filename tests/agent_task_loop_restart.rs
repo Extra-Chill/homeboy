@@ -125,7 +125,14 @@ fn real_daemon_loop_restart_resumes_one_admitted_revolution() {
     assert!(
         last_job.to_string().contains("\"status\":\"succeeded\"")
             || last_job.to_string().contains("\"status\":\"failed\""),
-        "reconciled WorkJob: {last_job}"
+        "reconciled WorkJob: {last_job}; loop status: {}",
+        String::from_utf8_lossy(
+            &run_cli(
+                &context,
+                ["agent-task", "loop", "status", "real-loop-restart"],
+            )
+            .stdout
+        )
     );
     let status = run_cli(
         &context,

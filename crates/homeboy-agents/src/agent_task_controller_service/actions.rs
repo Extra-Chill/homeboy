@@ -936,7 +936,7 @@ where
                     .and_then(|dispatch| dispatch.get("run_id"))
                     .and_then(Value::as_str)
             }) {
-                record_dispatch_admission(record, run_id)?;
+                record_dispatch_admission(record, &action.action_id, run_id)?;
             }
             let (value, exit_code) = dispatch.dispatch(&request)?;
             if let Some(run_id) = value.get("run_id").and_then(Value::as_str) {
@@ -965,6 +965,7 @@ where
 
 fn record_dispatch_admission(
     record: &mut AgentTaskLoopControllerRecord,
+    action_id: &str,
     run_id: &str,
 ) -> Result<()> {
     if !record.metadata.is_object() {
@@ -985,6 +986,11 @@ fn record_dispatch_admission(
             .expect("active provider runs array")
             .push(Value::String(run_id.to_string()));
     }
+    record.metadata["active_provider_run_lineage"][run_id] = serde_json::json!({
+        "loop_id": record.loop_id,
+        "action_id": action_id,
+        "generation": record.updated_at,
+    });
     controller::write_controller(record)
 }
 
@@ -995,6 +1001,13 @@ fn clear_dispatch_admission(record: &mut AgentTaskLoopControllerRecord, run_id: 
         .and_then(Value::as_array_mut)
     {
         runs.retain(|candidate| candidate.as_str() != Some(run_id));
+    }
+    if let Some(lineage) = record
+        .metadata
+        .get_mut("active_provider_run_lineage")
+        .and_then(Value::as_object_mut)
+    {
+        lineage.remove(run_id);
     }
 }
 

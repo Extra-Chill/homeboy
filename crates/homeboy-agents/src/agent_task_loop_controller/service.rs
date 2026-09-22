@@ -318,6 +318,30 @@ fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> Result<()> {
         "job_id": job_id,
         "state": "submitted",
     });
+    if let Some(generation) = record
+        .metadata
+        .pointer("/resume_operation/generation")
+        .and_then(Value::as_str)
+    {
+        record.metadata["loop_dispatch_receipt"] = serde_json::json!({
+            "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+            "generation": generation,
+            "state": "pre_dispatch",
+            "action_id": record
+                .next_actions
+                .iter()
+                .find(|action| {
+                    matches!(
+                        action.status,
+                        crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
+                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
+                    )
+                })
+                .map(|action| action.action_id.clone())
+                .or_else(|| record.next_actions.last().map(|action| action.action_id.clone())),
+        });
+    }
     if record.metadata["resume_operation"].is_object() {
         record.metadata["resume_operation"]["state"] = Value::String("published".to_string());
     }
