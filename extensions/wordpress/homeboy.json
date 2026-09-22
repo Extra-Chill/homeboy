@@ -128,6 +128,7 @@
       "bash tests/wp-test-smells-smoke.sh",
       "bash scripts/build/build-before-production-prune-smoke.sh",
       "bash scripts/build/build-package-artifacts-smoke.sh",
+      "bash scripts/build/build-tooling-php-floor-smoke.sh",
       "bash scripts/lint/eslint-build-ignore-smoke.sh",
       "bash scripts/test/host-smoke-wp-runner-smoke.sh",
       "bash scripts/test/test-shard-replay-smoke.sh",

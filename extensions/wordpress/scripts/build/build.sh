@@ -104,6 +104,54 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+# PHP interpreter Homeboy's own build tooling uses for the JSON/glob helper
+# scripts below (create_rsync_excludes, resolve_package_artifacts,
+# wordpress_setting, stage_package_profile). Populated once by
+# resolve_tooling_php_bin() and reused everywhere so it is resolved at most
+# once per build.
+WORDPRESS_TOOLING_PHP_BIN=""
+
+# Resolve the PHP interpreter for Homeboy's own build-tooling scripts.
+#
+# A component's declared `Requires PHP` header describes where the PLUGIN or
+# THEME must run, not where Homeboy's own packaging logic runs. The JSON/glob
+# helpers below use PHP 8.0+ syntax (str_starts_with, str_contains) no matter
+# what floor a component declares, so they cannot be pinned to that floor.
+# When this environment's ambient `php` has been resolved down to match a
+# component's lower declared floor, fall through to a versioned php8.x binary
+# still installed alongside it. Fails fast with an actionable message instead
+# of the bare "Standard input code" fatal this produced before. Issue #2858.
+#
+# Deliberately does NOT apply to `php -l` in validate_php_syntax(): that check
+# lints the COMPONENT's own staged files and must keep running under the
+# ambient interpreter so a syntax check reflects the floor the component
+# actually declared, not a newer floor Homeboy's tooling happens to prefer.
+resolve_tooling_php_bin() {
+    [ -n "$WORDPRESS_TOOLING_PHP_BIN" ] && return 0
+
+    local candidate major
+    for candidate in php php8.4 php8.3 php8.2 php8.1 php8.0; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        major="$("$candidate" -r 'echo PHP_MAJOR_VERSION;' 2>/dev/null || true)"
+        case "$major" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$major" -ge 8 ]; then
+            WORDPRESS_TOOLING_PHP_BIN="$candidate"
+            return 0
+        fi
+    done
+
+    print_error "WordPress packaging build tooling requires PHP 8.0 or newer."
+    print_error "No PHP 8.0+ interpreter was found on PATH"
+    print_error "(checked: php, php8.4, php8.3, php8.2, php8.1, php8.0)."
+    print_error "This is Homeboy's own build tooling floor, independent of"
+    print_error "this component's declared 'Requires PHP' header."
+    print_error "Install a PHP 8.0+ interpreter alongside the component's"
+    print_error "declared floor to build this component."
+    exit 1
+}
+
 npm_install_uses_legacy_peer_deps() {
     case "${HOMEBOY_NPM_LEGACY_PEER_DEPS:-auto}" in
         1|true|TRUE|yes|YES)
@@ -235,6 +283,10 @@ check_dependencies() {
         print_error "Please install the missing tools and try again."
         exit 1
     fi
+
+    # Fail fast, with an actionable message, if nothing 8.0+ can be found —
+    # rather than fataling deep inside a JSON/glob heredoc later. Issue #2858.
+    resolve_tooling_php_bin
 
     print_success "All build dependencies found"
 }
@@ -697,8 +749,9 @@ webpack.config.js
 EOF
     fi
 
+    resolve_tooling_php_bin
     HOMEBOY_WORDPRESS_PACKAGE_EXCLUDES_FILE="$exclude_file" \
-    php <<'PHP'
+    "$WORDPRESS_TOOLING_PHP_BIN" <<'PHP'
 <?php
 $settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
 if ( ! is_array( $settings ) ) {
@@ -747,9 +800,10 @@ resolve_package_artifacts() {
     [ -n "${HOMEBOY_SETTINGS_JSON:-}" ] || return 0
     [ "${HOMEBOY_SETTINGS_JSON}" != "{}" ] || return 0
 
+    resolve_tooling_php_bin
     HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_MANIFEST="$manifest_file" \
     HOMEBOY_WORDPRESS_PACKAGE_ARTIFACTS_LIST="$list_file" \
-    php <<'PHP'
+    "$WORDPRESS_TOOLING_PHP_BIN" <<'PHP'
 <?php
 $settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
 if ( ! is_array( $settings ) ) {
@@ -877,9 +931,10 @@ wordpress_setting() {
     local key="$1"
     local default_value="$2"
 
+    resolve_tooling_php_bin
     HOMEBOY_WORDPRESS_SETTING_KEY="$key" \
     HOMEBOY_WORDPRESS_SETTING_DEFAULT="$default_value" \
-    php <<'PHP'
+    "$WORDPRESS_TOOLING_PHP_BIN" <<'PHP'
 <?php
 $settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
 if ( ! is_array( $settings ) ) {
@@ -945,8 +1000,9 @@ include_package_artifacts() {
 stage_package_profile() {
     local staging_dir="$1"
 
+    resolve_tooling_php_bin
     HOMEBOY_WORDPRESS_PACKAGE_STAGING_DIR="$staging_dir" \
-    php <<'PHP'
+    "$WORDPRESS_TOOLING_PHP_BIN" <<'PHP'
 <?php
 $settings = json_decode( getenv( 'HOMEBOY_SETTINGS_JSON' ) ?: '{}', true );
 if ( ! is_array( $settings ) ) {
