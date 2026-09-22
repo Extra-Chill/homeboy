@@ -94,6 +94,10 @@ pub fn reconcile_fanout_pr_states(
     mutate: bool,
 ) -> Result<BTreeMap<String, String>> {
     let batch = batch::read_batch_record(batch_id)?;
+    // Dependency transitions rebase dependents onto an upstream candidate.
+    // Only a graph batch has dependents; independent fanout children still
+    // record their PR observation but schedule no dependency actions.
+    let has_dependency_graph = batch.metadata.get("dependency_graph").is_some();
     let mut resolutions = Vec::new();
     let mut statuses = BTreeMap::new();
     for child in batch.child_runs {
@@ -180,7 +184,8 @@ pub fn reconcile_fanout_pr_states(
                 .zip(observation.base_ref_name.clone()),
             _ => None,
         };
-        if let Some((upstream_revision, target_base)) = transition {
+        if let Some((upstream_revision, target_base)) = transition.filter(|_| has_dependency_graph)
+        {
             resolutions.push(DependencyResolution {
                 child_id: child.task_id.clone(),
                 upstream_revision,

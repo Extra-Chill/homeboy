@@ -22217,6 +22217,7 @@ fn stage_terminal_batch_child(
     run_id
 }
 
+#[cfg(unix)]
 #[test]
 fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provider() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -22277,6 +22278,31 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         )
         .expect("persist batch record");
 
+        // Portfolio reconciliation observes each recorded PR through `gh`.
+        // Serve that observation hermetically instead of depending on the
+        // runner's GitHub authentication.
+        let gh_root = tempfile::tempdir().expect("gh fixture directory");
+        let gh = gh_root.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '{\"state\":\"OPEN\",\"mergedAt\":null,\"reviewDecision\":\"REVIEW_REQUIRED\",\"mergeStateStatus\":\"CLEAN\",\"mergeCommit\":null,\"baseRefName\":\"main\",\"headRefOid\":\"head-sha\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("write gh fixture");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&gh, permissions).expect("make gh fixture executable");
+        }
+        let _path = homeboy_core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                gh_root.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
         // UnusedExecutor asserts the provider is never dispatched again: a
         // terminal child is harvested straight through gates and finalization.
         // Exercise the real registered control-plane delegate and outbox.
@@ -22302,7 +22328,8 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             .expect("resume action harvests terminal children");
         assert_eq!(
             acknowledgement.outcome,
-            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
+            "resume acknowledgement: {acknowledgement:#?}"
         );
         let result: crate::orchestration::FanoutBatchResumeActionResult =
             serde_json::from_value(acknowledgement.result.data.clone()).expect("typed result");

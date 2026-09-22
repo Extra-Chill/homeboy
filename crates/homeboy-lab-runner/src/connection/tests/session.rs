@@ -2430,8 +2430,11 @@ fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
         crate::generation_store::write("homeboy-lab", &generations)
             .expect("write generation ledger");
 
-        let (report, generations, owners) =
-            status_with_admission_projection("homeboy-lab").expect("status observation");
+        let (report, generations, owners) = status_with_admission_projection_until(
+            "homeboy-lab",
+            std::time::Instant::now() + Duration::from_secs(30),
+        )
+        .expect("status observation");
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
         assert_eq!(report.active_job_count, 1);
@@ -2456,7 +2459,11 @@ fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
             .expect("write mismatched ledger");
 
         let (mismatched_report, mismatched_generations, mismatched_owners) =
-            status_with_admission_projection("homeboy-lab").expect("mismatched status observation");
+            status_with_admission_projection_until(
+                "homeboy-lab",
+                std::time::Instant::now() + Duration::from_secs(30),
+            )
+            .expect("mismatched status observation");
         let mismatch = mismatched_report.admission_summary_with_generations(
             &mismatched_generations,
             &mismatched_owners,
