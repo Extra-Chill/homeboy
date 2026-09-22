@@ -111,6 +111,56 @@ fn prepare_runner_process_uses_embedded_runner_snapshot() {
 }
 
 #[test]
+fn prepare_runner_process_defers_runner_owned_secret_plan_entries() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut runner = ssh_runner();
+        runner.id = "homeboy-lab".to_string();
+        runner.secret_env.insert(
+            "ACCESS_TOKEN".to_string(),
+            RunnerSecretEnvRef {
+                env: Some("ACCESS_TOKEN".to_string()),
+                file: None,
+                secret: None,
+            },
+        );
+        let mut secret_env_plan =
+            SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
+        secret_env_plan.env_materialization = Some(
+            homeboy_core::env_materialization_plan::EnvMaterializationPlan {
+                secret_refs: vec![homeboy_core::env_materialization_plan::EnvSecretRef {
+                    name: "ACCESS_TOKEN".to_string(),
+                    owner: Some("runner".to_string()),
+                }],
+                ..Default::default()
+            },
+        );
+
+        let prepared = prepare_runner_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(runner),
+            cwd: Some("/srv/homeboy/project".to_string()),
+            project_id: None,
+            command: vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+            ],
+            env: Default::default(),
+            secret_env_names: vec!["ACCESS_TOKEN".to_string()],
+            secret_env_plan: Some(secret_env_plan),
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: false,
+        })
+        .expect("runner-owned secret must not be resolved by the controller");
+
+        assert!(!prepared.env.contains_key("ACCESS_TOKEN"));
+    });
+}
+
+#[test]
 fn ssh_runner_prep_leaves_default_path_to_runner_side() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = prepare_runner_process(RunnerProcessRequest {

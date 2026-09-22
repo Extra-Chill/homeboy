@@ -71,14 +71,26 @@ pub(super) fn resolve_runner_secret_env_for_command_with_fallbacks(
             continue;
         }
         if fallback_sources.contains_key(name) {
-            if let Ok(values) = agent_task_secrets::resolve_secret_env_with_fallbacks(
+            match agent_task_secrets::resolve_secret_env_with_fallbacks(
                 std::slice::from_ref(name),
                 fallback_sources,
             ) {
-                for (name, value) in values {
-                    resolved.insert(name, value);
+                Ok(values) => {
+                    for (name, value) in values {
+                        resolved.insert(name, value);
+                    }
+                    continue;
                 }
-                continue;
+                Err(error) => {
+                    return Err(Error::validation_invalid_argument(
+                        "secret_env",
+                        format!("runner secret source for {name} failed: {}", error.message),
+                        Some(name.clone()),
+                        Some(vec![
+                            "Repair the configured runner-side provider secret source, then retry the runner dispatch.".to_string(),
+                        ]),
+                    ));
+                }
             }
         }
         return Err(Error::validation_invalid_argument(
@@ -317,27 +329,49 @@ pub(super) fn is_agent_task_run_plan_command(command: &[String]) -> bool {
 
 pub(super) fn resolve_controller_secret_env_for_command(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    required_names: &[String],
+    plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    resolve_controller_secret_env_for_command_with_fallbacks(
+    resolve_controller_secret_env_for_plan_with_fallbacks(
         secret_env,
-        required_names,
+        plan,
         env,
         &provider_secret_sources_for_discovered_providers(),
     )
 }
 
+#[cfg(test)]
 pub(super) fn resolve_controller_secret_env_for_command_with_fallbacks(
     secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
     required_names: &[String],
     env: &HashMap<String, String>,
     fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
 ) -> Result<HashMap<String, String>> {
+    let plan = SecretEnvPlan::from_secret_env_names(required_names.to_vec());
+    resolve_controller_secret_env_for_plan_with_fallbacks(secret_env, &plan, env, fallback_sources)
+}
+
+pub(super) fn resolve_controller_secret_env_for_plan_with_fallbacks(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    plan: &SecretEnvPlan,
+    env: &HashMap<String, String>,
+    fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
+) -> Result<HashMap<String, String>> {
     let mut controller_secret_env = HashMap::new();
     let mut controller_required_names = Vec::new();
-    for name in required_names {
+    for name in plan.secret_env_names() {
         if env.contains_key(name.as_str()) {
+            continue;
+        }
+        if plan
+            .env_materialization
+            .as_ref()
+            .is_some_and(|materialization| {
+                materialization.secret_refs.iter().any(|reference| {
+                    reference.name == *name && reference.owner.as_deref() == Some("runner")
+                })
+            })
+        {
             continue;
         }
         let Some(source) = secret_env.get(name.as_str()) else {
