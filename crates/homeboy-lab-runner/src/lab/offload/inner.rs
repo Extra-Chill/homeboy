@@ -614,6 +614,19 @@ pub(crate) fn exec_lab_context(
             &env,
             &context.secret_env_handoff.secret_env_plan,
         )?;
+        // Lab reads declared provider credential files from its own home, so
+        // refresh them from the controller before provider readiness runs there.
+        if runner.kind == super::super::super::RunnerKind::Ssh {
+            crate::execution::provision_provider_file_secret_sources_for_runner(
+                runner,
+                &context.remote_command,
+                &context
+                    .secret_env_handoff
+                    .secret_env_plan
+                    .secret_env_names(),
+                &env,
+            )?;
+        }
     }
     if let (Some(provider), Some(runner), Some(source_snapshot)) = (
         context.provider_preflight.as_ref(),

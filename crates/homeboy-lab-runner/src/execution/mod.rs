@@ -117,6 +117,7 @@ pub use handoff::runner_job_cancel_for_session;
 pub(crate) use process::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
 };
+pub(crate) use secrets::provision_provider_file_secret_sources_for_runner;
 #[cfg(test)]
 pub(crate) use secrets::runner_exec_secret_env_names;
 pub(crate) use secrets::runner_exec_secret_env_plan;
