@@ -1770,6 +1770,26 @@ impl AgentTaskBatchStore {
             )
         })
     }
+
+    pub fn read_batch_if_exists(&self, batch_id: &str) -> Result<Option<AgentTaskBatchRecord>> {
+        let path = self.batch_path(batch_id);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ))
+            }
+        };
+        serde_json::from_str(&raw).map(Some).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task batch {}", batch_id)),
+            )
+        })
+    }
 }
 
 /// Read the persisted durable batch record. Used by the batch resume path to

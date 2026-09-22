@@ -91,6 +91,7 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
 fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("fanout-supervisor-cli-resume", Vec::new());
+        submit_plan(&plan, Some("production-resume")).expect("persist fanout owner");
         submit_plan(&plan, Some("cook-child")).expect("persist child");
         persist_fanout_run_batch(
             "production-resume",
@@ -131,6 +132,7 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
         let batch_id = "interrupted-independent-children";
         let children = ["child-a", "child-b", "child-c"];
         let plan = AgentTaskPlan::new("interrupted-provider-wave", Vec::new());
+        submit_plan(&plan, Some(batch_id)).expect("persist interrupted batch owner");
         for child in children {
             let run_id = format!("cook-{child}");
             submit_plan(&plan, Some(&run_id)).expect("persist interrupted child");

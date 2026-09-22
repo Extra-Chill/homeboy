@@ -5109,6 +5109,8 @@ fn run_next_claims_oldest_queued_run_and_leaves_later_runs_queued() {
 #[test]
 fn run_next_fanout_claims_ready_children_without_inspecting_unrelated_stale_queue_records() {
     with_temp_home(|| {
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("target-fanout"))
+            .expect("canonical fanout owner submitted");
         agent_task_lifecycle::submit_plan(&test_plan(), Some("stale-global-cook"))
             .expect("stale record submitted");
         let stale_plan = homeboy_core::paths::homeboy_data()

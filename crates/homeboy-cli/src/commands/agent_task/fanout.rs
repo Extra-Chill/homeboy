@@ -709,10 +709,16 @@ fn batch_resume_locked(
 ) -> CmdResult<Value> {
     let canonical = homeboy::agents::orchestration::run_from_current_environment(&args.batch_id)?;
     let idempotency_key = args.idempotency_key.clone().unwrap_or_else(|| {
+        let batch_updated_at = batch::read_batch_record(&args.batch_id)
+            .ok()
+            .and_then(|batch| batch.updated_at);
         format!(
             "fanout-resume:{}:{}",
             args.batch_id,
-            canonical.updated_at.as_deref().unwrap_or("initial")
+            batch_updated_at
+                .as_deref()
+                .or(canonical.updated_at.as_deref())
+                .unwrap_or("initial")
         )
     });
     let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
@@ -737,13 +743,6 @@ fn batch_resume_locked(
         acknowledgement.outcome
             == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
     );
-    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
-    {
-        return Ok((
-            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
-            1,
-        ));
-    }
     let result: homeboy::agents::orchestration::FanoutBatchResumeActionResult =
         serde_json::from_value(acknowledgement.result.data.clone()).map_err(|error| {
             Error::internal_unexpected(format!("canonical fanout resume result: {error}"))

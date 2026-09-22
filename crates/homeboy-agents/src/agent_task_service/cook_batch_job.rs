@@ -427,15 +427,10 @@ impl WorkJobHandler for CookBatchWorkHandler {
 /// again once it notices the cancellation, by which point the record exists —
 /// that second call is what actually stops a wave cancelled during startup.
 pub fn cancel_batch_children(batch_id: &str) -> Result<()> {
-    let record = match agent_task_batch::read_batch_record(batch_id) {
-        Ok(record) => record,
-        Err(error)
-            if error.message.contains("No such file") || error.message.contains("not found") =>
-        {
-            // A coordinator can be cancelled before it writes its roster.
-            return Ok(());
-        }
-        Err(error) => return Err(error),
+    let store = agent_task_batch::AgentTaskBatchStore::from_current_data_root()?;
+    let Some(record) = store.read_batch_if_exists(batch_id)? else {
+        // A coordinator can be cancelled before it writes its roster.
+        return Ok(());
     };
     // Written before the per-child cancellations go out, so a coordinator
     // racing this stops claiming while they are still in flight rather than

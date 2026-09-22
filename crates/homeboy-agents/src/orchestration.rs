@@ -100,6 +100,14 @@ pub type FanoutResumeDispatcherFactory = fn(
     Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
 >;
 
+fn no_fanout_resume_dispatcher(
+    _descriptor: &Value,
+) -> homeboy_core::Result<
+    Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+> {
+    Ok(None)
+}
+
 pub type FanoutResumeExecutionContextFactory = fn(
     &Value,
 ) -> homeboy_core::Result<(
@@ -1502,12 +1510,26 @@ impl FanoutBatchActionDelegate {
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?
                     .read_batch_record(batch_id)
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-                let authority = batch.metadata.get("execution_authority").ok_or_else(|| {
-                    ControlPlaneError::unavailable(format!(
-                        "fanout resume execution authority for `{batch_id}` is unavailable; the batch was not admitted with a caller context"
-                    ))
-                })?;
-                let (executor, dispatcher) = Self::context(authority)?;
+                let (executor, dispatcher) = match batch.metadata.get("execution_authority") {
+                    Some(authority) => Self::context(authority)?,
+                    None => {
+                        let requires_authority = batch.child_runs.iter().any(|child| {
+                            crate::agent_task_service::recipe_exists(&child.run_id).unwrap_or(false)
+                        });
+                        if requires_authority {
+                            return Err(ControlPlaneError::unavailable(format!(
+                                "fanout resume execution authority for `{batch_id}` is unavailable; the batch contains resumable Cook work"
+                            )));
+                        }
+                        (
+                            std::sync::Arc::new(
+                                crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                            )
+                                as crate::agent_task_scheduler::SharedAgentTaskExecutor,
+                            no_fanout_resume_dispatcher as FanoutResumeDispatcherFactory,
+                        )
+                    }
+                };
                 let result = crate::agent_task_service::resume_cook_batch(
                     batch_id,
                     executor.clone(),
@@ -1534,7 +1556,7 @@ impl FanoutBatchActionDelegate {
                 let result = fanout_batch_resume_action_result(&result.value)
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let mut action_result = action_result;
-                if action_result.outcome == ControlPlaneActionOutcome::Succeeded {
+                if action_result.outcome == ControlPlaneActionOutcome::Failed {
                     let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
                         executor,
                         dispatcher,
@@ -1805,34 +1827,41 @@ impl FanoutBatchDomainService {
             )))
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None)),
             Err(_) => {
-                let portfolio = crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio::new(
-                    batch.batch_id.clone(),
-                    batch.child_runs.iter().map(|child| {
-                        let tracker_ref = batch.metadata["declared_trackers"][&child.task_id]
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| {
-                                format!("homeboy://agent-task/run/{}", child.run_id)
-                            });
-                        crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioChild {
-                            child_id: child.task_id.clone(),
-                            tracker_ref,
-                            run_id: child.run_id.clone(),
-                            source_sha: None,
-                            base_sha: None,
-                            head_sha: None,
-                            evidence_generation: 0,
-                            finding_fingerprints: Default::default(),
-                            finding_fingerprint_recency: Default::default(),
-                            blocker: None,
-                            next_action: None,
-                        }
-                    }),
-                );
-                serde_json::to_value(
-                    portfolio.status(&self.portfolio_observations(batch, children, None)),
-                )
-                .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
+                let mut portfolio =
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio::new(
+                        batch.batch_id.clone(),
+                        batch.child_runs.iter().map(|child| {
+                            let tracker_ref = batch.metadata["declared_trackers"][&child.task_id]
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| {
+                                    format!("homeboy://agent-task/run/{}", child.run_id)
+                                });
+                            crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioChild {
+                                child_id: child.task_id.clone(),
+                                tracker_ref,
+                                run_id: child.run_id.clone(),
+                                source_sha: None,
+                                base_sha: None,
+                                head_sha: None,
+                                evidence_generation: 0,
+                                finding_fingerprints: Default::default(),
+                                finding_fingerprint_recency: Default::default(),
+                                blocker: None,
+                                next_action: None,
+                            }
+                        }),
+                    );
+                let observations = self.portfolio_observations(batch, children, None);
+                let status = if batch.metadata.get("dependency_graph").is_some() {
+                    let dependencies =
+                        crate::agent_task_fanout_service::durable_graph_dependencies(batch)?;
+                    portfolio.reconcile(observations.values().cloned(), &dependencies)
+                } else {
+                    portfolio.status(&observations)
+                };
+                serde_json::to_value(status)
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
             }
         }
     }

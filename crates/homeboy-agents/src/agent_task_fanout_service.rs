@@ -477,7 +477,7 @@ fn load_portfolio(
 
 /// Consume the graph owner's typed readiness projection without duplicating its
 /// topology, state, or downstream action contracts.
-struct DurableGraphDependencies {
+pub(crate) struct DurableGraphDependencies {
     batch_id: String,
     readiness: Option<crate::agent_tasks::dependency_graph::AgentTaskDependencyReadiness>,
 }
@@ -510,7 +510,7 @@ impl supervisor::FanoutDependencyResolver for DurableGraphDependencies {
     }
 }
 
-fn durable_graph_dependencies(
+pub(crate) fn durable_graph_dependencies(
     batch_record: &crate::agent_tasks::AgentTaskBatchRecord,
 ) -> Result<DurableGraphDependencies> {
     let Some(graph) = batch_record.metadata.get("dependency_graph") else {
