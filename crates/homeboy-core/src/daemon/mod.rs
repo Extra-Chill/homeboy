@@ -176,6 +176,90 @@ pub struct LocalControllerJobClient {
     _admission_guard: Option<DaemonAdmissionGuard>,
 }
 
+/// Direct controller-job operations for code already running in this daemon.
+/// It shares the daemon's `JobStore` and dispatch path; it is not a second
+/// lifecycle or admission implementation.
+#[derive(Clone)]
+pub struct DaemonControllerJobService {
+    job_store: JobStore,
+}
+
+impl DaemonControllerJobService {
+    pub fn new(job_store: JobStore) -> Self {
+        Self { job_store }
+    }
+
+    pub fn submit_with_disposition(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<ControllerJobSubmission> {
+        let body = enqueue_controller_job(Some(request), &self.job_store)?;
+        let job_id = body
+            .pointer("/job/id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::internal_unexpected("controller admission has no job id"))?;
+        let job: crate::api_jobs::Job = serde_json::from_value(
+            body.pointer("/job")
+                .cloned()
+                .ok_or_else(|| Error::internal_unexpected("controller admission has no job"))?,
+        )
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        let lease_id = job
+            .daemon_lease_id
+            .as_deref()
+            .filter(|lease_id| !lease_id.is_empty())
+            .ok_or_else(|| {
+                Error::internal_unexpected("controller admission has no daemon lease owner")
+            })?;
+        let serving = heartbeat_lease()?;
+        generation_store::record_job_for_admission(job_id, lease_id, &serving)?;
+        let disposition = match body
+            .pointer("/submission/disposition")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("created") => ControllerJobSubmissionDisposition::Created,
+            Some("reused") => ControllerJobSubmissionDisposition::Reused,
+            Some(_) => {
+                return Err(Error::internal_unexpected(
+                    "unknown controller admission disposition",
+                ))
+            }
+            None => ControllerJobSubmissionDisposition::Unknown,
+        };
+        let job = self.start(job_id)?;
+        Ok(ControllerJobSubmission { job, disposition })
+    }
+
+    pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        let path = format!("/controller/jobs/{job_id}/start");
+        let body = start_controller_job(&path, &self.job_store)?;
+        serde_json::from_value(
+            body.get("job")
+                .cloned()
+                .ok_or_else(|| Error::internal_unexpected("controller start has no job"))?,
+        )
+        .map_err(|error| Error::internal_json(error.to_string(), None))
+    }
+
+    pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
+        self.job_store.get(Uuid::parse_str(job_id).map_err(|error| {
+            Error::validation_invalid_argument("job_id", error.to_string(), None, None)
+        })?)
+    }
+
+    pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+        let path = format!("/controller/jobs/{job_id}/cancel");
+        let body =
+            cancel_controller_job(&path, Some(json!({ "reason": reason })), &self.job_store)?;
+        serde_json::from_value(
+            body.get("job")
+                .cloned()
+                .ok_or_else(|| Error::internal_unexpected("controller cancellation has no job"))?,
+        )
+        .map_err(|error| Error::internal_json(error.to_string(), None))
+    }
+}
+
 /// The durable admission result for a typed controller job submission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerJobSubmissionDisposition {
@@ -1635,19 +1719,31 @@ where
     );
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
-    let mut accepted = 0;
+    const CONNECTION_WORKERS: usize = 16;
+    let (connection_tx, connection_rx) = std::sync::mpsc::sync_channel::<TcpStream>(64);
+    let connection_rx = Arc::new(Mutex::new(connection_rx));
     let mut connection_threads = Vec::new();
+    for _ in 0..CONNECTION_WORKERS {
+        let worker_rx = Arc::clone(&connection_rx);
+        let worker_store = job_store.clone();
+        let worker_runner = analysis_runner.clone();
+        connection_threads.push(std::thread::spawn(move || loop {
+            let stream = worker_rx.lock().expect("connection queue lock").recv();
+            let Ok(stream) = stream else { return Ok(()) };
+            handle_connection(stream, &worker_store, worker_runner.clone(), loopback_bind)?;
+        }));
+    }
+    let mut accepted = 0;
     let mut serve_result = Ok(());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let connection_store = job_store.clone();
-                let connection_runner = analysis_runner.clone();
-                let connection = std::thread::spawn(move || {
-                    handle_connection(stream, &connection_store, connection_runner, loopback_bind)
-                });
-                if request_limit.is_some() {
-                    connection_threads.push(connection);
+                if connection_tx.send(stream).is_err() {
+                    serve_result = Err(Error::internal_io(
+                        "daemon connection workers stopped".to_string(),
+                        Some("dispatch daemon connection".to_string()),
+                    ));
+                    break;
                 }
                 accepted += 1;
                 if request_limit.is_some_and(|limit| accepted >= limit) {
@@ -1667,6 +1763,7 @@ where
     // Bounded TCP fixtures need all responses drained before their server
     // thread returns. Production listeners remain alive and simply retain the
     // connection workers until the process is stopped.
+    drop(connection_tx);
     for connection in connection_threads {
         if let Err(error) = connection
             .join()

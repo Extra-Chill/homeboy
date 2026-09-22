@@ -7094,6 +7094,19 @@ impl ControlPlaneProvider for RegisteredProvider {
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        self.execute_action_with_context(
+            requested_id,
+            request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+    }
+
+    fn execute_action_with_context(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
@@ -7152,7 +7165,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                 crate::agent_task_batch::AgentTaskBatchState::Succeeded
                     | crate::agent_task_batch::AgentTaskBatchState::Cancelled
             );
-            return homeboy_core::control_plane::execute_delegated_action(
+            return homeboy_core::control_plane::execute_delegated_action_with_context(
                 &observation,
                 &synthetic,
                 request,
@@ -7160,6 +7173,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                 &version,
                 available,
                 (!available).then(|| "fanout batch action is not currently available".to_string()),
+                context,
                 || {
                     batch_resource_from_current_environment(requested_id)?.ok_or_else(|| {
                         ControlPlaneError::not_found("fanout batch resource disappeared")
@@ -7198,7 +7212,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                                         == ControlPlaneActionAvailability::Available
                             })
                         });
-                    return homeboy_core::control_plane::execute_delegated_action(
+                    return homeboy_core::control_plane::execute_delegated_action_with_context(
                         &observation,
                         &record,
                         request,
@@ -7210,6 +7224,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                             .unwrap_or(&record.started_at),
                         available,
                         (!available).then(|| "loop action is not currently available".to_string()),
+                        context,
                         || {
                             let current = observation
                                 .get_run(&record.id)

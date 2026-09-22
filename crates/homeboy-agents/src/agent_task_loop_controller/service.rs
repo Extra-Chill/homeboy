@@ -183,7 +183,11 @@ fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
     Ok(Value::Object(admitted))
 }
 
-fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Result<Value> {
+fn cancel_work_job(
+    record: &AgentTaskLoopControllerRecord,
+    reason: &str,
+    context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+) -> Result<Value> {
     let Some(job_id) = record
         .metadata
         .pointer("/work_job/job_id")
@@ -191,8 +195,11 @@ fn cancel_work_job(record: &AgentTaskLoopControllerRecord, reason: &str) -> Resu
     else {
         return Ok(Value::Null);
     };
-    let job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
-        .cancel(job_id, reason)?;
+    let job = match context.daemon.as_ref() {
+        Some(service) => service.cancel(job_id, reason)?,
+        None => homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
+            .cancel(job_id, reason)?,
+    };
     Ok(serde_json::json!({ "job_id": job_id, "status": job.status }))
 }
 
@@ -240,7 +247,12 @@ pub fn cancel_owned_provider_runs(loop_id: &str, reason: &str) -> Result<()> {
     Ok(())
 }
 
-fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value) -> Result<Value> {
+fn admit_loop_work_job(
+    loop_id: &str,
+    generation: &str,
+    dispatch_defaults: Value,
+    context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+) -> Result<Value> {
     let provider_catalog = dispatch_defaults
         .get("provider_catalog")
         .cloned()
@@ -265,12 +277,14 @@ fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value
     if let Some(admitter) = TEST_LOOP_WORK_ADMITTER.with(|slot| slot.borrow().clone()) {
         return admitter(loop_id, generation, submission);
     }
-    let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?;
-    let submitted = client.submit_with_disposition(submission)?;
+    let submitted = match context.daemon.as_ref() {
+        Some(service) => service.submit_with_disposition(submission)?,
+        None => homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?
+            .submit_with_disposition(submission)?,
+    };
     let job = submitted.job;
     let job_id = job.id.to_string();
     persist_loop_work_identity(loop_id, &job_id)?;
-    client.start(&job_id)?;
     Ok(serde_json::json!({
         "schema": "homeboy/agent-task-loop-work-submission/v1",
         "loop_id": loop_id,
@@ -366,9 +380,25 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
+        self.execute_with_context(
+            run,
+            request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+    }
+
+    fn execute_with_context(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    ) -> std::result::Result<
+        ControlPlaneActionDelegateResult,
+        homeboy_control_plane_contract::ControlPlaneError,
+    > {
         match request.action {
-            ControlPlaneAction::Cancel => self.stop(run, request, false),
-            ControlPlaneAction::Resume => self.resume(run, request),
+            ControlPlaneAction::Cancel => self.stop(run, request, false, context),
+            ControlPlaneAction::Resume => self.resume(run, request, context),
             _ => Err(
                 homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
                     "agent-task loop supports only cancel and resume",
@@ -385,9 +415,25 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
+        self.recover_with_context(
+            run,
+            request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+    }
+
+    fn recover_with_context(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    ) -> std::result::Result<
+        ControlPlaneActionDelegateResult,
+        homeboy_control_plane_contract::ControlPlaneError,
+    > {
         match request.action {
-            ControlPlaneAction::Cancel => self.stop(run, request, true),
-            ControlPlaneAction::Resume => self.resume(run, request),
+            ControlPlaneAction::Cancel => self.stop(run, request, true, context),
+            ControlPlaneAction::Resume => self.resume(run, request, context),
             _ => Err(
                 homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
                     "agent-task loop supports only cancel and resume",
@@ -403,6 +449,7 @@ impl LoopActionDelegate {
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
         recovering: bool,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
@@ -465,6 +512,7 @@ impl LoopActionDelegate {
                 request.parameters.data["reason"]
                     .as_str()
                     .unwrap_or("loop stop requested"),
+                context,
             )
             .map_err(|error| {
                 homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
@@ -490,6 +538,7 @@ impl LoopActionDelegate {
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
@@ -579,10 +628,9 @@ impl LoopActionDelegate {
         }
         let generation = record.updated_at.clone();
         let dispatch_defaults = record.metadata["resume_operation"]["dispatch_defaults"].clone();
-        let work =
-            admit_loop_work_job(loop_id, &generation, dispatch_defaults).map_err(|error| {
-                homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
-            })?;
+        let work = admit_loop_work_job(loop_id, &generation, dispatch_defaults, context).map_err(
+            |error| homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message),
+        )?;
         Ok(ControlPlaneActionDelegateResult {
             outcome: ControlPlaneActionOutcome::Succeeded,
             result: ControlPlaneActionPayload {
