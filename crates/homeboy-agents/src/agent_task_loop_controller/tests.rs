@@ -475,7 +475,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
         bundle_id: "quality".to_string(),
         entity_id: Some("artifact:summary".to_string()),
         run_id: None,
-        status: AgentTaskGateBundleStatus::Failed,
+        status: AgentTaskLoopGateStatus::Failed,
         checks: Vec::new(),
         recorded_at: "2026-06-11T00:00:00Z".to_string(),
     });
@@ -495,7 +495,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "required-artifacts"
             && gate.entity_id.is_none()
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Missing
+            && gate.status == AgentTaskLoopGateStatus::Missing
             && gate
                 .problems
                 .contains(&"acceptance gate has no recorded result".to_string())
@@ -503,7 +503,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "quality"
             && gate.entity_id.as_deref() == Some("artifact:summary")
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Failed
+            && gate.status == AgentTaskLoopGateStatus::Failed
             && gate.result_id.as_deref() == Some("gate-result-1")
             && gate
                 .problems
@@ -531,7 +531,7 @@ fn status_diagnostics_surface_pending_acceptance_gate() {
         bundle_id: "manual-only".to_string(),
         entity_id: Some("artifact:summary".to_string()),
         run_id: None,
-        status: AgentTaskGateBundleStatus::Pending,
+        status: AgentTaskLoopGateStatus::Pending,
         checks: Vec::new(),
         recorded_at: "2026-06-11T00:00:00Z".to_string(),
     });
@@ -551,7 +551,7 @@ fn status_diagnostics_surface_pending_acceptance_gate() {
     assert_eq!(diagnostics.summary.missing_acceptance_gate_count, 0);
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "manual-only"
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Pending
+            && gate.status == AgentTaskLoopGateStatus::Pending
             && gate
                 .problems
                 .contains(&"acceptance gate is pending an external/manual result".to_string())

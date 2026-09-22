@@ -109,18 +109,12 @@ pub fn execute_delegated_action(
     let requested_id = RunId::new(&run.id)
         .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
     let (action, idempotency_digest, request_digest) = delegated_action_digests(request)?;
-    let aliases = store
-        .control_plane_resource_projection_exact(resource_type, &run.id)
-        .map_err(map_store_error)?
-        .map(|projection| projection.aliases)
-        .filter(|aliases| !aliases.is_empty())
-        .unwrap_or_else(|| vec![run.id.clone()]);
     let projection = ControlPlaneResourceProjection {
         resource_type: resource_type.to_string(),
         resource_id: run.id.clone(),
         version: resource_version.to_string(),
         state: run.status.clone(),
-        aliases,
+        aliases: Vec::new(),
         eligibility: serde_json::json!({ "action": action, "eligible": eligible }),
         provenance: serde_json::json!({ "source": "observation-run" }),
     };

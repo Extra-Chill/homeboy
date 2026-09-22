@@ -7291,8 +7291,8 @@ pub fn register() {
 #[cfg(test)]
 mod loop_control_plane_tests {
     use crate::agent_task_loop_controller::{
-        control_plane_run_id, create_controller, loop_read, loop_runtime_metadata,
-        loop_work_status, resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
+        control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
+        resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -7387,22 +7387,6 @@ mod loop_control_plane_tests {
             "state": "submitted",
             "admission": "created",
         }))
-    }
-
-    #[test]
-    fn loop_read_uses_the_canonical_resource_with_domain_adjuncts() {
-        with_isolated_home(|_| {
-            super::register();
-            let record = create_controller("loop/canonical-read", "repair", "v1").expect("created");
-            let read = loop_read(&record.loop_id).expect("canonical loop read");
-            let canonical = homeboy_core::control_plane::run(
-                &control_plane_run_id(&record.loop_id).expect("canonical id"),
-            )
-            .expect("canonical resource");
-            assert_eq!(read.resource, canonical);
-            assert_eq!(read.controller.loop_id, record.loop_id);
-            assert_eq!(read.work, serde_json::Value::Null);
-        });
     }
 
     #[test]
@@ -7524,84 +7508,6 @@ mod loop_control_plane_tests {
                 effect.state,
                 homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Succeeded
             );
-        });
-    }
-
-    #[test]
-    fn legacy_controller_status_is_read_only_and_stop_prepares_its_resource() {
-        with_isolated_home(|_| {
-            super::register();
-            let record = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
-                "legacy/read",
-                "repair",
-                "v1",
-            );
-            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
-                .expect("path");
-            std::fs::create_dir_all(path.parent().expect("controller parent")).expect("parent");
-            homeboy_core::engine::local_files::write_json_file(&path, &record)
-                .expect("legacy controller");
-            let before = std::fs::read(&path).expect("legacy bytes");
-            crate::agent_task_loop_controller::controller_status_report(&record.loop_id)
-                .expect("legacy status");
-            assert_eq!(before, std::fs::read(&path).expect("legacy bytes"));
-            assert!(homeboy_core::control_plane::run(
-                &control_plane_run_id(&record.loop_id).expect("canonical id")
-            )
-            .is_err());
-
-            let (stopped, acknowledgement) =
-                stop_loop(&record.loop_id, "legacy stop").expect("legacy stop");
-            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
-            assert_eq!(
-                acknowledgement.outcome,
-                ControlPlaneActionOutcome::Succeeded
-            );
-            assert!(homeboy_core::control_plane::run(
-                &control_plane_run_id(&record.loop_id).expect("canonical id")
-            )
-            .is_ok());
-        });
-    }
-
-    #[test]
-    fn loop_runtime_projection_preserves_legacy_defaults_without_writing() {
-        let metadata = json!({ "legacy": true });
-        assert_eq!(loop_runtime_metadata(&metadata)["on"], true);
-        assert_eq!(metadata, json!({ "legacy": true }));
-    }
-
-    #[test]
-    fn loop_control_plane_mapping_does_not_sanitize_colliding_legacy_ids() {
-        assert_ne!(
-            control_plane_run_id("legacy/a").expect("slash id"),
-            control_plane_run_id("legacy_a").expect("underscore id")
-        );
-    }
-
-    #[test]
-    fn loop_alias_collision_fails_in_the_authoritative_store() {
-        with_isolated_home(|_| {
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation");
-            let projection =
-                |resource_id: &str| homeboy_core::observation::ControlPlaneResourceProjection {
-                    resource_type:
-                        crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE
-                            .to_string(),
-                    resource_id: resource_id.to_string(),
-                    version: "v1".to_string(),
-                    state: "running".to_string(),
-                    aliases: vec!["legacy-alias".to_string()],
-                    eligibility: json!({}),
-                    provenance: json!({}),
-                };
-            store
-                .upsert_control_plane_resource_projection(&projection("loop:one"))
-                .expect("first alias");
-            assert!(store
-                .upsert_control_plane_resource_projection(&projection("loop:two"))
-                .is_err());
         });
     }
 
@@ -7757,7 +7663,7 @@ mod loop_control_plane_tests {
             };
             let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
                 method: homeboy_core::http_api::HttpMethod::Post,
-                path: format!("/v1/control-plane/runs/{loop_id}/actions"),
+                path: format!("/v1/control-plane/runs/{canonical}/actions"),
                 body: Some(serde_json::to_value(request).expect("action request")),
             })
             .expect("HTTP stop action");
@@ -7829,24 +7735,7 @@ mod loop_control_plane_tests {
                 )
                 .expect("exact projection")
                 .expect("exact projection exists");
-            assert_eq!(exact.aliases, vec![record.loop_id.clone()]);
-            assert!(observation
-                .control_plane_resource_projection(
-                    crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
-                    &record.loop_id,
-                )
-                .expect("projection")
-                .is_some());
-
-            let daemon_visible = homeboy_core::control_plane::run(
-                &homeboy_control_plane_contract::RunId::new(&record.loop_id).expect("alias id"),
-            )
-            .expect("alias read");
-            assert_eq!(daemon_visible.run, canonical);
-            assert_eq!(
-                daemon_visible.state,
-                homeboy_control_plane_contract::ControlPlaneRunState::Running
-            );
+            assert!(exact.aliases.is_empty());
 
             let effect = homeboy_core::control_plane::effect_status(
                 &canonical,
@@ -7863,7 +7752,7 @@ mod loop_control_plane_tests {
 
             let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
                 method: homeboy_core::http_api::HttpMethod::Get,
-                path: format!("/v1/control-plane/runs/{}", record.loop_id),
+                path: format!("/v1/control-plane/runs/{canonical}"),
                 body: None,
             })
             .expect("in-process HTTP read");
@@ -7891,7 +7780,7 @@ mod loop_control_plane_tests {
             let http_action =
                 homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
                     method: homeboy_core::http_api::HttpMethod::Post,
-                    path: format!("/v1/control-plane/runs/{}/actions", record.loop_id),
+                    path: format!("/v1/control-plane/runs/{canonical}/actions"),
                     body: Some(serde_json::to_value(&request).expect("action request")),
                 })
                 .expect("in-process HTTP action");

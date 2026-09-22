@@ -85,7 +85,7 @@ fn real_daemon_loop_restart_resumes_one_admitted_revolution() {
     });
     let response = post_json(
         port,
-        "/v1/control-plane/runs/real-loop-restart/actions",
+        "/v1/control-plane/runs/loop:real-loop-restart/actions",
         action,
     );
     assert_eq!(

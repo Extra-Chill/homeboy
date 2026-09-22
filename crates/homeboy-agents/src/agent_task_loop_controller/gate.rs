@@ -90,10 +90,6 @@ pub enum AgentTaskLoopGateStatus {
     Pending,
 }
 
-/// Backwards-compatible source alias for the old gate-result vocabulary.
-/// New policy, result, and diagnostic fields use `AgentTaskLoopGateStatus`.
-pub type AgentTaskGateBundleStatus = AgentTaskLoopGateStatus;
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskLoopTerminalStatus {

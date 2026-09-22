@@ -27,8 +27,8 @@ use homeboy::agents::agent_tasks::scheduler::SharedAgentTaskExecutor;
 use homeboy::core::config;
 use homeboy::core::proof::validate_proof_value;
 
+use homeboy::agents::agent_task_loop_controller::AgentTaskLoopPolicyAction;
 use homeboy::agents::agent_tasks::dispatch_service;
-use homeboy::agents::agent_tasks::loop_controller::AgentTaskLoopPolicyAction;
 
 use super::super::CmdResult;
 use super::args::{
@@ -109,9 +109,27 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
 fn controller_status_report_value(
     args: AgentTaskControllerStatusArgs,
 ) -> homeboy::core::Result<Value> {
-    let report = homeboy::agents::agent_task_loop_controller::loop_read(&args.loop_id)?;
+    let report =
+        homeboy::agents::agent_task_loop_controller::controller_status_report(&args.loop_id)?;
+    let resource_id =
+        homeboy::agents::agent_task_loop_controller::control_plane_run_id(&args.loop_id)?;
+    let resource = homeboy::core::control_plane::run(&resource_id)
+        .map_err(|error| homeboy::core::Error::internal_unexpected(error.message))?;
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "resource".to_string(),
+            serde_json::to_value(resource)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?,
+        );
+        object.insert(
+            "work".to_string(),
+            homeboy::agents::agent_task_loop_controller::loop_work_status(
+                &object["controller"]["metadata"],
+            ),
+        );
+    }
     if args.spec.is_some()
         || args.dispatch.dispatch_backend.is_some()
         || args.dispatch.dispatch_selector.is_some()
@@ -284,14 +302,27 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
 }
 
 fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let report = homeboy::agents::agent_task_loop_controller::loop_read(&args.loop_id)?;
+    let report =
+        homeboy::agents::agent_task_loop_controller::controller_status_report(&args.loop_id)?;
+    let report = serde_json::to_value(report)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let resource_id =
+        homeboy::agents::agent_task_loop_controller::control_plane_run_id(&args.loop_id)?;
+    let resource = homeboy::core::control_plane::run(&resource_id)
+        .map_err(|error| homeboy::core::Error::internal_unexpected(error.message))?;
+    let mut report = report;
+    report["resource"] = serde_json::to_value(resource)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    report["work"] = homeboy::agents::agent_task_loop_controller::loop_work_status(
+        &report["controller"]["metadata"],
+    );
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
             "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
-                &report.controller.metadata,
+                &report["controller"]["metadata"],
             ),
-            "work": report.work,
+            "work": report["work"],
             "status": report,
         }))?,
         0,
@@ -604,9 +635,8 @@ fn controller_run_from_spec_with_executor(
     let stopped_reason = resume_result.value.stopped_reason.clone();
     let results = resume_result.value.results;
 
-    let status = homeboy::agents::agent_tasks::loop_controller::controller_status_report(
-        &from_spec.loop_id,
-    )?;
+    let status =
+        homeboy::agents::agent_task_loop_controller::controller_status_report(&from_spec.loop_id)?;
 
     // On a terminal failure, normalize the nested provider/runtime failures into
     // a compact root-cause `failure_summary` with durable evidence refs so
