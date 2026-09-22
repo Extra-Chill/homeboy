@@ -5821,6 +5821,154 @@ mod loop_control_plane_tests {
     }
 
     #[test]
+    fn loop_stop_cancels_active_work_through_the_real_daemon_boundary() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let loop_id = "loop-active-stop";
+            let mut record = create_controller(loop_id, "repair", "v1").expect("created");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let submission =
+                crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &identity)
+                    .expect("build loop work submission");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let server = std::thread::spawn(move || {
+                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                    .expect("serve bounded daemon")
+            });
+            let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
+                .expect("connect daemon");
+            let job = client.submit(submission).expect("submit work");
+            let job_id = job.id.to_string();
+            client.start(&job_id).expect("start work");
+            let active = client.status(&job_id).expect("active status");
+            assert!(matches!(active.status.as_str(), "queued" | "running"));
+            record.metadata["work_job"] = json!({
+                "schema": "homeboy/agent-task-loop-work-ref/v1",
+                "job_id": job_id,
+                "state": "running",
+            });
+            write_controller(&record).expect("persist work identity");
+
+            let (stopped, acknowledgement) =
+                stop_loop(loop_id, "active stop").expect("stop active loop");
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            for _ in 0..5 {
+                let _ = client.status(&job_id);
+            }
+            for _ in 0..100 {
+                if matches!(
+                    homeboy_core::process::process_identity_state(child.id(), None),
+                    homeboy_core::process::ProcessIdentityState::Dead
+                ) {
+                    let _ = child.wait();
+                    server.join().expect("join daemon");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            server.join().expect("join daemon");
+            panic!("active loop coordinator was not cancelled");
+        });
+    }
+
+    #[test]
+    fn loop_stop_cancels_active_work_through_http_action_boundary() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let loop_id = "loop-active-http-stop";
+            let mut record = create_controller(loop_id, "repair", "v1").expect("created");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let submission =
+                crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &identity)
+                    .expect("build loop work submission");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let server = std::thread::spawn(move || {
+                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                    .expect("serve bounded daemon")
+            });
+            let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
+                .expect("connect daemon");
+            let job = client.submit(submission).expect("submit work");
+            let job_id = job.id.to_string();
+            client.start(&job_id).expect("start work");
+            let _ = client.status(&job_id).expect("active status");
+            record.metadata["work_job"] = json!({
+                "schema": "homeboy/agent-task-loop-work-ref/v1",
+                "job_id": job_id,
+                "state": "running",
+            });
+            write_controller(&record).expect("persist work identity");
+            let canonical = control_plane_run_id(loop_id).expect("canonical id");
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("loop-stop:{}:{}", canonical, record.updated_at),
+                actor: "homeboy-agent-task-loop".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "active HTTP stop" }),
+                },
+                confirmed: true,
+            };
+            let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Post,
+                path: format!("/v1/control-plane/runs/{loop_id}/actions"),
+                body: Some(serde_json::to_value(request).expect("action request")),
+            })
+            .expect("HTTP stop action");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body["resource"]["outcome"], "succeeded");
+            for _ in 0..5 {
+                let _ = client.status(&job_id);
+            }
+            for _ in 0..100 {
+                if matches!(
+                    homeboy_core::process::process_identity_state(child.id(), None),
+                    homeboy_core::process::ProcessIdentityState::Dead
+                ) {
+                    let _ = child.wait();
+                    server.join().expect("join daemon");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            server.join().expect("join daemon");
+            panic!("active loop coordinator was not cancelled through HTTP");
+        });
+    }
+
+    #[test]
     fn loop_runtime_stop_marker_is_owned_by_the_loop_service() {
         let mut metadata = json!({ "runtime": { "revolutions": 2 } });
         stamp_loop_runtime_metadata(&mut metadata, false, Some(3), false).expect("marker");

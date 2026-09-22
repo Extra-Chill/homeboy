@@ -1493,6 +1493,73 @@ mod tests {
     }
 
     #[test]
+    fn loop_stop_cli_adapter_cancels_active_work_through_the_daemon() {
+        with_isolated_home(|_| {
+            homeboy::agents::orchestration::register();
+            homeboy::agents::agent_task_service::register_work_job_driver();
+            homeboy::agents::agent_task_service::register_loop_work_job_handler();
+            let loop_id = "loop-active-cli-stop";
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("created");
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn coordinator fixture");
+            let identity = homeboy::core::process::process_start_identity(child.id())
+                .expect("inspect fixture")
+                .expect("fixture identity");
+            let submission = homeboy::agents::agent_task_service::loop_work_job_submission(
+                loop_id,
+                child.id(),
+                &identity,
+            )
+            .expect("build loop work submission");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let server = std::thread::spawn(move || {
+                homeboy::core::daemon::serve_listener_for_requests(listener, 10)
+                    .expect("serve bounded daemon")
+            });
+            let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()
+                .expect("connect daemon");
+            let job = client.submit(submission).expect("submit work");
+            let job_id = job.id.to_string();
+            client.start(&job_id).expect("start work");
+            let _ = client.status(&job_id).expect("active status");
+            record.metadata["work_job"] = serde_json::json!({
+                "schema": "homeboy/agent-task-loop-work-ref/v1",
+                "job_id": job_id,
+                "state": "running",
+            });
+            agent_task_loop_controller::write_controller(&record).expect("persist work identity");
+
+            let (value, exit_code) = loop_stop(AgentTaskLoopStatusArgs {
+                loop_id: loop_id.to_string(),
+            })
+            .expect("CLI stop");
+            assert_eq!(exit_code, 0);
+            assert_eq!(value["on"], false);
+            for _ in 0..5 {
+                let _ = client.status(&job_id);
+            }
+            for _ in 0..100 {
+                if matches!(
+                    homeboy::core::process::process_identity_state(child.id(), None),
+                    homeboy::core::process::ProcessIdentityState::Dead
+                ) {
+                    let _ = child.wait();
+                    server.join().expect("join daemon");
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = homeboy::core::process::terminate_process_tree(child.id());
+            let _ = child.wait();
+            server.join().expect("join daemon");
+            panic!("active loop coordinator was not cancelled through CLI");
+        });
+    }
+
+    #[test]
     fn controller_dispatch_defaults_apply_provider_config_when_missing() {
         let command = ControllerDispatchDefaults {
             backend: Some("ignored-backend".to_string()),
