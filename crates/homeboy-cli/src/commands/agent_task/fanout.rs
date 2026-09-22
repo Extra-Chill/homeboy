@@ -881,6 +881,21 @@ fn persist_fanout_run_batch_record(
             run_id: cook.run_id(),
         })
         .collect::<Vec<_>>();
+    let provider_catalog_ref = batch::read_batch_record(&plan.fanout_id)
+        .ok()
+        .and_then(|record| {
+            record.metadata["execution_authority"]["provider_catalog_ref"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            let catalog = AgentTaskProviderCatalog::discover();
+            homeboy::agents::orchestration::persist_fanout_resume_authority(
+                &plan.fanout_id,
+                &catalog,
+            )
+        })?;
     let record = batch::persist_fanout_run_batch(
         &plan.fanout_id,
         &plan.fanout_id,
@@ -895,6 +910,10 @@ fn persist_fanout_run_batch_record(
             "declared_trackers": plan.cooks.iter().filter_map(|cook| {
                 cook.task_url.as_ref().map(|tracker| (cook.cook_id.clone(), tracker.clone()))
             }).collect::<BTreeMap<_, _>>(),
+            "execution_authority": {
+                "schema": "homeboy/fanout-execution-authority/v1",
+                "provider_catalog_ref": provider_catalog_ref,
+            },
         }),
     )?;
     Ok(record.state != batch::AgentTaskBatchState::Planning)

@@ -629,13 +629,44 @@ pub(crate) fn register_startup_providers_before_reconcile() {
 /// Takes the agent-task config rather than loading it so the completeness test
 /// can drive the full registration sequence without touching the ambient home
 /// directory.
-fn fanout_resume_execution_context() -> homeboy::core::Result<(
+fn fanout_resume_execution_context(
+    authority: &serde_json::Value,
+) -> homeboy::core::Result<(
     homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
     homeboy::agents::orchestration::FanoutResumeDispatcherFactory,
 )> {
+    let reference = authority
+        .get("provider_catalog_ref")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "fanout.execution_authority",
+                "fanout resume authority is missing its private provider catalog reference",
+                None,
+                None,
+            )
+        })?;
+    let data_root = homeboy::core::paths::homeboy_data()?;
+    let path = std::path::Path::new(reference);
+    if !path.starts_with(&data_root) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "fanout resume authority reference is outside the Homeboy private data root",
+            None,
+            None,
+        ));
+    }
+    let catalog: homeboy::agents::agent_task_provider::AgentTaskProviderCatalog =
+        serde_json::from_slice(&std::fs::read(path).map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(reference.to_string()))
+        })?)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     Ok((
         std::sync::Arc::new(
-            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(
+                catalog,
+            ),
         ),
         crate::commands::route::reconstruct_cook_attempt_dispatcher,
     ))

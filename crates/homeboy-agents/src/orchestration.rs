@@ -100,7 +100,9 @@ pub type FanoutResumeDispatcherFactory = fn(
     Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
 >;
 
-pub type FanoutResumeExecutionContextFactory = fn() -> homeboy_core::Result<(
+pub type FanoutResumeExecutionContextFactory = fn(
+    &Value,
+) -> homeboy_core::Result<(
     crate::agent_task_scheduler::SharedAgentTaskExecutor,
     FanoutResumeDispatcherFactory,
 )>;
@@ -114,6 +116,25 @@ pub fn register_fanout_resume_context(factory: FanoutResumeExecutionContextFacto
         .get_or_init(|| RwLock::new(None))
         .write()
         .expect("fanout resume context registry poisoned") = Some(factory);
+}
+
+/// Persist the admitted provider catalog as private resume authority. The
+/// batch record stores only this reference; recipes retain the selected
+/// provider/account/config inputs used by each child.
+pub fn persist_fanout_resume_authority(
+    batch_id: &str,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> homeboy_core::Result<String> {
+    let root = homeboy_core::paths::homeboy_data()?.join("fanout-resume-authority");
+    std::fs::create_dir_all(&root).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(root.display().to_string()))
+    })?;
+    let path = root.join(format!(
+        "{}.json",
+        homeboy_core::paths::sanitize_path_segment(batch_id)
+    ));
+    homeboy_core::engine::local_files::write_json_file_owner_only(&path, catalog)?;
+    Ok(path.display().to_string())
 }
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -140,7 +161,9 @@ mod fanout_batch_read_tests {
 
     static MISSING_RECEIPT_CONTEXT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-    fn unexpected_resume_context() -> homeboy_core::Result<(
+    fn unexpected_resume_context(
+        _authority: &serde_json::Value,
+    ) -> homeboy_core::Result<(
         crate::agent_task_scheduler::SharedAgentTaskExecutor,
         super::FanoutResumeDispatcherFactory,
     )> {
@@ -181,6 +204,29 @@ mod fanout_batch_read_tests {
                 "missing child is not invented"
             );
             assert_eq!(before, fs::read(path).expect("batch bytes after read"));
+        });
+    }
+
+    #[test]
+    fn fanout_resume_context_rejects_ambient_discovery_without_admitted_authority() {
+        let error = match super::FanoutBatchActionDelegate::context(&serde_json::Value::Null) {
+            Ok(_) => panic!("resume must not discover daemon ambient context"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("execution authority is unavailable"));
+    }
+
+    #[test]
+    fn fanout_resume_authority_is_a_private_catalog_reference() {
+        with_isolated_home(|_| {
+            let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::default();
+            let reference = super::persist_fanout_resume_authority("caller-a", &catalog)
+                .expect("persist private authority");
+            let bytes = std::fs::read(&reference).expect("read private authority");
+            let restored: crate::agent_task_provider::AgentTaskProviderCatalog =
+                serde_json::from_slice(&bytes).expect("catalog round trip");
+            assert_eq!(restored, catalog);
+            assert!(!reference.contains("secret"));
         });
     }
 
@@ -1103,13 +1149,20 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
 }
 
 impl FanoutBatchActionDelegate {
-    fn context() -> Result<
+    fn context(
+        authority: &Value,
+    ) -> Result<
         (
             crate::agent_task_scheduler::SharedAgentTaskExecutor,
             FanoutResumeDispatcherFactory,
         ),
         ControlPlaneError,
     > {
+        if !authority.is_object() {
+            return Err(ControlPlaneError::unavailable(
+                "fanout resume execution authority is unavailable; re-run the fanout with an admitted caller context",
+            ));
+        }
         let factory = FANOUT_RESUME_CONTEXT_FACTORY
             .get_or_init(|| RwLock::new(None))
             .read()
@@ -1121,7 +1174,7 @@ impl FanoutBatchActionDelegate {
                     "fanout resume execution context is not registered for this runtime",
                 )
             })?;
-        factory().map_err(|error| ControlPlaneError::unavailable(error.message))
+        factory(authority).map_err(|error| ControlPlaneError::unavailable(error.message))
     }
 
     fn stored_resume_receipt(
@@ -1329,10 +1382,22 @@ impl FanoutBatchActionDelegate {
         let batch_id = run.id.as_str();
         match request.action {
             ControlPlaneAction::Resume => {
-                let (executor, dispatcher) = Self::context()?;
-                let result =
-                    crate::agent_task_service::resume_cook_batch(batch_id, executor, dispatcher)
-                        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let batch = AgentTaskBatchStore::from_current_data_root()
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?
+                    .read_batch_record(batch_id)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let authority = batch.metadata.get("execution_authority").ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume execution authority for `{batch_id}` is unavailable; the batch was not admitted with a caller context"
+                    ))
+                })?;
+                let (executor, dispatcher) = Self::context(authority)?;
+                let result = crate::agent_task_service::resume_cook_batch(
+                    batch_id,
+                    executor.clone(),
+                    dispatcher,
+                )
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let outcome = if result.exit_code == 0 {
                     ControlPlaneActionOutcome::Succeeded
                 } else {
@@ -1354,7 +1419,6 @@ impl FanoutBatchActionDelegate {
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let mut action_result = action_result;
                 if action_result.outcome == ControlPlaneActionOutcome::Succeeded {
-                    let (executor, dispatcher) = Self::context()?;
                     let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
                         executor,
                         dispatcher,

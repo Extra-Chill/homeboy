@@ -21959,7 +21959,9 @@ fn test_reconstruct_dispatcher(
     }
 }
 
-fn test_resume_context() -> homeboy_core::Result<(
+fn test_resume_context(
+    _authority: &Value,
+) -> homeboy_core::Result<(
     crate::agent_task_scheduler::SharedAgentTaskExecutor,
     crate::orchestration::FanoutResumeDispatcherFactory,
 )> {
@@ -22121,7 +22123,9 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
                     run_id: child_partial.clone(),
                 },
             ],
-            Value::Null,
+            serde_json::json!({
+                "execution_authority": {"schema": "test/fanout-execution-authority/v1"}
+            }),
         )
         .expect("persist batch record");
 
