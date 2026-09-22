@@ -559,8 +559,19 @@ fn submit_fanout_batch(
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> CmdResult<Value> {
     let batch_service =
-        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment()?;
-    let (report, _child_runs) = batch_service.status(&args.batch_id)?;
+        homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
+    let requested =
+        homeboy_control_plane_contract::RunId::new(&args.batch_id).map_err(|error| {
+            Error::validation_invalid_argument(
+                "batch_id",
+                error.to_string(),
+                Some(args.batch_id.clone()),
+                None,
+            )
+        })?;
+    let canonical = homeboy::core::control_plane::run(&requested)
+        .map_err(homeboy::agents::orchestration::control_plane_error_to_homeboy)?;
+    let projection = batch_service.status_adjunct(&canonical)?;
     // A terminal coordinator failure is the authoritative outcome even when it
     // happened before the first child record existed. Reconciling children first
     // would turn that diagnostic into a misleading "run record not found".
@@ -571,7 +582,9 @@ fn batch_status(args: AgentTaskFanoutBatchStatusArgs, placement: Placement) -> C
     // envelope's success/exit_code.
     // The mutating `resume` command keeps the aggregate exit policy, and
     // durable reconciliation / child continuation stay limited to it.
-    let portfolio = batch_service.durable_portfolio_status(&report.batch);
+    let portfolio =
+        batch_service.durable_portfolio_status(&projection.status.batch, &projection.children)?;
+    let report = projection.status;
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-fanout-status/v2",
@@ -1640,9 +1653,20 @@ fn batch_resume_result(
 
 fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
     let service =
-        homeboy::agents::orchestration::FanoutBatchReadService::from_current_environment()?;
-    let (report, _child_runs) = service.artifacts(&args.batch_id)?;
-    Ok((command_json_value(report)?, 0))
+        homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
+    let requested =
+        homeboy_control_plane_contract::RunId::new(&args.batch_id).map_err(|error| {
+            Error::validation_invalid_argument(
+                "batch_id",
+                error.to_string(),
+                Some(args.batch_id.clone()),
+                None,
+            )
+        })?;
+    let canonical = homeboy::core::control_plane::run(&requested)
+        .map_err(homeboy::agents::orchestration::control_plane_error_to_homeboy)?;
+    let projection = service.artifacts_adjunct(&canonical)?;
+    Ok((command_json_value(projection.artifacts)?, 0))
 }
 
 fn run_batch_cook_fanout(

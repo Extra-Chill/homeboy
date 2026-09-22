@@ -56,8 +56,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::agent_task_batch::{
-    AgentTaskBatchArtifactsReport, AgentTaskBatchRecord, AgentTaskBatchStatusReport,
-    AgentTaskBatchStore,
+    AgentTaskBatchArtifactsReport, AgentTaskBatchChildIssue, AgentTaskBatchRecord,
+    AgentTaskBatchStatusReport, AgentTaskBatchStore,
 };
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
@@ -99,7 +99,7 @@ pub struct RunSnapshot {
 
 #[cfg(test)]
 mod fanout_batch_read_tests {
-    use super::FanoutBatchReadService;
+    use super::FanoutBatchDomainService;
     use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
@@ -108,6 +108,7 @@ mod fanout_batch_read_tests {
     #[test]
     fn batch_status_is_read_only_and_uses_the_durable_roster() {
         with_isolated_home(|_| {
+            super::register();
             let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
             store
                 .persist_fanout_run_batch(
@@ -123,12 +124,97 @@ mod fanout_batch_read_tests {
             let path = store.batch_path("read-only-batch");
             let before = fs::read(&path).expect("batch bytes before read");
 
-            let service = FanoutBatchReadService::from_current_environment().expect("service");
-            let (report, children) = service.status("read-only-batch").expect("status");
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let requested =
+                homeboy_control_plane_contract::RunId::new("read-only-batch").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("canonical batch");
+            let projection = service.status_adjunct(&canonical).expect("status");
 
-            assert_eq!(report.batch.child_runs.len(), 1);
-            assert!(children.is_empty(), "missing child is not invented");
+            assert_eq!(projection.status.batch.child_runs.len(), 1);
+            assert!(
+                projection.children.is_empty(),
+                "missing child is not invented"
+            );
             assert_eq!(before, fs::read(path).expect("batch bytes after read"));
+        });
+    }
+
+    #[test]
+    fn canonical_batch_projection_keeps_existing_terminal_child_and_tolerates_missing_child() {
+        with_isolated_home(|_| {
+            super::register();
+            let batch_store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let lifecycle =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+            let existing = "batch-parity-existing";
+            let record: crate::agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": existing,
+                "plan_id": "batch-parity",
+                "state": "succeeded",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "artifact_refs": [{"task_id": "child", "kind": "result", "uri": "homeboy://artifact/child"}],
+                "metadata": {"batch_id": "batch-parity"}
+            }))
+            .expect("child record");
+            lifecycle.write_record(&record).expect("write child");
+            batch_store
+                .persist_fanout_run_batch(
+                    "batch-parity",
+                    "batch-parity",
+                    &[
+                        FanoutRunBatchChild {
+                            task_id: "child".to_string(),
+                            run_id: existing.to_string(),
+                        },
+                        FanoutRunBatchChild {
+                            task_id: "missing".to_string(),
+                            run_id: "batch-parity-missing".to_string(),
+                        },
+                    ],
+                    json!({}),
+                )
+                .expect("persist batch");
+            batch_store
+                .mutate_batch("batch-parity", |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    Ok(())
+                })
+                .expect("terminalize batch");
+
+            let requested =
+                homeboy_control_plane_contract::RunId::new("batch-parity").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("batch resource");
+            assert_eq!(
+                canonical.state,
+                homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+            );
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: "/v1/control-plane/runs/batch-parity".to_string(),
+                body: None,
+            })
+            .expect("HTTP batch resource");
+            assert_eq!(http.status, 200);
+            assert_eq!(http.body["resource"]["run"], "batch-parity");
+            assert_eq!(http.body["resource"]["state"], "succeeded");
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let projection = service.status_adjunct(&canonical).expect("status adjunct");
+            assert_eq!(projection.children.len(), 1);
+            assert_eq!(projection.status.totals.succeeded, 1);
+            assert_eq!(projection.status.admission.admitted, 1);
+
+            let artifacts = service
+                .artifacts_adjunct(&canonical)
+                .expect("artifacts adjunct");
+            assert_eq!(artifacts.artifacts.batch_id, "batch-parity");
+            assert!(artifacts
+                .artifacts
+                .unavailable_child_runs
+                .iter()
+                .any(|child| child.run_id == "batch-parity-missing"));
         });
     }
 }
@@ -638,31 +724,45 @@ impl<L: RunLookup> OrchestrationService<L> {
     }
 }
 
-/// Agent-owned read facade for a durable fanout. The batch record is a domain
-/// adjunct; every child lifecycle resource is still projected through the
-/// canonical control-plane run service. This facade is deliberately read-only:
-/// it does not expire admission, reconcile PR state, or write a projection.
-pub struct FanoutBatchReadService {
+/// Agent-owned domain adjunct for a canonical fanout run resource. The
+/// control-plane provider owns the batch `ControlPlaneRun`; this service adds
+/// the persisted batch envelope and child relationships without creating a
+/// second resource protocol.
+pub struct FanoutBatchDomainService {
     batch_store: AgentTaskBatchStore,
     lifecycle: AgentTaskLifecycleStore,
 }
 
-impl FanoutBatchReadService {
+pub struct FanoutBatchDomainProjection {
+    pub status: AgentTaskBatchStatusReport,
+    pub children: BTreeMap<String, ControlPlaneRun>,
+    pub child_read_errors: BTreeMap<String, String>,
+}
+
+pub struct FanoutBatchArtifactsProjection {
+    pub artifacts: AgentTaskBatchArtifactsReport,
+    pub children: BTreeMap<String, ControlPlaneRun>,
+    pub child_read_errors: BTreeMap<String, String>,
+}
+
+impl FanoutBatchDomainService {
     pub fn from_current_environment() -> homeboy_core::Result<Self> {
+        // The in-process CLI uses the same provider route as HTTP. Registration
+        // is idempotent and also keeps isolated callers from falling back to
+        // the no-op provider during tests or embedded invocation.
+        register();
         Ok(Self {
             batch_store: AgentTaskBatchStore::from_current_data_root()?,
             lifecycle: AgentTaskLifecycleStore::from_current_environment()?,
         })
     }
 
-    pub fn status(
+    pub fn status_adjunct(
         &self,
-        batch_id: &str,
-    ) -> homeboy_core::Result<(
-        AgentTaskBatchStatusReport,
-        BTreeMap<String, ControlPlaneRun>,
-    )> {
-        let report = self.batch_store.status_with(
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<FanoutBatchDomainProjection> {
+        let batch_id = canonical.run.as_str();
+        let mut report = self.batch_store.status_readonly_with(
             batch_id,
             |run_id| crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id),
             |run_id| {
@@ -678,66 +778,80 @@ impl FanoutBatchReadService {
                 )
             },
         )?;
-        let children = self.canonical_children(&report.batch)?;
-        Ok((report, children))
+        let (children, child_read_errors) = self.canonical_children(&report.batch)?;
+        append_child_read_errors(&mut report, &child_read_errors);
+        Ok(FanoutBatchDomainProjection {
+            status: report,
+            children,
+            child_read_errors,
+        })
     }
 
-    pub fn artifacts(
+    pub fn artifacts_adjunct(
         &self,
-        batch_id: &str,
-    ) -> homeboy_core::Result<(
-        AgentTaskBatchArtifactsReport,
-        BTreeMap<String, ControlPlaneRun>,
-    )> {
-        let report = crate::agent_task_batch::artifacts_in_store(
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<FanoutBatchArtifactsProjection> {
+        let batch_id = canonical.run.as_str();
+        let mut report = crate::agent_task_batch::artifacts_in_store(
             &self.batch_store,
             &self.lifecycle,
             batch_id,
         )?;
         let batch = self.batch_store.read_batch_record(batch_id)?;
-        let children = self.canonical_children(&batch)?;
-        Ok((report, children))
+        let (children, child_read_errors) = self.canonical_children(&batch)?;
+        append_artifact_read_errors(&mut report, &batch, &child_read_errors);
+        Ok(FanoutBatchArtifactsProjection {
+            artifacts: report,
+            children,
+            child_read_errors,
+        })
     }
 
-    pub fn child_run_exists(&self, run_id: &str) -> bool {
-        let Ok(run_id) = RunId::new(run_id) else {
-            return false;
-        };
-        OrchestrationService::new(LifecycleStoreLookup::new(self.lifecycle.clone()))
-            .run(&run_id)
-            .is_ok()
+    pub fn child_run_exists(&self, run_id: &str) -> homeboy_core::Result<bool> {
+        let run_id = RunId::new(run_id).map_err(|error| {
+            homeboy_core::Error::validation_invalid_argument(
+                "run_id",
+                error.to_string(),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        match homeboy_core::control_plane::run(&run_id) {
+            Ok(_) => Ok(true),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(false),
+            Err(error) => Err(control_plane_error_to_homeboy(error)),
+        }
     }
 
-    pub fn child_placement_metadata(&self, run_id: &str) -> Option<Value> {
-        crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id)
-            .ok()
-            .map(|record| record.metadata)
+    pub fn child_placement_metadata(&self, run_id: &str) -> homeboy_core::Result<Option<Value>> {
+        match crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id) {
+            Ok(record) => Ok(Some(record.metadata)),
+            Err(error) if is_run_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Project only the persisted portfolio snapshot. Live PR/Git observation
     /// belongs to resume or background supervision, never to a status read.
-    pub fn durable_portfolio_status(&self, batch: &AgentTaskBatchRecord) -> Value {
+    pub fn durable_portfolio_status(
+        &self,
+        batch: &AgentTaskBatchRecord,
+        children: &BTreeMap<String, ControlPlaneRun>,
+    ) -> homeboy_core::Result<Value> {
         match crate::agent_task_fanout_supervisor::read_portfolio(&batch.batch_id) {
-            Ok(portfolio) => {
-                serde_json::to_value(portfolio.status(&BTreeMap::new())).unwrap_or(Value::Null)
-            }
+            Ok(portfolio) => serde_json::to_value(portfolio.status(&self.portfolio_observations(
+                batch,
+                children,
+                Some(&portfolio),
+            )))
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None)),
             Err(_) => {
                 let portfolio = crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio::new(
                     batch.batch_id.clone(),
                     batch.child_runs.iter().map(|child| {
-                        let tracker_ref = self
-                            .child_placement_metadata(&child.run_id)
-                            .and_then(|metadata| {
-                                metadata
-                                    .get("declared_tracker")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            .or_else(|| {
-                                batch.metadata["declared_trackers"][&child.task_id]
-                                    .as_str()
-                                    .map(str::to_string)
-                            })
+                        let tracker_ref = batch.metadata["declared_trackers"][&child.task_id]
+                            .as_str()
+                            .map(str::to_string)
                             .unwrap_or_else(|| {
                                 format!("homeboy://agent-task/run/{}", child.run_id)
                             });
@@ -756,25 +870,175 @@ impl FanoutBatchReadService {
                         }
                     }),
                 );
-                serde_json::to_value(portfolio.status(&BTreeMap::new())).unwrap_or(Value::Null)
+                serde_json::to_value(
+                    portfolio.status(&self.portfolio_observations(batch, children, None)),
+                )
+                .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
             }
         }
+    }
+
+    fn portfolio_observations(
+        &self,
+        batch: &AgentTaskBatchRecord,
+        children: &BTreeMap<String, ControlPlaneRun>,
+        stored: Option<&crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio>,
+    ) -> BTreeMap<String, crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioObservation>
+    {
+        batch
+            .child_runs
+            .iter()
+            .map(|child| {
+                let resource = children.get(&child.run_id);
+                let tracker = if batch.metadata["declared_trackers"][&child.task_id].is_string() {
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved
+                } else {
+                    Default::default()
+                };
+                let provider = match resource.map(|resource| resource.state) {
+                    Some(ControlPlaneState::Succeeded) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Succeeded
+                    }
+                    Some(ControlPlaneState::Running) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Running
+                    }
+                    Some(ControlPlaneState::Failed | ControlPlaneState::Cancelled | ControlPlaneState::TimedOut) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Failed
+                    }
+                    _ => Default::default(),
+                };
+                let stored_child = stored.and_then(|portfolio| portfolio.children.get(&child.task_id));
+                (
+                    child.task_id.clone(),
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioObservation {
+                        child_id: child.task_id.clone(),
+                        tracker,
+                        provider,
+                        candidate: stored_child
+                            .map(|child| crate::agent_task_fanout_supervisor::AgentTaskFanoutCandidateState {
+                                source_sha: child.source_sha.clone(),
+                                base_sha: child.base_sha.clone(),
+                                head_sha: child.head_sha.clone(),
+                                ..Default::default()
+                            })
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
     }
 
     fn canonical_children(
         &self,
         batch: &AgentTaskBatchRecord,
-    ) -> homeboy_core::Result<BTreeMap<String, ControlPlaneRun>> {
-        let service = OrchestrationService::new(LifecycleStoreLookup::new(self.lifecycle.clone()));
-        let children = batch
-            .child_runs
+    ) -> homeboy_core::Result<(BTreeMap<String, ControlPlaneRun>, BTreeMap<String, String>)> {
+        let mut children = BTreeMap::new();
+        let mut child_read_errors = BTreeMap::new();
+        for child in &batch.child_runs {
+            let id = RunId::new(&child.run_id).map_err(|error| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "run_id",
+                    error.to_string(),
+                    Some(child.run_id.clone()),
+                    None,
+                )
+            })?;
+            match homeboy_core::control_plane::run(&id) {
+                Ok(run) => {
+                    children.insert(child.run_id.clone(), run);
+                }
+                Err(error) if error.class == ControlPlaneErrorClass::NotFound => {}
+                Err(error) if error.class == ControlPlaneErrorClass::Unavailable => {
+                    child_read_errors.insert(child.run_id.clone(), error.message);
+                }
+                Err(error) => return Err(control_plane_error_to_homeboy(error)),
+            }
+        }
+        Ok((children, child_read_errors))
+    }
+}
+
+fn append_child_read_errors(
+    report: &mut AgentTaskBatchStatusReport,
+    errors: &BTreeMap<String, String>,
+) {
+    for child in &report.batch.child_runs {
+        let Some(problem) = errors.get(&child.run_id) else {
+            continue;
+        };
+        if report
+            .unavailable_child_runs
             .iter()
-            .filter_map(|child| {
-                let id = RunId::new(&child.run_id).ok()?;
-                service.run(&id).ok().map(|run| (child.run_id.clone(), run))
-            })
-            .collect::<BTreeMap<_, _>>();
-        Ok(children)
+            .any(|issue| issue.run_id == child.run_id)
+        {
+            continue;
+        }
+        report
+            .unavailable_child_runs
+            .push(AgentTaskBatchChildIssue {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                last_known_state: Some(child.state),
+                status_command: child_status_command(&child.run_id),
+                artifacts_command: child_artifacts_command(&child.run_id),
+                problem: format!("canonical child resource unavailable: {problem}"),
+            });
+    }
+}
+
+fn append_artifact_read_errors(
+    report: &mut AgentTaskBatchArtifactsReport,
+    batch: &AgentTaskBatchRecord,
+    errors: &BTreeMap<String, String>,
+) {
+    for child in &batch.child_runs {
+        let Some(problem) = errors.get(&child.run_id) else {
+            continue;
+        };
+        if report
+            .unavailable_child_runs
+            .iter()
+            .any(|issue| issue.run_id == child.run_id)
+        {
+            continue;
+        }
+        report
+            .unavailable_child_runs
+            .push(AgentTaskBatchChildIssue {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                last_known_state: Some(child.state),
+                status_command: child_status_command(&child.run_id),
+                artifacts_command: child_artifacts_command(&child.run_id),
+                problem: format!("canonical child resource unavailable: {problem}"),
+            });
+    }
+}
+
+fn child_status_command(run_id: &str) -> String {
+    format!("homeboy agent-task status {run_id}")
+}
+
+fn child_artifacts_command(run_id: &str) -> String {
+    format!("homeboy agent-task artifacts {run_id}")
+}
+
+pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core::Error {
+    match error.class {
+        ControlPlaneErrorClass::InvalidArgument | ControlPlaneErrorClass::CursorExpired => {
+            homeboy_core::Error::validation_invalid_argument(
+                "control_plane",
+                error.message,
+                None,
+                None,
+            )
+        }
+        ControlPlaneErrorClass::NotFound
+        | ControlPlaneErrorClass::Unavailable
+        | ControlPlaneErrorClass::Unknown => {
+            homeboy_core::Error::internal_unexpected(error.message)
+        }
     }
 }
 
@@ -5209,6 +5473,44 @@ fn generic_observation_execution(
     })
 }
 
+fn batch_resource_from_current_environment(
+    requested_id: &RunId,
+) -> Result<Option<ControlPlaneRun>, ControlPlaneError> {
+    let store = AgentTaskBatchStore::from_current_data_root()
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let path = store.batch_path(requested_id.as_str());
+    if !path.exists() {
+        return Ok(None);
+    }
+    let batch = store
+        .read_batch_record(requested_id.as_str())
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let run = RunId::new(&batch.batch_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let mut resource = ControlPlaneRun::new(run);
+    resource.state = match batch.state {
+        crate::agent_task_batch::AgentTaskBatchState::Planning
+        | crate::agent_task_batch::AgentTaskBatchState::Admitting
+        | crate::agent_task_batch::AgentTaskBatchState::Queued => ControlPlaneState::Queued,
+        crate::agent_task_batch::AgentTaskBatchState::Running => ControlPlaneState::Running,
+        crate::agent_task_batch::AgentTaskBatchState::Succeeded => ControlPlaneState::Succeeded,
+        crate::agent_task_batch::AgentTaskBatchState::PartialFailure => {
+            ControlPlaneState::PartialFailure
+        }
+        crate::agent_task_batch::AgentTaskBatchState::Failed => ControlPlaneState::Failed,
+        crate::agent_task_batch::AgentTaskBatchState::Cancelled => ControlPlaneState::Cancelled,
+        crate::agent_task_batch::AgentTaskBatchState::TimedOut => ControlPlaneState::TimedOut,
+    };
+    resource.phase = Some("fanout_batch".to_string());
+    resource.owner = Some(ControlPlaneOwner {
+        kind: "agent-task-fanout".to_string(),
+        id: batch.batch_id,
+    });
+    resource.created_at = batch.submitted_at;
+    resource.updated_at = batch.updated_at;
+    Ok(Some(resource))
+}
+
 struct RegisteredProvider;
 
 impl ControlPlaneProvider for RegisteredProvider {
@@ -5247,6 +5549,9 @@ impl ControlPlaneProvider for RegisteredProvider {
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+        if let Some(batch) = batch_resource_from_current_environment(requested_id)? {
+            return Ok(batch);
+        }
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         let observation = store
@@ -7971,22 +8276,26 @@ mod tests {
                 first
             );
             let durable_events = service.events(&run, None).expect("durable action events");
+            let action_events = durable_events
+                .events
+                .iter()
+                .filter(|event| event.kind.starts_with("action."))
+                .collect::<Vec<_>>();
             assert_eq!(
-                durable_events
-                    .events
+                action_events
                     .iter()
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
                 vec!["action.accepted", "action.already_satisfied"]
             );
-            assert_eq!(durable_events.events[0].data["actor"], "test");
-            assert_eq!(durable_events.events[0].data["confirmed"], true);
+            assert_eq!(action_events[0].data["actor"], "test");
+            assert_eq!(action_events[0].data["confirmed"], true);
             assert_eq!(
-                durable_events.events[0].data["expected_updated_at"],
+                action_events[0].data["expected_updated_at"],
                 "2026-01-01T00:01:00Z"
             );
             assert_eq!(
-                durable_events.events[0].data["acknowledgement"],
+                action_events[0].data["acknowledgement"],
                 first.acknowledgement
             );
             let logs =
@@ -8015,7 +8324,9 @@ mod tests {
                     .events(&run, None)
                     .expect("conflict does not append events")
                     .events
-                    .len(),
+                    .iter()
+                    .filter(|event| event.kind.starts_with("action."))
+                    .count(),
                 2
             );
 
@@ -8035,7 +8346,9 @@ mod tests {
                     .events(&run, None)
                     .expect("stale fence does not append events")
                     .events
-                    .len(),
+                    .iter()
+                    .filter(|event| event.kind.starts_with("action."))
+                    .count(),
                 2
             );
 

@@ -1398,6 +1398,7 @@ mod tests {
         self, AgentTaskLoopControllerState, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
     };
     use homeboy::core::test_support::with_isolated_home;
+    use std::time::Duration;
 
     #[test]
     fn controller_doctor_checks_never_compare_the_backend_name_by_string() {
@@ -1443,9 +1444,9 @@ mod tests {
             });
             agent_task_loop_controller::write_controller(&record).expect("persist wait");
 
-            let (_, exit_code) = run_loop_coordinator(
+            let (_, exit_code) = controller_run_next_with_executor(
                 "loop-timeout".to_string(),
-                ControllerDispatchDefaults::default(),
+                Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
             )
             .expect("coordinator reconciles deadline");
 

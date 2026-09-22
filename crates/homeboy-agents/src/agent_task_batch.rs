@@ -696,7 +696,7 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn reconcile_status_in_store<S, P, E>(
+fn project_status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
@@ -1212,7 +1212,7 @@ pub fn artifacts_in_store(
     // projection-readiness probes are the ambient `persisted_status` and
     // `terminal_artifact_projection_readiness_bounded`. Naming their rooted
     // siblings here is what keeps the whole report in one home.
-    let report = reconcile_status_in_store(
+    let report = project_status_in_store(
         store,
         batch_id,
         |run_id| agent_task_lifecycle::status_in_store(lifecycle_store, run_id),
@@ -1630,7 +1630,31 @@ impl AgentTaskBatchStore {
         P: FnMut(&str) -> Result<Option<String>>,
         E: FnMut(&str) -> Result<bool>,
     {
-        reconcile_status_in_store(
+        project_status_in_store(
+            self,
+            batch_id,
+            child_status,
+            projection_readiness,
+            lifecycle_record_exists,
+        )
+    }
+
+    /// Read the durable batch projection without admission expiry or any
+    /// ambient-store lookup. Domain adapters use this after resolving the
+    /// canonical control-plane batch resource.
+    pub fn status_readonly_with<S, P, E>(
+        &self,
+        batch_id: &str,
+        child_status: S,
+        projection_readiness: P,
+        lifecycle_record_exists: E,
+    ) -> Result<AgentTaskBatchStatusReport>
+    where
+        S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
+        P: FnMut(&str) -> Result<Option<String>>,
+        E: FnMut(&str) -> Result<bool>,
+    {
+        project_status_in_store(
             self,
             batch_id,
             child_status,
