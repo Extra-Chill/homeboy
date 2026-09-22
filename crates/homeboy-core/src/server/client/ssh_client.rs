@@ -313,6 +313,11 @@ impl SshClient {
         if let Some(identity_file) = &self.identity_file {
             args.push("-i".to_string());
             args.push(identity_file.clone());
+            // A configured identity is the identity. Without this, ssh still
+            // walks every key the agent holds before reaching -i, and an agent
+            // with as many keys as the server's MaxAuthTries (6 by default)
+            // exhausts the budget first: the host is reachable and the key is
+            // correct, but authentication never gets to try it (#14881).
             args.push("-o".to_string());
             args.push("IdentitiesOnly=yes".to_string());
         }
@@ -353,6 +358,11 @@ impl SshClient {
         if let Some(identity_file) = &self.identity_file {
             args.push("-i".to_string());
             args.push(identity_file.clone());
+            // A configured identity is the identity. Without this, ssh still
+            // walks every key the agent holds before reaching -i, and an agent
+            // with as many keys as the server's MaxAuthTries (6 by default)
+            // exhausts the budget first: the host is reachable and the key is
+            // correct, but authentication never gets to try it (#14881).
             args.push("-o".to_string());
             args.push("IdentitiesOnly=yes".to_string());
         }
@@ -1157,6 +1167,45 @@ mod bounded_probe_tests {
         assert!(args.contains(&"ControlMaster=no".to_string()));
         assert!(args.contains(&"ControlPath=none".to_string()));
         assert!(!args.iter().any(|arg| arg.contains("/tmp/homeboy-control")));
+    }
+
+    /// A configured identity must be the only identity offered.
+    ///
+    /// Without `IdentitiesOnly=yes`, ssh presents every key the agent holds
+    /// before reaching `-i`. An agent carrying as many keys as the server's
+    /// `MaxAuthTries` (6 by default) exhausts the budget first, so a reachable
+    /// host with a correct configured key still fails to authenticate, and the
+    /// failure surfaces far away as an unrelated command timeout (#14881).
+    #[test]
+    fn a_configured_identity_file_is_the_only_identity_offered() {
+        let mut client = localhost_client();
+        client.is_local = false;
+        client.identity_file = Some("/home/operator/.ssh/id_ed25519".to_string());
+
+        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
+
+        let identity_position = args
+            .iter()
+            .position(|arg| arg == "/home/operator/.ssh/id_ed25519")
+            .expect("configured identity file is passed to ssh");
+        assert_eq!(args[identity_position - 1], "-i");
+        assert!(
+            args.contains(&"IdentitiesOnly=yes".to_string()),
+            "a configured identity must not be racing the agent's other keys: {args:?}"
+        );
+    }
+
+    /// No configured identity means agent-based auth, which must stay untouched.
+    #[test]
+    fn agent_auth_is_left_alone_when_no_identity_file_is_configured() {
+        let mut client = localhost_client();
+        client.is_local = false;
+        client.identity_file = None;
+
+        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
+
+        assert!(!args.contains(&"-i".to_string()));
+        assert!(!args.contains(&"IdentitiesOnly=yes".to_string()));
     }
 }
 

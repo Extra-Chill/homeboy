@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.4] - 2026-09-22
+
+### Changed
+- stop hanging by not asking the cheap question through the expensive path
+
+### Fixed
+- stop a non-deterministic deadline test from gating releases
+- select inline test modules beside their source
+- serialize subtree output as a tagged object
+- keep the real error in failure diagnostics
+- stop gating deploy on undeclared-need extensions
+
 ## [0.383.3] - 2026-09-21
 
 ### Fixed
