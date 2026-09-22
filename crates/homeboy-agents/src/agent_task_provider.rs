@@ -59,6 +59,7 @@ mod runtime_tool_resolution;
 mod runtime_types;
 mod secret_types;
 mod secrets;
+pub(crate) use secrets::provider_secret_env_plan;
 pub mod structured_error;
 mod types;
 mod usage_cap;

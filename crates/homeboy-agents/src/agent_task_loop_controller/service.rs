@@ -265,8 +265,13 @@ fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value
         dispatch_defaults,
         provider_catalog,
     )?;
+    #[cfg(test)]
+    if let Some(admitter) = TEST_LOOP_WORK_ADMITTER.with(|slot| slot.borrow().clone()) {
+        return admitter(loop_id, generation, submission);
+    }
     let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?;
-    let job = client.submit(submission)?;
+    let submitted = client.submit_with_disposition(submission)?;
+    let job = submitted.job;
     let job_id = job.id.to_string();
     persist_loop_work_identity(loop_id, &job_id)?;
     client.start(&job_id)?;
@@ -275,7 +280,32 @@ fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value
         "loop_id": loop_id,
         "job_id": job_id,
         "state": "submitted",
+        "admission": match submitted.disposition {
+            homeboy_core::daemon::ControllerJobSubmissionDisposition::Created => "created",
+            homeboy_core::daemon::ControllerJobSubmissionDisposition::Reused => "reused",
+            homeboy_core::daemon::ControllerJobSubmissionDisposition::Unknown => "unknown",
+        },
     }))
+}
+
+#[cfg(test)]
+type TestLoopWorkAdmitter = fn(&str, &str, Value) -> Result<Value>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOOP_WORK_ADMITTER: std::cell::RefCell<Option<TestLoopWorkAdmitter>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_loop_work_admitter<T>(
+    admitter: TestLoopWorkAdmitter,
+    body: impl FnOnce() -> T,
+) -> T {
+    TEST_LOOP_WORK_ADMITTER.with(|slot| *slot.borrow_mut() = Some(admitter));
+    let result = body();
+    TEST_LOOP_WORK_ADMITTER.with(|slot| *slot.borrow_mut() = None);
+    result
 }
 
 fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> Result<()> {

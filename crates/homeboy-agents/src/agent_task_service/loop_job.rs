@@ -352,6 +352,12 @@ impl LoopWorkHandler {
                 Some(serde_json::to_value(report.value).map_err(|error| {
                     homeboy_core::Error::internal_json(error.to_string(), None)
                 })?);
+            #[cfg(test)]
+            if TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.replace(false)) {
+                return Err(homeboy_core::Error::internal_unexpected(
+                    "test interruption after loop child admission",
+                ));
+            }
             job.refresh_controller_state();
             if job
                 .controller_state
@@ -387,11 +393,23 @@ impl LoopWorkHandler {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_INTERRUPT_AFTER_LOOP_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_loop_checkpoint_interrupt<T>(body: impl FnOnce() -> T) -> T {
+    TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.set(true));
+    let result = body();
+    TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.set(false));
+    result
+}
+
 /// Apply the caller's public environment projection to provider declarations.
-/// The command runner then uses its normal launch-context path, which clears
-/// ambient variables before spawning and resolves secret names separately via
-/// `SecretEnvPlan`. Unlisted names are rejected instead of becoming authority
-/// through the daemon environment.
+/// The command runner then uses its normal launch-context path and resolves
+/// secret names separately via `SecretEnvPlan`. Unlisted names are rejected
+/// instead of becoming authority through the daemon environment.
 fn apply_admitted_environment(catalog: &mut AgentTaskProviderCatalog, value: &Value) -> Result<()> {
     if value.is_null() {
         return Ok(());
@@ -406,8 +424,32 @@ fn apply_admitted_environment(catalog: &mut AgentTaskProviderCatalog, value: &Va
     for (name, value) in &plan.public_env {
         let mut declared = false;
         for provider in &mut catalog.providers {
+            if crate::agent_task_provider::provider_secret_env_plan(
+                provider,
+                &serde_json::from_value(json!({
+                    "task_id": "loop-environment-materialization",
+                    "executor": { "backend": provider.backend },
+                    "instructions": ""
+                }))
+                .map_err(|error| {
+                    invalid_loop_job(&format!("invalid provider secret plan input: {error}"))
+                })?,
+            )
+            .secret_env_names()
+            .iter()
+            .any(|secret_name| secret_name == name)
+            {
+                return Err(invalid_loop_job(&format!(
+                    "loop environment materialization cannot override secret provider variable `{name}`"
+                )));
+            }
             for env in &mut provider.invocation.env {
                 if env.name == *name {
+                    if env.redacted == Some(true) || env.source.as_deref() == Some("secret_env") {
+                        return Err(invalid_loop_job(&format!(
+                            "loop environment materialization cannot override secret provider variable `{name}`"
+                        )));
+                    }
                     env.source = Some("value".to_string());
                     env.value = Some(value.clone());
                     env.redacted = Some(false);
@@ -733,6 +775,35 @@ mod tests {
     }
 
     #[test]
+    fn public_environment_materialization_cannot_override_secret_authority() {
+        let mut catalog = AgentTaskProviderCatalog {
+            providers: vec![serde_json::from_value(json!({
+                "id": "secret-fixture",
+                "backend": "secret-fixture",
+                "invocation": { "env": [{
+                    "name": "FAKE_TOKEN",
+                    "source": "secret_env",
+                    "redacted": true
+                }] }
+            }))
+            .expect("secret provider")],
+            ..Default::default()
+        };
+        let error = apply_admitted_environment(
+            &mut catalog,
+            &json!({
+                "schema": "homeboy/env-materialization-plan/v1",
+                "public_env": { "FAKE_TOKEN": "not-a-secret" }
+            }),
+        )
+        .expect_err("public env must not replace secret authority");
+        assert!(
+            error.to_string().contains("secret provider variable"),
+            "unexpected validation error: {error:?}"
+        );
+    }
+
+    #[test]
     fn mixed_legacy_process_identity_is_rejected_without_panicking() {
         let request = serde_json::to_value(AgentTaskLoopJobRequest {
             schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
@@ -1047,6 +1118,87 @@ mod tests {
                 AgentTaskLoopControllerState::Completed
             );
         });
+    }
+
+    #[test]
+    fn interrupted_loop_child_admission_recovers_without_redispatch() {
+        with_isolated_home(|_| {
+            register_loop_work_job_handler();
+            let marker = tempfile::NamedTempFile::new().expect("provider marker");
+            let mut record = agent_task_loop_controller::create_controller(
+                "loop-interrupted-admission",
+                "repair",
+                "v1",
+            )
+            .expect("create controller");
+            record.record_action(
+                agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "interrupted-child-admission".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": { "backend": "interrupted-fixture", "prompt": "run" }
+                    }),
+                },
+                "interrupted child admission",
+            );
+            agent_task_loop_controller::write_controller(&record).expect("write controller");
+            let provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+                serde_json::from_value(json!({
+                "id": "interrupted-fixture",
+                "backend": "interrupted-fixture",
+                "command_argv": [
+                    "sh", "-c",
+                    format!(
+                        "printf x >> {}; printf '%s' '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"fixture\",\"status\":\"succeeded\"}}'",
+                        marker.path().display()
+                    )
+                ],
+                "capabilities": ["structured_outcome"]
+                }))
+                .expect("provider fixture");
+            let request = loop_work_job_execution_submission(
+                "loop-interrupted-admission",
+                "generation-1",
+                json!({ "backend": "interrupted-fixture" }),
+                AgentTaskProviderCatalog {
+                    providers: vec![provider],
+                    ..Default::default()
+                },
+            )?["request"]
+                .clone();
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
+                .expect("construct work harness");
+            let prepared = driver.prepare(request).expect("prepare work job");
+            let interrupted = with_test_loop_checkpoint_interrupt(|| {
+                driver.execute(prepared, harness.handle())
+            });
+            assert!(interrupted.is_err(), "fault hook must interrupt before checkpoint");
+            assert_eq!(
+                std::fs::read(marker.path()).expect("provider marker").len(),
+                1
+            );
+            let checkpoint = harness
+                .checkpoint()
+                .expect("checkpoint")
+                .expect("prepared checkpoint");
+            assert!(checkpoint["checkpoint"]["resume"].is_null());
+
+            let mut recovered = agent_task_loop_controller::load_controller(
+                "loop-interrupted-admission",
+            )?;
+            recovered.state = AgentTaskLoopControllerState::Completed;
+            agent_task_loop_controller::write_controller(&recovered)?;
+            let result = driver.resume(checkpoint, harness.handle())?;
+            assert_eq!(result["result"]["controller_state"], "completed");
+            assert_eq!(
+                std::fs::read(marker.path()).expect("provider marker after recovery").len(),
+                1
+            );
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("interrupted admission recovery converges");
     }
 
     #[test]

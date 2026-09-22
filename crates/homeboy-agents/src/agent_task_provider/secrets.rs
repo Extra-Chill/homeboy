@@ -125,7 +125,7 @@ fn provider_secret_env(
     names
 }
 
-pub(super) fn provider_secret_env_plan(
+pub(crate) fn provider_secret_env_plan(
     provider: &AgentTaskExecutorProvider,
     request: &AgentTaskRequest,
 ) -> SecretEnvPlan {

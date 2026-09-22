@@ -5663,9 +5663,13 @@ mod loop_control_plane_tests {
         control_plane_run_id, create_controller, loop_read, loop_runtime_metadata,
         loop_work_status, resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
-    use homeboy_control_plane_contract::ControlPlaneActionOutcome;
-    use homeboy_core::test_support::with_isolated_home;
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, EffectId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    };
+    use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
     use serde_json::json;
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn loop_status_is_read_only_and_does_not_infer_missing_work_success() {
@@ -5695,6 +5699,65 @@ mod loop_control_plane_tests {
         });
     }
 
+    fn admit_loop_work_through_real_harness(
+        loop_id: &str,
+        _generation: &str,
+        submission: serde_json::Value,
+    ) -> homeboy_core::Result<serde_json::Value> {
+        let driver: Arc<dyn homeboy_core::daemon::controller_job_driver::ControllerJobDriver> =
+            Arc::new(crate::agent_task_service::WorkJobDriver);
+        let work_request = submission["request"].clone();
+        let harness = ControllerJobHarness::new(Arc::clone(&driver), work_request.clone())?;
+        let job_id = harness.job()?.id.to_string();
+        let mut record = crate::agent_task_loop_controller::load_controller(loop_id)?;
+        record.metadata["work_job"] = json!({
+            "schema": "homeboy/agent-task-loop-work-ref/v1",
+            "job_id": job_id,
+            "state": "submitted",
+        });
+        crate::agent_task_loop_controller::write_controller(&record)?;
+        let prepared = driver.prepare(work_request)?;
+        let execution_driver = Arc::clone(&driver);
+        let execution_harness = Arc::new(harness);
+        let execution = std::thread::spawn({
+            let harness = Arc::clone(&execution_harness);
+            move || execution_driver.execute(prepared, harness.handle())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let active = crate::agent_task_loop_controller::load_controller(loop_id)?
+                .metadata
+                .get("active_provider_runs")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|runs| !runs.is_empty());
+            if active {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(homeboy_core::Error::internal_unexpected(
+                    "real loop WorkJob did not admit provider",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        execution_harness.request_cancellation("test loop WorkJob completion")?;
+        let checkpoint = execution_harness.checkpoint()?.ok_or_else(|| {
+            homeboy_core::Error::internal_unexpected("missing WorkJob checkpoint")
+        })?;
+        driver.cancel(&checkpoint)?;
+        execution
+            .join()
+            .map_err(|_| homeboy_core::Error::internal_unexpected("WorkJob thread panicked"))??;
+        Ok(json!({
+            "schema": "homeboy/agent-task-loop-work-submission/v1",
+            "loop_id": loop_id,
+            "job_id": job_id,
+            "state": "submitted",
+            "admission": "created",
+        }))
+    }
+
     #[test]
     fn loop_read_uses_the_canonical_resource_with_domain_adjuncts() {
         with_isolated_home(|_| {
@@ -5708,6 +5771,128 @@ mod loop_control_plane_tests {
             assert_eq!(read.resource, canonical);
             assert_eq!(read.controller.loop_id, record.loop_id);
             assert_eq!(read.work, serde_json::Value::Null);
+        });
+    }
+
+    #[test]
+    fn concurrent_loop_resume_actions_share_one_real_work_job_and_revolution() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let marker = tempfile::NamedTempFile::new().expect("provider marker");
+            let marker_path = marker.path().display().to_string();
+            let mut record =
+                create_controller("loop/concurrent-resume", "repair", "v1").expect("created");
+            record.record_action(
+                crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "concurrent-real-provider".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": { "backend": "concurrent-fixture", "prompt": "run" }
+                    }),
+                },
+                "real concurrent resume provider",
+            );
+            let provider = json!({
+                "id": "concurrent-fixture",
+                "backend": "concurrent-fixture",
+                "command_argv": [
+                    "sh", "-c",
+                    format!(
+                        "printf x >> {}; sleep 0.2; printf '%s' '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"fixture\",\"status\":\"succeeded\"}}'",
+                        marker_path
+                    )
+                ],
+                "capabilities": ["structured_outcome"]
+            });
+            stamp_loop_runtime_metadata(&mut record.metadata, true, None, false)
+                .expect("runtime metadata");
+            write_controller(&record).expect("controller");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("loop-concurrent-real-effect".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "loop-concurrent-real-idempotency".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: ControlPlaneActionPayload {
+                    schema: "homeboy/agent-task-loop-resume-parameters/v1".to_string(),
+                    data: json!({
+                        "dispatch_defaults": {
+                            "backend": "concurrent-fixture",
+                            "provider_catalog": { "providers": [provider] }
+                        }
+                    }),
+                },
+                confirmed: true,
+            };
+            let barrier = Arc::new(Barrier::new(2));
+            let first_request = request.clone();
+            let first_barrier = Arc::clone(&barrier);
+            let first_canonical = canonical.clone();
+            let first = std::thread::spawn(move || {
+                first_barrier.wait();
+                crate::agent_task_loop_controller::with_test_loop_work_admitter(
+                    admit_loop_work_through_real_harness,
+                    || {
+                        homeboy_core::control_plane::execute_action(
+                            &first_canonical,
+                            &first_request,
+                        )
+                    },
+                )
+            });
+            let second_request = request.clone();
+            let second_barrier = Arc::clone(&barrier);
+            let second_canonical = canonical.clone();
+            let second = std::thread::spawn(move || {
+                second_barrier.wait();
+                crate::agent_task_loop_controller::with_test_loop_work_admitter(
+                    admit_loop_work_through_real_harness,
+                    || {
+                        homeboy_core::control_plane::execute_action(
+                            &second_canonical,
+                            &second_request,
+                        )
+                    },
+                )
+            });
+            let first = first
+                .join()
+                .expect("first action thread")
+                .expect("first action");
+            let second = second
+                .join()
+                .expect("second action thread")
+                .expect("second action");
+            assert_eq!(first, second, "concurrent acknowledgements diverged");
+            assert_eq!(
+                first.outcome,
+                ControlPlaneActionOutcome::Succeeded,
+                "ack={first:?}"
+            );
+
+            let persisted = crate::agent_task_loop_controller::load_controller(&record.loop_id)
+                .expect("persisted controller");
+            let job_id = persisted.metadata["work_job"]["job_id"]
+                .as_str()
+                .expect("work job identity")
+                .to_string();
+            assert!(!job_id.is_empty());
+            assert_eq!(persisted.metadata["runtime"]["revolutions"], 1);
+            assert_eq!(
+                std::fs::read(marker.path()).expect("provider marker").len(),
+                1
+            );
+            let effect = homeboy_core::control_plane::effect_status(&canonical, &request.effect_id)
+                .expect("effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Succeeded
+            );
         });
     }
 
@@ -6169,7 +6354,6 @@ mod tests {
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::{json, Value};
-    use std::cell::Cell;
     use std::collections::BTreeMap;
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
@@ -8079,97 +8263,6 @@ mod tests {
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
                 vec!["action.accepted", "action.succeeded"]
-            );
-            assert_eq!(
-                service.execute_action(&run, &request).expect("replay"),
-                recovered
-            );
-        });
-    }
-
-    #[test]
-    fn interrupted_ambiguous_resume_terminalizes_without_redispatch() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
-            crate::agent_task_lifecycle::submit_plan_in_store(
-                &store,
-                &AgentTaskPlan::new("interrupted-resume", Vec::new()),
-                Some(AGENT_TASK_RUN),
-            )
-            .expect("queued record");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:interrupted-resume-1".to_string()),
-                action: ControlPlaneAction::Resume,
-                idempotency_key: "interrupted-resume-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: false,
-            };
-            let effect_count = Cell::new(0);
-            let _operation_key = interrupt_action_after_effect(&service, &run, &request, || {
-                effect_count.set(effect_count.get() + 1);
-            });
-            let accepted_at = store
-                .open_observation_initialized()
-                .expect("observation")
-                .control_plane_effect_status(&request.effect_id)
-                .expect("effect status")
-                .expect("effect")
-                .intent
-                .accepted_at;
-            for index in 0..100 {
-                let mut filler = event_append_request();
-                filler.idempotency_key = format!("interrupted-resume-filler-{index}");
-                filler.kind = "run.progress".to_string();
-                super::append_event_in_store(&store, &run, &filler).expect("retention filler");
-            }
-            assert!(service
-                .events(&run, None)
-                .expect("compacted events")
-                .events
-                .iter()
-                .all(|event| event.kind != "action.accepted"));
-
-            let recovered = service
-                .execute_action_with_delegates(
-                    &run,
-                    &request,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| {
-                        effect_count.set(effect_count.get() + 1);
-                        panic!("resume delegate must not run")
-                    },
-                    |_, _| panic!("promote delegate must not run"),
-                )
-                .expect("terminal interrupted resume acknowledgement");
-            assert_eq!(effect_count.get(), 1);
-            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
-            assert_eq!(recovered.accepted_at, accepted_at);
-            assert!(recovered
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("no second execution")));
-            assert_eq!(
-                service
-                    .effect_status(&run, &request.effect_id)
-                    .expect("effect status")
-                    .state,
-                ControlPlaneEffectExecutionState::Failed
-            );
-            assert_eq!(
-                service
-                    .events(&run, None)
-                    .expect("action receipts")
-                    .events
-                    .iter()
-                    .filter(|event| event.kind.starts_with("action."))
-                    .map(|event| event.kind.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["action.failed"]
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
