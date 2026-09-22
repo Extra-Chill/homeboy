@@ -89,8 +89,8 @@ pub fn provider_secret_sources_for_plan_with_providers(
 pub fn provider_secret_credential_mappings_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
-) -> BTreeMap<String, SecretEnvProviderCredentialMapping> {
-    let mut mappings = BTreeMap::new();
+) -> homeboy_core::Result<BTreeMap<String, SecretEnvProviderCredentialMapping>> {
+    let mut mappings: BTreeMap<String, SecretEnvProviderCredentialMapping> = BTreeMap::new();
     for request in &plan.tasks {
         let Some(provider) = select_provider(providers, request) else {
             continue;
@@ -108,19 +108,45 @@ pub fn provider_secret_credential_mappings_for_plan_with_providers(
                         scope: source.scope,
                         name: source.name,
                         field: source.field,
+                        fallback_fields: source.fallback_fields,
+                        fallback_value: source
+                            .value
+                            .filter(|value| matches!(value.as_str(), "true" | "false")),
                     },
                 )
             })
             .collect();
-        mappings.insert(
-            provider.id.clone(),
-            SecretEnvProviderCredentialMapping {
-                secret_env,
-                sources,
-            },
-        );
+        let mapping = SecretEnvProviderCredentialMapping {
+            secret_env,
+            sources,
+        };
+        if let Some(existing) = mappings.get_mut(&provider.id) {
+            for (name, source) in &mapping.sources {
+                if existing
+                    .sources
+                    .get(name)
+                    .is_some_and(|current| current != source)
+                {
+                    return Err(homeboy_core::Error::validation_invalid_argument(
+                        "provider_credentials",
+                        format!(
+                            "provider {} has conflicting credential source mappings for {}",
+                            provider.id, name
+                        ),
+                        None,
+                        None,
+                    ));
+                }
+            }
+            existing.secret_env.extend(mapping.secret_env);
+            existing.secret_env.sort();
+            existing.secret_env.dedup();
+            existing.sources.extend(mapping.sources);
+        } else {
+            mappings.insert(provider.id.clone(), mapping);
+        }
     }
-    mappings
+    Ok(mappings)
 }
 
 fn provider_secret_env(

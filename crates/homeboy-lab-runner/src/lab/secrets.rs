@@ -269,10 +269,10 @@ fn declared_agent_task_provider_credentials(
         return Ok(BTreeMap::new());
     };
     let providers = ExtensionProviderAgentTaskExecutor::discover();
-    Ok(homeboy_agents::agent_tasks::provider::provider_secret_credential_mappings_for_plan_with_providers(
+    homeboy_agents::agent_tasks::provider::provider_secret_credential_mappings_for_plan_with_providers(
         &plan,
         providers.providers(),
-    ))
+    )
 }
 
 fn redacted_lab_secret_env_plan(plan: &SecretEnvPlan) -> SecretEnvPlan {

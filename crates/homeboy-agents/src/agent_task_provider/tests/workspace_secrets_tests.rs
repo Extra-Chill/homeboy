@@ -70,6 +70,50 @@ fn provider_default_secret_sources_resolve_required_env_without_duplicate_mappin
 }
 
 #[test]
+fn provider_credential_mappings_reject_conflicting_accounts_for_one_executor() {
+    let (mut first, mut provider) = request("task-a", "node provider-a.js".to_string());
+    let (mut second, _) = request("task-b", "node provider-a.js".to_string());
+    first.executor.config = json!({ "provider": "account-a" });
+    second.executor.config = json!({ "provider": "account-b" });
+    provider.provider_defaults.insert(
+        "account-a".to_string(),
+        json!({
+            "secret_env": ["PROVIDER_ACCESS_TOKEN"],
+            "secret_env_sources": {
+                "PROVIDER_ACCESS_TOKEN": {
+                    "source": "json-file",
+                    "path": "~/.provider/a.json",
+                    "field": "tokens.access_token"
+                }
+            }
+        }),
+    );
+    provider.provider_defaults.insert(
+        "account-b".to_string(),
+        json!({
+            "secret_env": ["PROVIDER_ACCESS_TOKEN"],
+            "secret_env_sources": {
+                "PROVIDER_ACCESS_TOKEN": {
+                    "source": "json-file",
+                    "path": "~/.provider/b.json",
+                    "field": "tokens.access_token"
+                }
+            }
+        }),
+    );
+
+    let error = provider_secret_credential_mappings_for_plan_with_providers(
+        &AgentTaskPlan::new("conflicting-accounts", vec![first, second]),
+        &[provider],
+    )
+    .expect_err("one provider id cannot silently overwrite account mappings");
+
+    assert!(error
+        .message
+        .contains("conflicting credential source mappings"));
+}
+
+#[test]
 fn provider_secret_sources_for_providers_include_unconditional_json_sources() {
     let (_request, mut provider) = request("task-a", "node provider-a.js".to_string());
     provider.secret_env_requirements = serde_json::from_value(json!([{

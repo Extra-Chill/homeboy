@@ -1369,6 +1369,8 @@ fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPla
                     scope: None,
                     name: Some("~/.codex/auth.json".to_string()),
                     field: Some("tokens.access_token".to_string()),
+                    fallback_fields: Vec::new(),
+                    fallback_value: None,
                 },
             )]),
         },

@@ -20,6 +20,7 @@ fn provider_file_secret_source_provisions_group_json_file_sources_without_values
                 scope: None,
                 name: None,
                 field: None,
+                fallback_fields: Vec::new(),
                 value: None,
             },
         ),
@@ -246,6 +247,8 @@ fn runner_secret_env_plan_source_failure_stays_fail_closed_without_runner_ref() 
                         scope: None,
                         name: None,
                         field: Some("tokens.access_token".to_string()),
+                        fallback_fields: Vec::new(),
+                        fallback_value: None,
                     },
                 )]
                 .into_iter()
@@ -253,8 +256,13 @@ fn runner_secret_env_plan_source_failure_stays_fail_closed_without_runner_ref() 
             },
         );
 
-        let err = resolve_runner_secret_env_for_plan(&HashMap::new(), &plan, &HashMap::new())
-            .expect_err("sealed source failure must stop before provider execution");
+        let err = resolve_runner_secret_env_for_plan_with_sources(
+            &HashMap::new(),
+            &plan,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect_err("sealed source failure must stop before provider execution");
 
         assert!(err
             .message

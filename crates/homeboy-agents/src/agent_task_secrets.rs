@@ -212,6 +212,7 @@ pub fn map_secret_to_env(
             scope: None,
             name: None,
             field: None,
+            fallback_fields: Vec::new(),
             value: None,
         },
     );
@@ -236,6 +237,7 @@ pub fn set_config_secret(
             scope: None,
             name: None,
             field: None,
+            fallback_fields: Vec::new(),
             value: Some(value.to_string()),
         },
     );
@@ -266,6 +268,7 @@ pub fn set_keychain_secret(
             scope: Some(scope.to_string()),
             name: Some(keychain_name.to_string()),
             field: None,
+            fallback_fields: Vec::new(),
             value: None,
         },
     );
@@ -313,6 +316,7 @@ pub fn map_secret_to_keychain_bundle(
             scope: Some(scope.unwrap_or("agent-task").to_string()),
             name: Some(keychain_name.unwrap_or(bundle).to_string()),
             field: Some(field.to_string()),
+            fallback_fields: Vec::new(),
             value: None,
         },
     );
@@ -628,7 +632,14 @@ fn resolve_secret_source_json_file(
         })
         .as_ref()?;
     let field = source.field.as_deref().unwrap_or(requested_name);
-    bundle_field_value(bundle, field).or_else(|| source.value.clone())
+    bundle_field_value(bundle, field)
+        .or_else(|| {
+            source
+                .fallback_fields
+                .iter()
+                .find_map(|fallback| bundle_field_value(bundle, fallback))
+        })
+        .or_else(|| source.value.clone())
 }
 
 fn resolve_secret_source_json_file_jwt_expiration(
@@ -769,6 +780,7 @@ mod tests {
             scope: None,
             name: None,
             field: None,
+            fallback_fields: Vec::new(),
             value: None,
         };
         let mut fallback_sources = HashMap::new();
@@ -824,6 +836,7 @@ mod tests {
             scope: None,
             name: None,
             field: None,
+            fallback_fields: Vec::new(),
             value: None,
         };
         let requiring = AgentTaskSecretEnvScope {
@@ -896,6 +909,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: None,
+                fallback_fields: Vec::new(),
                 value: None,
             },
         );
@@ -1057,6 +1071,7 @@ mod tests {
             scope: Some("agent-task".to_string()),
             name: Some("provider-oauth".to_string()),
             field: Some("tokens.access".to_string()),
+            fallback_fields: Vec::new(),
             value: None,
         };
         let mut cache = HashMap::new();
@@ -1149,6 +1164,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: Some("tokens.access_token".to_string()),
+                fallback_fields: Vec::new(),
                 value: None,
             },
         );
@@ -1191,6 +1207,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: Some("tokens.refresh_token".to_string()),
+                fallback_fields: Vec::new(),
                 value: None,
             },
         );
@@ -1218,6 +1235,7 @@ mod tests {
             scope: None,
             name: None,
             field: Some("tokens.fedramp".to_string()),
+            fallback_fields: Vec::new(),
             value: Some("false".to_string()),
         };
         let mut cache = HashMap::new();
@@ -1254,6 +1272,7 @@ mod tests {
             scope: None,
             name: None,
             field: Some("tokens.access_token".to_string()),
+            fallback_fields: Vec::new(),
             value: None,
         };
         let mut cache = HashMap::new();
@@ -1291,6 +1310,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: None,
+                fallback_fields: Vec::new(),
                 value: None,
             },
         );
@@ -1305,6 +1325,7 @@ mod tests {
                 scope: None,
                 name: None,
                 field: Some("tokens.access_token".to_string()),
+                fallback_fields: Vec::new(),
                 value: None,
             },
         );

@@ -663,6 +663,8 @@ pub struct AgentTaskSecretSource {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
 }

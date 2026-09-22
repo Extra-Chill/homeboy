@@ -168,29 +168,98 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
         std::fs::write(
             auth_dir.join("auth.json"),
             serde_json::json!({
-                "tokens": { "access_token": "runner-access-secret" }
+                "tokens": {
+                    "access_token": "eyJhbGciOiJub25lIn0.eyJleHAiOjQxMDI0NDQ4MDB9.signature",
+                    "refresh_token": "runner-refresh-secret",
+                    "account_id": "runner-account"
+                }
             })
             .to_string(),
         )
         .expect("auth file");
         let workspace = tempfile::tempdir().expect("workspace");
-        let mut secret_env_plan =
-            SecretEnvPlan::from_secret_env_names(["ACCESS_TOKEN".to_string()]);
+        let names = vec![
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+            "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+        ];
+        let mut secret_env_plan = SecretEnvPlan::from_secret_env_names(names.clone());
         secret_env_plan.provider_credentials.insert(
             "opencode.agent-task-executor".to_string(),
             homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
-                secret_env: vec!["ACCESS_TOKEN".to_string()],
-                sources: [(
-                    "ACCESS_TOKEN".to_string(),
-                    homeboy_core::secret_env_plan::SecretEnvCredentialSource {
-                        source: "json-file".to_string(),
-                        env_var: None,
-                        path: Some("~/.codex/auth.json".to_string()),
-                        scope: None,
-                        name: None,
-                        field: Some("tokens.access_token".to_string()),
-                    },
-                )]
+                secret_env: names.clone(),
+                sources: [
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.access_token".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.refresh_token".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file-jwt-expiration".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.access_token".to_string()),
+                            fallback_fields: vec![
+                                "tokens.expires_at".to_string(),
+                                "tokens.expiresAt".to_string(),
+                            ],
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.account_id".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: None,
+                        },
+                    ),
+                    (
+                        "AI_PROVIDER_OPENAI_CODEX_FEDRAMP".to_string(),
+                        homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                            source: "json-file".to_string(),
+                            env_var: None,
+                            path: Some("~/.codex/auth.json".to_string()),
+                            scope: None,
+                            name: None,
+                            field: Some("tokens.fedramp".to_string()),
+                            fallback_fields: Vec::new(),
+                            fallback_value: Some("false".to_string()),
+                        },
+                    ),
+                ]
                 .into_iter()
                 .collect(),
             },
@@ -198,17 +267,33 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
         let serialized = serde_json::to_string(&secret_env_plan).expect("serialize sealed plan");
         let secret_env_plan: SecretEnvPlan =
             serde_json::from_str(&serialized).expect("deserialize sealed plan");
+        assert!(!serialized.contains("runner-refresh-secret"));
+        assert!(serialized.contains("tokens.expires_at"));
         let mapping = secret_env_plan
             .provider_credentials
             .get("opencode.agent-task-executor")
             .expect("selected provider credential mapping");
         assert_eq!(
-            mapping.sources["ACCESS_TOKEN"].path.as_deref(),
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"]
+                .path
+                .as_deref(),
             Some("~/.codex/auth.json")
         );
         assert_eq!(
-            mapping.sources["ACCESS_TOKEN"].field.as_deref(),
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"]
+                .field
+                .as_deref(),
             Some("tokens.access_token")
+        );
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT"].fallback_fields,
+            vec!["tokens.expires_at", "tokens.expiresAt"]
+        );
+        assert_eq!(
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"]
+                .fallback_value
+                .as_deref(),
+            Some("false")
         );
 
         let prepared = prepare_daemon_local_process(RunnerProcessRequest {
@@ -222,7 +307,7 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
                 "providers".to_string(),
             ],
             env: Default::default(),
-            secret_env_names: vec!["ACCESS_TOKEN".to_string()],
+            secret_env_names: names,
             secret_env_plan: Some(secret_env_plan),
             capture_patch: false,
             raw_exec: false,
@@ -233,8 +318,20 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
         .expect("daemon preparation resolves the sealed runner source");
 
         assert_eq!(
-            prepared.env.get("ACCESS_TOKEN"),
-            Some(&"runner-access-secret".to_string())
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN"),
+            Some(&"runner-refresh-secret".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_EXPIRES_AT"),
+            Some(&"4102444800".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_ACCOUNT_ID"),
+            Some(&"runner-account".to_string())
+        );
+        assert_eq!(
+            prepared.env.get("AI_PROVIDER_OPENAI_CODEX_FEDRAMP"),
+            Some(&"false".to_string())
         );
     });
 }

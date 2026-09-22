@@ -42,7 +42,21 @@ pub(super) fn resolve_runner_secret_env_for_plan(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    let mut fallback_sources = provider_secret_sources_for_discovered_providers();
+    resolve_runner_secret_env_for_plan_with_sources(
+        secret_env,
+        plan,
+        env,
+        &provider_secret_sources_for_discovered_providers(),
+    )
+}
+
+pub(super) fn resolve_runner_secret_env_for_plan_with_sources(
+    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
+    plan: &SecretEnvPlan,
+    env: &HashMap<String, String>,
+    discovered_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
+) -> Result<HashMap<String, String>> {
+    let mut fallback_sources = discovered_sources.clone();
     fallback_sources.extend(provider_secret_sources_from_plan(plan));
     resolve_runner_secret_env_for_command_with_fallbacks(
         secret_env,
@@ -421,7 +435,8 @@ fn provider_secret_sources_from_plan(
                     scope: source.scope.clone(),
                     name: source.name.clone(),
                     field: source.field.clone(),
-                    value: None,
+                    fallback_fields: source.fallback_fields.clone(),
+                    value: source.fallback_value.clone(),
                 },
             )
         })
