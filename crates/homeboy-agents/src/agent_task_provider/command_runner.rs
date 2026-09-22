@@ -2618,6 +2618,30 @@ pub struct ProviderReadinessInvocationResult {
     pub reason: String,
     pub cache_key: String,
     pub identity: Value,
+    /// Per-connected-account capacity, when the provider publishes it.
+    /// Absent (`None`) means the provider declares nothing about capacity —
+    /// that is not evidence of unavailability, only silence (#14858).
+    #[serde(default)]
+    pub capacity: Option<ProviderReadinessInvocationCapacity>,
+}
+
+/// Provider-declared capacity for the connected account/route the readiness
+/// invocation just probed. Every field is optional and provider-neutral: a
+/// provider fills in whichever of remaining/limit/unit/reset_at it actually
+/// knows, and Homeboy reports the rest as unknown rather than inventing a
+/// value. `reset_at` is an RFC 3339 timestamp string (parsed and validated by
+/// the caller, not here, so a malformed timestamp degrades to "unknown reset"
+/// instead of failing the whole probe).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProviderReadinessInvocationCapacity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
 }
 
 pub fn run_provider_readiness_invocation(
@@ -2655,6 +2679,7 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
             reason: String::new(),
             cache_key: String::new(),
             identity: Value::Null,
+            capacity: None,
         });
     };
     run_provider_readiness_invocation_with_timeout(
@@ -2929,6 +2954,24 @@ fn redact_readiness_credentials(
     for (credential, hashed) in &credentials {
         result.cache_key = result.cache_key.replace(credential, hashed);
         redact_json_credential(&mut result.identity, credential, hashed);
+    }
+    if let Some(capacity) = result.capacity.as_mut() {
+        for (credential, _) in &credentials {
+            if let Some(unit) = capacity.unit.as_mut() {
+                *unit = unit.replace(credential, "[REDACTED]");
+            }
+            if let Some(reset_at) = capacity.reset_at.as_mut() {
+                *reset_at = reset_at.replace(credential, "[REDACTED]");
+            }
+        }
+        for (credential, hashed) in &credentials {
+            if let Some(remaining) = capacity.remaining.as_mut() {
+                redact_json_credential(remaining, credential, hashed);
+            }
+            if let Some(limit) = capacity.limit.as_mut() {
+                redact_json_credential(limit, credential, hashed);
+            }
+        }
     }
 }
 

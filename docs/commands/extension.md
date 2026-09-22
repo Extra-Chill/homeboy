@@ -201,13 +201,14 @@ Uninstalls an extension.
 ### `action`
 
 ```sh
-homeboy extension action <extension_id> <action_id> [-p|--project <project_id>] [--data <json>]
+homeboy extension action <extension_id> <action_id> [-p|--project <project_id>] [--data <JSON>] [--payload <JSON>]
 ```
 
 Executes an action defined in the extension manifest.
 
 - For `type: "api"` actions, `--project` is required.
-- `--data` accepts a JSON array string of selected result rows (passed through to template variables like `{{selected}}`).
+- `--data` accepts a JSON array of selected result rows (passed through to template variables like `{{selected}}`).
+- `--payload` accepts an action JSON payload. Both JSON options accept inline JSON, `@FILE`, or `-` for stdin. Action payload templates can reference fields as `{{payload.field}}`; raw payload input is never included in command evidence.
 
 ### `exec`
 

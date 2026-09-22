@@ -11,6 +11,7 @@ homeboy release gap [<component_id>] [--path <path>]
 homeboy release readiness list <component_id>
 homeboy release changelog show [<component_id>]
 homeboy release artifact-source-authority <component_id> --dir <DIR> --tag <TAG> --version <VERSION> --commit <SHA>
+homeboy release resolve <repository> --prefix <tag-prefix>
 ```
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
@@ -145,6 +146,21 @@ Both commands accept a positional component target, `--path`, and
 Without `--installed`, the query uses the resolved component checkout's declared
 version. `--installed` overrides it so you can ask about a version you are not
 currently running.
+
+### `resolve` - discover a published release coordinate
+
+`resolve` performs one bounded, read-only `git ls-remote --tags` query and
+returns the newest stable tag in a namespace:
+
+```sh
+homeboy release resolve https://github.com/example/monorepo.git --prefix figma-transformer
+```
+
+The structured payload includes `repository`, `version`, `tag`, and the peeled
+`commit`. Annotated tags use their peeled commit and lightweight tags use their
+direct commit. Prereleases and malformed or non-matching tags are ignored. With
+no matching tag, the payload has `"match": null` and exits successfully;
+transport, authentication, and timeout failures return a non-zero error.
 
 ### Regenerate a package for an existing tag
 

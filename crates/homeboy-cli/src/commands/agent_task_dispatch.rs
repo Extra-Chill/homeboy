@@ -102,6 +102,11 @@ pub struct DispatchCoreArgs {
     #[arg(long = "command-policy-reason", value_name = "TEXT")]
     pub command_policy_reason: Option<String>,
 
+    /// Explicitly acknowledge that an explicit model may displace configured
+    /// model routes. The refusal includes this flag as a replay instruction.
+    #[arg(long = "acknowledge-model-override")]
+    pub acknowledge_model_override: bool,
+
     #[arg(
         long = "resolved-provider-policy",
         hide = true,
@@ -135,6 +140,7 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             deny_command: args.deny_command,
             allow_command: args.allow_command,
             command_policy_reason: args.command_policy_reason,
+            acknowledge_model_override: args.acknowledge_model_override,
         }
     }
 }
@@ -362,6 +368,7 @@ mod tests {
                     deny_command: Vec::new(),
                     allow_command: Vec::new(),
                     command_policy_reason: None,
+                    acknowledge_model_override: false,
                 },
             }
             .into(),
@@ -403,6 +410,7 @@ mod tests {
                     deny_command: Vec::new(),
                     allow_command: Vec::new(),
                     command_policy_reason: None,
+                    acknowledge_model_override: false,
                 },
             }
             .into(),
@@ -507,6 +515,7 @@ mod tests {
                 deny_command: overrides.core.deny_command,
                 allow_command: overrides.core.allow_command,
                 command_policy_reason: overrides.core.command_policy_reason,
+                acknowledge_model_override: overrides.core.acknowledge_model_override,
             },
         }
     }

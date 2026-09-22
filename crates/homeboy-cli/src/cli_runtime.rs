@@ -1,8 +1,10 @@
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
 use std::collections::BTreeSet;
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::process::Command as ProcessCommand;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::capability_registry::CommandCapabilityRegistry;
@@ -120,6 +122,119 @@ const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
 const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD";
 const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBACK_RECONCILIATION";
+const RELEASE_DEADLINE_CHILD_ENV: &str = "HOMEBOY_RELEASE_DEADLINE_CHILD";
+const RELEASE_DEADLINE_SECS_ENV: &str = "HOMEBOY_RELEASE_DEADLINE_SECS";
+const DEFAULT_RELEASE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Run release commands in a killable child. Release resolution uses synchronous
+/// filesystem and git calls, so a timer in this process could report a timeout
+/// while the blocked call kept the CLI alive indefinitely.
+fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> {
+    if std::env::var_os(RELEASE_DEADLINE_CHILD_ENV).is_some()
+        || args.get(1).map(String::as_str) != Some("release")
+    {
+        return None;
+    }
+
+    let deadline = std::env::var(RELEASE_DEADLINE_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_RELEASE_DEADLINE);
+    let executable = std::env::current_exe().ok()?;
+    let mut child = ProcessCommand::new(executable)
+        .args(args.iter().skip(1))
+        .env(RELEASE_DEADLINE_CHILD_ENV, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stderr = child.stderr.take()?;
+    let stage = Arc::new(Mutex::new(String::from("startup")));
+    let stage_for_reader = Arc::clone(&stage);
+    let stderr_thread = thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut buffer = [0_u8; 4096];
+        let mut pending = Vec::new();
+        while let Ok(bytes) = stderr.read(&mut buffer) {
+            if bytes == 0 {
+                break;
+            }
+            let chunk = &buffer[..bytes];
+            let _ = std::io::stderr().write_all(chunk);
+            let _ = std::io::stderr().flush();
+            pending.extend_from_slice(chunk);
+            while let Some(index) = pending.iter().position(|byte| *byte == b'\n') {
+                let line = String::from_utf8_lossy(&pending[..index])
+                    .trim()
+                    .to_string();
+                if let Some(value) = line.strip_prefix("[release] stage: ") {
+                    if let Ok(mut current) = stage_for_reader.lock() {
+                        *current = value.to_string();
+                    }
+                } else if line.starts_with("[release]") {
+                    if let Ok(mut current) = stage_for_reader.lock() {
+                        *current = line.trim_start_matches("[release] ").to_string();
+                    }
+                }
+                pending.drain(..=index);
+            }
+        }
+    });
+
+    let started = Instant::now();
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().and_then(|mut output| {
+                    let mut bytes = Vec::new();
+                    output.read_to_end(&mut bytes).ok().map(|_| bytes)
+                });
+                let _ = stderr_thread.join();
+                if let Some(stdout) = stdout {
+                    let _ = std::io::stdout().write_all(&stdout);
+                    let _ = std::io::stdout().flush();
+                }
+                return Some(std::process::ExitCode::from(
+                    status.code().unwrap_or(1).try_into().unwrap_or(1),
+                ));
+            }
+            Ok(None) if started.elapsed() >= deadline => break true,
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => break false,
+        }
+    };
+
+    if timed_out {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stderr_thread.join();
+        let stalled_stage = stage
+            .lock()
+            .map(|current| current.clone())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let error = crate::core::Error::internal_io(
+            format!(
+                "release command exceeded its {}s deadline while stalled in stage `{stalled_stage}`",
+                deadline.as_secs()
+            ),
+            Some(format!("release stage: {stalled_stage}")),
+        );
+        crate::commands::output_runtime::emit_json_result_for_identity(
+            Err(error),
+            None,
+            124,
+            &crate::commands::utils::response::CommandIdentity::top_level("release"),
+        );
+        return Some(std::process::ExitCode::from(124));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stderr_thread.join();
+    None
+}
 
 fn generic_route_policy_snapshot(
     cli: &Cli,
@@ -702,6 +817,9 @@ impl CliRuntime {
         }
 
         let normalized = args::normalize(args);
+        if let Some(exit) = run_release_with_deadline(&normalized) {
+            return exit;
+        }
         if let Some(exit) = run_config_read_fast_path(&normalized) {
             return exit;
         }

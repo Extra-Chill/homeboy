@@ -36,6 +36,7 @@ use homeboy_core::{component, defaults, Error};
 
 mod admission;
 pub(crate) mod artifact_finalization;
+mod capacity_readiness;
 mod catalog;
 pub(crate) mod command_runner;
 mod config_preflight;
@@ -71,13 +72,19 @@ pub use admission::{
     AgentTaskProviderAdmissionPredicate, AgentTaskProviderAdmissionRequest,
     AGENT_TASK_PROVIDER_ADMISSION_PLAN_SCHEMA,
 };
+pub use capacity_readiness::{
+    capacity_readiness_from_outcome, capacity_readiness_from_probe_result,
+    capacity_readiness_unknown, AgentTaskProviderCapacityReadiness,
+    PROVIDER_READINESS_CAPACITY_CLASSIFICATION,
+};
 pub use catalog::*;
 #[cfg(test)]
 pub(crate) use command_runner::run_provider_readiness_invocation_with_test_timeout;
 pub use command_runner::{
     probe_provider_executor_resolves, provider_command_parts, run_provider_readiness_invocation,
     validate_provider_immediate_failure_patterns, ProviderExecutorResolution,
-    ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
+    ProviderReadinessInvocationCapacity, ProviderReadinessInvocationResult,
+    PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
 pub use credential_readiness::{

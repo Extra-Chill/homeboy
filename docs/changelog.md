@@ -4,6 +4,59 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.3] - 2026-09-21
+
+### Fixed
+- carry extension-skipped components into real sweep results
+
+## [0.383.2] - 2026-09-21
+
+### Fixed
+- route source changes to the tests that own them
+
+## [0.383.1] - 2026-09-21
+
+### Changed
+- establish release gate fixtures instead of sampling host state
+
+### Fixed
+- harvest committed changes behind an empty provider patch
+- reclaim squash and rebase merged task branches
+
+## [0.383.0] - 2026-09-21
+
+### Added
+- expose provider capacity as typed readiness evidence
+- publish configured git subtrees
+
+### Fixed
+- stop rsyncing directories into a live path in place
+- require consent for model overrides
+- pass action payloads through CLI
+- preserve cancellation lifecycle classification
+
+## [0.382.0] - 2026-09-21
+
+### Added
+- add remote release coordinate resolution
+- durable Cook review feedback
+
+### Changed
+- centralize work supervision
+
+### Fixed
+- align auto preview with Lab admission
+- report unavailable shared cargo reclaim
+- preserve source build timeout state
+- preserve detached child diagnostics
+- project evidence for deferred workspaces
+- converge doctor repairs safely
+- share readiness cache across admission phases
+- publish detached handoff before runtime admission
+- stabilize authority locks and adoption replay fixtures
+- preserve promotion failure causes
+- bound Cook promotion admission waits
+
 ## [0.381.0] - 2026-09-21
 
 ### Added

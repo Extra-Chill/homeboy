@@ -198,6 +198,9 @@ enum ExtensionCommand {
         /// JSON array of selected data rows
         #[arg(long)]
         data: Option<String>,
+        /// JSON payload for the action (inline JSON, @FILE, or - for stdin)
+        #[arg(long, value_name = "JSON")]
+        payload: Option<String>,
     },
     /// Run a tool from a extension's vendor directory
     Exec {
@@ -295,7 +298,8 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
             action_id,
             project,
             data,
-        } => run_action(&extension_id, &action_id, project, data),
+            payload,
+        } => run_action(&extension_id, &action_id, project, data, payload),
         ExtensionCommand::Exec {
             extension_id,
             component,
@@ -1908,12 +1912,14 @@ fn run_action(
     action_id: &str,
     project_id: Option<String>,
     data: Option<String>,
+    payload: Option<String>,
 ) -> CmdResult<ExtensionOutput> {
-    let response = homeboy_core::extension::invoke::run_action(
+    let (response, exit_code) = homeboy_core::extension::invoke::run_action(
         extension_id,
         action_id,
         project_id.as_deref(),
         data.as_deref(),
+        payload.as_deref(),
     )?;
 
     Ok((
@@ -1923,7 +1929,7 @@ fn run_action(
             project_id,
             response,
         },
-        0,
+        exit_code,
     ))
 }
 

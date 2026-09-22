@@ -1,4 +1,4 @@
-use super::{ReleaseReadinessCommand, ReleaseSubcommand};
+use super::{ReleaseReadinessCommand, ReleaseSubcommand, ResolveOutput};
 use crate::cli_surface::{Cli, Commands};
 use clap::{CommandFactory, Parser};
 
@@ -106,6 +106,19 @@ fn release_inspection_targets_use_component_first_grammar() {
         readiness.command,
         ReleaseReadinessCommand::List { component_id } if component_id == "homeboy"
     ));
+
+    let resolve = release(&[
+        "homeboy",
+        "release",
+        "resolve",
+        "https://github.com/example/monorepo.git",
+        "--prefix",
+        "figma-transformer",
+    ]);
+    assert!(matches!(
+        resolve.command,
+        Some(ReleaseSubcommand::Resolve(_))
+    ));
 }
 
 #[test]
@@ -166,6 +179,10 @@ fn release_inspection_help_includes_copy_paste_examples() {
             ["release", "readiness"].as_slice(),
             "homeboy release readiness list data-machine-code",
         ),
+        (
+            ["release", "resolve"].as_slice(),
+            "homeboy release resolve https://github.com/example/monorepo.git --prefix figma-transformer",
+        ),
     ];
 
     for (path, example) in expectations {
@@ -179,4 +196,33 @@ fn release_inspection_help_includes_copy_paste_examples() {
         let help = command.render_help().to_string();
         assert!(help.contains(example), "missing `{example}`:\n{help}");
     }
+}
+
+#[test]
+fn resolve_output_keeps_success_and_no_match_shapes_distinct() {
+    let success = serde_json::to_value(ResolveOutput {
+        command: "release.resolve",
+        variant: "resolve",
+        repository: "file:///repo.git".to_string(),
+        version: Some("1.2.3".to_string()),
+        tag: Some("component-v1.2.3".to_string()),
+        commit: Some("a".repeat(40)),
+        no_match: None,
+    })
+    .unwrap();
+    assert_eq!(success["command"], "release.resolve");
+    assert!(success.get("match").is_none());
+
+    let no_match = serde_json::to_value(ResolveOutput {
+        command: "release.resolve",
+        variant: "resolve",
+        repository: "file:///repo.git".to_string(),
+        version: None,
+        tag: None,
+        commit: None,
+        no_match: Some(serde_json::Value::Null),
+    })
+    .unwrap();
+    assert_eq!(no_match["match"], serde_json::Value::Null);
+    assert!(no_match.get("version").is_none());
 }

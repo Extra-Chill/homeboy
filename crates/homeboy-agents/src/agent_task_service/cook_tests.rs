@@ -13492,6 +13492,18 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
 }
 
 #[test]
+fn terminal_fallback_preserves_cancellation_and_provider_failure_classifications() {
+    assert_eq!(
+        terminal_fallback_status(agent_task_lifecycle::AgentTaskRunState::Cancelled),
+        CookStatus::Cancelled
+    );
+    assert_eq!(
+        terminal_fallback_status(agent_task_lifecycle::AgentTaskRunState::Failed),
+        CookStatus::ProviderFailure
+    );
+}
+
+#[test]
 fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_completion() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-detached-attempt-1";
