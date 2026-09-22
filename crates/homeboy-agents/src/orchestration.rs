@@ -136,6 +136,19 @@ mod fanout_batch_read_tests {
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::json;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static MISSING_RECEIPT_CONTEXT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn unexpected_resume_context() -> homeboy_core::Result<(
+        crate::agent_task_scheduler::SharedAgentTaskExecutor,
+        super::FanoutResumeDispatcherFactory,
+    )> {
+        MISSING_RECEIPT_CONTEXT_CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(homeboy_core::Error::internal_unexpected(
+            "missing-receipt recovery entered execution context",
+        ))
+    }
 
     #[test]
     fn batch_status_is_read_only_and_uses_the_durable_roster() {
@@ -362,6 +375,69 @@ mod fanout_batch_read_tests {
                 .expect("stored receipt recovery");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
             assert_eq!(recovered.result.data["status"], "partial_failure");
+        });
+    }
+
+    #[test]
+    fn batch_resume_missing_receipt_reattaches_child_reconciliation_without_execution() {
+        with_isolated_home(|_| {
+            MISSING_RECEIPT_CONTEXT_CALLS.store(0, Ordering::SeqCst);
+            super::register_fanout_resume_context(unexpected_resume_context);
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "resume-missing-receipt",
+                    "resume-missing-receipt",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-missing-receipt-child".to_string(),
+                    }],
+                    json!({
+                        "child_finalizations": {
+                            "resume-missing-receipt-child": {
+                                "status": "review_ready",
+                                "exit_code": 0
+                            }
+                        }
+                    }),
+                )
+                .expect("persist batch");
+            store
+                .mutate_batch("resume-missing-receipt", |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    batch.child_runs[0].state =
+                        crate::agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                    Ok(())
+                })
+                .expect("persist terminal child receipt");
+
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id(
+                    "test",
+                    "resume-missing-receipt",
+                    "resume",
+                    "missing-receipt-effect",
+                ),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "missing-receipt-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-missing-receipt".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let recovered = FanoutBatchActionDelegate
+                .recover(&run, &request)
+                .expect("reconcile completed child effect");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(recovered.result.data["status"], "succeeded");
+            assert_eq!(recovered.result.data["cooks"][0]["terminal"], true);
+            assert_eq!(MISSING_RECEIPT_CONTEXT_CALLS.load(Ordering::SeqCst), 0);
         });
     }
 }
@@ -904,7 +980,10 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
             if let Some(receipt) = Self::stored_resume_receipt(&run.id, &request.effect_id)? {
                 return Ok(receipt);
             }
+            return Self::recover_missing_resume_receipt(&run.id);
         }
+        // Cancel is independently idempotent: its marker-first implementation
+        // is safe to replay even when the action receipt was lost.
         self.execute_inner(run, request)
     }
 }
@@ -959,6 +1038,100 @@ impl FanoutBatchActionDelegate {
                 .and_then(Value::as_str)
                 .map(str::to_string),
         }))
+    }
+
+    fn recover_missing_resume_receipt(
+        batch_id: &str,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        let store = AgentTaskBatchStore::from_current_data_root()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let batch = store
+            .read_batch_record(batch_id)
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let Some(finalizations) = batch
+            .metadata
+            .get("child_finalizations")
+            .and_then(Value::as_object)
+        else {
+            return Err(ControlPlaneError::unavailable(format!(
+                "fanout resume outcome for `{batch_id}` is unknown: no child reconciliation receipts exist; reconcile the batch before retrying"
+            )));
+        };
+
+        // These receipts are written after each child is harvested. Only when
+        // every roster entry has one and the durable child state is terminal can
+        // they prove that resume completed without needing another provider call.
+        if batch
+            .child_runs
+            .iter()
+            .any(|child| !child.state.is_terminal() || !finalizations.contains_key(&child.run_id))
+        {
+            return Err(ControlPlaneError::unavailable(format!(
+                "fanout resume outcome for `{batch_id}` is unknown: child reconciliation is incomplete; reconcile the batch before retrying"
+            )));
+        }
+
+        let mut cooks = Vec::with_capacity(batch.child_runs.len());
+        let mut succeeded = 0;
+        let mut failed = 0;
+        let mut cancelled = 0;
+        let mut timed_out = 0;
+        for child in &batch.child_runs {
+            let receipt = &finalizations[&child.run_id];
+            let status = receipt
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            let exit_code = receipt
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(1) as i32;
+            match status.as_str() {
+                "cancelled" => cancelled += 1,
+                "timed_out" => timed_out += 1,
+                _ if exit_code == 0 => succeeded += 1,
+                _ => failed += 1,
+            }
+            cooks.push(FanoutBatchResumeCookResult {
+                cook_id: child.task_id.clone(),
+                initial_run_id: child.run_id.clone(),
+                status,
+                exit_code,
+                result: None,
+                error: receipt
+                    .get("error")
+                    .cloned()
+                    .filter(|error| !error.is_null()),
+                terminal: true,
+            });
+        }
+        let report = FanoutBatchResumeActionResult {
+            schema: "homeboy/agent-task-cook-batch/v1".to_string(),
+            batch_id: batch_id.to_string(),
+            status: batch.state.outcome_status().to_string(),
+            total: cooks.len(),
+            queued: 0,
+            running: 0,
+            succeeded,
+            failed,
+            cancelled,
+            timed_out,
+            cooks,
+        };
+        Ok(ControlPlaneActionDelegateResult {
+            outcome: if batch.state == crate::agent_task_batch::AgentTaskBatchState::Succeeded {
+                ControlPlaneActionOutcome::Succeeded
+            } else {
+                ControlPlaneActionOutcome::Failed
+            },
+            result: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                data: serde_json::to_value(report)
+                    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+            },
+            message: Some("reattached from durable child reconciliation receipts".to_string()),
+        })
     }
 
     fn execute_inner(
