@@ -6119,6 +6119,9 @@ mod loop_control_plane_tests {
                 acknowledgement.result.data["stopped_reason"],
                 "revolution_limit_reached"
             );
+            let replay = resume_loop(&record.loop_id, Some(1), json!({ "backend": "fixture" }))
+                .expect("replayed resume acknowledgement");
+            assert_eq!(replay, acknowledgement);
         });
     }
 }
