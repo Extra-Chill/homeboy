@@ -1213,7 +1213,11 @@ impl AgentTaskScheduler {
                         &mut outcome,
                         running_task.adoption.as_ref(),
                     );
-                    persist_resolved_provider_model(&mut outcome, &running_task.request);
+                    persist_resolved_provider_model_for_attempt(
+                        &mut outcome,
+                        &running_task.request,
+                        !running_task.timeout_cancel_requested,
+                    );
                     if let Some(run_id) = running_task.run_id.as_deref() {
                         let terminal_state = match outcome.status {
                             AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
@@ -1257,7 +1261,11 @@ impl AgentTaskScheduler {
                     // Harvest can add Homeboy-generated patch artifacts after the
                     // provider result was normalized. Keep their provenance tied
                     // to the same concrete model as the canonical outcome.
-                    persist_resolved_provider_model(&mut outcome, &running_task.request);
+                    persist_resolved_provider_model_for_attempt(
+                        &mut outcome,
+                        &running_task.request,
+                        !running_task.timeout_cancel_requested,
+                    );
                     finalize_candidate_artifacts(&mut outcome, &running_task);
                     let outcome =
                         AgentTaskScheduleSupport::normalize_outcome(outcome, Some(&running_task));
@@ -1791,6 +1799,14 @@ pub(crate) fn persist_resolved_provider_model(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
 ) {
+    persist_resolved_provider_model_for_attempt(outcome, request, true);
+}
+
+fn persist_resolved_provider_model_for_attempt(
+    outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskRequest,
+    provider_execution_identity_available: bool,
+) {
     // A second normalization pass runs after patch harvest. Once the first pass
     // supplied a configured fallback in `metadata.model`, retain the original
     // runtime-report boundary instead of mistaking that fallback for a report.
@@ -1803,7 +1819,11 @@ pub(crate) fn persist_resolved_provider_model(
                 .then(|| outcome.selected_model().map(str::to_string))
                 .flatten()
         })
-        .or_else(|| provider_run_result_model(outcome));
+        .or_else(|| {
+            provider_execution_identity_available
+                .then(|| provider_run_result_model(outcome))
+                .flatten()
+        });
     let requested = request.metadata["model_selection"]["requested"]
         .as_str()
         .filter(|model| !model.trim().is_empty())
