@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 
-use homeboy_core::process::ProcessStartIdentity;
 use homeboy_core::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,14 +19,11 @@ use crate::agent_task_scheduler::SharedAgentTaskExecutor;
 pub const AGENT_TASK_LOOP_JOB_TYPE: &str = "agent-task-loop";
 pub const AGENT_TASK_LOOP_JOB_VERSION: u32 = 2;
 const AGENT_TASK_LOOP_JOB_SCHEMA: &str = "homeboy/agent-task-loop-job/v2";
-const LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA: &str = "homeboy/agent-task-loop-job/v1";
 const SUPERVISION_POLL: Duration = Duration::from_millis(500);
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskLoopJobKind {
-    #[default]
-    LegacyChild,
     DaemonExecution,
 }
 
@@ -36,13 +32,7 @@ pub enum AgentTaskLoopJobKind {
 pub struct AgentTaskLoopJobRequest {
     pub schema: String,
     pub loop_id: String,
-    #[serde(default)]
     pub kind: AgentTaskLoopJobKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_start_identity: Option<ProcessStartIdentity>,
-    #[serde(default)]
     pub generation: String,
     #[serde(default)]
     pub dispatch_defaults: Value,
@@ -68,49 +58,19 @@ pub struct AgentTaskLoopJob {
 
 impl AgentTaskLoopJob {
     fn new(request: AgentTaskLoopJobRequest) -> Result<Self> {
-        if !matches!(
-            request.schema.as_str(),
-            AGENT_TASK_LOOP_JOB_SCHEMA | LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA
-        ) || request.loop_id.trim().is_empty()
-        {
+        if request.schema != AGENT_TASK_LOOP_JOB_SCHEMA || request.loop_id.trim().is_empty() {
             return Err(invalid_loop_job(
                 "loop jobs require a recognized schema and durable loop id",
             ));
         }
-        if request.child_pid == Some(0) {
-            return Err(invalid_loop_job(
-                "loop jobs require the detached coordinator's process id",
-            ));
-        }
-        if request.child_pid.is_some() != request.child_start_identity.is_some() {
-            return Err(invalid_loop_job(
-                "loop jobs require both coordinator pid and start identity",
-            ));
-        }
-        if request.kind == AgentTaskLoopJobKind::DaemonExecution
-            && request.generation.trim().is_empty()
-        {
+        if request.generation.trim().is_empty() {
             return Err(invalid_loop_job(
                 "daemon loop executions require a non-empty generation",
             ));
         }
-        if request.kind == AgentTaskLoopJobKind::DaemonExecution && request.child_pid.is_some() {
-            return Err(invalid_loop_job(
-                "daemon loop executions cannot carry a legacy child identity",
-            ));
-        }
-        if request.kind == AgentTaskLoopJobKind::LegacyChild && request.child_pid.is_none() {
-            return Err(invalid_loop_job(
-                "legacy loop jobs require a coordinator process identity",
-            ));
-        }
         Ok(Self {
             schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
-            idempotency_key: if request.generation.is_empty() {
-                format!("agent-task-loop:{}", request.loop_id)
-            } else {
-                format!("agent-task-loop:{}:{}", request.loop_id, request.generation)
-            },
+            idempotency_key: format!("agent-task-loop:{}:{}", request.loop_id, request.generation),
             request,
             phase: WorkJobPhase::Queued,
             controller_state: None,
@@ -119,16 +79,8 @@ impl AgentTaskLoopJob {
     }
 
     fn parse(value: Value) -> Result<Self> {
-        let mut job: Self = serde_json::from_value(value)
+        let job: Self = serde_json::from_value(value)
             .map_err(|error| invalid_loop_job(&format!("invalid durable loop job: {error}")))?;
-        // Old queued jobs remain readable, but every resumed checkpoint is
-        // rewritten with the explicit v2 execution-kind contract.
-        if job.schema == LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA {
-            job.schema = AGENT_TASK_LOOP_JOB_SCHEMA.to_string();
-        }
-        if job.request.schema == LEGACY_AGENT_TASK_LOOP_JOB_SCHEMA {
-            job.request.schema = AGENT_TASK_LOOP_JOB_SCHEMA.to_string();
-        }
         let expected = Self::new(job.request.clone())?;
         if job.schema != AGENT_TASK_LOOP_JOB_SCHEMA
             || job.idempotency_key != expected.idempotency_key
@@ -260,27 +212,17 @@ impl WorkJobHandler for LoopWorkHandler {
 
     fn cancel(&self, checkpoint: &Value) -> Result<()> {
         let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
-        let Some(child_pid) = job.request.child_pid else {
+        if job.phase != WorkJobPhase::Completed
+            && !controller_state_is_terminal(
+                agent_task_loop_controller::controller_status(&job.request.loop_id)?.state,
+            )
+        {
             agent_task_loop_controller::cancel_owned_provider_runs(
                 &job.request.loop_id,
                 "controller work job cancelled",
             )?;
-            return Ok(());
-        };
-        let Some(child_start_identity) = job.request.child_start_identity.as_ref() else {
-            return Ok(());
-        };
-        if job.phase == WorkJobPhase::Completed
-            || !super::work_job::supervised_child_is_live(child_pid, child_start_identity)
-        {
-            return Ok(());
         }
-        if controller_state_is_terminal(
-            agent_task_loop_controller::controller_status(&job.request.loop_id)?.state,
-        ) {
-            return Ok(());
-        }
-        homeboy_core::process::terminate_process_tree(child_pid).map(|_| ())
+        Ok(())
     }
 }
 
@@ -304,10 +246,7 @@ impl LoopWorkHandler {
         // controller action here would be an unprovable second dispatch. A
         // durable active-provider identity is the only safe reattach signal;
         // absent one, preserve the revolution and fail closed as unknown.
-        if invocation == WorkJobInvocation::Resume
-            && job.resume_result.is_none()
-            && job.request.child_pid.is_none()
-        {
+        if invocation == WorkJobInvocation::Resume && job.resume_result.is_none() {
             if matches!(
                 resume_dispatch_is_proven(&job.request.loop_id, &job.request.generation)?,
                 ResumeDispatchDecision::Unknown
@@ -324,97 +263,73 @@ impl LoopWorkHandler {
                 return Ok(WorkJobStep::Complete(job.result()));
             }
         }
-        if job.request.child_pid.is_none() {
-            let mut catalog = job.request.provider_catalog.clone();
-            apply_admitted_environment(
-                &mut catalog,
-                &job.request.dispatch_defaults["env_materialization"],
-            )?;
-            let executor: SharedAgentTaskExecutor = std::sync::Arc::new(
-                ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
-            );
-            let dispatch = LoopDispatchHook {
-                executor: executor.clone(),
-                catalog,
-                defaults: ControllerDispatchOverrides {
-                    backend: job.request.dispatch_defaults["backend"]
-                        .as_str()
-                        .map(str::to_string),
-                    selector: job.request.dispatch_defaults["selector"]
-                        .as_str()
-                        .map(str::to_string),
-                    model: job.request.dispatch_defaults["model"]
-                        .as_str()
-                        .map(str::to_string),
-                    provider_config: job.request.dispatch_defaults["provider_config_ref"]
-                        .as_str()
-                        .map(|reference| format!("@{reference}")),
-                },
-            };
-            write_loop_dispatch_receipt(
-                &job.request.loop_id,
-                &job.request.generation,
-                "dispatching",
-            )?;
-            let report = match crate::agent_task_controller_service::resume_with_options(
-                &job.request.loop_id,
-                executor,
-                &dispatch,
-                crate::agent_task_controller_service::ControllerResumeOptions {
-                    max_actions: 1,
-                    stop_on_terminal: true,
-                },
-            ) {
-                Ok(report) => report,
-                Err(error) => {
-                    job.refresh_controller_state();
-                    if job
-                        .controller_state
-                        .is_some_and(controller_state_is_terminal)
-                    {
-                        job.phase = WorkJobPhase::Completed;
-                        return Ok(WorkJobStep::Complete(job.result()));
-                    }
-                    return Err(error);
-                }
-            };
-            write_loop_dispatch_completion_receipt(&job.request.loop_id, &job.request.generation)?;
-            job.resume_result =
-                Some(serde_json::to_value(report.value).map_err(|error| {
-                    homeboy_core::Error::internal_json(error.to_string(), None)
-                })?);
-            #[cfg(any(test, feature = "test-support"))]
-            if test_interrupt_after_loop_dispatch() {
-                return Err(homeboy_core::Error::internal_unexpected(
-                    "test interruption after loop child admission",
-                ));
-            }
-            job.refresh_controller_state();
-            if job
-                .controller_state
-                .is_some_and(controller_state_is_terminal)
-            {
-                job.phase = WorkJobPhase::Completed;
-                return Ok(WorkJobStep::Complete(job.result()));
-            }
-            return Ok(WorkJobStep::Continue {
-                checkpoint: job.to_checkpoint()?,
-                progress: job.result(),
-                wait: SUPERVISION_POLL,
-            });
-        }
-        let _ = invocation;
-        if !super::work_job::supervised_child_is_live(
-            job.request.child_pid.expect("legacy child job"),
-            job.request
-                .child_start_identity
-                .as_ref()
-                .expect("legacy child identity"),
+        let mut catalog = job.request.provider_catalog.clone();
+        apply_admitted_environment(
+            &mut catalog,
+            &job.request.dispatch_defaults["env_materialization"],
+        )?;
+        let executor: SharedAgentTaskExecutor = std::sync::Arc::new(
+            ExtensionProviderAgentTaskExecutor::from_catalog(catalog.clone()),
+        );
+        let dispatch = LoopDispatchHook {
+            executor: executor.clone(),
+            catalog,
+            defaults: ControllerDispatchOverrides {
+                backend: job.request.dispatch_defaults["backend"]
+                    .as_str()
+                    .map(str::to_string),
+                selector: job.request.dispatch_defaults["selector"]
+                    .as_str()
+                    .map(str::to_string),
+                model: job.request.dispatch_defaults["model"]
+                    .as_str()
+                    .map(str::to_string),
+                provider_config: job.request.dispatch_defaults["provider_config_ref"]
+                    .as_str()
+                    .map(|reference| format!("@{reference}")),
+            },
+        };
+        write_loop_dispatch_receipt(&job.request.loop_id, &job.request.generation, "dispatching")?;
+        let report = match crate::agent_task_controller_service::resume_with_options(
+            &job.request.loop_id,
+            executor,
+            &dispatch,
+            crate::agent_task_controller_service::ControllerResumeOptions {
+                max_actions: 1,
+                stop_on_terminal: true,
+            },
         ) {
-            return Ok(WorkJobStep::Complete(terminalize_interrupted(
-                job,
-                AgentTaskLoopControllerState::Failed,
-            )?));
+            Ok(report) => report,
+            Err(error) => {
+                job.refresh_controller_state();
+                if job
+                    .controller_state
+                    .is_some_and(controller_state_is_terminal)
+                {
+                    job.phase = WorkJobPhase::Completed;
+                    return Ok(WorkJobStep::Complete(job.result()));
+                }
+                return Err(error);
+            }
+        };
+        write_loop_dispatch_completion_receipt(&job.request.loop_id, &job.request.generation)?;
+        job.resume_result = Some(
+            serde_json::to_value(report.value)
+                .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        if test_interrupt_after_loop_dispatch() {
+            return Err(homeboy_core::Error::internal_unexpected(
+                "test interruption after loop dispatch",
+            ));
+        }
+        job.refresh_controller_state();
+        if job
+            .controller_state
+            .is_some_and(controller_state_is_terminal)
+        {
+            job.phase = WorkJobPhase::Completed;
+            return Ok(WorkJobStep::Complete(job.result()));
         }
         Ok(WorkJobStep::Continue {
             checkpoint: job.to_checkpoint()?,
@@ -489,10 +404,7 @@ enum ResumeDispatchDecision {
     Unknown,
 }
 
-fn resume_dispatch_is_proven(
-    loop_id: &str,
-    generation: &str,
-) -> Result<ResumeDispatchDecision> {
+fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDispatchDecision> {
     let record = agent_task_loop_controller::load_controller(loop_id)?;
     let has_pending_action = record.next_actions.iter().any(|action| {
         matches!(
@@ -762,28 +674,6 @@ pub fn register_loop_work_job_handler() {
     });
 }
 
-pub fn loop_work_job_submission(
-    loop_id: &str,
-    child_pid: u32,
-    child_start_identity: &ProcessStartIdentity,
-) -> Result<Value> {
-    let job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
-        schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
-        loop_id: loop_id.to_string(),
-        kind: AgentTaskLoopJobKind::LegacyChild,
-        child_pid: Some(child_pid),
-        child_start_identity: Some(child_start_identity.clone()),
-        generation: String::new(),
-        dispatch_defaults: Value::Null,
-        provider_catalog: AgentTaskProviderCatalog::default(),
-    })?;
-    work_job_submission(
-        &LoopWorkHandler,
-        job.idempotency_key.clone(),
-        job.to_checkpoint()?,
-    )
-}
-
 /// Admit one daemon-owned loop execution without launching a public CLI child.
 pub fn loop_work_job_execution_submission(
     loop_id: &str,
@@ -801,8 +691,6 @@ pub fn loop_work_job_execution_submission(
         schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
         loop_id: loop_id.to_string(),
         kind: AgentTaskLoopJobKind::DaemonExecution,
-        child_pid: None,
-        child_start_identity: None,
         generation: generation.to_string(),
         dispatch_defaults,
         provider_catalog,
@@ -845,7 +733,6 @@ mod tests {
     use std::sync::Arc;
 
     use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
-    use homeboy_core::process::ProcessIdentityState;
     use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness, EnvVarGuard};
 
     use super::*;
@@ -853,13 +740,15 @@ mod tests {
         WorkJobDriver, WORK_JOB_CHECKPOINT_SCHEMA, WORK_JOB_TYPE, WORK_JOB_VERSION,
     };
 
-    const IDENTITY: ProcessStartIdentity = ProcessStartIdentity::Linux {
-        starttime_ticks: 4242,
-    };
-
-    fn submission(loop_id: &str, pid: u32) -> Value {
+    fn submission(loop_id: &str) -> Value {
         register_loop_work_job_handler();
-        loop_work_job_submission(loop_id, pid, &IDENTITY).expect("build loop work submission")
+        loop_work_job_execution_submission(
+            loop_id,
+            "generation-test",
+            json!({}),
+            AgentTaskProviderCatalog::default(),
+        )
+        .expect("build loop work submission")
     }
 
     fn recovery_record(
@@ -940,7 +829,8 @@ mod tests {
                 if !receipt.is_null() {
                     record.metadata["loop_dispatch_receipt"] = receipt;
                 }
-                agent_task_loop_controller::write_controller(&record).expect("write receipt fixture");
+                agent_task_loop_controller::write_controller(&record)
+                    .expect("write receipt fixture");
                 assert_eq!(
                     resume_dispatch_is_proven(loop_id, generation).expect("classify receipt"),
                     ResumeDispatchDecision::Unknown
@@ -972,11 +862,14 @@ mod tests {
 
     #[test]
     fn new_loop_submissions_use_the_shared_work_driver() {
-        let submission = submission("loop-shared", 4242);
+        let submission = submission("loop-shared");
 
         assert_eq!(submission["type"], WORK_JOB_TYPE);
         assert_eq!(submission["version"], WORK_JOB_VERSION);
-        assert_eq!(submission["idempotency_key"], "agent-task-loop:loop-shared");
+        assert_eq!(
+            submission["idempotency_key"],
+            "agent-task-loop:loop-shared:generation-test"
+        );
         assert_eq!(submission["request"]["work_type"], AGENT_TASK_LOOP_JOB_TYPE);
         assert_eq!(
             submission["request"]["request"]["request"]["loop_id"],
@@ -989,7 +882,7 @@ mod tests {
             .public_request(&submission["request"])
             .expect("safe public projection");
         assert_eq!(public["loop_id"], "loop-shared");
-        assert!(public.get("child_pid").is_none());
+        assert_eq!(public["kind"], "daemon_execution");
         assert!(!public.to_string().contains("starttime_ticks"));
     }
 
@@ -1096,8 +989,6 @@ mod tests {
                 schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
                 loop_id: loop_id.to_string(),
                 kind: AgentTaskLoopJobKind::DaemonExecution,
-                child_pid: None,
-                child_start_identity: None,
                 generation: "generation-caller-a".to_string(),
                 dispatch_defaults: json!({
                     "backend": "caller-fixture",
@@ -1150,26 +1041,25 @@ mod tests {
     }
 
     #[test]
-    fn mixed_legacy_process_identity_is_rejected_without_panicking() {
-        let request = serde_json::to_value(AgentTaskLoopJobRequest {
-            schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
-            loop_id: "loop-invalid-identity".to_string(),
-            kind: AgentTaskLoopJobKind::LegacyChild,
-            child_pid: Some(4242),
-            child_start_identity: None,
-            generation: String::new(),
-            dispatch_defaults: Value::Null,
-            provider_catalog: AgentTaskProviderCatalog::default(),
-        })
-        .expect("encode request");
+    fn obsolete_process_identity_fields_are_rejected_by_the_strict_schema() {
+        let request = json!({
+            "schema": AGENT_TASK_LOOP_JOB_SCHEMA,
+            "loop_id": "loop-invalid-identity",
+            "kind": "daemon_execution",
+            "generation": "generation-1",
+            "dispatch_defaults": null,
+            "provider_catalog": AgentTaskProviderCatalog::default(),
+            "child_pid": 4242,
+            "child_start_identity": { "linux": { "starttime_ticks": 1 } }
+        });
         let error = AgentTaskLoopJob::parse(json!({
             "schema": AGENT_TASK_LOOP_JOB_SCHEMA,
-            "idempotency_key": "agent-task-loop:loop-invalid-identity",
+            "idempotency_key": "agent-task-loop:loop-invalid-identity:generation-1",
             "request": request,
             "phase": "queued"
         }))
-        .expect_err("mixed identity must be rejected");
-        assert!(format!("{error:?}").contains("both coordinator pid and start identity"));
+        .expect_err("obsolete process identity must be rejected");
+        assert!(format!("{error:?}").contains("unknown field"));
     }
 
     #[test]
@@ -1227,8 +1117,6 @@ mod tests {
                 schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
                 loop_id: loop_id.to_string(),
                 kind: AgentTaskLoopJobKind::DaemonExecution,
-                child_pid: None,
-                child_start_identity: None,
                 generation: "generation-1".to_string(),
                 dispatch_defaults: json!({}),
                 provider_catalog: AgentTaskProviderCatalog::default(),
@@ -1286,8 +1174,6 @@ mod tests {
                 schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
                 loop_id: loop_id.to_string(),
                 kind: AgentTaskLoopJobKind::DaemonExecution,
-                child_pid: None,
-                child_start_identity: None,
                 generation: "generation-1".to_string(),
                 dispatch_defaults: json!({ "backend": "long-provider" }),
                 provider_catalog: catalog,
@@ -1383,8 +1269,6 @@ mod tests {
                 schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
                 loop_id: record.loop_id.clone(),
                 kind: AgentTaskLoopJobKind::DaemonExecution,
-                child_pid: None,
-                child_start_identity: None,
                 generation: "generation-1".to_string(),
                 dispatch_defaults: json!({}),
                 provider_catalog: AgentTaskProviderCatalog::default(),
@@ -1399,11 +1283,14 @@ mod tests {
     }
 
     #[test]
-    fn dead_coordinator_terminalizes_through_the_shared_harness() {
+    fn failed_daemon_execution_terminalizes_through_the_shared_harness() {
         with_isolated_home(|_| {
-            agent_task_loop_controller::create_controller("loop-dead", "repair", "v1")
-                .expect("create controller");
-            let request = submission("loop-dead", u32::MAX)["request"].clone();
+            let mut record =
+                agent_task_loop_controller::create_controller("loop-daemon-failed", "repair", "v1")
+                    .expect("create controller");
+            record.state = AgentTaskLoopControllerState::Failed;
+            agent_task_loop_controller::write_controller(&record).expect("fail controller");
+            let request = submission("loop-daemon-failed")["request"].clone();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct work harness");
@@ -1416,7 +1303,7 @@ mod tests {
             assert_eq!(result["result"]["phase"], "completed");
             assert_eq!(result["result"]["controller_state"], "failed");
             assert_eq!(
-                agent_task_loop_controller::load_controller("loop-dead")
+                agent_task_loop_controller::load_controller("loop-daemon-failed")
                     .expect("read terminal controller")
                     .state,
                 AgentTaskLoopControllerState::Failed
@@ -1438,7 +1325,7 @@ mod tests {
                     .expect("create controller");
             record.state = AgentTaskLoopControllerState::Completed;
             agent_task_loop_controller::write_controller(&record).expect("complete controller");
-            let request = submission("loop-complete", u32::MAX)["request"].clone();
+            let request = submission("loop-complete")["request"].clone();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct work harness");
@@ -1575,15 +1462,13 @@ mod tests {
             let loop_id = "loop-cancel-racing-terminal";
             let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
                 .expect("create controller");
-            let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy_core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let request = loop_work_job_submission(loop_id, child.id(), &identity)
-                .expect("build submission")["request"]
+            let request = loop_work_job_execution_submission(
+                loop_id,
+                "generation-cancel-racing",
+                json!({}),
+                AgentTaskProviderCatalog::default(),
+            )
+            .expect("build submission")["request"]
                 .clone();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
@@ -1605,13 +1490,6 @@ mod tests {
 
             assert_eq!(result["result"]["phase"], "completed");
             assert_eq!(result["result"]["controller_state"], "completed");
-            assert!(matches!(
-                homeboy_core::process::process_identity_state(child.id(), None),
-                ProcessIdentityState::Live
-            ));
-
-            homeboy_core::process::terminate_process_tree(child.id()).expect("clean fixture child");
-            let _ = child.wait();
         });
     }
 
@@ -1620,15 +1498,13 @@ mod tests {
         with_isolated_home(|_| {
             agent_task_loop_controller::create_controller("loop-idle", "repair", "v1")
                 .expect("create controller");
-            let child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy_core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let request = loop_work_job_submission("loop-idle", child.id(), &identity)
-                .expect("build submission")["request"]
+            let request = loop_work_job_execution_submission(
+                "loop-idle",
+                "generation-idle",
+                json!({}),
+                AgentTaskProviderCatalog::default(),
+            )
+            .expect("build submission")["request"]
                 .clone();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = Arc::new(
@@ -1680,15 +1556,13 @@ mod tests {
             register_loop_work_job_handler();
             agent_task_loop_controller::create_controller("loop-cancel", "repair", "v1")
                 .expect("create controller");
-            let child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy_core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let request = loop_work_job_submission("loop-cancel", child.id(), &identity)
-                .expect("build submission")["request"]
+            let request = loop_work_job_execution_submission(
+                "loop-cancel",
+                "generation-cancel",
+                json!({}),
+                AgentTaskProviderCatalog::default(),
+            )
+            .expect("build submission")["request"]
                 .clone();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
@@ -1706,10 +1580,6 @@ mod tests {
                 .expect("terminalize cancelled loop work");
 
             assert_eq!(result["result"]["controller_state"], "abandoned");
-            assert!(matches!(
-                homeboy_core::process::process_identity_state(child.id(), None),
-                ProcessIdentityState::Dead
-            ));
         });
     }
 }

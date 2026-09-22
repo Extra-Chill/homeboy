@@ -164,8 +164,14 @@ pub fn persist_fanout_resume_authority(
         "catalog": catalog,
         "provider_public_env": provider_public_env,
     });
-    let bytes = serde_json::to_vec(&authority)
-        .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    // The private JSON writer persists pretty JSON with a trailing newline;
+    // hash the exact durable bytes so the reference is verifiable on reload.
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&authority)
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?
+    )
+    .into_bytes();
     let digest = homeboy_engine_primitives::content_hash::sha256_hex(&bytes);
     let path = root.join(format!("{digest}.json"));
     if !path.exists() {
@@ -7550,16 +7556,13 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy_core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let submission =
-                crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &identity)
-                    .expect("build loop work submission");
+            let submission = crate::agent_task_service::loop_work_job_execution_submission(
+                loop_id,
+                &record.updated_at,
+                json!({}),
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+            )
+            .expect("build loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7589,21 +7592,7 @@ mod loop_control_plane_tests {
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
-            for _ in 0..100 {
-                if matches!(
-                    homeboy_core::process::process_identity_state(child.id(), None),
-                    homeboy_core::process::ProcessIdentityState::Dead
-                ) {
-                    let _ = child.wait();
-                    server.join().expect("join daemon");
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
             server.join().expect("join daemon");
-            panic!("active loop coordinator was not cancelled");
         });
     }
 
@@ -7615,16 +7604,13 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-http-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy_core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let submission =
-                crate::agent_task_service::loop_work_job_submission(loop_id, child.id(), &identity)
-                    .expect("build loop work submission");
+            let submission = crate::agent_task_service::loop_work_job_execution_submission(
+                loop_id,
+                &record.updated_at,
+                json!({}),
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+            )
+            .expect("build loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7672,21 +7658,7 @@ mod loop_control_plane_tests {
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
-            for _ in 0..100 {
-                if matches!(
-                    homeboy_core::process::process_identity_state(child.id(), None),
-                    homeboy_core::process::ProcessIdentityState::Dead
-                ) {
-                    let _ = child.wait();
-                    server.join().expect("join daemon");
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
             server.join().expect("join daemon");
-            panic!("active loop coordinator was not cancelled through HTTP");
         });
     }
 

@@ -1428,7 +1428,6 @@ mod tests {
         self, AgentTaskLoopControllerState, AgentTaskLoopWait, AgentTaskLoopWaitStatus,
     };
     use homeboy::core::test_support::with_isolated_home;
-    use std::time::Duration;
 
     #[test]
     fn controller_doctor_checks_never_compare_the_backend_name_by_string() {
@@ -1513,19 +1512,14 @@ mod tests {
             let loop_id = "loop-active-cli-stop";
             let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
                 .expect("created");
-            let mut child = std::process::Command::new("sh")
-                .args(["-c", "sleep 30"])
-                .spawn()
-                .expect("spawn coordinator fixture");
-            let identity = homeboy::core::process::process_start_identity(child.id())
-                .expect("inspect fixture")
-                .expect("fixture identity");
-            let submission = homeboy::agents::agent_task_service::loop_work_job_submission(
-                loop_id,
-                child.id(),
-                &identity,
-            )
-            .expect("build loop work submission");
+            let submission =
+                homeboy::agents::agent_task_service::loop_work_job_execution_submission(
+                    loop_id,
+                    &record.updated_at,
+                    serde_json::json!({}),
+                    homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::default(),
+                )
+                .expect("build loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy::core::daemon::serve_listener_for_requests(listener, 10)
@@ -1553,21 +1547,7 @@ mod tests {
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
-            for _ in 0..100 {
-                if matches!(
-                    homeboy::core::process::process_identity_state(child.id(), None),
-                    homeboy::core::process::ProcessIdentityState::Dead
-                ) {
-                    let _ = child.wait();
-                    server.join().expect("join daemon");
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let _ = homeboy::core::process::terminate_process_tree(child.id());
-            let _ = child.wait();
             server.join().expect("join daemon");
-            panic!("active loop coordinator was not cancelled through CLI");
         });
     }
 
