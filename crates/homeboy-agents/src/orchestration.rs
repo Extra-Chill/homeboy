@@ -105,15 +105,30 @@ pub type FanoutResumeExecutionContextFactory = fn() -> homeboy_core::Result<(
     FanoutResumeDispatcherFactory,
 )>;
 
+/// Runs Cook-owned fanout publication and cleanup before the action is
+/// acknowledged. The runtime supplies adapters; the delegate owns ordering.
+pub type FanoutResumeEffectsFactory =
+    fn(&str, &FanoutBatchResumeActionResult) -> homeboy_core::Result<Value>;
+
 static FANOUT_RESUME_CONTEXT_FACTORY: OnceLock<
     RwLock<Option<FanoutResumeExecutionContextFactory>>,
 > = OnceLock::new();
+
+static FANOUT_RESUME_EFFECTS_FACTORY: OnceLock<RwLock<Option<FanoutResumeEffectsFactory>>> =
+    OnceLock::new();
 
 pub fn register_fanout_resume_context(factory: FanoutResumeExecutionContextFactory) {
     *FANOUT_RESUME_CONTEXT_FACTORY
         .get_or_init(|| RwLock::new(None))
         .write()
         .expect("fanout resume context registry poisoned") = Some(factory);
+}
+
+pub fn register_fanout_resume_effects(factory: FanoutResumeEffectsFactory) {
+    *FANOUT_RESUME_EFFECTS_FACTORY
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("fanout resume effects registry poisoned") = Some(factory);
 }
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -129,8 +144,8 @@ mod fanout_batch_read_tests {
     use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
     use homeboy_control_plane_contract::{
         action_effect_id, ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
-        ControlPlaneActionRequest, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        ControlPlaneActionRequest, ControlPlaneErrorClass, RunId,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneActionDelegate;
     use homeboy_core::test_support::with_isolated_home;
@@ -396,7 +411,13 @@ mod fanout_batch_read_tests {
                         "child_finalizations": {
                             "resume-missing-receipt-child": {
                                 "status": "review_ready",
-                                "exit_code": 0
+                                "exit_code": 0,
+                                "provenance": {
+                                    "source": "resume_cook_batch",
+                                    "batch_id": "resume-missing-receipt",
+                                    "child_run_id": "resume-missing-receipt-child",
+                                    "generation": 1
+                                }
                             }
                         }
                     }),
@@ -438,6 +459,79 @@ mod fanout_batch_read_tests {
             assert_eq!(recovered.result.data["status"], "succeeded");
             assert_eq!(recovered.result.data["cooks"][0]["terminal"], true);
             assert_eq!(MISSING_RECEIPT_CONTEXT_CALLS.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn batch_resume_recovery_rejects_missing_malformed_and_stale_child_receipts() {
+        with_isolated_home(|_| {
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let batch_id = "invalid-resume-receipts";
+            let child_id = "invalid-resume-receipts-child";
+            store
+                .persist_fanout_run_batch(
+                    batch_id,
+                    batch_id,
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: child_id.to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            store
+                .mutate_batch(batch_id, |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    batch.child_runs[0].state =
+                        crate::agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                    Ok(())
+                })
+                .expect("terminalize child");
+
+            let run = homeboy_core::observation::RunRecord {
+                id: batch_id.to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            for (suffix, receipt) in [
+                (
+                    "missing-status",
+                    json!({
+                        "exit_code": 0,
+                        "provenance": {"source": "resume_cook_batch", "batch_id": batch_id, "child_run_id": child_id, "generation": 1}
+                    }),
+                ),
+                ("malformed", json!("not-an-object")),
+                (
+                    "stale-generation",
+                    json!({
+                        "status": "review_ready",
+                        "exit_code": 0,
+                        "provenance": {"source": "old-resume", "batch_id": batch_id, "child_run_id": child_id, "generation": 0}
+                    }),
+                ),
+            ] {
+                store
+                    .mutate_batch(batch_id, |batch| {
+                        batch.metadata["child_finalizations"][child_id] = receipt;
+                        Ok(())
+                    })
+                    .expect("write invalid receipt");
+                let request = ControlPlaneActionRequest {
+                    schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                    effect_id: action_effect_id("test", batch_id, "resume", suffix),
+                    action: ControlPlaneAction::Resume,
+                    idempotency_key: suffix.to_string(),
+                    actor: "test".to_string(),
+                    expected_updated_at: None,
+                    parameters: ControlPlaneActionPayload::empty(),
+                    confirmed: true,
+                };
+                let error = FanoutBatchActionDelegate
+                    .recover(&run, &request)
+                    .expect_err("invalid receipt must remain unknown");
+                assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
+            }
         });
     }
 }
@@ -1010,6 +1104,24 @@ impl FanoutBatchActionDelegate {
         factory().map_err(|error| ControlPlaneError::unavailable(error.message))
     }
 
+    fn effects(
+        batch_id: &str,
+        result: &FanoutBatchResumeActionResult,
+    ) -> Result<Value, ControlPlaneError> {
+        let factory = FANOUT_RESUME_EFFECTS_FACTORY
+            .get_or_init(|| RwLock::new(None))
+            .read()
+            .expect("fanout resume effects registry poisoned")
+            .as_ref()
+            .copied()
+            .ok_or_else(|| {
+                ControlPlaneError::unavailable(
+                    "fanout resume effects are not registered for this runtime",
+                )
+            })?;
+        factory(batch_id, result).map_err(|error| ControlPlaneError::unavailable(error.message))
+    }
+
     fn stored_resume_receipt(
         batch_id: &str,
         effect_id: &EffectId,
@@ -1078,15 +1190,88 @@ impl FanoutBatchActionDelegate {
         let mut timed_out = 0;
         for child in &batch.child_runs {
             let receipt = &finalizations[&child.run_id];
-            let status = receipt
+            let receipt_object = receipt.as_object().ok_or_else(|| {
+                ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: malformed child receipt `{}`",
+                    child.run_id
+                ))
+            })?;
+            let status = receipt_object
                 .get("status")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
+                .filter(|status| !status.is_empty())
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no status",
+                        child.run_id
+                    ))
+                })?
                 .to_string();
-            let exit_code = receipt
+            let exit_code = receipt_object
                 .get("exit_code")
                 .and_then(Value::as_i64)
-                .unwrap_or(1) as i32;
+                .and_then(|code| i32::try_from(code).ok())
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no valid exit code",
+                        child.run_id
+                    ))
+                })?;
+            let provenance = receipt_object
+                .get("provenance")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no provenance",
+                        child.run_id
+                    ))
+                })?;
+            if provenance.get("source").and_then(Value::as_str) != Some("resume_cook_batch")
+                || provenance.get("batch_id").and_then(Value::as_str) != Some(batch_id)
+                || provenance.get("child_run_id").and_then(Value::as_str) != Some(&child.run_id)
+                || provenance
+                    .get("generation")
+                    .and_then(Value::as_i64)
+                    .is_none()
+            {
+                return Err(ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has stale or incomplete provenance",
+                    child.run_id
+                )));
+            }
+            let status_is_success = matches!(
+                status.as_str(),
+                "review_ready"
+                    | "draft_published"
+                    | "completed"
+                    | "intentional_no_change"
+                    | "no_candidate"
+                    | "no_changes"
+                    | "green_no_finalize"
+            );
+            let state_consistent = match child.state {
+                crate::agent_task_lifecycle::AgentTaskRunState::Cancelled => {
+                    status == "cancelled" && exit_code != 0
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::Succeeded => {
+                    exit_code == 0 && status_is_success
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable => {
+                    exit_code == 0 && status_is_success
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::Failed
+                | crate::agent_task_lifecycle::AgentTaskRunState::PartialFailure => {
+                    exit_code != 0 || !status_is_success
+                }
+                _ => false,
+            };
+            if !state_consistent {
+                return Err(ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` conflicts with durable state",
+                    child.run_id
+                )));
+            }
             match status.as_str() {
                 "cancelled" => cancelled += 1,
                 "timed_out" => timed_out += 1,
@@ -1163,6 +1348,12 @@ impl FanoutBatchActionDelegate {
                     },
                     message: None,
                 };
+                let result = fanout_batch_resume_action_result(&result.value)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let mut action_result = action_result;
+                if action_result.outcome == ControlPlaneActionOutcome::Succeeded {
+                    action_result.result.data["portfolio"] = Self::effects(batch_id, &result)?;
+                }
                 let store = AgentTaskBatchStore::from_current_data_root()
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let receipt = serde_json::json!({

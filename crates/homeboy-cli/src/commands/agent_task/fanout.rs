@@ -652,13 +652,12 @@ fn batch_resume_locked(
         serde_json::from_value(acknowledgement.result.data.clone()).map_err(|error| {
             Error::internal_unexpected(format!("canonical fanout resume result: {error}"))
         })?;
-    reconcile_fanout_pr_states(&args.batch_id, true)?;
-    let batch = batch::read_batch_record(&args.batch_id)?;
-    let portfolio = run_portfolio(&batch)?;
-    // Portfolio publication can add durable PR evidence. Reconcile it before a
-    // RemoveOnSuccess provider is allowed to destroy the source workspace.
-    reconcile_fanout_pr_states(&args.batch_id, true)?;
-    finalize_resumed_native_worktrees(&args.batch_id, Some(&result))?;
+    let portfolio = acknowledgement
+        .result
+        .data
+        .get("portfolio")
+        .cloned()
+        .unwrap_or(Value::Null);
     Ok(batch_resume_result(
         result,
         subject_exit_code,
@@ -666,6 +665,21 @@ fn batch_resume_locked(
         Some(portfolio),
         placement,
     ))
+}
+
+/// Registered as the Cook domain adapter. It runs before the control-plane
+/// delegate writes the durable action receipt, so a successful acknowledgement
+/// cannot be followed by an unrecorded portfolio or destructive cleanup effect.
+pub(crate) fn execute_fanout_resume_effects(
+    batch_id: &str,
+    result: &homeboy::agents::orchestration::FanoutBatchResumeActionResult,
+) -> Result<Value> {
+    reconcile_fanout_pr_states(batch_id, true)?;
+    let batch = batch::read_batch_record(batch_id)?;
+    let portfolio = run_portfolio(&batch)?;
+    reconcile_fanout_pr_states(batch_id, true)?;
+    finalize_resumed_native_worktrees(batch_id, Some(result))?;
+    Ok(serde_json::to_value(portfolio)?)
 }
 
 /// GitHub is the authority for whether a review-ready candidate was accepted.
@@ -1654,7 +1668,7 @@ fn batch_resume_result(
     report: homeboy::agents::orchestration::FanoutBatchResumeActionResult,
     subject_exit_code: i32,
     batch_id: &str,
-    portfolio: Option<supervisor::AgentTaskFanoutPortfolioRunReport>,
+    portfolio: Option<Value>,
     placement: Placement,
 ) -> (Value, i32) {
     let report_value = serde_json::to_value(&report).unwrap_or(Value::Null);

@@ -721,6 +721,9 @@ fn register_startup_providers_after_reconcile(
     // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
     crate::agents::orchestration::register_fanout_resume_context(fanout_resume_execution_context);
+    crate::agents::orchestration::register_fanout_resume_effects(
+        crate::commands::agent_task::fanout::execute_fanout_resume_effects,
+    );
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.

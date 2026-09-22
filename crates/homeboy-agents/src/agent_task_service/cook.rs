@@ -3174,7 +3174,7 @@ pub fn run_cook_batch_with_control(
                             if let Err(error) = crate::agent_task_batch::record_child_finalization(
                                 &batch_id,
                                 &cell.initial_run_id,
-                                child_finalization_value(&cell),
+                                child_finalization_value(&batch_id, &cell),
                                 child_terminal_state(&cell),
                             ) {
                                 // Cleanup cannot consume a successful outcome
@@ -3498,7 +3498,7 @@ where
         crate::agent_task_batch::record_child_finalization(
             batch_id,
             &child.run_id,
-            child_finalization_value(&cell),
+            child_finalization_value(&batch_id, &cell),
             child_terminal_state(&cell),
         )?;
         cells.push(cell);
@@ -3712,9 +3712,15 @@ where
 /// an object rather than a string; `error.message` carries the text the field
 /// used to hold. `status` and `exit_code` are unchanged. Canonical lifecycle is
 /// persisted directly on the batch child rather than duplicated in this JSON.
-fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
+fn child_finalization_value(batch_id: &str, cell: &AgentTaskCookBatchCellReport) -> Value {
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
+        "provenance": {
+            "source": "resume_cook_batch",
+            "batch_id": batch_id,
+            "child_run_id": cell.initial_run_id,
+            "generation": chrono::Utc::now().timestamp_millis(),
+        },
         "exit_code": cell.exit_code,
         "status": cell.status,
         "error": cell.error,
