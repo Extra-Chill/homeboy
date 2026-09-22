@@ -129,17 +129,16 @@ pub fn persist_fanout_resume_authority(
     std::fs::create_dir_all(&root).map_err(|error| {
         homeboy_core::Error::internal_io(error.to_string(), Some(root.display().to_string()))
     })?;
-    let path = root.join(format!(
-        "{}.json",
-        homeboy_core::paths::sanitize_path_segment(batch_id)
-    ));
-    let mut public_env = BTreeMap::new();
+    let mut provider_public_env = BTreeMap::new();
     for provider in &catalog.providers {
-        let secret_names = provider
-            .secret_env_requirements
-            .iter()
-            .flat_map(|requirement| requirement.env.iter().cloned())
+        let request: crate::agent_task_provider::AgentTaskRequest = serde_json::from_value(
+            serde_json::json!({"task_id":"fanout-admission", "executor":{"backend":provider.backend}, "instructions":""}),
+        ).map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+        let secret_names = crate::agent_task_provider::provider_secret_env_plan(provider, &request)
+            .secret_env_names()
+            .into_iter()
             .collect::<BTreeSet<_>>();
+        let mut public_env = BTreeMap::new();
         for env_ref in &provider.invocation.env {
             if secret_names.contains(&env_ref.name)
                 || env_ref.redacted.unwrap_or(false)
@@ -155,16 +154,79 @@ pub fn persist_fanout_resume_authority(
                 public_env.insert(env_ref.name.clone(), value);
             }
         }
+        provider_public_env.insert(provider.id.clone(), public_env);
     }
-    homeboy_core::engine::local_files::write_json_file_owner_only(
-        &path,
-        &serde_json::json!({
-            "schema": "homeboy/fanout-execution-authority/v2",
-            "catalog": catalog,
-            "public_env": public_env,
-        }),
-    )?;
+    let authority = serde_json::json!({
+        "schema": crate::agent_task_provider::FANOUT_EXECUTION_AUTHORITY_SCHEMA,
+        "batch_id": batch_id,
+        "catalog": catalog,
+        "provider_public_env": provider_public_env,
+    });
+    let bytes = serde_json::to_vec(&authority)
+        .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(&bytes);
+    let path = root.join(format!("{digest}.json"));
+    if !path.exists() {
+        homeboy_core::engine::local_files::write_json_file_owner_only(&path, &authority)?;
+    }
     Ok(path.display().to_string())
+}
+
+/// Load and materialize one immutable admitted provider catalog. This is the
+/// owning service boundary used by production and tests alike.
+pub fn resolve_fanout_resume_catalog(
+    reference: &str,
+) -> homeboy_core::Result<crate::agent_task_provider::AgentTaskProviderCatalog> {
+    let data_root = homeboy_core::paths::homeboy_data()?;
+    let path = Path::new(reference);
+    if !path.starts_with(&data_root) {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "reference is outside the private data root",
+            None,
+            None,
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(reference.to_string()))
+    })?;
+    let expected_digest = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if expected_digest != homeboy_engine_primitives::content_hash::sha256_hex(&bytes) {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "private authority content digest does not match its reference",
+            None,
+            None,
+        ));
+    }
+    let authority: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    if authority["schema"] != crate::agent_task_provider::FANOUT_EXECUTION_AUTHORITY_SCHEMA {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority.schema",
+            "unsupported fanout execution authority schema",
+            None,
+            None,
+        ));
+    }
+    let mut catalog: crate::agent_task_provider::AgentTaskProviderCatalog =
+        serde_json::from_value(authority["catalog"].clone())
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    let env = authority["provider_public_env"]
+        .as_object()
+        .ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "fanout.execution_authority.provider_public_env",
+                "missing provider environment projections",
+                None,
+                None,
+            )
+        })?;
+    crate::agent_task_provider::apply_admitted_public_environment(&mut catalog.providers, env)?;
+    Ok(catalog)
 }
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -249,14 +311,28 @@ mod fanout_batch_read_tests {
     #[test]
     fn fanout_resume_authority_is_a_private_catalog_reference() {
         with_isolated_home(|_| {
-            let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::default();
-            let reference = super::persist_fanout_resume_authority("caller-a", &catalog)
-                .expect("persist private authority");
+            let mut catalog = crate::agent_task_provider::AgentTaskProviderCatalog::default();
+            catalog.version = Some("A".to_string());
+            let expected_first = catalog.clone();
+            let reference = super::persist_fanout_resume_authority("same-batch", &catalog)
+                .expect("persist private authority A");
+            let first = std::fs::read(&reference).expect("read authority A");
+            catalog.version = Some("C".to_string());
+            let second_reference = super::persist_fanout_resume_authority("same-batch", &catalog)
+                .expect("persist private authority C");
+            assert_ne!(
+                reference, second_reference,
+                "admissions need immutable references"
+            );
+            assert_eq!(
+                first,
+                std::fs::read(&reference).expect("authority A remains unchanged")
+            );
             let bytes = std::fs::read(&reference).expect("read private authority");
             let authority: Value = serde_json::from_slice(&bytes).expect("authority round trip");
             let restored: crate::agent_task_provider::AgentTaskProviderCatalog =
                 serde_json::from_value(authority["catalog"].clone()).expect("catalog round trip");
-            assert_eq!(restored, catalog);
+            assert_eq!(restored, expected_first);
             assert!(!reference.contains("secret"));
         });
     }

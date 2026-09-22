@@ -110,9 +110,10 @@ pub use dispatchability::{
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;
+pub(crate) use launch_context::apply_admitted_public_environment;
 pub use launch_context::{
     AgentTaskProviderLaunchContext, AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV,
-    AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA,
+    AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA, FANOUT_EXECUTION_AUTHORITY_SCHEMA,
 };
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
 pub(crate) use resolution::{

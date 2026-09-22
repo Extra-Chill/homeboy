@@ -21971,26 +21971,7 @@ fn test_resume_context(
     else {
         return Ok((Arc::new(UnusedExecutor), test_reconstruct_dispatcher));
     };
-    let authority: Value = serde_json::from_slice(
-        &std::fs::read(reference)
-            .map_err(|error| Error::internal_io(error.to_string(), Some(reference.to_string())))?,
-    )
-    .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    let mut catalog: crate::agent_task_provider::AgentTaskProviderCatalog =
-        serde_json::from_value(authority["catalog"].clone())
-            .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    for provider in &mut catalog.providers {
-        for env_ref in &mut provider.invocation.env {
-            if let Some(value) = authority["public_env"]
-                .get(&env_ref.name)
-                .and_then(Value::as_str)
-            {
-                env_ref.value = Some(value.to_string());
-                env_ref.source = Some("value".to_string());
-                env_ref.redacted = Some(false);
-            }
-        }
-    }
+    let catalog = crate::orchestration::resolve_fanout_resume_catalog(reference)?;
     Ok((
         Arc::new(
             crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
