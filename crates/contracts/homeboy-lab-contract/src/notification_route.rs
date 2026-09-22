@@ -127,38 +127,95 @@ impl NotificationRoute {
     }
 }
 
+/// Caller-supplied notification context, before route-resolver consultation.
+///
+/// A transport is enough context to act on by itself: an installed extension
+/// may still declare a route resolver that derives a route for it, and a
+/// transport with no resolver (or an unmatched one) simply delivers to its
+/// own default destination. A route is never meaningful without the transport
+/// that owns it, so a route can only appear paired with a transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationRouteContext {
+    /// Neither a transport nor a route was supplied.
+    None,
+    /// A transport was supplied without a route.
+    TransportOnly(String),
+    /// A transport and a route were supplied together and validated.
+    Route(NotificationRoute),
+}
+
+impl NotificationRouteContext {
+    /// The validated route, when both transport and route were supplied.
+    pub fn into_route(self) -> Option<NotificationRoute> {
+        match self {
+            Self::Route(route) => Some(route),
+            Self::None | Self::TransportOnly(_) => None,
+        }
+    }
+
+    /// The transport identity, if any context was supplied at all.
+    pub fn transport(&self) -> Option<&str> {
+        match self {
+            Self::None => None,
+            Self::TransportOnly(transport) => Some(transport),
+            Self::Route(route) => Some(&route.transport),
+        }
+    }
+}
+
 /// Resolve generic caller context once for a process. Explicit CLI values win;
 /// environment context is considered only when neither CLI value was supplied.
+/// A transport alone is valid context; a route without a transport is not.
 pub fn from_cli_or_env(
     cli_transport: Option<&str>,
     cli_route: Option<&str>,
-) -> Result<Option<NotificationRoute>> {
-    if let (Some(transport), Some(route)) = (cli_transport, cli_route) {
-        return NotificationRoute::new(transport, route).map(Some);
+) -> Result<NotificationRouteContext> {
+    if let Some(route) = cli_route {
+        return match cli_transport {
+            Some(transport) => {
+                NotificationRoute::new(transport, route).map(NotificationRouteContext::Route)
+            }
+            None => Err(Error::validation_invalid_argument(
+                "notification_route",
+                "--notification-route requires --notification-transport",
+                None,
+                None,
+            )),
+        };
     }
-    if cli_transport.is_some() || cli_route.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "notification_route",
-            "--notification-transport and --notification-route must be supplied together",
-            None,
-            None,
-        ));
+    if let Some(transport) = cli_transport {
+        return validated_transport_only(transport);
     }
     match (
         std::env::var(NOTIFICATION_TRANSPORT_ENV).ok(),
         std::env::var(NOTIFICATION_ROUTE_ENV).ok(),
     ) {
-        (None, None) => Ok(None),
-        (Some(transport), Some(route)) => NotificationRoute::new(transport, route).map(Some),
-        _ => Err(Error::validation_invalid_argument(
+        (None, None) => Ok(NotificationRouteContext::None),
+        (Some(transport), Some(route)) => {
+            NotificationRoute::new(transport, route).map(NotificationRouteContext::Route)
+        }
+        (Some(transport), None) => validated_transport_only(&transport),
+        (None, Some(_)) => Err(Error::validation_invalid_argument(
             "notification_route",
-            format!(
-                "{NOTIFICATION_TRANSPORT_ENV} and {NOTIFICATION_ROUTE_ENV} must be set together"
-            ),
+            format!("{NOTIFICATION_ROUTE_ENV} requires {NOTIFICATION_TRANSPORT_ENV}"),
             None,
             None,
         )),
     }
+}
+
+fn validated_transport_only(transport: &str) -> Result<NotificationRouteContext> {
+    if !valid_transport_id(transport) {
+        return Err(Error::validation_invalid_argument(
+            "notification_transport",
+            "must contain 1-64 ASCII letters, digits, '.', '_' or '-'",
+            Some(transport.to_string()),
+            None,
+        ));
+    }
+    Ok(NotificationRouteContext::TransportOnly(
+        transport.to_string(),
+    ))
 }
 
 /// The environment pairs that carry a route across a process boundary.
@@ -169,9 +226,11 @@ pub fn from_cli_or_env(
 /// durable-record fallback (#11115). That fallback stays; this is the direct
 /// path for the offloaded case it was invented for.
 ///
-/// Emitted together or not at all. [`from_cli_or_env`] rejects a half-set pair
-/// as a hard validation error, so a producer that set only one variable would
-/// make every child fail to start.
+/// Emitted together or not at all. [`from_cli_or_env`] never parses a route
+/// without a transport, so a producer that set only the route variable would
+/// make every child fail to start; a transport-only producer intentionally
+/// carries nothing here, since [`NotificationRouteContext::TransportOnly`]
+/// still lacks a route to propagate.
 ///
 /// # Credential safety
 ///
@@ -441,8 +500,8 @@ mod tests {
         }
     }
 
-    /// A half-set pair is a hard error in `from_cli_or_env`, so an absent route
-    /// must leave both variables alone rather than emit one of them.
+    /// `child_env` only ever receives a fully resolved route, so an absent
+    /// route must leave both variables alone rather than emit one of them.
     #[test]
     fn child_env_without_a_route_sets_neither_variable() {
         assert!(child_env(None).is_empty());
@@ -459,7 +518,10 @@ mod tests {
         for (name, value) in child_env(Some(&route)) {
             std::env::set_var(name, value);
         }
-        assert_eq!(from_cli_or_env(None, None).unwrap(), Some(route));
+        assert_eq!(
+            from_cli_or_env(None, None).unwrap(),
+            NotificationRouteContext::Route(route)
+        );
         match old_transport {
             Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
             None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
@@ -483,7 +545,8 @@ mod tests {
         }
         let resolved = from_cli_or_env(Some("argv.transport"), Some("argv-route"))
             .unwrap()
-            .unwrap();
+            .into_route()
+            .expect("explicit route resolves");
         assert_eq!(resolved.transport, "argv.transport");
         assert_eq!(resolved.route, "argv-route");
         match old_transport {
@@ -520,7 +583,7 @@ mod tests {
         std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
         std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
         let route = from_cli_or_env(Some("cli.transport"), Some("cli-route")).unwrap();
-        assert_eq!(route.unwrap().transport, "cli.transport");
+        assert_eq!(route.into_route().unwrap().transport, "cli.transport");
         match old_transport {
             Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
             None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
@@ -538,9 +601,71 @@ mod tests {
         let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
         std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
         std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
-        let route = from_cli_or_env(None, None).unwrap().unwrap();
+        let route = from_cli_or_env(None, None).unwrap().into_route().unwrap();
         assert_eq!(route.transport, "env.transport");
         assert_eq!(route.route, "env-route");
+        match old_transport {
+            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
+        }
+        match old_route {
+            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
+        }
+    }
+
+    /// A transport alone is valid CLI context: it carries enough identity for
+    /// a caller (`resolve_from_cli_or_env_with_evidence`) to go consult that
+    /// transport's declared route resolver, rather than being rejected here.
+    #[test]
+    fn transport_only_cli_context_is_valid() {
+        assert_eq!(
+            from_cli_or_env(Some("chosen.transport"), None).unwrap(),
+            NotificationRouteContext::TransportOnly("chosen.transport".to_string())
+        );
+    }
+
+    /// The same transport-only acceptance applies when the identity travels
+    /// through the environment instead of argv.
+    #[test]
+    fn transport_only_environment_context_is_valid() {
+        let _lock = env_lock().lock().unwrap();
+        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
+        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
+        std::env::remove_var(NOTIFICATION_ROUTE_ENV);
+        std::env::set_var(NOTIFICATION_TRANSPORT_ENV, "env.transport");
+        assert_eq!(
+            from_cli_or_env(None, None).unwrap(),
+            NotificationRouteContext::TransportOnly("env.transport".to_string())
+        );
+        match old_transport {
+            Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),
+        }
+        match old_route {
+            Some(value) => std::env::set_var(NOTIFICATION_ROUTE_ENV, value),
+            None => std::env::remove_var(NOTIFICATION_ROUTE_ENV),
+        }
+    }
+
+    /// A malformed transport id is still rejected even with no route present.
+    #[test]
+    fn transport_only_still_validates_the_transport_id() {
+        assert!(from_cli_or_env(Some("bad transport"), None).is_err());
+    }
+
+    /// A route is meaningless without the transport that owns it, whether the
+    /// route arrives through argv or through the environment.
+    #[test]
+    fn route_without_transport_is_still_rejected() {
+        assert!(from_cli_or_env(None, Some("cli-route")).is_err());
+
+        let _lock = env_lock().lock().unwrap();
+        let old_transport = std::env::var(NOTIFICATION_TRANSPORT_ENV).ok();
+        let old_route = std::env::var(NOTIFICATION_ROUTE_ENV).ok();
+        std::env::remove_var(NOTIFICATION_TRANSPORT_ENV);
+        std::env::set_var(NOTIFICATION_ROUTE_ENV, "env-route");
+        assert!(from_cli_or_env(None, None).is_err());
         match old_transport {
             Some(value) => std::env::set_var(NOTIFICATION_TRANSPORT_ENV, value),
             None => std::env::remove_var(NOTIFICATION_TRANSPORT_ENV),

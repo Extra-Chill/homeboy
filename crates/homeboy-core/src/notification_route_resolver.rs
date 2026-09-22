@@ -118,16 +118,15 @@ fn select_match(
     }
 }
 
-/// Apply the explicit route precedence contract. Ambient resolver execution is
-/// intentionally owned by the Cook submission path, after request validation.
+/// Apply the explicit route precedence contract. Ambient discovery across
+/// every installed transport is intentionally owned by the Cook submission
+/// path, after request validation; a single caller-named transport's own
+/// declared resolver is not ambient and is consulted right here.
 pub fn resolve_from_cli_or_env(
     cli_transport: Option<&str>,
     cli_route: Option<&str>,
-) -> Result<Option<NotificationRoute>> {
-    match crate::notification_route::from_cli_or_env(cli_transport, cli_route)? {
-        Some(route) => Ok(Some(route)),
-        None => Ok(None),
-    }
+) -> Result<crate::notification_route::NotificationRouteContext> {
+    crate::notification_route::from_cli_or_env(cli_transport, cli_route)
 }
 
 /// Resolve explicit argv or propagated environment context with its source.
@@ -135,24 +134,93 @@ pub fn resolve_from_cli_or_env_with_evidence(
     cli_transport: Option<&str>,
     cli_route: Option<&str>,
 ) -> Result<ResolvedNotificationRoute> {
-    let route = resolve_from_cli_or_env(cli_transport, cli_route)
+    use crate::notification_route::NotificationRouteContext;
+
+    let context = resolve_from_cli_or_env(cli_transport, cli_route)
         .map_err(with_invalid_resolution_evidence)?;
-    let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
-        "explicit"
-    } else if route.is_some() {
-        "environment"
-    } else {
-        "route_less"
-    });
-    evidence.transport = route.as_ref().map(|route| route.transport.clone());
+    let mut resolved = match context {
+        NotificationRouteContext::Route(route) => {
+            let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
+                "explicit"
+            } else {
+                "environment"
+            });
+            evidence.transport = Some(route.transport.clone());
+            ResolvedNotificationRoute {
+                route: Some(route),
+                evidence,
+            }
+        }
+        NotificationRouteContext::TransportOnly(transport) => {
+            resolve_declared_transport_route(&transport).map_err(with_invalid_resolution_evidence)?
+        }
+        NotificationRouteContext::None => ResolvedNotificationRoute {
+            route: None,
+            evidence: NotificationRouteResolution::new("route_less"),
+        },
+    };
     if cli_transport.is_none() {
         if let Some(propagated) =
-            crate::notification_route::propagated_resolution_from_env(route.as_ref())
+            crate::notification_route::propagated_resolution_from_env(resolved.route.as_ref())
         {
-            evidence = propagated;
+            resolved.evidence = propagated;
         }
     }
-    Ok(ResolvedNotificationRoute { route, evidence })
+    Ok(resolved)
+}
+
+/// Consult a single caller-named transport's own declared route resolver.
+///
+/// A transport with no declared resolver, or whose resolver reports no
+/// match, resolves route-less: the transport's identity is preserved in the
+/// evidence so the caller still knows which transport was selected, and
+/// delivery proceeds to that transport's own default destination. A resolver
+/// that fails to start, times out, or returns an invalid result is a real
+/// failure here — unlike ambient discovery, there is exactly one resolver in
+/// play, selected by the caller, so there is no other candidate to fall back
+/// to.
+fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificationRoute> {
+    let extensions = load_all_extensions()?;
+    let declared = extensions.iter().find_map(|extension| {
+        let resolver = extension
+            .notification_transports
+            .iter()
+            .find(|candidate| candidate.id == transport)?
+            .route_resolver
+            .as_ref()?;
+        Some((resolver, extension.extension_path.as_deref().unwrap_or_default()))
+    });
+    let Some((resolver, extension_path)) = declared else {
+        let mut evidence = NotificationRouteResolution::new("route_less");
+        evidence.transport = Some(transport.to_string());
+        return Ok(ResolvedNotificationRoute {
+            route: None,
+            evidence,
+        });
+    };
+    match invoke(resolver, transport, extension_path, AMBIENT_DISCOVERY_TIMEOUT) {
+        Ok(ResolverResult::Matched(route)) => {
+            let mut evidence = NotificationRouteResolution::new("resolver");
+            evidence.transport = Some(route.transport.clone());
+            evidence.resolver_transport = Some(route.transport.clone());
+            Ok(ResolvedNotificationRoute {
+                route: Some(route),
+                evidence,
+            })
+        }
+        Ok(ResolverResult::Unmatched { missing_context }) => {
+            let mut evidence = NotificationRouteResolution::new("route_less");
+            evidence.transport = Some(transport.to_string());
+            evidence.resolver_transport = Some(transport.to_string());
+            evidence.missing_context = missing_context;
+            Ok(ResolvedNotificationRoute {
+                route: None,
+                evidence,
+            })
+        }
+        Err(InvokeError::Optional(message)) => Err(resolver_error(message)),
+        Err(InvokeError::Fatal(error)) => Err(error),
+    }
 }
 
 enum InvokeError {
@@ -498,8 +566,71 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(1));
             assert_eq!(
                 route,
-                Some(NotificationRoute::new("chosen.transport", "chosen-route").unwrap())
+                crate::notification_route::NotificationRouteContext::Route(
+                    NotificationRoute::new("chosen.transport", "chosen-route").unwrap()
+                )
             );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_only_consults_that_transports_own_resolver() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver("resolver-test", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"matched\",\"route\":\"derived-route\"}'");
+            let resolution =
+                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), None)
+                    .expect("transport-only resolves");
+            assert_eq!(
+                resolution.route,
+                Some(NotificationRoute::new("synthetic.completed", "derived-route").unwrap())
+            );
+            assert_eq!(resolution.evidence.classification, "resolver");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_only_with_an_unmatched_resolver_still_delivers_route_less() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver("resolver-test", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/notification-route-resolver/v1\",\"status\":\"unmatched\"}'");
+            let resolution =
+                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), None)
+                    .expect("route-less delivery is still permitted");
+            assert_eq!(resolution.route, None);
+            assert_eq!(resolution.evidence.classification, "route_less");
+            assert_eq!(
+                resolution.evidence.transport.as_deref(),
+                Some("synthetic.completed")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_only_with_no_declared_resolver_delivers_route_less() {
+        crate::test_support::with_isolated_home(|_| {
+            let resolution =
+                resolve_from_cli_or_env_with_evidence(Some("undeclared.transport"), None)
+                    .expect("a transport with no resolver is still route-less, not an error");
+            assert_eq!(resolution.route, None);
+            assert_eq!(resolution.evidence.classification, "route_less");
+            assert_eq!(
+                resolution.evidence.transport.as_deref(),
+                Some("undeclared.transport")
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transport_only_with_a_failing_resolver_is_a_real_error() {
+        crate::test_support::with_isolated_home(|_| {
+            install_resolver("resolver-test", "cat >/dev/null; printf not-json");
+            let error =
+                resolve_from_cli_or_env_with_evidence(Some("synthetic.completed"), None)
+                    .unwrap_err();
+            assert!(error.to_string().contains("malformed"));
         });
     }
 
@@ -545,8 +676,13 @@ mod tests {
             .expect("explicit route");
         assert_eq!(explicit.evidence.classification, "explicit");
         assert_eq!(explicit.evidence.transport.as_deref(), Some("chosen"));
+    }
 
-        let invalid = resolve_from_cli_or_env_with_evidence(Some("chosen"), None).unwrap_err();
+    /// A route without a transport stays invalid: it names no owner, so there
+    /// is nothing here for a resolver to consult.
+    #[test]
+    fn route_without_transport_evidence_is_invalid() {
+        let invalid = resolve_from_cli_or_env_with_evidence(None, Some("route")).unwrap_err();
         assert_eq!(
             invalid.details["notification_resolution"]["classification"],
             "invalid"
