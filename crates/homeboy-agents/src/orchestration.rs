@@ -54,7 +54,7 @@ use homeboy_core::control_plane::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -260,6 +260,41 @@ mod fanout_batch_read_tests {
                 .unavailable_child_runs
                 .iter()
                 .any(|child| child.run_id == "batch-parity-missing"));
+        });
+    }
+
+    #[test]
+    fn fanout_scope_rejects_a_roster_entry_with_the_wrong_batch_lineage() {
+        with_isolated_home(|_| {
+            super::register();
+            let batch_store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            batch_store
+                .persist_fanout_run_batch(
+                    "lineage-batch",
+                    "lineage-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "lineage-child".to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            let lifecycle =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+            let mut plan = crate::agent_task_schedule::AgentTaskPlan::new("lineage-plan", vec![]);
+            plan.metadata = json!({"batch_id": "different-batch"});
+            lifecycle
+                .write_controller_plan("lineage-child", &plan)
+                .expect("write child plan");
+
+            let requested = RunId::new("lineage-batch").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("batch resource");
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let error = service
+                .owned_child_run_ids(&canonical)
+                .expect_err("wrong lineage must be rejected");
+            assert!(error.message.contains("batch lineage"));
         });
     }
 
@@ -1526,6 +1561,45 @@ impl FanoutBatchDomainService {
             Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(false),
             Err(error) => Err(control_plane_error_to_homeboy(error)),
         }
+    }
+
+    /// Return the roster roots and their durable retry descendants. The batch
+    /// file is only an index: every returned run must prove its controller plan
+    /// belongs to this batch. Keeping this check here makes CLI and daemon
+    /// fanout scoping use the same ownership boundary.
+    pub fn owned_child_run_ids(
+        &self,
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<HashSet<String>> {
+        let batch_id = canonical.run.as_str();
+        let batch = self.batch_store.read_batch(batch_id)?;
+        let mut owned = HashSet::new();
+        let mut pending = batch
+            .child_runs
+            .iter()
+            .map(|child| child.run_id.clone())
+            .collect::<Vec<_>>();
+        while let Some(run_id) = pending.pop() {
+            if !owned.insert(run_id.clone()) {
+                continue;
+            }
+            let plan = crate::agent_task_lifecycle::load_controller_plan_in_store(
+                &self.lifecycle,
+                &run_id,
+            )?;
+            if plan.metadata.get("batch_id").and_then(Value::as_str) != Some(batch_id) {
+                return Err(homeboy_core::Error::validation_invalid_argument(
+                    "fanout",
+                    "fanout child roster entry does not match the durable child plan batch lineage",
+                    Some(run_id),
+                    None,
+                ));
+            }
+            for successor in self.lifecycle.read_retry_successors(&run_id)? {
+                pending.push(successor.run_id);
+            }
+        }
+        Ok(owned)
     }
 
     pub fn child_placement_metadata(&self, run_id: &str) -> homeboy_core::Result<Option<Value>> {

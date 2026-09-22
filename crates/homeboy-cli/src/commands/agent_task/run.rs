@@ -9789,7 +9789,12 @@ pub(super) fn run_next_with_executor_and_fanout(
 ) -> CmdResult<Value> {
     let scoped_run_ids = fanout_id
         .as_deref()
-        .map(homeboy::agents::agent_tasks::batch::owned_child_run_ids)
+        .map(|fanout_id| {
+            let service =
+                homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
+            let canonical = homeboy::agents::orchestration::run_from_current_environment(fanout_id)?;
+            service.owned_child_run_ids(&canonical)
+        })
         .transpose()?
         .map(|run_ids| run_ids.into_iter().collect::<HashSet<_>>());
     let result = agent_task_service::run_next_with_cook_dispatcher(
