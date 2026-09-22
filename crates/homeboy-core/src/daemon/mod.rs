@@ -1636,12 +1636,19 @@ where
     let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
 
     let mut accepted = 0;
+    let mut connection_threads = Vec::new();
     let mut serve_result = Ok(());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let _ =
-                    handle_connection(stream, &job_store, analysis_runner.clone(), loopback_bind);
+                let connection_store = job_store.clone();
+                let connection_runner = analysis_runner.clone();
+                let connection = std::thread::spawn(move || {
+                    handle_connection(stream, &connection_store, connection_runner, loopback_bind)
+                });
+                if request_limit.is_some() {
+                    connection_threads.push(connection);
+                }
                 accepted += 1;
                 if request_limit.is_some_and(|limit| accepted >= limit) {
                     break;
@@ -1653,6 +1660,23 @@ where
                     Some("accept daemon connection".to_string()),
                 ));
                 break;
+            }
+        }
+    }
+
+    // Bounded TCP fixtures need all responses drained before their server
+    // thread returns. Production listeners remain alive and simply retain the
+    // connection workers until the process is stopped.
+    for connection in connection_threads {
+        if let Err(error) = connection
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("daemon connection thread panicked")))
+        {
+            if serve_result.is_ok() {
+                serve_result = Err(Error::internal_io(
+                    error.to_string(),
+                    Some("serve daemon connection".to_string()),
+                ));
             }
         }
     }

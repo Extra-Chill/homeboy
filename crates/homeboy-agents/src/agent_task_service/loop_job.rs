@@ -299,6 +299,33 @@ impl LoopWorkHandler {
             job.phase = WorkJobPhase::Completed;
             return Ok(WorkJobStep::Complete(job.result()));
         }
+        // A daemon can die after controller dispatch has admitted provider work
+        // but before this WorkJob publishes its next checkpoint. Replaying the
+        // controller action here would be an unprovable second dispatch. A
+        // durable active-provider identity is the only safe reattach signal;
+        // absent one, preserve the revolution and fail closed as unknown.
+        if invocation == WorkJobInvocation::Resume
+            && job.resume_result.is_none()
+            && job.request.child_pid.is_none()
+        {
+            let active_provider =
+                agent_task_loop_controller::controller_status(&job.request.loop_id)
+                    .ok()
+                    .and_then(|record| record.metadata.get("active_provider_runs").cloned())
+                    .is_some_and(|runs| runs.as_array().is_some_and(|runs| !runs.is_empty()));
+            if !active_provider {
+                job.resume_result = Some(json!({
+                    "recovery": "unknown",
+                    "reason": "daemon stopped after dispatch admission before WorkJob checkpoint"
+                }));
+                job.phase = WorkJobPhase::Completed;
+                job.controller_state = Some(AgentTaskLoopControllerState::Failed);
+                let mut record = agent_task_loop_controller::load_controller(&job.request.loop_id)?;
+                record.state = AgentTaskLoopControllerState::Failed;
+                agent_task_loop_controller::write_controller(&record)?;
+                return Ok(WorkJobStep::Complete(job.result()));
+            }
+        }
         if job.request.child_pid.is_none() {
             let mut catalog = job.request.provider_catalog.clone();
             apply_admitted_environment(
@@ -352,8 +379,8 @@ impl LoopWorkHandler {
                 Some(serde_json::to_value(report.value).map_err(|error| {
                     homeboy_core::Error::internal_json(error.to_string(), None)
                 })?);
-            #[cfg(test)]
-            if TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.replace(false)) {
+            #[cfg(any(test, feature = "test-support"))]
+            if test_interrupt_after_loop_dispatch() {
                 return Err(homeboy_core::Error::internal_unexpected(
                     "test interruption after loop child admission",
                 ));
@@ -393,17 +420,34 @@ impl LoopWorkHandler {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_INTERRUPT_AFTER_LOOP_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_test_loop_checkpoint_interrupt<T>(body: impl FnOnce() -> T) -> T {
     TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.set(true));
     let result = body();
     TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.set(false));
     result
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn test_interrupt_after_loop_dispatch() -> bool {
+    if TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.replace(false)) {
+        return true;
+    }
+    let Some(marker) = std::env::var_os("HOMEBOY_TEST_LOOP_DISPATCH_ADMITTED") else {
+        return false;
+    };
+    // This hook is compiled only into test-support builds. The marker gives a
+    // subprocess test a precise admission boundary; the test owns termination
+    // of the daemon, rather than exposing a production CLI fault switch.
+    let _ = std::fs::write(marker, format!("{}\n", std::process::id()));
+    loop {
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Apply the caller's public environment projection to provider declarations.
