@@ -287,6 +287,20 @@ fn subtree_cli_publishes_from_nested_component_and_previews_without_mutation() {
             panic!("expected subtree preview output");
         };
         assert!(evidence[0].preview);
+
+        // Serialize through the real command-output serializer. Matching on the
+        // enum alone cannot catch a payload that is not an object: this
+        // serializer tags every variant by inserting `variant`, so a bare
+        // sequence fails at runtime while every in-process assertion passes.
+        let serialized = serde_json::to_value(GitCommandOutput::Subtree(evidence))
+            .expect("subtree output serializes through the command envelope");
+        assert_eq!(serialized["variant"], "subtree");
+        assert!(
+            serialized["publications"]
+                .as_array()
+                .is_some_and(|publications| !publications.is_empty()),
+            "publications are carried as an array inside the tagged object: {serialized}"
+        );
         assert_eq!(rev(remote.path(), "main"), before);
 
         let clone = tempfile::tempdir().expect("destination clone");
