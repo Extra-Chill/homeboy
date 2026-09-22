@@ -201,7 +201,7 @@ pub(crate) fn rewrite_lab_offload_args(
         if arg.starts_with("--placement=") {
             continue;
         }
-        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
+        if arg == "--wait" {
             continue;
         }
         if arg == "--output" {
@@ -386,7 +386,7 @@ pub(crate) fn rewrite_runner_resident_lab_offload_args(
         if arg.starts_with("--placement=") {
             continue;
         }
-        if arg == "--detach-after-handoff" || arg.starts_with("--detach-after-handoff=") {
+        if arg == "--wait" {
             continue;
         }
         if arg == "--output" {

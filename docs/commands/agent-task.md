@@ -655,34 +655,35 @@ command after a contended attempt queues rather than collides. Admission
 diagnostics always name the current holder (PID, verified liveness, and the
 owning admission request) or the actionable lock state.
 
-Use global `--detach-after-handoff` with `--runner <runner-id>` when the Lab job is
-expected to outlive the local shell. Homeboy returns after the runner daemon
-accepts the job and prints follow/cancel commands instead of waiting for remote
-provider completion.
+Eligible top-level durable work returns after verified durable controller
+handoff by default, with run identity and inspection/watch commands. Acceptance
+is not terminal success. Global `--wait` observes until terminal completion and
+returns the terminal exit status. Placement and durable ownership are independent
+of this wait policy, for both local and Lab execution.
 
-Lab Cook has two observation modes: waiting by default, and detaching on
-request. Submit and return when an interruptible client should hand the provider
-attempt to the Lab controller:
-
-```bash
-homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
-  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
-```
-
-Wait for the completed Cook when the caller owns a synchronous workflow:
+Submit a Lab Cook and return after handoff:
 
 ```bash
 homeboy --runner homeboy-lab agent-task cook \
   --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
 ```
 
-Waiting is the default, so a synchronous caller passes no observation flag at
-all; interruptible clients specify `--detach-after-handoff`. Both modes print
-bounded phase heartbeats with the durable run id. Reconnect and retrieve durable
+Wait for the completed Cook when the caller owns a synchronous workflow:
+
+```bash
+homeboy --wait --runner homeboy-lab agent-task cook \
+  --to-worktree homeboy@fix-issue-6453 --verify 'homeboy review test homeboy' --prompt @task.txt
+```
+
+Synchronous orchestration should pass `--wait`. Runner-owned attempts and
+controller re-executions complete their assigned work without recursively
+detaching. Ordinary synchronous commands, including previews and planning-only
+fanout commands, retain their synchronous behavior. Reconnect and retrieve durable
 state with:
 
 ```bash
 homeboy agent-task status <run-id>
+homeboy runs watch <run-id>
 homeboy agent-task evidence <run-id> --full
 ```
 

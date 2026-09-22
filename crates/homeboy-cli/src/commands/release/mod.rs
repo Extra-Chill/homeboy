@@ -725,6 +725,8 @@ impl PortableStageDispatcher for CliPortableStageDispatcher {
             )
         })?;
         let mut command = Command::new(executable);
+        // The release decision requires terminal gate evidence, not handoff.
+        command.arg("--wait");
         let output_dir = tempfile::tempdir().map_err(|error| {
             homeboy::core::Error::internal_io(
                 format!(

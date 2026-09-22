@@ -140,15 +140,11 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
         bounded_output(command)
     };
 
-    // Local detach is served on a controller (#11476), but not here: this
-    // process IS the runner's owned execution of one attempt. It has no
-    // controller lifecycle to hand off, so detaching would orphan work the
-    // runner believes it owns. The rejection must still land before any
-    // worktree or provider resolution.
+    // The runner already owns this attempt. Default handoff must not intercept
+    // it: execution reaches ordinary input validation instead.
     let detach = cook(&[
         "--placement",
         "local",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--backend",
@@ -163,15 +159,10 @@ fn contradictory_cook_arguments_survive_controller_transport_context() {
     assert!(!detach.status.success());
     let detach_stdout = String::from_utf8_lossy(&detach.stdout);
     assert!(
-        detach_stdout.contains(
-            "cannot detach after handoff with --placement local inside a runner-owned execution"
-        ),
+        detach_stdout.contains("--repo <repo> is required"),
         "{detach_stdout}"
     );
-    assert!(
-        !detach_stdout.contains("worktree provider"),
-        "{detach_stdout}"
-    );
+    assert!(!detach_stdout.contains("handoff/v1"), "{detach_stdout}");
 
     let queue_only = cook(&[
         "agent-task",
@@ -259,7 +250,6 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         .args([
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--run-id",
@@ -296,6 +286,7 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         "{stdout}"
     );
     assert!(stdout.contains("\"state\": \"accepted\""), "{stdout}");
+    assert!(stdout.contains("watch_command"), "{stdout}");
     assert!(
         stdout.contains("local-detach-exits-before-attempt-attempt-1-"),
         "{stdout}"
@@ -310,6 +301,82 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
         "durable attempt must be visible: stdout={status_stdout} stderr={status_stderr}"
     );
     assert!(status_stdout.contains("local-detach-exits-before-attempt"));
+}
+
+#[test]
+fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
+    for runner_owned in [false, true] {
+        let context = HermeticTestContext::new();
+        let (_checkout_guard, checkout) =
+            homeboy_core::test_support::shared_committed_git_repo_fixture("wait-terminal-failure");
+        std::fs::create_dir_all(checkout.join("docs")).unwrap();
+        std::fs::write(checkout.join("docs/agent-task-smoke.md"), "before\n").unwrap();
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &["add", "docs/agent-task-smoke.md"],
+        );
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &["commit", "-m", "seed patch input"],
+        );
+        let (_task_handle, task_worktree) = native_task_worktree(
+            &context,
+            "wait-terminal-failure",
+            &checkout,
+            "terminal-failure",
+        );
+        let started_file = context.root().join("provider-started");
+        let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+        command
+            .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &started_file)
+            .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "1000");
+        if runner_owned {
+            command
+                .env("HOMEBOY_RUNNER_HOSTED_EXEC", "1")
+                .env("HOMEBOY_RUNNER_PLACEMENT_RESOLVED", "1")
+                .env("HOMEBOY_RUNNER_ID", "fixture-runner");
+        } else {
+            command.arg("--wait");
+        }
+        command.args([
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--backend",
+            "fixture",
+            "--repo",
+            "wait-terminal-failure",
+            "--model",
+            "fixture-model",
+            "--prompt",
+            "exercise terminal failure",
+            "--cwd",
+            task_worktree.to_str().unwrap(),
+            "--to-worktree",
+            task_worktree.to_str().unwrap(),
+            "--verify",
+            "false",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
+        let started = Instant::now();
+        let output = bounded_output(command);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            started_file.exists(),
+            "provider must execute: {stdout}\n{stderr}"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert_eq!(output.status.code(), Some(1), "{stdout}\n{stderr}");
+        assert!(
+            stdout.contains("Cook terminal") || stderr.contains("Cook terminal"),
+            "{stdout}\n{stderr}"
+        );
+        assert!(!stdout.contains("handoff/v1"), "{stdout}");
+    }
 }
 
 #[test]
@@ -362,7 +429,6 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     command.args([
         "--placement",
         "local",
-        "--detach-after-handoff",
         "agent-task",
         "cook",
         "--run-id",
@@ -525,7 +591,6 @@ fn cancelling_interrupted_pre_projection_launcher_leaves_no_admitted_orphan() {
         .args([
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--run-id",
@@ -648,7 +713,6 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         .args([
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--run-id",
@@ -718,7 +782,6 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
         .args([
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--run-id",
@@ -752,12 +815,13 @@ fn crashing_pre_projection_launcher_leaves_no_admitted_orphan() {
     );
 }
 
-/// Piped stdio is not permission to turn a default local wait into a durable
+/// Piped stdio is not permission to turn an explicit local wait into a durable
 /// handoff. This target fails during foreground resolution, which makes the
 /// assertion bounded while proving the launcher did not emit a detach envelope.
 #[test]
 fn non_tty_local_wait_stays_foreground() {
     let output = homeboy(&[
+        "--wait",
         "--placement",
         "local",
         "agent-task",
@@ -776,11 +840,11 @@ fn non_tty_local_wait_stays_foreground() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("homeboy/agent-task-cook-local-detach-handoff/v1"),
-        "a default local wait must not return a detach handoff: {stdout}"
+        "an explicit local wait must not return a detach handoff: {stdout}"
     );
     assert!(
         !stdout.contains("\"status\": \"in_flight\""),
-        "a default local wait must not return an in-flight Cook report: {stdout}"
+        "an explicit local wait must not return an in-flight Cook report: {stdout}"
     );
 }
 
@@ -831,6 +895,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     client
         .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "5000")
         .args([
+            "--wait",
             "--placement",
             "local",
             "agent-task",
@@ -1028,6 +1093,7 @@ fn attached_nonlocal_cook_observes_terminal_execution() {
     cook.env("GITHUB_ACTIONS", "true").args([
         "agent-task",
         "cook",
+        "--wait",
         "--run-id",
         "attached-cook-terminal",
         "--repo",
@@ -1070,10 +1136,14 @@ fn no_runner_lab_or_local_cook_reaches_local_execution() {
         &checkout,
         "local-fallback",
     );
+    let terminal_output = context.root().join("terminal.json");
     let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
     cook.env("GITHUB_ACTIONS", "true").args([
         "--placement",
         "lab-or-local",
+        "--wait",
+        "--output",
+        terminal_output.to_str().unwrap(),
         "agent-task",
         "cook",
         "--backend",
@@ -1095,7 +1165,8 @@ fn no_runner_lab_or_local_cook_reaches_local_execution() {
     let output = bounded_output(cook);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("Cook result JSON");
+        serde_json::from_slice(&std::fs::read(terminal_output).expect("terminal output"))
+            .expect("Cook result JSON");
 
     assert!(
         !stdout.contains("pending_resource_admission"),
@@ -1155,7 +1226,6 @@ fn detached_cook_admission_does_not_schedule_unrelated_recovery_records() {
         .args([
             "--placement",
             "local",
-            "--detach-after-handoff",
             "agent-task",
             "cook",
             "--backend",
@@ -1262,5 +1332,6 @@ fn cook_help_does_not_advertise_queue_only() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(!help.contains("\n      --queue-only\n"));
-    assert!(help.contains("--detach-after-handoff"), "{help}");
+    assert!(help.contains("--wait"), "{help}");
+    assert!(!help.contains("--detach-after-handoff"), "{help}");
 }

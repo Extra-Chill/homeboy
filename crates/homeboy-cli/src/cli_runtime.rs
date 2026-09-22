@@ -1061,7 +1061,7 @@ impl CliRuntime {
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
                     delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
-                    detach_after_handoff: matches.get_flag("detach_after_handoff"),
+                    detach_after_handoff: matches.get_flag("wait"),
                     runner_env: &runner_env,
                     runner_secret_env: &runner_secret_env,
                     lab_env_json: matches
@@ -3243,7 +3243,6 @@ fn preflight_hot_command_with_input(
             // controller-local resource refusal, never selects local execution.
             let runner_admits_offload = runner_admits_offload
                 || (hot_command.allows_warm_runner_coordination
-                    && cli.detach_after_handoff
                     && cli.runner.is_none()
                     && matches!(
                         cli.command,

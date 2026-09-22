@@ -18,6 +18,7 @@ pub(crate) fn lab_offload_command_prefix(
         homeboy_path.to_string(),
         "--placement".to_string(),
         "local".to_string(),
+        "--wait".to_string(),
     ];
     let required_tools = required_tools_for_command_prefix(&argv);
 
@@ -61,6 +62,7 @@ mod tests {
                 "/usr/local/bin/homeboy".to_string(),
                 "--placement".to_string(),
                 "local".to_string(),
+                "--wait".to_string(),
             ]
         );
         assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
@@ -78,6 +80,7 @@ mod tests {
                 "homeboy".to_string(),
                 "--placement".to_string(),
                 "local".to_string(),
+                "--wait".to_string(),
             ]
         );
         assert_eq!(prefix.required_tools, vec![RunnerRequiredTool::homeboy()]);
