@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { openCodeRuntimeReadiness } = require('..');
+const { openCodeRuntimeReadiness, resolveOpenCodeAuthPlan } = require('..');
 const fixtures = require('./fixtures/provider-readiness.json');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-readiness-'));
@@ -39,17 +39,17 @@ function probe(responses, expectedTimeout = 15_000) {
 	};
 }
 
-function readyResponses(providerResult = fixtures.success, model = 'gpt-5.6-terra') {
+function readyResponses(providerResult = fixtures.success, model = 'gpt-5.6-terra', provider = 'openai') {
 	return [
 		{ args: ['--version'], result: { status: 0, stdout: '1.18.25\n', stderr: '' } },
-		{ args: ['auth', 'list'], result: { status: 0, stdout: 'Credentials ~/.local/share/opencode/auth.json\nOpenAI oauth\n', stderr: '' } },
-		{ args: ['models', 'openai'], result: { status: 0, stdout: `openai/${model}\n`, stderr: '' } },
-		{ args: ['run', '--model', `openai/${model}`, '--format', 'json', '--agent', 'homeboy-readiness', '--title', 'homeboy-readiness', 'Reply with exactly READY. Do not access files, run commands, or make changes.'], result: providerResult },
+		{ args: ['auth', 'list'], result: { status: 0, stdout: `Credentials ~/.local/share/opencode/auth.json\n${provider} oauth\n`, stderr: '' } },
+		{ args: ['models', provider], result: { status: 0, stdout: `${provider}/${model}\n`, stderr: '' } },
+		{ args: ['run', '--model', `${provider}/${model}`, '--format', 'json', '--agent', 'homeboy-readiness', '--title', 'homeboy-readiness', 'Reply with exactly READY. Do not access files, run commands, or make changes.'], result: providerResult },
 	];
 }
 
 try {
-	const ready = openCodeRuntimeReadiness(request({ provider: 'codex' }), { env: env(), spawnSync: probe(readyResponses()) });
+	const ready = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses()) });
 	assert.equal(ready.schema, 'homeboy/agent-task-provider-readiness-result/v1');
 	assert.equal(ready.ready, true);
 	assert.equal(ready.classification, 'ready');
@@ -74,9 +74,18 @@ try {
 	assert.notEqual(changedConfigCredential.cache_key, ready.cache_key);
 	const authStore = path.join(root, '.local', 'share', 'opencode');
 	fs.mkdirSync(authStore, { recursive: true });
-	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":"first"}');
+	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":{"type":"oauth"}}');
+	const openAiOAuth = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra' }, { env: env() });
+	assert.equal(openAiOAuth.auth_kind, 'oauth');
+	assert.equal(openAiOAuth.source.kind, 'opencode_auth_store');
+	assert.equal(openAiOAuth.source.handoff_supported, false);
+	assert.deepEqual(openAiOAuth.secret_env, []);
 	const firstAuthStore = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses()) });
-	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":"second"}');
+	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":{"type":"api"}}');
+	const openAiApi = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra' }, { env: env({ OPENAI_API_KEY: 'api-key-must-not-leak' }) });
+	assert.equal(openAiApi.auth_kind, 'api_key');
+	assert.deepEqual(openAiApi.secret_env, ['OPENAI_API_KEY']);
+	assert.equal(JSON.stringify(openAiApi).includes('api-key-must-not-leak'), false);
 	const secondAuthStore = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses()) });
 	assert.notEqual(firstAuthStore.cache_key, secondAuthStore.cache_key);
 
@@ -86,6 +95,18 @@ try {
 	]) });
 	assert.equal(missingAuth.classification, 'auth_failure');
 	assert.equal(missingAuth.reason, 'provider_credentials_missing');
+	const runnerWithoutControllerAuth = openCodeRuntimeReadiness(request(), { env: env({ HOME: path.join(root, 'runner-without-auth'), OPENAI_API_KEY: undefined }), spawnSync: probe([
+		readyResponses()[0],
+		{ args: ['auth', 'list'], result: { status: 0, stdout: 'Anthropic oauth\n', stderr: '' } },
+	]) });
+	assert.equal(runnerWithoutControllerAuth.classification, 'auth_failure');
+	assert.equal(runnerWithoutControllerAuth.reason, 'provider_credentials_missing');
+	const nativeProvider = openCodeRuntimeReadiness(request({ model: 'anthropic/claude-sonnet' }), { env: env(), spawnSync: probe(readyResponses(fixtures.success, 'claude-sonnet', 'anthropic')) });
+	assert.equal(nativeProvider.ready, true);
+	assert.equal(nativeProvider.identity.provider, 'anthropic');
+	const explicitProvider = openCodeRuntimeReadiness(request({ provider: 'codex', model: 'openai/gpt-5.6-terra' }), { env: env({ AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'codex-secret-must-not-leak' }), spawnSync: probe(readyResponses(fixtures.success, 'gpt-5.6-terra', 'codex')) });
+	assert.equal(explicitProvider.ready, true);
+	assert.equal(explicitProvider.identity.provider, 'codex');
 	const rejectedAuth = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe([
 		readyResponses()[0],
 		{ args: ['auth', 'list'], result: { status: 1, stdout: '', stderr: 'authentication failed for secret-do-not-leak' } },

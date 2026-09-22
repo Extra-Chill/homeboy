@@ -12,10 +12,12 @@ embedding CLI details in their own manifests.
 - `command` and `invocation` point at the runtime-local executor wrapper.
 - `runner_readiness` advertises the OpenCode executable check and install hint.
 - `workspace_tools` declares the default repository workspace tool ids.
-- `provider_defaults.codex` declares Codex OAuth secret env names and source
+- `provider_defaults.openai` declares the optional scoped OpenAI API-key route;
+  `provider_defaults.codex` declares Codex OAuth secret env names and source
   metadata.
-- `provider_preflight.codex` declares the auth checks callers should run before
-  launching OpenCode.
+- `provider_preflight` declares the auth checks callers should run before
+  launching OpenCode. Native OpenCode OAuth accounts remain provider-owned and
+  require runner-local login when they cannot be delivered through secrets.
 
 The JavaScript package exports the same provider contract through
 `providerContract()`, plus `executeOpenCodeAgentTask()` for the CLI wrapper and
