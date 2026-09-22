@@ -131,6 +131,7 @@ pub use runtime_types::*;
 pub use secret_types::*;
 pub use secrets::{
     provider_runner_secret_env_for_plan_with_providers,
+    provider_secret_credential_mappings_for_plan_with_providers,
     provider_secret_sources_for_plan_with_providers,
 };
 pub use structured_error::{

@@ -936,6 +936,8 @@ pub struct SecretEnvCredentialSource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1125,6 +1127,7 @@ mod tests {
                     "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
                     SecretEnvCredentialSource {
                         source: "keychain-bundle".to_string(),
+                        path: None,
                         scope: Some("agent-task".to_string()),
                         name: Some("example-oauth".to_string()),
                         field: Some("refresh_token".to_string()),
