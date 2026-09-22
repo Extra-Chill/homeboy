@@ -256,7 +256,7 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
                             name: None,
                             field: Some("tokens.fedramp".to_string()),
                             fallback_fields: Vec::new(),
-                            fallback_value: Some("false".to_string()),
+                            fallback_value: Some(false),
                         },
                     ),
                 ]
@@ -290,10 +290,8 @@ fn daemon_prepare_resolves_sealed_provider_source_without_runner_secret_map() {
             vec!["tokens.expires_at", "tokens.expiresAt"]
         );
         assert_eq!(
-            mapping.sources["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"]
-                .fallback_value
-                .as_deref(),
-            Some("false")
+            mapping.sources["AI_PROVIDER_OPENAI_CODEX_FEDRAMP"].fallback_value,
+            Some(false)
         );
 
         let prepared = prepare_daemon_local_process(RunnerProcessRequest {
