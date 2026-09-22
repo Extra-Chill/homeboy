@@ -536,14 +536,17 @@ impl ReleaseExecuteArgs {
 }
 
 pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
+    eprintln!("[release] stage: dispatching subcommand");
     match args.command {
         Some(ReleaseSubcommand::Candidate(args)) => {
+            eprintln!("[release] stage: preparing candidate publication");
             return map_nested(candidate::run(args), ReleaseCommandOutput::Candidate);
         }
         Some(ReleaseSubcommand::Changes(args)) => {
             return map_nested(changes::run(args), ReleaseCommandOutput::Changes);
         }
         Some(ReleaseSubcommand::Changelog(args)) => {
+            eprintln!("[release] stage: reading changelog");
             return map_nested(changelog::run(args), ReleaseCommandOutput::Changelog);
         }
         Some(ReleaseSubcommand::Version(args)) => {
@@ -553,16 +556,19 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
             );
         }
         Some(ReleaseSubcommand::Contains(args)) => {
+            eprintln!("[release] stage: checking release containment");
             return map_nested(contains::run_contains(args), |report| {
                 ReleaseCommandOutput::Contains(Box::new(report))
             });
         }
         Some(ReleaseSubcommand::Gap(args)) => {
+            eprintln!("[release] stage: calculating release gap");
             return map_nested(contains::run_gap(args), |report| {
                 ReleaseCommandOutput::Gap(Box::new(report))
             });
         }
         Some(ReleaseSubcommand::Resolve(args)) => {
+            eprintln!("[release] stage: resolving remote release tag");
             let coordinate = homeboy_core::git::get_latest_remote_release_with_prefix(
                 &args.repository,
                 Some(&args.prefix),
@@ -591,6 +597,7 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
             return Ok((ReleaseCommandOutput::Resolve(output), 0));
         }
         Some(ReleaseSubcommand::ArtifactSourceAuthority(args)) => {
+            eprintln!("[release] stage: writing artifact source authority");
             let release_notes = artifact_source_authority_release_notes(&args);
             let manifest = release::write_artifact_source_authority_manifest(
                 Path::new(&args.dir),
@@ -610,6 +617,7 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
         }
         Some(ReleaseSubcommand::Readiness(args)) => match args.command {
             ReleaseReadinessCommand::Show { reference } => {
+                eprintln!("[release] stage: loading readiness record");
                 // The readiness subcommand is its own unit of work, so it
                 // resolves roots once and binds the record store to them
                 // rather than letting each store call rediscover a home
@@ -643,6 +651,7 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                 ));
             }
             ReleaseReadinessCommand::List { component_id } => {
+                eprintln!("[release] stage: listing readiness records");
                 let store = release::operation_record::OperationRecordStore::in_roots(
                     &homeboy::core::paths::PathRoots::from_environment()?,
                 );
@@ -659,6 +668,7 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
         None => {}
     }
 
+    eprintln!("[release] stage: executing release pipeline");
     run_execute(args.execute)
 }
 
