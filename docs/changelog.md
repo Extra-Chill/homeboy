@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.383.13] - 2026-09-22
+
+### Fixed
+- separate split timeout from git calls
+- allow a transport-only route, consult its resolver
+- harvest interrupted provider candidates
+- do not claim artifact cleanup completion
+
 ## [0.383.12] - 2026-09-22
 
 ### Changed
