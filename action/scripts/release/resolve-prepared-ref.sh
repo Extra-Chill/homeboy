@@ -6,9 +6,16 @@ prepared_ref="${PREPARED_REF:-}"
 release_branch="${RELEASE_BRANCH:-main}"
 release_branch="${release_branch#refs/heads/}"
 
+# GitHub's Git smart-HTTP endpoint authenticates with Basic credentials, using
+# `x-access-token` as the username for both GITHUB_TOKEN and GitHub App
+# installation tokens. It rejects a Bearer header with "invalid credentials",
+# and git then falls back to prompting for a username, which fails in CI as
+# "could not read Username". Bearer is correct for the REST API, not for Git.
 remote_ls() {
   if [ -n "${SOURCE_TOKEN:-}" ]; then
-    git -c "http.extraheader=AUTHORIZATION: bearer ${SOURCE_TOKEN}" ls-remote origin "$@"
+    local basic_credentials
+    basic_credentials="$(printf 'x-access-token:%s' "${SOURCE_TOKEN}" | base64 | tr -d '\n')"
+    git -c "http.extraheader=AUTHORIZATION: basic ${basic_credentials}" ls-remote origin "$@"
   else
     git ls-remote origin "$@"
   fi
