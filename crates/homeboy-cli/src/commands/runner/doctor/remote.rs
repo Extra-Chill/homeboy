@@ -456,7 +456,7 @@ pub(super) fn unreachable_report(
     server: &Server,
     output: homeboy::core::server::CommandOutput,
 ) -> RunnerDoctorOutput {
-    let recovery_command = format!("homeboy server status {}", shell::quote_arg(&server.id));
+    let recovery_command = format!("homeboy server connect {}", shell::quote_arg(&server.id));
     RunnerDoctorOutput {
         variant: "doctor",
         command: "runner.doctor",
@@ -469,14 +469,17 @@ pub(super) fn unreachable_report(
         checks: vec![checks::error(
             "ssh.execution",
             format!("SSH runner {} is not reachable", runner_id),
-            Some(recovery_command.clone()),
+            Some(format!(
+                "SSH transport/authentication failed. Re-establish the configured session with {recovery_command}, then rerun runner doctor."
+            )),
             common::detail_map(&[
                 ("phase", "ssh_transport"),
                 ("stderr", output.stderr.trim()),
                 ("stdout", output.stdout.trim()),
                 ("recovery_command", &recovery_command),
             ]),
-        )],
+        )
+        .with_action(types::RunnerRepairAction::Reconnect)],
         secret_env_migration: None,
         diagnostics: Some(types::RunnerDoctorDiagnostics {
             status: "partial",

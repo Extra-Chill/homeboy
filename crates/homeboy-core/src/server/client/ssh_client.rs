@@ -313,6 +313,8 @@ impl SshClient {
         if let Some(identity_file) = &self.identity_file {
             args.push("-i".to_string());
             args.push(identity_file.clone());
+            args.push("-o".to_string());
+            args.push("IdentitiesOnly=yes".to_string());
         }
 
         if self.port != 22 {
@@ -351,6 +353,8 @@ impl SshClient {
         if let Some(identity_file) = &self.identity_file {
             args.push("-i".to_string());
             args.push(identity_file.clone());
+            args.push("-o".to_string());
+            args.push("IdentitiesOnly=yes".to_string());
         }
 
         if self.port != 22 {
@@ -1032,6 +1036,36 @@ mod bounded_probe_tests {
             "local",
         )
         .expect("localhost client")
+    }
+
+    #[test]
+    fn configured_identity_is_the_only_identity_offered() {
+        let mut client = localhost_client();
+        client.is_local = false;
+        client.identity_file = Some("/home/operator/.ssh/id_ed25519".to_string());
+
+        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
+
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "-i".to_string(),
+                "/home/operator/.ssh/id_ed25519".to_string(),
+            ]
+        }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["-o".to_string(), "IdentitiesOnly=yes".to_string()] }));
+    }
+
+    #[test]
+    fn agent_auth_has_no_identities_only_restriction() {
+        let mut client = localhost_client();
+        client.is_local = false;
+
+        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
+
+        assert!(!args.contains(&"-i".to_string()));
+        assert!(!args.contains(&"IdentitiesOnly=yes".to_string()));
     }
 
     #[test]

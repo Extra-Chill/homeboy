@@ -90,6 +90,9 @@ fn client_connection_args(
     if let Some(identity_file) = identity_file {
         args.push("-i".to_string());
         args.push(shellexpand::tilde(identity_file).to_string());
+        // A configured identity must not race keys held by the SSH agent.
+        // Without this, MaxAuthTries can be exhausted before this key is tried.
+        push_option(&mut args, "IdentitiesOnly=yes");
     }
 
     if let Some(flag) = options.port_flag {
