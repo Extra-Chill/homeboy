@@ -629,11 +629,31 @@ mod tests {
             .trim()
             .parse()
             .unwrap();
-        let still_running = unsafe { libc::kill(pid, 0) == 0 };
+        // The killed descendant is an orphan. Its reaper may be an outer CI
+        // subreaper, so a terminated-but-unreaped zombie still accepts kill(0).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while process_is_live(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         assert!(
-            !still_running,
+            !process_is_live(pid),
             "delayed split descendant {pid} survived cleanup"
         );
+    }
+
+    #[cfg(unix)]
+    fn process_is_live(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return false;
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|output| {
+                let state = String::from_utf8_lossy(&output.stdout);
+                !state.trim().is_empty() && !state.trim_start().starts_with('Z')
+            })
+            .unwrap_or(true)
     }
 
     #[cfg(unix)]
