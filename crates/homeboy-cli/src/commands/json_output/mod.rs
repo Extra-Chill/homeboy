@@ -593,16 +593,65 @@ fn release_publication_url(data: &Value) -> Option<&str> {
         .find_map(|key| verification.get(key).and_then(Value::as_str))
 }
 
+/// Bound long release text while preserving BOTH ends of it.
+///
+/// Release failure text is two useful things joined together: the head names
+/// what failed (`Release step package (package) failed: ...`) and the tail
+/// carries what the underlying tool actually said. Keeping only the head meant
+/// a packaging failure was reported as
+///
+/// ```text
+/// Package command failed (exit 255): Building release ZIP for <component>...
+/// [BUILD] Checking build dependencies...
+/// [SUCCESS] All build dependencies found
+/// ```
+///
+/// — several hundred bytes of preamble, with the error that explained it
+/// discarded. The operator could not act on that, so every packaging failure
+/// cost a trip into raw CI logs to recover output Homeboy had already captured
+/// (issue #14859).
+///
+/// Truncating from the tail instead would be just as wrong in the other
+/// direction: `Refusing to release from branch 'x' because the repo default
+/// branch is 'main'` is answered entirely by its head. Both ends carry signal,
+/// so the middle is what gets dropped, and the elision states how much went.
+///
+/// The marker is budgeted inside `MAX_RELEASE_TEXT_BYTES` rather than added on
+/// top, so this stays within the bound callers already rely on.
 fn bounded_release_text(value: &str) -> String {
-    let mut end = value.len().min(MAX_RELEASE_TEXT_BYTES);
-    while !value.is_char_boundary(end) {
-        end -= 1;
+    if value.len() <= MAX_RELEASE_TEXT_BYTES {
+        return value.to_string();
     }
-    if end == value.len() {
-        value.to_string()
-    } else {
-        format!("{}...", &value[..end])
+
+    // Reserved so the marker never pushes the result past the existing bound.
+    // `... [<digits>] bytes omitted ...` plus newlines fits comfortably.
+    const ELISION_RESERVE: usize = 40;
+
+    let budget = MAX_RELEASE_TEXT_BYTES.saturating_sub(ELISION_RESERVE);
+    // The tail gets the larger share: build tools put the actionable error last.
+    let head_budget = budget / 3;
+    let tail_budget = budget - head_budget;
+
+    let mut head_end = head_budget.min(value.len());
+    while head_end > 0 && !value.is_char_boundary(head_end) {
+        head_end -= 1;
     }
+
+    let mut tail_start = value.len().saturating_sub(tail_budget);
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+
+    if tail_start <= head_end {
+        return value[..head_end].to_string();
+    }
+
+    format!(
+        "{}\n... [{} bytes omitted] ...\n{}",
+        &value[..head_end],
+        tail_start - head_end,
+        &value[tail_start..]
+    )
 }
 
 fn release_reproduction_commands(step: &Value, result: &Value) -> Vec<String> {
@@ -1213,6 +1262,85 @@ fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this protects against: a packaging failure whose summary was
+    /// all preamble, because the error a build tool emits comes last and the
+    /// bound kept only the first 512 bytes. Every such failure then cost a trip
+    /// into raw CI logs to recover text Homeboy had already captured (#14859).
+    #[test]
+    fn bounded_release_text_keeps_the_error_at_the_end() {
+        let preamble = "Package command failed (exit 255): Building release ZIP for extrachill-link-pages...\n";
+        let chatter = "[BUILD] Checking build dependencies...\n".repeat(40);
+        let real_error = "[ERROR] webpack: Module not found: Can't resolve './missing-entry'";
+        let value = format!("{preamble}{chatter}{real_error}");
+
+        assert!(
+            value.len() > MAX_RELEASE_TEXT_BYTES,
+            "fixture must exceed the bound or it proves nothing"
+        );
+
+        let bounded = bounded_release_text(&value);
+
+        assert!(
+            bounded.contains(real_error),
+            "the actionable error must survive truncation; got: {bounded}"
+        );
+        assert!(
+            bounded.contains("Package command failed (exit 255)"),
+            "the head still identifies what failed; got: {bounded}"
+        );
+        assert!(
+            bounded.contains("bytes omitted"),
+            "the elision must be visible rather than silent; got: {bounded}"
+        );
+    }
+
+    /// Tail-truncation would be just as wrong in the other direction: a
+    /// preflight refusal is answered entirely by its opening words.
+    #[test]
+    fn bounded_release_text_keeps_the_reason_at_the_start() {
+        let head = "Release step preflight.default_branch failed: Refusing to release from branch 'fix/x' because the repo default branch is 'main'";
+        let value = format!("{head}{}", "\ntrailing diagnostic noise".repeat(60));
+
+        let bounded = bounded_release_text(&value);
+
+        assert!(
+            bounded.contains("Refusing to release from branch"),
+            "the leading reason must survive; got: {bounded}"
+        );
+    }
+
+    #[test]
+    fn bounded_release_text_leaves_short_values_untouched() {
+        let value = "sha256:abc123";
+        assert_eq!(bounded_release_text(value), value);
+
+        let exact = "x".repeat(MAX_RELEASE_TEXT_BYTES);
+        assert_eq!(bounded_release_text(&exact), exact);
+    }
+
+    /// Callers bound the rendered envelope, so the elision marker is budgeted
+    /// inside the limit rather than added on top of it.
+    #[test]
+    fn bounded_release_text_respects_the_existing_bound() {
+        let value = "y".repeat(MAX_RELEASE_TEXT_BYTES * 8);
+        let bounded = bounded_release_text(&value);
+        assert!(
+            bounded.len() <= MAX_RELEASE_TEXT_BYTES,
+            "bounded text grew to {} bytes, past the {} byte budget",
+            bounded.len(),
+            MAX_RELEASE_TEXT_BYTES
+        );
+    }
+
+    /// Multi-byte input must not panic or split a character.
+    #[test]
+    fn bounded_release_text_handles_multibyte_boundaries() {
+        let value = "é".repeat(MAX_RELEASE_TEXT_BYTES);
+        let bounded = bounded_release_text(&value);
+        assert!(bounded.len() <= MAX_RELEASE_TEXT_BYTES);
+        assert!(!bounded.is_empty());
+    }
 
     #[test]
     fn output_bootstrap_failure_terminalizes_the_persisted_cook_parent() {
