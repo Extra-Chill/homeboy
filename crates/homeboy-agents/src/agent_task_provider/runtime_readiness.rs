@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -23,6 +25,7 @@ pub struct ProviderRuntimeReadinessCache {
     shared: Arc<ProviderRuntimeReadinessCacheShared>,
 }
 
+#[cfg(not(test))]
 static PROCESS_READINESS_CACHE: OnceLock<Arc<ProviderRuntimeReadinessCacheShared>> =
     OnceLock::new();
 static PROCESS_PROBE_GATE: OnceLock<Arc<ProviderReadinessProbeGate>> = OnceLock::new();
@@ -34,6 +37,12 @@ fn process_probe_gate() -> Arc<ProviderReadinessProbeGate> {
             changed: Condvar::new(),
         })
     }))
+}
+
+// Parallel tests use isolated homes and must not share readiness evidence.
+#[cfg(test)]
+thread_local! {
+    static TEST_PROCESS_READINESS_CACHE: RefCell<Option<Arc<ProviderRuntimeReadinessCacheShared>>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug)]
@@ -93,6 +102,26 @@ impl ProviderRuntimeReadinessCache {
     /// request identity still includes credential value hashes, so refreshed
     /// credentials cannot reuse old readiness evidence.
     pub fn process_local() -> Self {
+        #[cfg(test)]
+        {
+            return Self {
+                shared: TEST_PROCESS_READINESS_CACHE.with(|cache| {
+                    let mut cache = cache.borrow_mut();
+                    Arc::clone(cache.get_or_insert_with(|| {
+                        Arc::new(ProviderRuntimeReadinessCacheShared {
+                            state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                            changed: Condvar::new(),
+                            probe_gate: Arc::new(ProviderReadinessProbeGate {
+                                active: Mutex::new(0),
+                                changed: Condvar::new(),
+                            }),
+                        })
+                    }))
+                }),
+            };
+        }
+
+        #[cfg(not(test))]
         Self {
             shared: Arc::clone(PROCESS_READINESS_CACHE.get_or_init(|| {
                 Arc::new(ProviderRuntimeReadinessCacheShared {
