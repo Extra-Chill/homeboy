@@ -275,6 +275,13 @@ or build transcript. Pass `--full` to emit the complete refresh result on stdout
 Global `--output <path>` always writes the lossless command-result envelope,
 regardless of `--full`; use it when automation needs every response field.
 
+While a refresh is running, stderr emits bounded noninteractive progress lines
+with the `HOMEBOY_REFRESH_PROGRESS ` prefix. The JSON payload includes the
+durable `run_id`, coarse `phase: "refresh"`, `requested_mode` (`materialize` or
+`select`), and `state`; heartbeat lines additionally include `heartbeat: true`.
+These lines are operator progress only and never contain child stdout/stderr or
+secrets. The final stdout envelope and persisted artifacts use the same run ID.
+
 Every refresh attempt creates one terminal observation run. Its redacted
 materialization script and complete build/select transcript are persisted for
 both successful and failed execution; planning or execution errors persist their
