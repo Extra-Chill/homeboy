@@ -105,30 +105,15 @@ pub type FanoutResumeExecutionContextFactory = fn() -> homeboy_core::Result<(
     FanoutResumeDispatcherFactory,
 )>;
 
-/// Runs Cook-owned fanout publication and cleanup before the action is
-/// acknowledged. The runtime supplies adapters; the delegate owns ordering.
-pub type FanoutResumeEffectsFactory =
-    fn(&str, &FanoutBatchResumeActionResult) -> homeboy_core::Result<Value>;
-
 static FANOUT_RESUME_CONTEXT_FACTORY: OnceLock<
     RwLock<Option<FanoutResumeExecutionContextFactory>>,
 > = OnceLock::new();
-
-static FANOUT_RESUME_EFFECTS_FACTORY: OnceLock<RwLock<Option<FanoutResumeEffectsFactory>>> =
-    OnceLock::new();
 
 pub fn register_fanout_resume_context(factory: FanoutResumeExecutionContextFactory) {
     *FANOUT_RESUME_CONTEXT_FACTORY
         .get_or_init(|| RwLock::new(None))
         .write()
         .expect("fanout resume context registry poisoned") = Some(factory);
-}
-
-pub fn register_fanout_resume_effects(factory: FanoutResumeEffectsFactory) {
-    *FANOUT_RESUME_EFFECTS_FACTORY
-        .get_or_init(|| RwLock::new(None))
-        .write()
-        .expect("fanout resume effects registry poisoned") = Some(factory);
 }
 
 /// One bounded non-reconciling read of the durable record and optional plan.
@@ -1104,24 +1089,6 @@ impl FanoutBatchActionDelegate {
         factory().map_err(|error| ControlPlaneError::unavailable(error.message))
     }
 
-    fn effects(
-        batch_id: &str,
-        result: &FanoutBatchResumeActionResult,
-    ) -> Result<Value, ControlPlaneError> {
-        let factory = FANOUT_RESUME_EFFECTS_FACTORY
-            .get_or_init(|| RwLock::new(None))
-            .read()
-            .expect("fanout resume effects registry poisoned")
-            .as_ref()
-            .copied()
-            .ok_or_else(|| {
-                ControlPlaneError::unavailable(
-                    "fanout resume effects are not registered for this runtime",
-                )
-            })?;
-        factory(batch_id, result).map_err(|error| ControlPlaneError::unavailable(error.message))
-    }
-
     fn stored_resume_receipt(
         batch_id: &str,
         effect_id: &EffectId,
@@ -1352,7 +1319,16 @@ impl FanoutBatchActionDelegate {
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 let mut action_result = action_result;
                 if action_result.outcome == ControlPlaneActionOutcome::Succeeded {
-                    action_result.result.data["portfolio"] = Self::effects(batch_id, &result)?;
+                    let (executor, dispatcher) = Self::context()?;
+                    let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
+                        executor,
+                        dispatcher,
+                    };
+                    action_result.result.data["portfolio"] =
+                        crate::agent_task_fanout_service::resume_effects(
+                            batch_id, &result, &transport,
+                        )
+                        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 }
                 let store = AgentTaskBatchStore::from_current_data_root()
                     .map_err(|error| ControlPlaneError::unavailable(error.message))?;
