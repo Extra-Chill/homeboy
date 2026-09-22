@@ -151,6 +151,19 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
         .spawn()
         .ok()?;
     let stderr = child.stderr.take()?;
+    // Both pipes must be drained while the child runs. A pipe holds about 64 KiB
+    // before a write blocks, and release output is far larger: `release
+    // changelog` emits roughly 480 KB. Reading stdout only after the child exits
+    // therefore deadlocks -- the child blocks writing, the parent blocks waiting,
+    // and the deadline fires against a command that had already finished its
+    // work. Buffer it on a thread and print it only on success, so a timeout
+    // still emits one clean envelope instead of partial output.
+    let mut child_stdout = child.stdout.take()?;
+    let stdout_thread = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = child_stdout.read_to_end(&mut bytes);
+        bytes
+    });
     let stage = Arc::new(Mutex::new(String::from("startup")));
     let stage_for_reader = Arc::clone(&stage);
     let stderr_thread = thread::spawn(move || {
@@ -187,13 +200,9 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     let timed_out = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout = child.stdout.take().and_then(|mut output| {
-                    let mut bytes = Vec::new();
-                    output.read_to_end(&mut bytes).ok().map(|_| bytes)
-                });
                 let _ = stderr_thread.join();
-                if let Some(stdout) = stdout {
-                    let _ = std::io::stdout().write_all(&stdout);
+                if let Ok(bytes) = stdout_thread.join() {
+                    let _ = std::io::stdout().write_all(&bytes);
                     let _ = std::io::stdout().flush();
                 }
                 return Some(std::process::ExitCode::from(
@@ -210,6 +219,9 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
         let _ = child.kill();
         let _ = child.wait();
         let _ = stderr_thread.join();
+        // Discard buffered stdout: a timeout emits its own envelope, and partial
+        // output ahead of it would hand the caller two conflicting results.
+        let _ = stdout_thread.join();
         let stalled_stage = stage
             .lock()
             .map(|current| current.clone())
@@ -233,6 +245,7 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     let _ = child.kill();
     let _ = child.wait();
     let _ = stderr_thread.join();
+    let _ = stdout_thread.join();
     None
 }
 
@@ -1048,7 +1061,7 @@ impl CliRuntime {
                     allow_dirty_lab_workspace: matches.get_flag("allow_dirty_lab_workspace"),
                     skip_deps_hydration: matches.get_flag("skip_deps_hydration"),
                     delete_workspace_on_failure: matches.get_flag("delete_workspace_on_failure"),
-                    detach_after_handoff: matches.get_flag("detach_after_handoff"),
+                    detach_after_handoff: matches.get_flag("wait"),
                     runner_env: &runner_env,
                     runner_secret_env: &runner_secret_env,
                     lab_env_json: matches
@@ -1286,6 +1299,8 @@ impl CliRuntime {
         }
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
+        // Restore command-scoped runner intent before admission and placement
+        // routing inspect the typed command. Provider readiness is runner-scoped.
         normalize_agent_task_runner_option(&mut cli, &normalized);
         if let Commands::AgentTask(agent_task) = &mut cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
@@ -3230,7 +3245,6 @@ fn preflight_hot_command_with_input(
             // controller-local resource refusal, never selects local execution.
             let runner_admits_offload = runner_admits_offload
                 || (hot_command.allows_warm_runner_coordination
-                    && cli.detach_after_handoff
                     && cli.runner.is_none()
                     && matches!(
                         cli.command,
@@ -3255,7 +3269,7 @@ fn preflight_hot_command_with_input(
             // guidance, whether policy selected the runner or the operator pinned
             // it. Controller pressure still matters for preparation and transport,
             // but it must not be presented as local provider execution.
-            let warning = (!required_lab_placement)
+            let warning = (!required_lab_placement && !runner_admits_offload)
                 .then(|| {
                     resource_policy::evaluate_with_runner_hint(
                         hot_command,
@@ -3265,7 +3279,11 @@ fn preflight_hot_command_with_input(
                 })
                 .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
-            if let Some(runner_id) = required_lab_runner {
+            if let Some(runner_id) = required_lab_runner.or_else(|| {
+                runner_admits_offload
+                    .then_some(selected_lab_runner)
+                    .flatten()
+            }) {
                 if let Some(notice) = resource_policy::lab_routed_controller_notice_message(
                     hot_command,
                     &resources,
@@ -4109,6 +4127,7 @@ mod tests {
     }
     use super::*;
     use clap::Parser;
+    use homeboy::core::parsed_command_preflight::RunnerIntent;
     use sha2::{Digest, Sha256};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -6536,6 +6555,72 @@ mod tests {
 
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert_eq!(resource_policy_runner_hint(&cli, None), Some("homeboy-lab"));
+        }
+    }
+
+    #[test]
+    fn provider_readiness_runner_intent_reaches_generic_route_selection() {
+        let argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--validate-readiness".to_string(),
+        ];
+        let mut cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "providers",
+            "--backend",
+            "opencode",
+            "--validate-readiness",
+        ]);
+        normalize_agent_task_runner_option(&mut cli, &argv);
+
+        let input = resource_policy::parsed_command_preflight_input(&cli, &argv);
+        let route = generic_route_policy_snapshot(&cli, Some("homeboy-lab".to_string()));
+
+        assert!(route.command_supports_lab);
+        assert_eq!(
+            input.runner,
+            RunnerIntent::Explicit("homeboy-lab".to_string())
+        );
+        assert_eq!(
+            homeboy::core::parsed_command_preflight::resolve_generic_route_runner(&input, &route),
+            Some("homeboy-lab".to_string())
+        );
+    }
+
+    #[test]
+    fn local_provider_readiness_stays_controller_owned_without_runner_pin() {
+        for (args, expected) in [
+            (
+                vec!["homeboy", "--placement", "local", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec![
+                    "homeboy",
+                    "--placement",
+                    "lab-or-local",
+                    "agent-task",
+                    "providers",
+                ],
+                homeboy::core::parsed_command_preflight::ControllerExecution::ControllerOnly,
+            ),
+            (
+                vec!["homeboy", "--placement", "lab", "agent-task", "providers"],
+                homeboy::core::parsed_command_preflight::ControllerExecution::Ordinary,
+            ),
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let cli = Cli::parse_from(args.clone());
+            let input = resource_policy::parsed_command_preflight_input(&cli, &args);
+
+            assert_eq!(input.controller_execution, expected);
         }
     }
 

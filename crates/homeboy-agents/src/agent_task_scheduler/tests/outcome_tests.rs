@@ -79,6 +79,25 @@ fn runtime_reported_model_wins_over_conflicting_dispatch_selection() {
 }
 
 #[test]
+fn provider_run_result_model_is_promoted_to_canonical_provenance() {
+    let request = request("task-1");
+    let mut outcome = outcome("task-1".to_string(), AgentTaskOutcomeStatus::Succeeded);
+    outcome.outputs = json!({
+        "provider_run_result": {
+            "metadata": { "model": "anthropic/claude-sonnet-5" }
+        }
+    });
+
+    crate::agent_task_scheduler::engine::persist_resolved_provider_model(&mut outcome, &request);
+
+    assert_eq!(outcome.selected_model(), Some("anthropic/claude-sonnet-5"));
+    assert_eq!(
+        outcome.metadata["model_identity"]["provider_reported"],
+        json!("anthropic/claude-sonnet-5")
+    );
+}
+
+#[test]
 fn nested_failed_executor_status_fails_succeeded_wrapper_outcome() {
     let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusExecutor));
 

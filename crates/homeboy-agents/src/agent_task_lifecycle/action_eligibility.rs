@@ -40,8 +40,9 @@ pub fn lifecycle_action_eligibility(
     } else {
         unavailable("run does not retain a potentially promotable candidate")
     };
-    let reconcile = if record.state == AgentTaskRunState::Running
-        && !matches!(record.local_owner_liveness(), LocalOwnerLiveness::Live)
+    let reconcile = if (record.state == AgentTaskRunState::Running
+        && !matches!(record.local_owner_liveness(), LocalOwnerLiveness::Live))
+        || dead_candidate_adoption_owner(record)
     {
         available("running record has no authoritative live local owner")
     } else {
@@ -118,6 +119,15 @@ pub fn lifecycle_action_eligibility(
             ),
         ],
     }
+}
+
+fn dead_candidate_adoption_owner(record: &AgentTaskRunRecord) -> bool {
+    record.candidate_adoption.as_ref().is_some_and(|adoption| {
+        (adoption.state == "verification_running"
+            && !homeboy_core::process::pid_is_running(adoption.owner_pid))
+            || (adoption.state == "interrupted"
+                && matches!(adoption.phase.as_str(), "owner_stale" | "gate_orphaned"))
+    })
 }
 
 fn placement_update_availability(

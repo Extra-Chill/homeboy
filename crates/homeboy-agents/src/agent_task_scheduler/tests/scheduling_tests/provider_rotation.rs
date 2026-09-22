@@ -251,6 +251,11 @@ mod provider_rotation_tests {
 
             let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::Timeout);
             result.failure_classification = Some(AgentTaskFailureClassification::Timeout);
+            result.outputs = json!({
+                "provider_run_result": {
+                    "metadata": { "model": "anthropic/claude-sonnet-5" }
+                }
+            });
             if self.returns_patch {
                 let patch = "diff --git a/candidate.txt b/candidate.txt\nnew file mode 100644\n--- /dev/null\n+++ b/candidate.txt\n@@ -0,0 +1 @@\n+candidate\n";
                 let path = std::path::Path::new(
@@ -653,6 +658,10 @@ mod provider_rotation_tests {
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::CandidateRecoverable
+        );
+        assert_eq!(
+            aggregate.outcomes[0].selected_model(),
+            Some("anthropic/claude-sonnet-5")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(aggregate.outcomes[0].diagnostics.iter().any(|diagnostic| {
@@ -1760,7 +1769,13 @@ mod provider_rotation_tests {
                         .expect("cancellation receiver")
                         .recv_timeout(Duration::from_secs(5))
                         .expect("scheduler cancelled the timed-out first attempt");
-                    return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+                    let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+                    outcome.outputs = serde_json::json!({
+                        "provider_run_result": {
+                            "metadata": { "model": "provider/model-not-confirmed" }
+                        }
+                    });
+                    return outcome;
                 }
                 outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
             }
@@ -1808,6 +1823,11 @@ mod provider_rotation_tests {
         assert_eq!(
             aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][1]["status"],
             "succeeded"
+        );
+        assert_eq!(
+            aggregate.outcomes[0].metadata["model_identity"]["provider_reported"],
+            Value::Null,
+            "scheduler-cancelled timeout must not infer an executed model"
         );
         let scratch_roots = scratch_roots.lock().expect("scratch roots").clone();
         assert_eq!(scratch_roots.len(), 2);

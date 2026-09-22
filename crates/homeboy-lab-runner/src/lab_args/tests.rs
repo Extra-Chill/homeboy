@@ -138,14 +138,8 @@ mod migrated_legacy_lab_arg_tests {
     }
 
     #[test]
-    fn rewrite_strips_controller_detach_policy() {
-        let input = args(&[
-            "homeboy",
-            "--detach-after-handoff",
-            "fuzz",
-            "run",
-            "component-a",
-        ]);
+    fn rewrite_strips_controller_wait_policy_for_runner_prefix() {
+        let input = args(&["homeboy", "--wait", "fuzz", "run", "component-a"]);
 
         assert_eq!(
             rewrite_lab_offload_args(&input, "/runner/project", &[], None),
@@ -155,6 +149,26 @@ mod migrated_legacy_lab_arg_tests {
             rewrite_runner_resident_lab_offload_args(&input, None),
             args(&["homeboy", "fuzz", "run", "component-a"])
         );
+    }
+
+    #[test]
+    fn runner_rewrite_consumes_only_the_controller_wait_flag() {
+        for wait in [false, true] {
+            let mut input = args(&["homeboy", "fuzz", "run", "component-a"]);
+            if wait {
+                input.push("--wait".to_string());
+            }
+            input.extend(args(&["--", "--wait"]));
+            let expected = args(&["homeboy", "fuzz", "run", "component-a", "--", "--wait"]);
+            assert_eq!(
+                rewrite_lab_offload_args(&input, "/runner/project", &[], None),
+                expected
+            );
+            assert_eq!(
+                rewrite_runner_resident_lab_offload_args(&input, None),
+                expected
+            );
+        }
     }
 
     #[test]

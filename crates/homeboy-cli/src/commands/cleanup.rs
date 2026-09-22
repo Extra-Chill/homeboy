@@ -1999,6 +1999,8 @@ fn cleanup_inventory_with_deadline(
                     apply,
                     cleanup_category_action_deadline(deadline),
                     args.cursor.as_deref(),
+                    policy.scan_limit(),
+                    args.limit.and_then(|limit| usize::try_from(limit).ok()),
                 )
                 .map(|category| vec![category])
             },
@@ -3447,17 +3449,23 @@ fn repo_artifacts_category(
     apply: bool,
     deadline: Option<SystemTime>,
     cursor: Option<&str>,
+    limit: usize,
+    command_limit: Option<usize>,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     let cursor = cursor
         .map(cleanup::parse_artifact_cleanup_cursor)
         .transpose()?;
-    let configured_roots: Vec<PathBuf> = homeboy::core::component::registered()
+    // Cleanup needs only persisted local paths. Full component resolution can
+    // enrich checkout-less releases through the network, which is unrelated to
+    // artifact inventory and can consume the entire bounded category wall.
+    let configured_roots: Vec<PathBuf> = homeboy::core::component::registered_base()
         .unwrap_or_default()
         .into_iter()
         .map(|component| PathBuf::from(component.local_path))
         .collect();
     let include_source_checkout = configured_roots.is_empty();
-    let mut collected_roots = repo_artifact_roots(configured_roots, include_source_checkout, apply);
+    let mut collected_roots =
+        repo_artifact_roots(configured_roots, include_source_checkout, apply, limit);
     if let Some(cursor) = &cursor {
         if collected_roots.roots.len() > 1 {
             let cursor_root = PathBuf::from(&cursor.root);
@@ -3487,7 +3495,7 @@ fn repo_artifacts_category(
             .iter()
             .all(|diagnostic| !diagnostic.success)
     {
-        let mut source_roots = repo_artifact_roots(Vec::new(), true, apply);
+        let mut source_roots = repo_artifact_roots(Vec::new(), true, apply, limit);
         apply_repo_artifact_scan_budget(&mut source_roots.roots, deadline);
         let source_output = cleanup_repo_artifact_roots(source_roots.roots);
         output.candidate_count += source_output.candidate_count;
@@ -3509,7 +3517,7 @@ fn repo_artifacts_category(
         .any(|output| !output.scan_complete);
     Ok(CleanupInventoryCategory {
         category: REPO_ARTIFACTS_METADATA.category.to_string(),
-        canonical_cleanup_command: REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        canonical_cleanup_command: repo_artifacts_command(apply, command_limit),
         specialist_command: REPO_ARTIFACTS_METADATA
             .specialist_command(apply)
             .to_string(),
@@ -3549,8 +3557,12 @@ fn repo_artifacts_category(
         elapsed_ms: 0,
         timeout_ms: 0,
         last_progress: None,
-        continuation_command: repo_artifact_continuation_command(apply, &output.diagnostics)
-            .unwrap_or_else(|| REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply)),
+        continuation_command: repo_artifact_continuation_command(
+            apply,
+            command_limit,
+            &output.diagnostics,
+        )
+        .unwrap_or_else(|| repo_artifacts_command(apply, command_limit)),
         cleanup_run_ref: None,
         candidate_count: output.candidate_count,
         applied_count: output.applied_count,
@@ -3569,6 +3581,7 @@ fn repo_artifacts_category(
 
 fn repo_artifact_continuation_command(
     apply: bool,
+    command_limit: Option<usize>,
     diagnostics: &[RepoArtifactRootDiagnostic],
 ) -> Option<String> {
     let cursor = diagnostics
@@ -3578,9 +3591,17 @@ fn repo_artifact_continuation_command(
     let cursor = serde_json::to_string(cursor).ok()?;
     Some(format!(
         "{} --cursor {}",
-        REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply),
+        repo_artifacts_command(apply, command_limit),
         quote_arg(&cursor)
     ))
+}
+
+fn repo_artifacts_command(apply: bool, command_limit: Option<usize>) -> String {
+    let mut command = REPO_ARTIFACTS_METADATA.canonical_cleanup_command(apply);
+    if let Some(limit) = command_limit {
+        command.push_str(&format!(" --limit {limit}"));
+    }
+    command
 }
 
 struct RepoArtifactRootsCleanup {
@@ -3644,6 +3665,7 @@ fn repo_artifact_roots(
     configured_roots: Vec<PathBuf>,
     include_source_checkout: bool,
     apply: bool,
+    limit: usize,
 ) -> RepoArtifactRootCollection {
     let mut collection = RepoArtifactRootCollection {
         roots: Vec::new(),
@@ -3674,7 +3696,7 @@ fn repo_artifact_roots(
                     self_artifacts: false,
                     temp_roots: Vec::new(),
                     sort: ArtifactCleanupSort::Discovery,
-                    limit: None,
+                    limit: Some(limit),
                     cursor: None,
                     merged_only: false,
                     min_age_days: None,
@@ -3694,7 +3716,7 @@ fn repo_artifact_roots(
                 self_artifacts: true,
                 temp_roots: Vec::new(),
                 sort: ArtifactCleanupSort::Discovery,
-                limit: None,
+                limit: Some(limit),
                 cursor: None,
                 merged_only: false,
                 min_age_days: None,
@@ -5810,7 +5832,7 @@ mod tests {
             PathBuf::from("/configured/one"),
             PathBuf::from("/configured/two"),
         ];
-        let roots = repo_artifact_roots(configured.clone(), true, false);
+        let roots = repo_artifact_roots(configured.clone(), true, false, 100);
 
         assert_eq!(roots.roots.len(), 3);
         assert_eq!(roots.roots[0].0, "configured_component");
@@ -5828,7 +5850,7 @@ mod tests {
     #[test]
     fn aggregate_repo_artifact_roots_deduplicate_configured_paths_and_preserve_apply() {
         let root = PathBuf::from("/configured/root");
-        let roots = repo_artifact_roots(vec![root.clone(), root], false, true);
+        let roots = repo_artifact_roots(vec![root.clone(), root], false, true, 7);
 
         assert_eq!(roots.roots.len(), 1);
         assert_eq!(roots.roots[0].0, "configured_component");
@@ -5837,11 +5859,12 @@ mod tests {
             Some(PathBuf::from("/configured/root"))
         );
         assert!(roots.roots[0].1.apply);
+        assert_eq!(roots.roots[0].1.limit, Some(7));
     }
 
     #[test]
     fn aggregate_repo_artifact_roots_reject_relative_persisted_paths() {
-        let roots = repo_artifact_roots(vec![PathBuf::from(".")], false, false);
+        let roots = repo_artifact_roots(vec![PathBuf::from(".")], false, false, 100);
 
         assert!(roots.roots.is_empty());
         assert_eq!(roots.diagnostics.len(), 1);
@@ -5867,6 +5890,7 @@ mod tests {
             vec![subdirectory, repository.path().to_path_buf()],
             false,
             false,
+            100,
         );
 
         assert_eq!(roots.roots.len(), 1);
@@ -5921,6 +5945,7 @@ mod tests {
             ],
             false,
             false,
+            100,
         );
         let output = cleanup_repo_artifact_roots(roots.roots);
 

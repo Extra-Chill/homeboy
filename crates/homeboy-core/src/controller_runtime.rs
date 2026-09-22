@@ -524,28 +524,41 @@ pub fn protected_executables() -> Result<Vec<PathBuf>> {
         .into_iter()
         .map(|pin| pin.path)
         .collect();
-    let active = runtime_root()?.join(ACTIVE_GENERATION_FILE);
-    if active.exists() {
-        let value = fs::read_to_string(&active).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("read active controller generation".to_string()),
-            )
-        })?;
-        let runtime: Value = serde_json::from_str(&value).map_err(|error| {
-            Error::validation_invalid_json(
-                error,
-                Some("parse active controller generation".to_string()),
-                None,
-            )
-        })?;
-        for pointer in ["/originating/executable", "/originating/pinned_executable"] {
-            if let Some(path) = runtime.pointer(pointer).and_then(Value::as_str) {
-                protected.insert(PathBuf::from(path));
-            }
-        }
-    }
+    protected.extend(active_generation_executables()?);
     Ok(protected.into_iter().collect())
+}
+
+/// Return only executables selected by the current controller generation.
+///
+/// Inventory readers use this projection because durable pin references require
+/// scanning the agent-task lifecycle store. That scan is intentionally retained
+/// for the apply boundary, but must not prevent a bounded artifact page from
+/// producing its first cursor and candidates.
+pub fn active_generation_executables() -> Result<Vec<PathBuf>> {
+    let active = runtime_root()?.join(ACTIVE_GENERATION_FILE);
+    if !active.exists() {
+        return Ok(Vec::new());
+    }
+    let value = fs::read_to_string(&active).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read active controller generation".to_string()),
+        )
+    })?;
+    let runtime: Value = serde_json::from_str(&value).map_err(|error| {
+        Error::validation_invalid_json(
+            error,
+            Some("parse active controller generation".to_string()),
+            None,
+        )
+    })?;
+    Ok(
+        ["/originating/executable", "/originating/pinned_executable"]
+            .into_iter()
+            .filter_map(|pointer| runtime.pointer(pointer).and_then(Value::as_str))
+            .map(PathBuf::from)
+            .collect(),
+    )
 }
 
 fn retention_report_with_references_at(

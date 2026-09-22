@@ -1189,9 +1189,6 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
         Some("lab-or-local") => homeboy_lab_runner_contract::Placement::LabOrLocal,
         _ => homeboy_lab_runner_contract::Placement::Auto,
     };
-    let detached = replay_args
-        .iter()
-        .any(|arg| arg == "--detach-after-handoff");
     if let ResourceAdmissionDecision::Rejected {
         label, evidence, ..
     } = result.resource_admission
@@ -1205,7 +1202,7 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
         return indeterminate_preview_admission_with_next_action(&reason, "homeboy self doctor");
     }
     if crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
-        requested, detached, &result,
+        requested, &result,
     ) && requested == homeboy_lab_runner_contract::Placement::Auto
         && crate::commands::infra::route::auto_cook_unavailable_lab_state(&result).is_some()
     {
@@ -1222,7 +1219,6 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
             if requested == homeboy_lab_runner_contract::Placement::LabOrLocal
                 || !crate::commands::infra::route::cook_requires_unmaterialized_admission_for_placement(
                     requested,
-                    detached,
                     &result,
                 ) =>
         {
@@ -1409,7 +1405,7 @@ fn preview_placement_policy_from_argv(argv: &[String]) -> Value {
     serde_json::json!({
         "requested": placement,
         "runner": runner,
-        "detach_after_handoff": argv.iter().any(|value| value == "--detach-after-handoff"),
+        "detach_after_handoff": !argv.iter().take_while(|value| value.as_str() != "--").any(|value| value == "--wait"),
         "route_executed": false,
     })
 }
@@ -2202,7 +2198,6 @@ mod preview_tests {
         let policy = preview_placement_policy_from_argv(&[
             "homeboy".to_string(),
             "--placement=lab-or-local".to_string(),
-            "--detach-after-handoff".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
             "--".to_string(),
@@ -3082,14 +3077,13 @@ mod preview_tests {
     }
 
     #[test]
-    fn auto_local_fallback_preview_surfaces_disconnected_lab_admission() {
+    fn auto_local_fallback_preview_does_not_change_placement_for_default_handoff() {
         let _reset = ResetCapturedPreflight;
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "cook",
             "--preview",
-            "--detach-after-handoff",
             "--prompt",
             "implement the issue",
             "--verify",
@@ -3115,16 +3109,10 @@ mod preview_tests {
             "agent-task".to_string(),
             "cook".to_string(),
             "--preview".to_string(),
-            "--detach-after-handoff".to_string(),
         ]);
 
         assert_eq!(policy["selected"], "local");
-        assert_eq!(policy["admission"]["state"], "blocked");
-        assert_eq!(policy["admission"]["remaining_blocker"], "not_connected");
-        assert!(policy["admission"]["next_action"]
-            .as_str()
-            .expect("local replay")
-            .contains("--placement local"));
+        assert_eq!(policy["admission"]["state"], "admissible");
     }
 
     #[test]
@@ -3139,8 +3127,8 @@ mod preview_tests {
                     "cook".to_string(),
                     "--preview".to_string(),
                 ];
-                if detached {
-                    argv.push("--detach-after-handoff".to_string());
+                if !detached {
+                    argv.push("--wait".to_string());
                 }
                 let cli = Cli::try_parse_from(argv.clone()).expect("parse placement preview");
                 crate::cli_runtime::capture_preflight_result_for_test(
@@ -3161,8 +3149,7 @@ mod preview_tests {
                 let policy = preview_placement_policy_with_admission(&argv);
                 let state = policy.pointer("/admission/state").and_then(Value::as_str);
                 match (placement, detached) {
-                    ("auto", true) => assert_eq!(state, Some("blocked")),
-                    ("auto", false) | ("lab-or-local", _) => {
+                    ("auto", _) | ("lab-or-local", _) => {
                         assert_eq!(
                             state,
                             Some("admissible"),
@@ -3774,7 +3761,22 @@ where
                 &run_id,
             )?
         } else {
-            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
+            if claim.is_none()
+                && record
+                    .metadata
+                    .get("latest_promotion")
+                    .is_some_and(Value::is_object)
+            {
+                // A direct operator continuation must remain admissible even
+                // when status reconciliation has not materialized the queue
+                // entry yet. Finalization receipts are handled above and stay
+                // observation-only.
+                recipe_store.enqueue_terminal_continuation(&recipe.cook_id, &run_id)?;
+                recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
+            } else {
+                claim
+            }
         };
         let Some(claim) = claim else {
             return Ok((

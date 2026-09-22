@@ -7236,12 +7236,12 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
     assert!(request.instructions.contains("A successful response"));
-    // #14733: the dispatched prompt no longer asks the agent to run or report
-    // its own verification; Homeboy runs the declared gates and derives
-    // `review_form.verification` from that evidence alone.
+    // The review form does not replace controller-owned gate evidence, while
+    // still allowing the agent to describe bounded diagnostic observations.
+    assert!(request.instructions.contains("Bounded checks are allowed"));
     assert!(request
         .instructions
-        .contains("Do not run or report verification commands"));
+        .contains("never as authoritative final gate results"));
     assert!(!request
         .instructions
         .contains("structured `verification` entries"));
@@ -7295,13 +7295,13 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
     assert!(instructions.contains("`cargo test --locked -p homeboy-agents`"));
     assert!(instructions.contains("1 private deterministic gate(s)"));
     assert!(!instructions.contains("private-gate --token secret"));
-    // #14733: the agent is told not to run or report its own verification —
-    // never nudged toward "a focused check" or asked to report its result.
-    assert!(instructions.contains("not for running or improvising your own verification"));
-    assert!(instructions.contains("Do not run or report a verification command yourself"));
+    assert!(instructions.contains("bounded checks to reproduce behavior"));
+    assert!(instructions.contains("test a hypothesis"));
+    assert!(instructions.contains("develop regression coverage"));
+    assert!(instructions.contains("Treat those results as observations"));
+    assert!(instructions.contains("not as authoritative final gate results"));
     assert!(instructions.contains("authoritative gate evidence separately after harvest"));
-    assert!(!instructions.contains("focused check"));
-    assert!(!instructions.contains("Report any focused command"));
+    assert!(instructions.contains("Do not claim a focused check is a final gate result"));
 
     project_controller_owned_gate_contract(&mut options);
     assert_eq!(
@@ -7313,15 +7313,25 @@ fn provider_prompt_distinguishes_controller_owned_gates_from_focused_checks() {
     );
 }
 
-/// #14733 end-to-end: the complete dispatched prompt — both the gate contract
-/// and the review-form dossier projections applied together, exactly as
-/// `materialize_initial_cook_attempt_with_stores` applies them before a
-/// provider is dispatched — asks the agent for the source change and the
-/// qualitative dossier fields only. It never asks the agent to run, choose, or
-/// report the result of any verification command, and the declared output
-/// schema has no `verification` slot for the agent to fill.
 #[test]
-fn dispatched_prompt_never_asks_the_agent_to_run_or_report_verification() {
+fn provider_prompt_without_declared_gates_preserves_existing_contract() {
+    let mut options = batch_cook_options(
+        "no-declared-gates-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    let original = options.identity.initial_plan.tasks[0].clone();
+
+    project_controller_owned_gate_contract(&mut options);
+
+    assert_eq!(options.identity.initial_plan.tasks[0], original);
+}
+
+/// End-to-end: the complete dispatched prompt — both the gate contract and the
+/// review-form dossier projections applied together — permits bounded checks
+/// without making them authoritative, and the declared output schema has no
+/// `verification` slot for the agent to fill.
+#[test]
+fn dispatched_prompt_allows_bounded_checks_without_authoritative_gate_claims() {
     let mut options = batch_cook_options(
         "dispatched-prompt-no-agent-verification",
         Arc::new(AcceptedDetachedAttemptDispatcher),
@@ -7334,20 +7344,9 @@ fn dispatched_prompt_never_asks_the_agent_to_run_or_report_verification() {
 
     let request = &options.identity.initial_plan.tasks[0];
     let instructions = &request.instructions;
-    for forbidden in [
-        "focused check",
-        "Report any focused command",
-        "optional structured `verification`",
-        "run a command",
-        "run your own test",
-    ] {
-        assert!(
-            !instructions.contains(forbidden),
-            "dispatched prompt must not ask the agent to run/report verification, found {forbidden:?} in {instructions}"
-        );
-    }
-    assert!(instructions.contains("Do not run or report a verification command yourself"));
-    assert!(instructions.contains("Do not run or report verification commands"));
+    assert!(instructions.contains("bounded checks to reproduce behavior"));
+    assert!(instructions.contains("describe those as observations"));
+    assert!(instructions.contains("never as authoritative final gate results"));
 
     let declaration = request
         .output_declarations
@@ -9935,6 +9934,51 @@ fn non_retryable_pre_execution_failure_does_not_advertise_a_cook_losing_retry() 
             .next_actions
             .iter()
             .all(|action| !action.command.contains("agent-task retry")));
+    });
+}
+
+#[test]
+fn wrapped_storage_failure_is_retryable_and_guidance_advertises_the_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-wrapped-storage-recovery";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+        options.retry_policy.max_attempts = 2;
+        options.identity.initial_plan.tasks[0].executor.backend = "homeboy-lab".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options).expect("materialize attempt");
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+            record.metadata["runner_generation"] = serde_json::json!("generation-a");
+        })
+        .expect("seed Lab identity");
+
+        let error = Error::internal_json(
+            "staging record schema is invalid",
+            Some("daemon request failed".to_string()),
+        );
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            "lab_staging_submission",
+            &error,
+        )
+        .expect("record wrapped storage failure");
+
+        assert!(
+            crate::agent_task_service::retry_admission(&options.identity.initial_run_id).is_ok()
+        );
+        let context = super::super::cook_failure_context(
+            &options.identity.cook_id,
+            Some(&options.identity.initial_run_id),
+            "pre_execution_failure",
+        )
+        .expect("Cook failure context");
+        assert!(context.next_actions.iter().any(|action| action.command
+            == format!(
+                "homeboy agent-task retry {} --run",
+                options.identity.initial_run_id
+            )));
     });
 }
 
@@ -16535,6 +16579,82 @@ fn promotion_with_existing_path(run_id: &str, path: &std::path::Path) -> AgentTa
     promotion.target.path = Some(path.clone());
     promotion.provenance["worktree_path"] = serde_json::json!(path);
     promotion
+}
+
+#[test]
+fn cook_remediation_classifies_gate_failure_without_provider_identity() {
+    let options = compile_options("timeout-gate-remediation");
+    let plan = options.identity.initial_plan;
+    let aggregate = review_form_aggregate(&plan);
+    let mut promotion = promotion("timeout-gate-remediation-run");
+    promotion.status = AgentTaskPromotionStatus::GateFailed;
+
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a failed deterministic gate is same-provider remediation even without timeout identity"
+    );
+    assert_eq!(
+        reserve_remediation_budget(
+            &crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 1, 0),
+            true,
+        )
+        .expect("remaining attempt is reserved")
+        .same_provider_retries,
+        1
+    );
+}
+
+#[test]
+fn cook_remediation_preserves_provider_identity_and_no_gate_requirements() {
+    let options = compile_options("provider-remediation-classification");
+    let plan = options.identity.initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].metadata = serde_json::json!({
+        "executor": { "backend": "fixture", "selector": null, "model": null }
+    });
+    let mut promotion = promotion("provider-remediation-classification-run");
+    promotion.deterministic_gates.clear();
+    promotion.gate_results.clear();
+
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        Some(true),
+        "a normal provider failure keeps identity-based same-provider remediation"
+    );
+
+    let mut rotated = plan.tasks[0].executor.clone();
+    rotated.backend = "rotated".to_string();
+    assert_eq!(
+        cook_remediation_same_provider(&promotion, &aggregate, &plan, None, &rotated),
+        Some(false),
+        "a normal provider failure can still classify provider rotation"
+    );
+
+    aggregate.outcomes[0].metadata = serde_json::json!({});
+    assert_eq!(
+        cook_remediation_same_provider(
+            &promotion,
+            &aggregate,
+            &plan,
+            None,
+            &plan.tasks[0].executor,
+        ),
+        None,
+        "without a gate result or terminal identity remediation stays unclassified"
+    );
 }
 
 #[test]

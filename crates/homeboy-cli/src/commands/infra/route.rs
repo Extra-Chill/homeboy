@@ -65,11 +65,8 @@ pub(crate) fn route_after_parse_with_provenance(
         || managed_runner_placement
         || runner_resident_execution(cli);
 
-    // A locally-placed Cook asking to detach is served by re-executing it in
-    // its own session, so the durable run id means what Cook's help says it
-    // means on every placement (#11476). This is evaluated before the
-    // runner-side bail-out because the request needs a verdict — detach here,
-    // or an explicit rejection there — in both contexts.
+    // Local Cook transfers durable ownership regardless of observation policy.
+    // Runner-owned children consume their launch context and execute once.
     if runner_side || cli.placement == homeboy::cli_surface::Placement::Local {
         if let Some(exit_code) =
             local_detach::intercept_local_cook_retry(cli, normalized_args, runner_side)?
@@ -88,12 +85,8 @@ pub(crate) fn route_after_parse_with_provenance(
         }
     }
 
-    // A controller-owned fanout wave asking to detach gets the same verdict,
-    // regardless of the placement selected for its provider attempts. The flag
-    // was advertised on `fanout cook-batch` and `fanout run-plan` but every gate
-    // that acted on it tested for Cook, so a wave accepted a flag promising the
-    // caller could disconnect and then blocked that caller for hours. This
-    // either serves the request or refuses it explicitly; it never ignores it.
+    // Fanout retains the same controller ownership for default handoff and
+    // explicit terminal observation, independent of provider placement.
     if let Some(exit_code) =
         local_detach_fanout::intercept_local_detached_fanout(cli, normalized_args, runner_side)?
     {
@@ -111,9 +104,11 @@ pub(crate) fn route_after_parse_with_provenance(
         && std::env::var_os("HOMEBOY_DETACHED_REVIEW_RUN_ID").is_none()
     {
         if let Commands::Review(review) = &cli.command {
-            if let Some(exit_code) =
-                crate::commands::review::detach_changed_only_summary(review, normalized_args)?
-            {
+            if let Some(exit_code) = crate::commands::review::detach_changed_only_summary(
+                review,
+                normalized_args,
+                !cli.detach_after_handoff,
+            )? {
                 return Ok(Some(exit_code));
             }
         }
@@ -421,9 +416,14 @@ pub(crate) fn route_after_parse_with_provenance(
     };
     let normalized_args =
         inject_agent_task_cook_attempt_plan(&normalized_args, cook_plan.as_ref())?;
+    let read_only_polling = cli
+        .command
+        .lab_route_contract()?
+        .is_some_and(|contract| contract.command.routing_policy.read_only_polling);
+    let detach_after_handoff = cli.detach_after_handoff && !read_only_polling;
     let needs_generic_detached_handoff = lab_command.is_some()
         && route_runner_id.is_some()
-        && cli.detach_after_handoff
+        && detach_after_handoff
         && run_handoff.is_none()
         && retry_handoff.is_none()
         && cook_plan.is_none();
@@ -551,12 +551,9 @@ pub(crate) fn route_after_parse_with_provenance(
             mutation_flag,
             timeout: lab_route_dispatch_timeout(&cli.command),
             placement_outcome_target,
-            detach_after_handoff: cli.detach_after_handoff,
+            detach_after_handoff,
             output_file_requested: output_file.is_some(),
-            read_only_polling: cli
-                .command
-                .lab_route_contract()?
-                .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
+            read_only_polling,
             local_output_file: output_file,
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
             durable_run_id,
@@ -730,7 +727,7 @@ pub(crate) fn route_composed_lab_command(
             mutation_flag: route.lab_offload_mutation_flag(),
             timeout: None,
             placement_outcome_target: None,
-            detach_after_handoff: options.detach_after_handoff,
+            detach_after_handoff: options.detach_after_handoff && !read_only_polling,
             output_file_requested: output_file.is_some(),
             read_only_polling,
             local_output_file: output_file,
@@ -995,22 +992,19 @@ fn cook_requires_unmaterialized_admission(
             command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
         })
     );
-    is_cook
-        && cook_requires_unmaterialized_admission_for_placement(
-            cli.placement,
-            cli.detach_after_handoff,
-            preflight,
-        )
+    is_cook && cook_requires_unmaterialized_admission_for_placement(cli.placement, preflight)
 }
 
 pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
     placement: homeboy::cli_surface::Placement,
-    detach_after_handoff: bool,
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
 ) -> bool {
-    (detach_after_handoff
-        && !placement.allows_local_fallback()
-        && !matches!(placement, homeboy::cli_surface::Placement::Local))
+    (!placement.allows_local_fallback()
+        && !matches!(placement, homeboy::cli_surface::Placement::Local)
+        // Wait policy cannot turn an admitted local route into a Lab request.
+        && (placement == homeboy::cli_surface::Placement::Lab
+            || preflight.selected_runner_id.is_some()
+            || matches!(preflight.input.runner, homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(_))))
         || (matches!(placement, homeboy::cli_surface::Placement::Auto)
             && preflight.selected_runner_id.is_none()
             && matches!(
@@ -1195,6 +1189,21 @@ fn admit_unmaterialized_cook(
                 })
             });
     let record = agent_task_lifecycle::exact_record(&cook_id).unwrap_or(record);
+    if !cli.detach_after_handoff {
+        let (output, exit_code) =
+            crate::commands::agent_task::status::wait_for_terminal_status(&cook_id)?;
+        let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize terminal Cook status".to_string()),
+            )
+        })?;
+        if let Some(path) = output_file {
+            write_output_file(path, &stdout)?;
+        }
+        println!("{stdout}");
+        return Ok(exit_code);
+    }
     let admission = record.metadata["unmaterialized_cook_admission"].clone();
     let output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
@@ -4194,7 +4203,7 @@ fn persist_retry_handoff_preacceptance_failure(
         .unwrap_or_else(|| "selected-lab-runner".to_string());
     let error = durable_lab_preacceptance_transport_error(&handoff.run_id, &selected_runner, error);
     let recovery = format!(
-        "Fix the Lab preflight failure, then retry with `homeboy agent-task retry {} --run --runner <runner-id> --detach-after-handoff`.",
+        "Fix the Lab preflight failure, then retry with `homeboy agent-task retry {} --run --runner <runner-id>`.",
         handoff.run_id
     );
     if let Err(record_error) = agent_task_lifecycle::record_pre_execution_failure(

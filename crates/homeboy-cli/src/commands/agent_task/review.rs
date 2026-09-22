@@ -800,6 +800,49 @@ impl PromotionProgressReporter {
     }
 }
 
+struct AdoptionProgressReporter {
+    stopped: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AdoptionProgressReporter {
+    fn new(source: &str, candidate_ref: &str, interval: std::time::Duration) -> Self {
+        promotion_progress_line(&format!(
+            "adoption: candidate `{candidate_ref}` accepted for `{source}`; status -> homeboy agent-task status {source}"
+        ));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = stopped.clone();
+        let started = Instant::now();
+        let source = source.to_string();
+        let worker = std::thread::spawn(move || {
+            while !worker_stopped.load(Ordering::SeqCst) {
+                let deadline = Instant::now() + interval;
+                while !worker_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if worker_stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                promotion_progress_line(&format!(
+                    "adoption heartbeat: source={source} phase=verification elapsed={}s; status -> homeboy agent-task status {source}",
+                    started.elapsed().as_secs(),
+                ));
+            }
+        });
+        Self {
+            stopped,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn promotion_progress_line(message: &str) {
     let message = homeboy::core::redaction::redact_string(message);
     if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
@@ -824,6 +867,11 @@ fn promotion_progress_line(message: &str) {
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
+    let reporter = AdoptionProgressReporter::new(
+        &args.run_or_cook_id,
+        &args.candidate_ref,
+        std::time::Duration::from_secs(5),
+    );
     let result =
         agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
             &args.run_or_cook_id,
@@ -836,7 +884,9 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
             Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        )?;
+        );
+    reporter.finish();
+    let result = result?;
     let exit_code = result.exit_code;
     let cook_id = result.value.cook_id.clone();
     let selected_attempt = result.value.attempts.first().ok_or_else(|| {
@@ -1871,7 +1921,7 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
 
     serde_json::json!({
         "schema": AGENT_TASK_PROVIDER_SCOPE_SCHEMA,
-        "location": location,
+        "location": if runner_id.is_some() { "runner" } else { location },
         "runner_id": runner_id,
         "label": label,
         "homeboy_identity": {
