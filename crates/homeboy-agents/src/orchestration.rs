@@ -54,7 +54,7 @@ use homeboy_core::control_plane::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -133,7 +133,37 @@ pub fn persist_fanout_resume_authority(
         "{}.json",
         homeboy_core::paths::sanitize_path_segment(batch_id)
     ));
-    homeboy_core::engine::local_files::write_json_file_owner_only(&path, catalog)?;
+    let mut public_env = BTreeMap::new();
+    for provider in &catalog.providers {
+        let secret_names = provider
+            .secret_env_requirements
+            .iter()
+            .flat_map(|requirement| requirement.env.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        for env_ref in &provider.invocation.env {
+            if secret_names.contains(&env_ref.name)
+                || env_ref.redacted.unwrap_or(false)
+                || !matches!(env_ref.source.as_deref(), Some("env"))
+            {
+                continue;
+            }
+            if let Some(value) = env_ref
+                .value
+                .clone()
+                .or_else(|| std::env::var(&env_ref.name).ok())
+            {
+                public_env.insert(env_ref.name.clone(), value);
+            }
+        }
+    }
+    homeboy_core::engine::local_files::write_json_file_owner_only(
+        &path,
+        &serde_json::json!({
+            "schema": "homeboy/fanout-execution-authority/v2",
+            "catalog": catalog,
+            "public_env": public_env,
+        }),
+    )?;
     Ok(path.display().to_string())
 }
 
@@ -155,7 +185,7 @@ mod fanout_batch_read_tests {
     };
     use homeboy_core::control_plane::ControlPlaneActionDelegate;
     use homeboy_core::test_support::with_isolated_home;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -223,8 +253,9 @@ mod fanout_batch_read_tests {
             let reference = super::persist_fanout_resume_authority("caller-a", &catalog)
                 .expect("persist private authority");
             let bytes = std::fs::read(&reference).expect("read private authority");
+            let authority: Value = serde_json::from_slice(&bytes).expect("authority round trip");
             let restored: crate::agent_task_provider::AgentTaskProviderCatalog =
-                serde_json::from_slice(&bytes).expect("catalog round trip");
+                serde_json::from_value(authority["catalog"].clone()).expect("catalog round trip");
             assert_eq!(restored, catalog);
             assert!(!reference.contains("secret"));
         });

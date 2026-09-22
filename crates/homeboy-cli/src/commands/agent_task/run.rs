@@ -9791,8 +9791,10 @@ pub(super) fn run_next_with_executor_and_fanout(
         .as_deref()
         .map(|fanout_id| {
             let service =
-                homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
-            let canonical = homeboy::agents::orchestration::run_from_current_environment(fanout_id)?;
+                homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment(
+                )?;
+            let canonical =
+                homeboy::agents::orchestration::run_from_current_environment(fanout_id)?;
             service.owned_child_run_ids(&canonical)
         })
         .transpose()?

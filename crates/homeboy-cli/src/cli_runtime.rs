@@ -657,11 +657,34 @@ fn fanout_resume_execution_context(
             None,
         ));
     }
-    let catalog: homeboy::agents::agent_task_provider::AgentTaskProviderCatalog =
+    let authority: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(reference.to_string()))
         })?)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let mut catalog: homeboy::agents::agent_task_provider::AgentTaskProviderCatalog =
+        serde_json::from_value(authority["catalog"].clone())
+            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let public_env = authority["public_env"].as_object().ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "fanout resume authority has no declared public environment projection",
+            None,
+            None,
+        )
+    })?;
+    for provider in &mut catalog.providers {
+        for env_ref in &mut provider.invocation.env {
+            if let Some(value) = public_env
+                .get(&env_ref.name)
+                .and_then(|value| value.as_str())
+            {
+                env_ref.value = Some(value.to_string());
+                env_ref.source = Some("value".to_string());
+                env_ref.redacted = Some(false);
+            }
+        }
+    }
     Ok((
         std::sync::Arc::new(
             homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(
