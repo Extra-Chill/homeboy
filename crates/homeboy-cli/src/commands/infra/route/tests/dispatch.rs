@@ -3692,10 +3692,6 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
         );
         assert!(intent
             .argv
-            .iter()
-            .any(|arg| arg == "--detach-after-handoff"));
-        assert!(intent
-            .argv
             .windows(2)
             .any(|pair| pair[0] == "--placement" && pair[1] == "auto"));
         assert!(intent.argv.iter().any(|arg| arg == "--prompt"));
@@ -3717,6 +3713,10 @@ fn replay_intent_reconstructs_cook_from_references_without_secret_values() {
         replay.extend(["--runner".to_string(), "lab".to_string()]);
         let replay =
             Cli::try_parse_from(replay).expect("intent reconstructs normal Cook CLI inputs");
+        assert!(
+            replay.detach_after_handoff,
+            "replay retains default handoff"
+        );
         assert_eq!(replay.runner.as_deref(), Some("lab"));
         assert!(
             replay.runner.is_some() && !replay.placement.is_explicit_local_override(),
