@@ -2,6 +2,7 @@
 //! lifecycle, spec defaults, and the CLI dispatch bridge.
 
 use serde_json::Value;
+use std::fs;
 use std::sync::Arc;
 
 use homeboy::agents::agent_task_controller_service::{
@@ -20,7 +21,7 @@ use homeboy::agents::agent_tasks::controller_service::{
     ControllerPlanRequest,
 };
 use homeboy::agents::agent_tasks::provider::{
-    is_fixture_backend, ExtensionProviderAgentTaskExecutor,
+    is_fixture_backend, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy::agents::agent_tasks::scheduler::SharedAgentTaskExecutor;
 use homeboy::core::config;
@@ -307,10 +308,12 @@ fn submit_loop_resume(
     revolution_limit: Option<u32>,
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
+    let mut parameters = defaults.to_resume_parameters();
+    materialize_private_resume_provider_config(&mut parameters)?;
     let acknowledgement = homeboy::agents::agent_task_loop_controller::resume_loop(
         &loop_id,
         revolution_limit,
-        defaults.to_resume_parameters(),
+        parameters,
     )?;
     let record = homeboy::agents::agent_task_loop_controller::load_controller(&loop_id)?;
     let result = acknowledgement.result.data;
@@ -328,6 +331,43 @@ fn submit_loop_resume(
         }),
         0,
     ))
+}
+
+/// A loop action is durable and may be exposed through the control-plane
+/// envelope. Keep caller-supplied provider configuration in the private data
+/// root and persist only its reference; credentials are resolved by the runner
+/// secret contract when the WorkJob executes.
+fn materialize_private_resume_provider_config(
+    parameters: &mut Value,
+) -> homeboy::core::Result<()> {
+    let Some(raw) = parameters
+        .get("provider_config")
+        .and_then(Value::as_str)
+        .filter(|raw| !raw.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let root = homeboy::core::paths::homeboy_data()?.join("agent-task-loop-provider-configs");
+    fs::create_dir_all(&root)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let path = root.join(format!("{}.json", uuid::Uuid::new_v4().simple()));
+    fs::write(&path, raw)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    }
+    let object = parameters
+        .as_object_mut()
+        .expect("resume parameters are an object");
+    object.remove("provider_config");
+    object.insert(
+        "provider_config_ref".to_string(),
+        Value::String(path.display().to_string()),
+    );
+    Ok(())
 }
 
 fn loop_stop(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
@@ -1114,6 +1154,9 @@ impl ControllerDispatchDefaults {
             "selector": self.selector,
             "model": self.model,
             "provider_config": self.provider_config,
+            // The daemon executes the admitted catalog; it must not resolve a
+            // different provider/account from its own environment after resume.
+            "provider_catalog": AgentTaskProviderCatalog::discover(),
         })
     }
 

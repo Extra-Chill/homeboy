@@ -157,9 +157,10 @@ pub fn resume_loop(
     Ok(acknowledgement)
 }
 
-/// Only route selection is durable loop intent. Provider configuration and
-/// credential material belong to the caller's admitted catalog/Runner handoff,
-/// never to a generic control-plane action payload.
+/// Only route selection and opaque configuration references are durable loop
+/// intent. Provider configuration and credential material belong to the
+/// caller's admitted catalog/Runner handoff, never to a generic control-plane
+/// action payload.
 fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
     let object = value.as_object().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -170,7 +171,15 @@ fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
         )
     })?;
     let mut admitted = serde_json::Map::new();
-    for key in ["backend", "selector", "model"] {
+    for key in [
+        "backend",
+        "selector",
+        "model",
+        "provider_config_ref",
+        "provider_catalog",
+        "env_materialization",
+        "secret_env_plan",
+    ] {
         if let Some(value) = object.get(key) {
             admitted.insert(key.to_string(), value.clone());
         }
@@ -236,7 +245,20 @@ pub fn cancel_owned_provider_runs(loop_id: &str, reason: &str) -> Result<()> {
 }
 
 fn admit_loop_work_job(loop_id: &str, generation: &str, dispatch_defaults: Value) -> Result<Value> {
-    let provider_catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
+    let provider_catalog = dispatch_defaults
+        .get("provider_catalog")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "dispatch_defaults.provider_catalog",
+                format!("invalid caller-admitted provider catalog: {error}"),
+                None,
+                None,
+            )
+        })?
+        .unwrap_or_else(crate::agent_task_provider::AgentTaskProviderCatalog::discover);
     let submission = crate::agent_task_service::loop_work_job_execution_submission(
         loop_id,
         generation,

@@ -317,7 +317,9 @@ impl LoopWorkHandler {
                     model: job.request.dispatch_defaults["model"]
                         .as_str()
                         .map(str::to_string),
-                    provider_config: None,
+                    provider_config: job.request.dispatch_defaults["provider_config_ref"]
+                        .as_str()
+                        .map(|reference| format!("@{reference}")),
                 },
             };
             let report = match crate::agent_task_controller_service::resume_with_options(
@@ -502,6 +504,9 @@ fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
         "model",
         "provider_config_ref",
         "provider_account",
+        "provider_catalog",
+        "env_materialization",
+        "secret_env_plan",
     ] {
         if let Some(value) = object.get(key) {
             admitted.insert(key.to_string(), value.clone());
@@ -575,6 +580,37 @@ mod tests {
         let encoded = submission.to_string();
         assert!(!encoded.contains("credential-value-must-not-cross-boundary"));
         assert!(submission["request"]["request"]["request"]["provider_catalog"].is_object());
+    }
+
+    #[test]
+    fn execution_dispatch_keeps_the_admitted_provider_config_reference() {
+        let submission = loop_work_job_execution_submission(
+            "loop-config-reference-dispatch",
+            "generation-1",
+            json!({
+                "backend": "fixture",
+                "provider_config_ref": "provider-configs/caller-a"
+            }),
+            AgentTaskProviderCatalog::default(),
+        )
+        .expect("build execution submission");
+        let defaults = ControllerDispatchOverrides {
+            backend: Some("fixture".to_string()),
+            provider_config: submission["request"]["request"]["request"]["dispatch_defaults"]
+                ["provider_config_ref"]
+                .as_str()
+                .map(|reference| format!("@{reference}")),
+            ..Default::default()
+        };
+        let command = crate::agent_task_controller_service::controller_request_dispatch_command(
+            &json!({"mode": "dispatch", "prompt": "fixture"}),
+            &defaults,
+        )
+        .expect("dispatch command");
+        assert_eq!(
+            command.core.provider_config.as_deref(),
+            Some("@provider-configs/caller-a")
+        );
     }
 
     #[test]
