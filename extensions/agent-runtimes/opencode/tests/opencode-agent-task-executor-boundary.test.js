@@ -18,8 +18,10 @@ const { agentTaskPolicyToolPermissions } = require('../../../agent-task-contract
 const {
 	OPENCODE_INVOCATION,
 	OPENCODE_READINESS_INVOCATION,
+	OPENCODE_OPENAI_STORE_SECRET_ENV,
 	OPENCODE_PROVIDER_DEFAULTS,
 	OPENCODE_PROVIDER_PREFLIGHT,
+	OPENAI_OAUTH_ACCOUNT,
 	OPENCODE_ROLE_ALIASES,
 	OPENCODE_RUNNER_READINESS,
 	OPENCODE_SECRET_ENV,
@@ -123,9 +125,23 @@ assert.equal(provider.readiness_invocation.env_allowlist.includes('AI_PROVIDER_O
 assert.equal(Object.hasOwn(provider.lifecycle, 'max_concurrency_default'), false);
 assert.equal(provider.lifecycle.cancellation, 'provider_signal');
 assert.deepEqual(secretEnvRequirementForProvider(provider, 'codex').env, OPENCODE_SECRET_ENV);
+assert.deepEqual(secretEnvRequirementForProvider(provider, 'openai').env, ['OPENAI_API_KEY']);
+assert.deepEqual(secretEnvRequirementForProvider(provider, OPENAI_OAUTH_ACCOUNT).env, OPENCODE_OPENAI_STORE_SECRET_ENV);
+assert.deepEqual(provider.provider_defaults.openai.secret_env, ['OPENAI_API_KEY']);
+assert.deepEqual(provider.provider_defaults.openai.secret_env_sources, {
+	OPENAI_API_KEY: { source: 'environment', env: 'OPENAI_API_KEY' },
+});
+assert.deepEqual(provider.provider_defaults[OPENAI_OAUTH_ACCOUNT].secret_env, OPENCODE_OPENAI_STORE_SECRET_ENV);
+assert.deepEqual(provider.provider_defaults[OPENAI_OAUTH_ACCOUNT].secret_env_sources, {
+	AI_PROVIDER_OPENCODE_OPENAI_ACCESS: { source: 'json-file', path: '~/.local/share/opencode/auth.json', field: 'openai.access' },
+	AI_PROVIDER_OPENCODE_OPENAI_REFRESH: { source: 'json-file', path: '~/.local/share/opencode/auth.json', field: 'openai.refresh' },
+	AI_PROVIDER_OPENCODE_OPENAI_EXPIRES: { source: 'json-file', path: '~/.local/share/opencode/auth.json', field: 'openai.expires' },
+});
 assert.deepEqual(provider.provider_defaults.codex.secret_env, OPENCODE_SECRET_ENV);
 assert.equal(Object.hasOwn(provider.provider_defaults.codex, 'model'), false);
 assert.deepEqual(provider.provider_defaults.codex.secret_env_sources, OPENCODE_PROVIDER_DEFAULTS.codex.secret_env_sources);
+assert.equal(provider.readiness_invocation.env_allowlist.includes('XDG_DATA_HOME'), true);
+assert.equal(provider.readiness_invocation.env_allowlist.includes('AI_PROVIDER_OPENCODE_OPENAI_ACCESS'), true);
 assert.deepEqual(resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-luna' }, { env: { OPENAI_API_KEY: 'openai-secret-must-not-leak' } }), {
 	supported: true,
 	provider: 'openai',
@@ -151,6 +167,90 @@ assert.equal(openAiExecutionEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, undefined
 const codexExecutionEnv = opencodeSpawnEnv({ executor: { config: { model: 'codex/gpt-5.6-luna' } } }, { env: routeEnv });
 assert.equal(codexExecutionEnv.OPENAI_API_KEY, undefined);
 assert.equal(codexExecutionEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, routeEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN);
+
+const storeOnlyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-store-handoff-'));
+try {
+	const storeDirectory = path.join(storeOnlyRoot, '.local', 'share', 'opencode');
+	fs.mkdirSync(storeDirectory, { recursive: true });
+	fs.writeFileSync(path.join(storeDirectory, 'auth.json'), JSON.stringify({
+		openai: {
+			type: 'oauth',
+			access: 'store-access-must-not-leak',
+			refresh: 'store-refresh-must-not-leak',
+			expires: 4102444800000,
+		},
+	}));
+	const storeAmbientEnv = { HOME: storeOnlyRoot, PATH: '/bin' };
+
+	// OAuth-store-only: the model route hands off the store without any API key.
+	const storeOnlyPlan = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-luna' }, { env: storeAmbientEnv });
+	assert.equal(storeOnlyPlan.supported, true);
+	assert.equal(storeOnlyPlan.provider, 'openai');
+	assert.equal(storeOnlyPlan.model, 'gpt-5.6-luna');
+	assert.equal(storeOnlyPlan.account_kind, 'openai_oauth');
+	assert.equal(storeOnlyPlan.auth_kind, 'oauth');
+	assert.equal(storeOnlyPlan.handoff_blocker, undefined);
+	assert.equal(storeOnlyPlan.source.kind, 'opencode_auth_store');
+	assert.equal(storeOnlyPlan.source.handoff_supported, true);
+	assert.deepEqual(storeOnlyPlan.secret_env, OPENCODE_OPENAI_STORE_SECRET_ENV);
+	assert.equal(JSON.stringify(storeOnlyPlan.secret_env).includes('OPENAI_API_KEY'), false);
+	assert.deepEqual(storeOnlyPlan.secret_env_sources['AI_PROVIDER_OPENCODE_OPENAI_ACCESS'], {
+		source: 'json-file',
+		path: '~/.local/share/opencode/auth.json',
+		field: 'openai.access',
+	});
+	assert.equal(JSON.stringify(storeOnlyPlan).includes('store-access-must-not-leak'), false);
+	assert.equal(JSON.stringify(storeOnlyPlan).includes('store-refresh-must-not-leak'), false);
+
+	// The store account is a credential selector for the OpenAI route.
+	const storeAccountPlan = resolveOpenCodeAuthPlan({
+		model: 'openai/gpt-5.6-luna',
+		provider: OPENAI_OAUTH_ACCOUNT,
+	}, { env: storeAmbientEnv });
+	assert.equal(storeAccountPlan.provider, 'openai');
+	assert.equal(storeAccountPlan.model, 'gpt-5.6-luna');
+	assert.equal(storeAccountPlan.auth_kind, 'oauth');
+	assert.deepEqual(storeAccountPlan.secret_env, OPENCODE_OPENAI_STORE_SECRET_ENV);
+	const storeOnlyExecutionEnv = opencodeSpawnEnv({
+		executor: { config: { model: 'openai/gpt-5.6-luna', provider: OPENAI_OAUTH_ACCOUNT } },
+	}, { env: { ...storeAmbientEnv, AI_PROVIDER_OPENCODE_OPENAI_ACCESS: 'store-access-must-not-leak' } });
+	assert.equal(storeOnlyExecutionEnv.OPENAI_API_KEY, undefined);
+	assert.equal(storeOnlyExecutionEnv.AI_PROVIDER_OPENCODE_OPENAI_ACCESS, 'store-access-must-not-leak');
+
+	// API-key-only: with no usable store entry the openai route keeps requiring
+	// exactly OPENAI_API_KEY, unchanged.
+	fs.writeFileSync(path.join(storeDirectory, 'auth.json'), '{}');
+	const apiKeyOnlyEnv = { HOME: storeOnlyRoot, PATH: '/bin', OPENAI_API_KEY: 'openai-secret-must-not-leak' };
+	const apiKeyOnlyPlan = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-luna' }, { env: apiKeyOnlyEnv });
+	assert.equal(apiKeyOnlyPlan.supported, true);
+	assert.equal(apiKeyOnlyPlan.account_kind, 'openai_api_key');
+	assert.equal(apiKeyOnlyPlan.auth_kind, 'api_key');
+	assert.deepEqual(apiKeyOnlyPlan.secret_env, ['OPENAI_API_KEY']);
+	assert.equal(JSON.stringify(apiKeyOnlyPlan.secret_env).includes('AI_PROVIDER_OPENCODE_OPENAI_ACCESS'), false);
+	assert.equal(JSON.stringify(apiKeyOnlyPlan).includes('openai-secret-must-not-leak'), false);
+	const apiKeyOnlyExecutionEnv = opencodeSpawnEnv({
+		executor: { config: { model: 'openai/gpt-5.6-luna' } },
+	}, { env: { ...apiKeyOnlyEnv, AI_PROVIDER_OPENCODE_OPENAI_ACCESS: 'store-access-must-not-leak' } });
+	assert.equal(apiKeyOnlyExecutionEnv.OPENAI_API_KEY, apiKeyOnlyEnv.OPENAI_API_KEY);
+	assert.equal(apiKeyOnlyExecutionEnv.AI_PROVIDER_OPENCODE_OPENAI_ACCESS, undefined);
+
+	// The codex route keeps its own declared names and sources.
+	const codexPlan = resolveOpenCodeAuthPlan({ model: 'codex/gpt-5.6-luna' }, {
+		env: { HOME: storeOnlyRoot, PATH: '/bin', AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN: 'codex-secret-must-not-leak' },
+	});
+	assert.equal(codexPlan.account_kind, 'codex_oauth');
+	assert.deepEqual(codexPlan.secret_env, OPENCODE_SECRET_ENV);
+	assert.deepEqual(codexPlan.secret_env_sources, OPENCODE_PROVIDER_DEFAULTS.codex.secret_env_sources);
+	assert.equal(JSON.stringify(codexPlan.secret_env_sources).includes('~/.local/share/opencode/auth.json'), false);
+} finally {
+	fs.rmSync(storeOnlyRoot, { recursive: true, force: true });
+}
+
+const oauthAccountEnv = opencodeSpawnEnv({
+	executor: { config: { model: 'openai/gpt-5.6-luna', provider: OPENAI_OAUTH_ACCOUNT } },
+}, { env: routeEnv });
+assert.equal(oauthAccountEnv.OPENAI_API_KEY, routeEnv.OPENAI_API_KEY);
+assert.equal(oauthAccountEnv.AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN, undefined);
 assert.deepEqual(provider.provider_preflight, OPENCODE_PROVIDER_PREFLIGHT);
 assert.deepEqual(provider.runner_readiness, OPENCODE_RUNNER_READINESS);
 assert.deepEqual(provider.workspace_materialization, OPENCODE_WORKSPACE_MATERIALIZATION);

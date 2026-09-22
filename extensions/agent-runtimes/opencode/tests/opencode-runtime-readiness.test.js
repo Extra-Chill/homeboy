@@ -74,12 +74,47 @@ try {
 	assert.notEqual(changedConfigCredential.cache_key, ready.cache_key);
 	const authStore = path.join(root, '.local', 'share', 'opencode');
 	fs.mkdirSync(authStore, { recursive: true });
-	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":{"type":"oauth"}}');
+	fs.writeFileSync(path.join(authStore, 'auth.json'), JSON.stringify({
+		openai: {
+			type: 'oauth',
+			access: 'opencode-access-must-not-leak',
+			refresh: 'opencode-refresh-must-not-leak',
+			expires: 4102444800000,
+		},
+	}));
 	const openAiOAuth = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra' }, { env: env() });
 	assert.equal(openAiOAuth.auth_kind, 'oauth');
+	assert.equal(openAiOAuth.account_kind, 'openai_oauth');
 	assert.equal(openAiOAuth.source.kind, 'opencode_auth_store');
-	assert.equal(openAiOAuth.source.handoff_supported, false);
-	assert.deepEqual(openAiOAuth.secret_env, []);
+	assert.equal(openAiOAuth.source.location, '~/.local/share/opencode/auth.json');
+	assert.equal(openAiOAuth.source.handoff_supported, true);
+	assert.equal(openAiOAuth.handoff_blocker, undefined);
+	assert.deepEqual(openAiOAuth.secret_env, [
+		'AI_PROVIDER_OPENCODE_OPENAI_ACCESS',
+		'AI_PROVIDER_OPENCODE_OPENAI_REFRESH',
+		'AI_PROVIDER_OPENCODE_OPENAI_EXPIRES',
+	]);
+	assert.deepEqual(openAiOAuth.secret_env_sources['AI_PROVIDER_OPENCODE_OPENAI_ACCESS'], {
+		source: 'json-file',
+		path: '~/.local/share/opencode/auth.json',
+		field: 'openai.access',
+	});
+	assert.deepEqual(openAiOAuth.secret_env_sources['AI_PROVIDER_OPENCODE_OPENAI_REFRESH'], {
+		source: 'json-file',
+		path: '~/.local/share/opencode/auth.json',
+		field: 'openai.refresh',
+	});
+	assert.deepEqual(openAiOAuth.secret_env_sources['AI_PROVIDER_OPENCODE_OPENAI_EXPIRES'], {
+		source: 'json-file',
+		path: '~/.local/share/opencode/auth.json',
+		field: 'openai.expires',
+	});
+	assert.equal(JSON.stringify(openAiOAuth).includes('opencode-access-must-not-leak'), false);
+	assert.equal(JSON.stringify(openAiOAuth).includes('opencode-refresh-must-not-leak'), false);
+	const oauthAccountRoute = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra', provider: 'openai-oauth' }, { env: env() });
+	assert.equal(oauthAccountRoute.provider, 'openai');
+	assert.equal(oauthAccountRoute.auth_kind, 'oauth');
+	assert.equal(oauthAccountRoute.account_kind, 'openai_oauth');
 	const firstAuthStore = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses()) });
 	fs.writeFileSync(path.join(authStore, 'auth.json'), '{"openai":{"type":"api"}}');
 	const openAiApi = resolveOpenCodeAuthPlan({ model: 'openai/gpt-5.6-terra' }, { env: env({ OPENAI_API_KEY: 'api-key-must-not-leak' }) });

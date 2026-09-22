@@ -24,7 +24,16 @@ const {
 } = require('./opencode-progress-events');
 const { applyOpenCodeRuntimeTools } = require('../../lib/runtime-tool-adapter');
 const { finalizeOwnershipMarker, writeOwnershipMarker } = require('./opencode-external-storage-retention');
-const { CODEX_SECRET_ENV, CODEX_SECRET_ENV_SOURCES, effectiveOpenCodeModel, resolveOpenCodeAuthPlan } = require('./opencode-auth-plan');
+const {
+	CODEX_SECRET_ENV,
+	CODEX_SECRET_ENV_SOURCES,
+	OPENAI_OAUTH_ACCOUNT,
+	OPENCODE_STORE_SECRET_ENV_NAME_PATTERN,
+	effectiveOpenCodeModel,
+	openCodeStoreSecretEnv,
+	openCodeStoreSecretEnvSources,
+	resolveOpenCodeAuthPlan,
+} = require('./opencode-auth-plan');
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -36,6 +45,8 @@ const OPENCODE_PROVIDER_ID = 'opencode.agent-task-executor';
 const OPENCODE_PROVIDER_LABEL = 'OpenCode agent task executor';
 const OPENCODE_SECRET_ENV = [...CODEX_SECRET_ENV];
 const OPENCODE_ALL_SECRET_ENV = [...OPENCODE_SECRET_ENV, 'OPENAI_API_KEY'];
+const OPENCODE_OPENAI_STORE_SECRET_ENV = openCodeStoreSecretEnv('openai');
+const OPENCODE_OPENAI_STORE_SECRET_ENV_SOURCES = openCodeStoreSecretEnvSources('openai');
 const OPENCODE_FATAL_LOG_PATTERNS = [
 	{
 		pattern: /\bAI_APICallError\b[\s\S]{0,1000}\b(?:weekly(?:\/monthly)?|monthly)\s+limit\s+exhausted\b/i,
@@ -119,6 +130,7 @@ const OPENCODE_READINESS_INVOCATION = {
 		'HOME', 'PATH', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
 		'HOMEBOY_OPENCODE_COMMAND_ARGS', 'OPENCODE_CONFIG_CONTENT',
 		...OPENCODE_ALL_SECRET_ENV,
+		...OPENCODE_OPENAI_STORE_SECRET_ENV,
 	],
 	display: 'node {{runtime_path}}/scripts/agent/homeboy-opencode-provider-readiness.cjs',
 };
@@ -214,6 +226,13 @@ const OPENCODE_PROVIDER_DEFAULTS = {
 			},
 		},
 	},
+	// Selecting this account opts a run into the OpenCode auth-store handoff:
+	// core uploads the whole declared file to the same ~-relative runner path
+	// before every run, and OpenCode reads it natively from there.
+	[OPENAI_OAUTH_ACCOUNT]: {
+		secret_env: [...OPENCODE_OPENAI_STORE_SECRET_ENV],
+		secret_env_sources: { ...OPENCODE_OPENAI_STORE_SECRET_ENV_SOURCES },
+	},
 	codex: {
 		secret_env: [...OPENCODE_SECRET_ENV],
 		secret_env_sources: CODEX_SECRET_ENV_SOURCES,
@@ -230,10 +249,10 @@ const OPENCODE_PROVIDER_PREFLIGHT = {
 		label: 'OpenAI',
 		diagnostic_class: 'opencode.preflight.openai_api_key',
 		required_secret_env: [],
-		optional_secret_env: ['OPENAI_API_KEY'],
+		optional_secret_env: ['OPENAI_API_KEY', ...OPENCODE_OPENAI_STORE_SECRET_ENV],
 		refresh_hook: 'openai-api-key-refresh',
 		validation_hooks: [],
-		guidance: 'Provide the OpenAI API key through the declared OPENAI_API_KEY secret environment mapping, or authenticate the provider through the provider-owned OpenCode auth store.',
+		guidance: 'Provide the OpenAI API key through the declared OPENAI_API_KEY secret environment mapping, or select the openai-oauth provider account to hand off the OpenCode auth store, which the controller syncs to the runner before each run.',
 	},
 	codex: {
 		label: 'Codex',
@@ -276,6 +295,7 @@ function providerContract(options = {}) {
 		...contractFields,
 		secret_env_requirements: [
 			providerSecretEnvRequirement('openai', ['OPENAI_API_KEY']),
+			providerSecretEnvRequirement(OPENAI_OAUTH_ACCOUNT, OPENCODE_OPENAI_STORE_SECRET_ENV),
 			providerSecretEnvRequirement('codex', OPENCODE_SECRET_ENV),
 		],
 		capabilities: OPENCODE_CAPABILITIES,
@@ -1400,10 +1420,17 @@ function uniqueDeclaredArtifactRequirements(request = {}) {
 
 function redactKnownSecrets(content, env = process.env) {
 	let redacted = content;
-	for (const name of OPENCODE_ALL_SECRET_ENV) {
-		const value = env?.[name] || process.env[name];
+	const redact = (value) => {
 		if (value) {
-			redacted = redacted.split(value).join('[redacted]');
+			redacted = redacted.split(String(value)).join('[redacted]');
+		}
+	};
+	for (const name of OPENCODE_ALL_SECRET_ENV) {
+		redact(env?.[name] || process.env[name]);
+	}
+	for (const [name, value] of Object.entries(env || {})) {
+		if (OPENCODE_STORE_SECRET_ENV_NAME_PATTERN.test(name)) {
+			redact(value);
 		}
 	}
 	return redacted;
@@ -2000,6 +2027,8 @@ module.exports = {
 	OPENCODE_PROVIDER_ID,
 	OPENCODE_PROVIDER_LABEL,
 	OPENCODE_SECRET_ENV,
+	OPENCODE_OPENAI_STORE_SECRET_ENV,
+	OPENAI_OAUTH_ACCOUNT,
 	OPENCODE_COMMAND,
 	OPENCODE_INVOCATION,
 	OPENCODE_READINESS_INVOCATION,

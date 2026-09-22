@@ -24,6 +24,7 @@ const OPENCODE_UNSUPPORTED_MODEL_PATTERN = /\b(?:model|deployment|engine)\b[\s\S
 const OPENCODE_UNSUPPORTED_PROBE_PATTERN = /\b(?:unknown|unrecognized|invalid) (?:argument|option|command)|\bnot supported\b/i;
 const OPENCODE_READINESS_AGENT = 'homeboy-readiness';
 const OPENCODE_READINESS_PROMPT = 'Reply with exactly READY. Do not access files, run commands, or make changes.';
+const OPENCODE_SECRET_ENV_NAME_PATTERN = /(?:token|secret|api[_-]?key|credential|auth|access|refresh|expires)/i;
 
 function openCodeRuntimeReadiness(request = {}, options = {}) {
 	const config = objectValue(request.effective_config);
@@ -254,7 +255,7 @@ function verdict(classification, identity, remediation, retryable, reason) {
 
 function credentialIdentity(env, authPlan = {}) {
 	const values = Object.entries(env)
-		.filter(([name]) => /(?:token|secret|api[_-]?key|credential|auth)/i.test(name))
+		.filter(([name]) => OPENCODE_SECRET_ENV_NAME_PATTERN.test(name))
 		.sort(([left], [right]) => left.localeCompare(right));
 	return crypto.createHash('sha256').update(JSON.stringify({
 		environment: values,
@@ -292,7 +293,7 @@ function authStoreIdentity(env) {
 function redact(value, env) {
 	let redacted = value;
 	for (const [name, secret] of Object.entries(env)) {
-		if (secret && /(?:token|secret|api[_-]?key|credential|auth)/i.test(name)) redacted = redacted.split(String(secret)).join('[redacted]');
+		if (secret && OPENCODE_SECRET_ENV_NAME_PATTERN.test(name)) redacted = redacted.split(String(secret)).join('[redacted]');
 	}
 	return redacted;
 }

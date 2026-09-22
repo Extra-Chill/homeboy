@@ -15,9 +15,41 @@ embedding CLI details in their own manifests.
 - `provider_defaults.openai` declares the optional scoped OpenAI API-key route;
   `provider_defaults.codex` declares Codex OAuth secret env names and source
   metadata.
+- `provider_defaults.openai-oauth` declares the OpenCode auth-store handoff
+  route as an additive opt-in: selecting `provider: "openai-oauth"` requires
+  the `AI_PROVIDER_OPENCODE_OPENAI_ACCESS`, `AI_PROVIDER_OPENCODE_OPENAI_REFRESH`,
+  and `AI_PROVIDER_OPENCODE_OPENAI_EXPIRES` secret env names, sourced through
+  `json-file` fields from `~/.local/share/opencode/auth.json`. Homeboy core
+  uploads that whole declared file to the same `~`-relative path on the runner
+  before every agent-task run, and OpenCode reads it through its native store
+  path. The env values are secondary; the file sync is the handoff. Exactly
+  the selected route's credential names are required, so existing `openai`
+  API-key configurations are unaffected and an OAuth-only setup never needs an
+  API key.
 - `provider_preflight` declares the auth checks callers should run before
-  launching OpenCode. Native OpenCode OAuth accounts remain provider-owned and
-  require runner-local login when they cannot be delivered through secrets.
+  launching OpenCode.
+
+### Auth-store handoff behavior
+
+The controller's OpenCode auth store is the source of truth. The runner-side
+copy is overwritten from the controller before every run and is never copied
+back, so an OpenCode refresh on the runner cannot corrupt or diverge from the
+controller's credentials: a rotated refresh token on the runner is discarded
+with the next provisioning pass.
+
+Sync targets the `~`-relative declared path (`~/.local/share/opencode/auth.json`).
+In job environments where `XDG_DATA_HOME` is set, OpenCode resolves its store
+under `$XDG_DATA_HOME` instead; the executor's process env allowlist forwards
+only `HOME`, so agent-task execution resolves the synced store at the
+provisioned `~` path. Readiness keeps `XDG_DATA_HOME` in its allowlist for
+installations that genuinely relocate their store.
+
+Core admission requires every required secret env name of the selected route
+to resolve, and its `when` conditions can only inspect the serialized request —
+not machine state such as whether the store currently holds an OAuth entry. A
+single `openai` route therefore cannot conditionally switch between the API
+key and the store; the `openai-oauth` account is the supported selector for
+the store handoff until core grows a conditional source mechanism.
 
 The JavaScript package exports the same provider contract through
 `providerContract()`, plus `executeOpenCodeAgentTask()` for the CLI wrapper and

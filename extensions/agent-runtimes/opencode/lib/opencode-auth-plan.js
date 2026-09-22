@@ -3,6 +3,21 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const OPENCODE_AUTH_STORE_PATH = '~/.local/share/opencode/auth.json';
+const OPENCODE_STORE_SECRET_ENV_PREFIX = 'AI_PROVIDER_OPENCODE_';
+const OPENCODE_STORE_SECRET_ENV_FIELDS = [
+	['ACCESS', 'access'],
+	['REFRESH', 'refresh'],
+	['EXPIRES', 'expires'],
+];
+const OPENCODE_STORE_SECRET_ENV_NAME_PATTERN = /^AI_PROVIDER_OPENCODE_[A-Z0-9]+_(?:ACCESS|REFRESH|EXPIRES)$/;
+// The OpenCode auth-store OAuth route is its own additive provider_defaults
+// account: selecting it opts a run into the store handoff. The existing
+// `openai` account keeps requiring exactly OPENAI_API_KEY, so current API-key
+// configurations are unaffected, and exactly the selected route's names are
+// required at dispatch.
+const OPENAI_OAUTH_ACCOUNT = 'openai-oauth';
+
 const CODEX_SECRET_ENV = [
 	'AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN',
 	'AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN',
@@ -32,11 +47,12 @@ function resolveOpenCodeAuthPlan(config = {}, options = {}) {
 		: authKind === 'oauth' && route.provider === 'codex' && codexEnvPresent
 			? { kind: 'scoped_secret_env', location: 'AI_PROVIDER_OPENAI_CODEX_*', handoff_supported: true }
 		: metadata.source;
+	const storeHandoff = authKind === 'oauth' && route.provider !== 'codex' && source.kind === 'opencode_auth_store';
 	const secretEnv = route.provider === 'codex' && authKind === 'oauth'
 		? [...CODEX_SECRET_ENV]
 		: authKind === 'api_key' && route.provider === 'openai'
 			? ['OPENAI_API_KEY']
-			: [];
+		: storeHandoff ? openCodeStoreSecretEnv(route.provider) : [];
 	return {
 		supported: true,
 		provider: route.provider,
@@ -44,7 +60,7 @@ function resolveOpenCodeAuthPlan(config = {}, options = {}) {
 		account_kind: accountKind(route.provider, authKind),
 		auth_kind: authKind,
 		secret_env: secretEnv,
-		secret_env_sources: secretSources(route.provider, authKind),
+		secret_env_sources: storeHandoff ? openCodeStoreSecretEnvSources(route.provider) : secretSources(route.provider, authKind),
 		source,
 		metadata_only: true,
 		...(source.handoff_supported === false ? { handoff_blocker: source.reason } : {}),
@@ -56,8 +72,11 @@ function selectedOpenCodeRoute(config = {}) {
 	const separator = configuredModel.indexOf('/');
 	const modelProvider = separator > 0 ? configuredModel.slice(0, separator) : '';
 	const configuredProvider = stringValue(config.provider);
+	// The store account is a credential selector for the OpenAI route, not a
+	// separate OpenCode provider.
+	const normalizedProvider = configuredProvider === OPENAI_OAUTH_ACCOUNT ? 'openai' : configuredProvider;
 	return {
-		provider: configuredProvider || modelProvider,
+		provider: normalizedProvider || modelProvider,
 		model: separator > 0 ? configuredModel.slice(separator + 1) : configuredModel,
 	};
 }
@@ -97,7 +116,10 @@ function authMetadata(provider, env, options = {}) {
 		const entry = objectValue(JSON.parse(fs.readFileSync(authPath, 'utf8'))[provider]);
 		const authKind = normalizeAuthKind(entry?.type);
 		if (authKind) {
-			return { auth_kind: authKind, source: { kind: 'opencode_auth_store', location: '~/.local/share/opencode/auth.json', handoff_supported: false, reason: 'Provider-owned OpenCode auth metadata cannot be copied into a runner; authenticate the selected account on the runner.' } };
+			return {
+				auth_kind: authKind,
+				source: { kind: 'opencode_auth_store', location: OPENCODE_AUTH_STORE_PATH, handoff_supported: true },
+			};
 		}
 	} catch {
 		// A missing store is a truthful unknown account, not a reason to reject native providers.
@@ -117,6 +139,23 @@ function normalizeAuthKind(...values) {
 		if (normalized === 'wellknown' || normalized === 'well_known') return 'well_known';
 	}
 	return '';
+}
+
+function openCodeStoreSecretEnvKey(provider) {
+	return String(provider || '').toUpperCase().replace(/[^A-Z0-9]/g, '_');
+}
+
+function openCodeStoreSecretEnv(provider) {
+	const key = openCodeStoreSecretEnvKey(provider);
+	return OPENCODE_STORE_SECRET_ENV_FIELDS.map(([suffix]) => `${OPENCODE_STORE_SECRET_ENV_PREFIX}${key}_${suffix}`);
+}
+
+function openCodeStoreSecretEnvSources(provider) {
+	const key = openCodeStoreSecretEnvKey(provider);
+	return Object.fromEntries(OPENCODE_STORE_SECRET_ENV_FIELDS.map(([suffix, field]) => [
+		`${OPENCODE_STORE_SECRET_ENV_PREFIX}${key}_${suffix}`,
+		{ source: 'json-file', path: OPENCODE_AUTH_STORE_PATH, field: `${provider}.${field}` },
+	]));
 }
 
 function secretSources(provider, authKind) {
@@ -152,7 +191,12 @@ function clone(value) {
 module.exports = {
 	CODEX_SECRET_ENV,
 	CODEX_SECRET_ENV_SOURCES,
+	OPENAI_OAUTH_ACCOUNT,
+	OPENCODE_AUTH_STORE_PATH,
+	OPENCODE_STORE_SECRET_ENV_NAME_PATTERN,
 	authMetadata,
+	openCodeStoreSecretEnv,
+	openCodeStoreSecretEnvSources,
 	resolveOpenCodeAuthPlan,
 	selectedOpenCodeRoute,
 	effectiveOpenCodeModel,
