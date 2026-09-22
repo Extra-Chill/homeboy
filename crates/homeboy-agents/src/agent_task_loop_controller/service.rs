@@ -23,13 +23,19 @@ use std::path::{Path, PathBuf};
 
 /// A bounded read of the shared detached work owner. Errors are deliberately
 /// represented as unavailable data: a failed daemon inspection is not success.
-pub fn loop_work_status(metadata: &Value) -> Value {
+pub fn loop_work_status(
+    metadata: &Value,
+    context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+) -> Value {
     let Some(job_id) = metadata.pointer("/work_job/job_id").and_then(Value::as_str) else {
         return Value::Null;
     };
-    match homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
-        .and_then(|client| client.status(job_id))
-    {
+    let status = match context.daemon.as_ref() {
+        Some(service) => service.status(job_id),
+        None => homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
+            .and_then(|client| client.status(job_id)),
+    };
+    match status {
         Ok(job) => serde_json::json!({
             "job_id": job_id,
             "status": job.status,
@@ -278,13 +284,21 @@ fn admit_loop_work_job(
         return admitter(loop_id, generation, submission);
     }
     let submitted = match context.daemon.as_ref() {
-        Some(service) => service.submit_with_disposition(submission)?,
+        Some(service) => service.admit(serde_json::from_value(submission).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse controller job submission".to_string()),
+            )
+        })?)?,
         None => homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?
             .submit_with_disposition(submission)?,
     };
     let job = submitted.job;
     let job_id = job.id.to_string();
     persist_loop_work_identity(loop_id, &job_id)?;
+    if let Some(service) = context.daemon.as_ref() {
+        service.start(&job_id)?;
+    }
     Ok(serde_json::json!({
         "schema": "homeboy/agent-task-loop-work-submission/v1",
         "loop_id": loop_id,
@@ -492,7 +506,7 @@ impl LoopActionDelegate {
                 homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
             })?;
         }
-        let existing_work = loop_work_status(&record.metadata);
+        let existing_work = loop_work_status(&record.metadata, context);
         if existing_work
             .get("status")
             .is_some_and(|status| status == "unavailable")

@@ -189,56 +189,35 @@ impl DaemonControllerJobService {
         Self { job_store }
     }
 
+    pub fn admit(&self, request: ControllerJobRequest) -> Result<ControllerJobSubmission> {
+        let admission = admit_controller_job(request, &self.job_store)?;
+        record_controller_job_generation(&admission.job)?;
+        Ok(ControllerJobSubmission {
+            job: admission.job,
+            disposition: admission.disposition,
+        })
+    }
+
     pub fn submit_with_disposition(
         &self,
         request: serde_json::Value,
     ) -> Result<ControllerJobSubmission> {
-        let body = enqueue_controller_job(Some(request), &self.job_store)?;
-        let job_id = body
-            .pointer("/job/id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| Error::internal_unexpected("controller admission has no job id"))?;
-        let job: crate::api_jobs::Job = serde_json::from_value(
-            body.pointer("/job")
-                .cloned()
-                .ok_or_else(|| Error::internal_unexpected("controller admission has no job"))?,
-        )
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let lease_id = job
-            .daemon_lease_id
-            .as_deref()
-            .filter(|lease_id| !lease_id.is_empty())
-            .ok_or_else(|| {
-                Error::internal_unexpected("controller admission has no daemon lease owner")
-            })?;
-        let serving = heartbeat_lease()?;
-        generation_store::record_job_for_admission(job_id, lease_id, &serving)?;
-        let disposition = match body
-            .pointer("/submission/disposition")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("created") => ControllerJobSubmissionDisposition::Created,
-            Some("reused") => ControllerJobSubmissionDisposition::Reused,
-            Some(_) => {
-                return Err(Error::internal_unexpected(
-                    "unknown controller admission disposition",
-                ))
-            }
-            None => ControllerJobSubmissionDisposition::Unknown,
-        };
-        let job = self.start(job_id)?;
-        Ok(ControllerJobSubmission { job, disposition })
+        let request: ControllerJobRequest = serde_json::from_value(request).map_err(|error| {
+            Error::validation_invalid_argument(
+                "body",
+                format!("invalid controller job request body: {error}"),
+                None,
+                None,
+            )
+        })?;
+        let submission = self.admit(request)?;
+        let job = self.start(submission.job.id.to_string().as_str())?;
+        Ok(ControllerJobSubmission { job, ..submission })
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        let path = format!("/controller/jobs/{job_id}/start");
-        let body = start_controller_job(&path, &self.job_store)?;
-        serde_json::from_value(
-            body.get("job")
-                .cloned()
-                .ok_or_else(|| Error::internal_unexpected("controller start has no job"))?,
-        )
-        .map_err(|error| Error::internal_json(error.to_string(), None))
+        let job_id = parse_controller_job_id(job_id)?;
+        start_controller_job(job_id, &self.job_store)
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
@@ -248,15 +227,7 @@ impl DaemonControllerJobService {
     }
 
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
-        let path = format!("/controller/jobs/{job_id}/cancel");
-        let body =
-            cancel_controller_job(&path, Some(json!({ "reason": reason })), &self.job_store)?;
-        serde_json::from_value(
-            body.get("job")
-                .cloned()
-                .ok_or_else(|| Error::internal_unexpected("controller cancellation has no job"))?,
-        )
-        .map_err(|error| Error::internal_json(error.to_string(), None))
+        cancel_controller_job(parse_controller_job_id(job_id)?, reason, &self.job_store)
     }
 }
 
@@ -1251,14 +1222,14 @@ pub struct DirectDaemonExecSubmitRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-struct ControllerJobRequest {
+pub struct ControllerJobRequest {
     #[serde(rename = "type")]
-    job_type: String,
-    version: u32,
-    idempotency_key: String,
+    pub job_type: String,
+    pub version: u32,
+    pub idempotency_key: String,
     #[serde(default)]
-    active_idempotency_key: Option<String>,
-    request: serde_json::Value,
+    pub active_idempotency_key: Option<String>,
+    pub request: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1730,7 +1701,9 @@ where
         connection_threads.push(std::thread::spawn(move || loop {
             let stream = worker_rx.lock().expect("connection queue lock").recv();
             let Ok(stream) = stream else { return Ok(()) };
-            handle_connection(stream, &worker_store, worker_runner.clone(), loopback_bind)?;
+            // A malformed or disconnected client owns only this connection;
+            // it must never retire the bounded worker that serves later peers.
+            let _ = handle_connection(stream, &worker_store, worker_runner.clone(), loopback_bind);
         }));
     }
     let mut accepted = 0;
@@ -2345,37 +2318,34 @@ where
         },
         ("POST", "/controller/jobs") => {
             match with_daemon_job_admission(|| {
-                let body = enqueue_controller_job(body, job_store)?;
-                let job_id = body
-                    .pointer("/job/id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        Error::internal_unexpected("controller admission has no job id")
-                    })?;
-                let lease_id = body
-                    .pointer("/job/daemon_lease_id")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|lease_id| !lease_id.is_empty())
-                    .ok_or_else(|| {
-                        Error::internal_unexpected("controller admission has no daemon lease owner")
-                    })?;
-                let serving = heartbeat_lease()?;
-                generation_store::record_job_for_admission(job_id, lease_id, &serving)?;
-                Ok(body)
+                let request = parse_controller_job_request(body)?;
+                let admission = admit_controller_job(request, job_store)?;
+                record_controller_job_generation(&admission.job)?;
+                Ok(controller_job_admission_response(&admission))
             }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
                 Err(err) => error_response(400, err),
             }
         }
         ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
-            match start_controller_job(path, job_store) {
-                Ok(body) => daemon_endpoint_response("controller.jobs.start", body),
+            match parse_controller_job_path_id(path, "/start")
+                .and_then(|job_id| start_controller_job(job_id, job_store))
+            {
+                Ok(job) => daemon_endpoint_response(
+                    "controller.jobs.start",
+                    controller_job_operation_response(job),
+                ),
                 Err(err) => error_response(400, err),
             }
         }
         ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
-            match cancel_controller_job(path, body, job_store) {
-                Ok(body) => daemon_endpoint_response("controller.jobs.cancel", body),
+            match parse_controller_job_path_id(path, "/cancel")
+                .and_then(|job_id| parse_controller_job_cancel_reason(body).and_then(|reason| cancel_controller_job(job_id, &reason, job_store)))
+            {
+                Ok(job) => daemon_endpoint_response(
+                    "controller.jobs.cancel",
+                    controller_job_cancel_response(job),
+                ),
                 Err(err) => error_response(400, err),
             }
         }
@@ -4461,19 +4431,27 @@ fn enqueue_exec_request(
     }))
 }
 
-fn enqueue_controller_job(
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-) -> Result<serde_json::Value> {
-    let request: ControllerJobRequest = serde_json::from_value(body.unwrap_or_else(|| json!({})))
-        .map_err(|error| {
+fn parse_controller_job_request(body: Option<serde_json::Value>) -> Result<ControllerJobRequest> {
+    serde_json::from_value(body.unwrap_or_else(|| json!({}))).map_err(|error| {
         Error::validation_invalid_argument(
             "body",
             format!("invalid controller job request body: {error}"),
             None,
             None,
         )
-    })?;
+    })
+}
+
+struct ControllerJobAdmission {
+    job: crate::api_jobs::Job,
+    disposition: ControllerJobSubmissionDisposition,
+    compacted: bool,
+}
+
+fn admit_controller_job(
+    request: ControllerJobRequest,
+    job_store: &JobStore,
+) -> Result<ControllerJobAdmission> {
     if request.job_type.trim().is_empty() || request.idempotency_key.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "type",
@@ -4528,25 +4506,49 @@ fn enqueue_controller_job(
             (*job, compacted, "reused")
         }
     };
-    let job_id = job.id;
-    Ok(json!({
-        "command": "api.controller.jobs.create",
-        "job": job,
-        "submission": { "disposition": disposition },
-        "terminal_tombstone": if compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
-        "poll": if compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
-        "start": if compacted { serde_json::Value::Null } else { json!({ "method": "POST", "path": format!("/controller/jobs/{job_id}/start") }) },
-    }))
+    Ok(ControllerJobAdmission {
+        job,
+        disposition: match disposition {
+            "created" => ControllerJobSubmissionDisposition::Created,
+            "reused" => ControllerJobSubmissionDisposition::Reused,
+            _ => ControllerJobSubmissionDisposition::Unknown,
+        },
+        compacted,
+    })
 }
 
-fn start_controller_job(path: &str, job_store: &JobStore) -> Result<serde_json::Value> {
-    let job_id = controller_job_id_from_path(path, "/start")?;
+fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serde_json::Value {
+    let job_id = admission.job.id;
+    json!({
+        "command": "api.controller.jobs.create",
+        "job": admission.job,
+        "submission": { "disposition": match admission.disposition {
+            ControllerJobSubmissionDisposition::Created => "created",
+            ControllerJobSubmissionDisposition::Reused => "reused",
+            ControllerJobSubmissionDisposition::Unknown => "unknown",
+        } },
+        "terminal_tombstone": if admission.compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
+        "poll": if admission.compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
+        "start": if admission.compacted { serde_json::Value::Null } else { json!({ "method": "POST", "path": format!("/controller/jobs/{job_id}/start") }) },
+    })
+}
+
+fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
+    let lease_id = job
+        .daemon_lease_id
+        .as_deref()
+        .filter(|lease_id| !lease_id.is_empty())
+        .ok_or_else(|| {
+            Error::internal_unexpected("controller admission has no daemon lease owner")
+        })?;
+    let serving = heartbeat_lease()?;
+    generation_store::record_job_for_admission(&job.id.to_string(), lease_id, &serving)
+}
+
+fn start_controller_job(job_id: Uuid, job_store: &JobStore) -> Result<crate::api_jobs::Job> {
     let controller = job_store.controller_job_state(job_id)?;
     if job_store.get(job_id)?.status != JobStatus::Queued {
-        return Ok(json!({
-            "job": job_store.get(job_id)?,
-            "poll": { "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") },
-        }));
+        return job_store.get(job_id);
     }
     // Resolve the persisted type/version, not caller-controlled input, before
     // claiming the job so unsupported work remains queued and recoverable.
@@ -4556,10 +4558,26 @@ fn start_controller_job(path: &str, job_store: &JobStore) -> Result<serde_json::
     {
         dispatch_claimed_controller_job(job_store.clone(), job_id, state, false);
     }
-    Ok(json!({
-        "job": job_store.get(job_id)?,
-        "poll": { "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") },
-    }))
+    job_store.get(job_id)
+}
+
+fn controller_job_operation_response(job: crate::api_jobs::Job) -> serde_json::Value {
+    json!({
+        "job": job,
+        "poll": { "job": format!("/jobs/{}", job.id), "events": format!("/jobs/{}/events", job.id) },
+    })
+}
+
+fn controller_job_cancel_response(job: crate::api_jobs::Job) -> serde_json::Value {
+    let phase = if job.status == JobStatus::Cancelled {
+        "cancelled"
+    } else {
+        "requested"
+    };
+    json!({
+        "job": job,
+        "cancellation": { "accepted": true, "phase": phase },
+    })
 }
 
 /// Run work which has already been claimed by either explicit start or startup
@@ -4861,22 +4879,14 @@ fn recover_controller_jobs(job_store: &JobStore) {
 }
 
 fn cancel_controller_job(
-    path: &str,
-    body: Option<serde_json::Value>,
+    job_id: Uuid,
+    reason: &str,
     job_store: &JobStore,
-) -> Result<serde_json::Value> {
-    let job_id = controller_job_id_from_path(path, "/cancel")?;
+) -> Result<crate::api_jobs::Job> {
     let controller = job_store.controller_job_state(job_id)?;
     // Resolve the persisted type/version, not a caller-controlled envelope.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
-    let reason = body
-        .as_ref()
-        .and_then(|value| value.get("reason"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|reason| !reason.trim().is_empty())
-        .unwrap_or("controller job cancellation requested")
-        .to_string();
-    let job = job_store.request_controller_cancellation(job_id, reason)?;
+    let job = job_store.request_controller_cancellation(job_id, reason.to_string())?;
     if let Some(runtime) = controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
@@ -4884,20 +4894,10 @@ fn cancel_controller_job(
     {
         let _ = runtime.cancel.send(());
     }
-    Ok(json!({
-        "job": job,
-        "cancellation": {
-            "accepted": true,
-            "phase": if job.status == JobStatus::Cancelled { "cancelled" } else { "requested" },
-        },
-    }))
+    Ok(job)
 }
 
-fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
-    let job_id = path
-        .trim_start_matches("/controller/jobs/")
-        .trim_end_matches(suffix)
-        .trim_end_matches('/');
+fn parse_controller_job_id(job_id: &str) -> Result<Uuid> {
     Uuid::parse_str(job_id).map_err(|error| {
         Error::validation_invalid_argument(
             "job_id",
@@ -4906,6 +4906,24 @@ fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
             None,
         )
     })
+}
+
+fn parse_controller_job_path_id(path: &str, suffix: &str) -> Result<Uuid> {
+    let job_id = path
+        .trim_start_matches("/controller/jobs/")
+        .trim_end_matches(suffix)
+        .trim_end_matches('/');
+    parse_controller_job_id(job_id)
+}
+
+fn parse_controller_job_cancel_reason(body: Option<serde_json::Value>) -> Result<String> {
+    Ok(body
+        .as_ref()
+        .and_then(|value| value.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or("controller job cancellation requested")
+        .to_string())
 }
 
 pub(crate) fn hex_digest(value: &serde_json::Value) -> Result<String> {
@@ -6657,6 +6675,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_connections_do_not_retire_bounded_workers() {
+        with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let server = std::thread::spawn(move || serve_listener_for_requests(listener, 18));
+            let malformed = vec![b'x'; 17 * 1024];
+            for _ in 0..17 {
+                let mut stream = TcpStream::connect(address).expect("malformed client");
+                std::io::Write::write_all(&mut stream, &malformed).expect("write malformed client");
+            }
+
+            let response = reqwest::blocking::get(format!("http://{address}/health"))
+                .expect("healthy request after malformed clients");
+            assert!(response.status().is_success());
+            server
+                .join()
+                .expect("join bounded daemon")
+                .expect("bounded daemon remains healthy");
+        });
+    }
+
+    #[test]
     fn admission_reservation_rejects_a_changed_daemon_lease_before_job_creation() {
         let error = validate_admission_lease("lease-a", "lease-b")
             .expect_err("a reservation must not cross daemon leases");
@@ -6722,8 +6762,9 @@ mod tests {
                 .first()
                 .is_some_and(|command| command == "__homeboy_test_hold__")
             {
-                // Keep the reservation observable while concurrent requests arrive.
-                std::thread::sleep(Duration::from_millis(250));
+                // Keep the reservation observable while concurrent requests arrive
+                // without making the serialized capacity fixture timing-sensitive.
+                std::thread::sleep(Duration::from_millis(100));
             }
             #[cfg(unix)]
             {

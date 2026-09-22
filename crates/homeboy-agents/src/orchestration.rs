@@ -7330,7 +7330,10 @@ mod loop_control_plane_tests {
             "work_job": { "job_id": "missing-loop-work" }
         });
         let before = metadata.clone();
-        let work = loop_work_status(&metadata);
+        let work = loop_work_status(
+            &metadata,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        );
 
         assert_eq!(metadata, before);
         assert_eq!(work["job_id"], "missing-loop-work");

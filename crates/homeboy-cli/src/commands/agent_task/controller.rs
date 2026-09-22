@@ -127,6 +127,7 @@ fn controller_status_report_value(
             "work".to_string(),
             homeboy::agents::agent_task_loop_controller::loop_work_status(
                 &object["controller"]["metadata"],
+                &homeboy::core::control_plane::ControlPlaneInvocationContext::default(),
             ),
         );
     }
@@ -315,6 +316,7 @@ fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     report["work"] = homeboy::agents::agent_task_loop_controller::loop_work_status(
         &report["controller"]["metadata"],
+        &homeboy::core::control_plane::ControlPlaneInvocationContext::default(),
     );
     Ok((
         command_json_value(serde_json::json!({
