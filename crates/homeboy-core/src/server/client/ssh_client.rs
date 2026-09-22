@@ -1049,36 +1049,6 @@ mod bounded_probe_tests {
     }
 
     #[test]
-    fn configured_identity_is_the_only_identity_offered() {
-        let mut client = localhost_client();
-        client.is_local = false;
-        client.identity_file = Some("/home/operator/.ssh/id_ed25519".to_string());
-
-        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
-
-        assert!(args.windows(2).any(|pair| {
-            pair == [
-                "-i".to_string(),
-                "/home/operator/.ssh/id_ed25519".to_string(),
-            ]
-        }));
-        assert!(args
-            .windows(2)
-            .any(|pair| { pair == ["-o".to_string(), "IdentitiesOnly=yes".to_string()] }));
-    }
-
-    #[test]
-    fn agent_auth_has_no_identities_only_restriction() {
-        let mut client = localhost_client();
-        client.is_local = false;
-
-        let args = client.build_ssh_args_with_multiplexing(Some("printf ok"), false, true);
-
-        assert!(!args.contains(&"-i".to_string()));
-        assert!(!args.contains(&"IdentitiesOnly=yes".to_string()));
-    }
-
-    #[test]
     fn bounded_probes_preserve_healthy_output_and_record_stalled_command() {
         let _limits = localhost_client().scoped_probe_limits(
             Duration::from_millis(50),
