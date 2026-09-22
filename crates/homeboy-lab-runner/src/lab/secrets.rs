@@ -389,6 +389,12 @@ fn hydrate_agent_task_secret_env_with_providers(
         })
         .transpose()?
         .unwrap_or_default();
+    let runner_source = |name: &str| {
+        fallback_sources
+            .get(name)
+            .map(|source| source.source.as_str())
+            .unwrap_or("runner")
+    };
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
         "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),
@@ -396,7 +402,7 @@ fn hydrate_agent_task_secret_env_with_providers(
             .into_iter()
             .map(|name| serde_json::json!({
                 "name": name,
-                "source": "runner",
+                "source": runner_source(&name),
             }))
             .collect::<Vec<_>>(),
     }))
@@ -540,7 +546,10 @@ pub(crate) fn preflight_lab_secret_env_handoff(
         let configured = match entry.owner.as_str() {
             "controller" => env.contains_key(&entry.name),
             "runner" => runner
-                .map(|runner| runner.secret_env.contains_key(&entry.name))
+                .map(|runner| {
+                    runner.secret_env.contains_key(&entry.name)
+                        || runner_declared_source_is_delivery(&entry.source)
+                })
                 .unwrap_or(true),
             _ => true,
         };
@@ -587,6 +596,13 @@ pub(crate) fn preflight_lab_secret_env_handoff(
         );
     }
     Err(error)
+}
+
+fn runner_declared_source_is_delivery(source: &str) -> bool {
+    matches!(
+        source,
+        "env" | "json-file" | "json-file-jwt-expiration" | "keychain" | "keychain-bundle"
+    )
 }
 
 fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {
