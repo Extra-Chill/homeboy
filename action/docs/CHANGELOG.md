@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.2] - 2026-09-22
+
+### Fixed
+- trust nominated release branch
+
 ## [2.20.1] - 2026-09-22
 
 ### Fixed
