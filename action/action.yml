@@ -237,6 +237,10 @@ inputs:
     description: 'Pass --from-artifacts <path> to homeboy release. Use to publish artifacts produced by an earlier build job through the native Homeboy release pipeline.'
     required: false
     default: ''
+  npm-token:
+    description: 'Optional npm registry token for release.publish. It is available only to a non-dry-run release step; leave empty to use npm trusted publishing/OIDC.'
+    required: false
+    default: ''
 
 outputs:
   component:
@@ -775,6 +779,11 @@ runs:
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
         HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
         HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}
+        # An empty token preserves npm trusted publishing through GitHub OIDC.
+        # The token expression is empty for dry runs, so credentials never
+        # enter a preview release process.
+        NPM_TOKEN: ${{ inputs.release-dry-run != 'true' && inputs.npm-token || '' }}
+        NPM_CONFIG_PROVENANCE: ${{ inputs.release-dry-run != 'true' && inputs.npm-token == '' && 'true' || '' }}
       run: bash ${{ github.action_path }}/scripts/release/run-release-with-liveness.sh
 
     # ── Phase 7b: Operations (fleet/deploy) ──

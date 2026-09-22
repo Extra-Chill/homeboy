@@ -162,8 +162,8 @@ jobs:
     secrets: inherit
 ```
 
-The caller must grant `contents: write`, `issues: write`, and
-`pull-requests: write` — GitHub fails a called workflow that requests a scope
+The caller must grant `contents: write`, `issues: write`, `pull-requests: write`,
+and `id-token: write` — GitHub fails a called workflow that requests a scope
 the caller did not grant before it schedules any jobs. The canonical minimal
 caller is maintained in
 [`fixtures/reusable-release-minimal-consumer.yml`](fixtures/reusable-release-minimal-consumer.yml).
@@ -197,6 +197,44 @@ jobs:
 Do not use `ssh-keyscan` output for `publisher-known-hosts`. The dispatch
 payload's `sha` and `released-source-sha` identify the source repository commit;
 any publisher or mirror commit is a separate downstream identity.
+
+#### npm publishing credentials
+
+The release action prefers npm trusted publishing through GitHub OIDC. Grant
+`id-token: write`, configure the npm package's trusted publisher, and omit
+`NPM_TOKEN`. For registries or packages that do not support trusted publishing,
+map an existing token to the reusable workflow's declared `NPM_TOKEN` secret.
+The token is passed as `npm-token` only to the real release step and is never
+passed to a dry run or emitted as an output.
+
+```yaml
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      dry-run: ${{ inputs.dry-run || false }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+The `NPM_TOKEN` mapping may be omitted entirely for OIDC-only consumers. A
+dry-run never receives the token and never publishes.
 
 #### Release credentials
 
@@ -439,6 +477,7 @@ Test reconciliation consumes Homeboy's `homeboy/test-outcomes/v1` and `homeboy/t
 | `release-branch` | No | `main` | Branch that releases are allowed from |
 | `release-head` | No | `false` | Finish a release at the current HEAD/tag with `--head` |
 | `release-from-artifacts` | No | | Publish existing artifacts with `--from-artifacts <path>` |
+| `npm-token` | No | | Optional npm registry token fallback for `release.publish`; omitted for npm trusted publishing/OIDC |
 | `release-skip-publish` | No | `false` | Skip package and publish steps |
 | `release-skip-github-release` | No | `false` | Skip GitHub Release creation |
 | `release-verify-github-release` | No | `true` | Verify that a successful release has a GitHub Release |

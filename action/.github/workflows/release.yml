@@ -130,6 +130,9 @@ on:
       PUBLISH_SSH_KEY:
         description: 'Optional SSH private key for native Git publishing. Pair with publisher-known-hosts; the key is agent-loaded only during the action.'
         required: false
+      NPM_TOKEN:
+        description: 'Optional npm registry token fallback for release.publish. Omit when npm trusted publishing/OIDC is configured.'
+        required: false
     outputs:
       released:
         description: 'Whether a release was created (true/false).'
@@ -174,6 +177,7 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  id-token: write
 
 jobs:
   # ── Step 1: Check for releasable commits ──
@@ -384,6 +388,7 @@ jobs:
           ssh-key: ${{ secrets.PUBLISH_SSH_KEY }}
           ssh-known-hosts: ${{ inputs.publisher-known-hosts }}
           ssh-require-known-hosts: 'true'
+          npm-token: ${{ inputs.dry-run != true && secrets.NPM_TOKEN || '' }}
           app-token: ${{ steps.app-token.outputs.token || '' }}
 
   # ── Post-release dispatch ──
