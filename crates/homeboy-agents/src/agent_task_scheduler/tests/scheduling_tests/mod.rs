@@ -10,4 +10,5 @@ mod plan_projection;
 mod provider_rotation;
 mod resource_budget;
 mod retry_failure;
+mod stall_rotation;
 mod timeout;
