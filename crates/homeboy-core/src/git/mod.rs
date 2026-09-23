@@ -113,7 +113,8 @@ pub use primitives_query::{
 };
 pub use push_transport::{
     classify_git_push_failure, non_interactive_push_env, redact_push_url,
-    resolve_effective_push_url, GitPushRemote, GitPushTransportClass, GitPushTransportKind,
+    remote_branch_head_over_push_transport, resolve_effective_push_url, GitPushRemote,
+    GitPushTransportClass, GitPushTransportKind, GitRemoteHeadRead,
     DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 pub use remote_tracking_authority::with_remote_tracking_authority_until;

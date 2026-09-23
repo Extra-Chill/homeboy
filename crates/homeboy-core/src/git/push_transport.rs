@@ -178,6 +178,17 @@ pub struct GitPushRemote {
 /// push URL after `pushInsteadOf` rewrites, with the same process-scoped host
 /// transport environment (`github_hosts.<host>.env`) the push receives.
 pub fn resolve_effective_push_url(git_root: &Path, remote: &str) -> Result<GitPushRemote> {
+    resolve_effective_push_url_with_target(git_root, remote).map(|(resolved, _)| resolved)
+}
+
+/// Like [`resolve_effective_push_url`], but also returns the raw push URL,
+/// which may carry embedded credentials, for remote-contacting commands that
+/// must target the push destination itself (#10734). Diagnostics must use the
+/// redacted [`GitPushRemote::effective_push_url`], never the raw URL.
+pub(crate) fn resolve_effective_push_url_with_target(
+    git_root: &Path,
+    remote: &str,
+) -> Result<(GitPushRemote, String)> {
     let mut command = Command::new("git");
     command
         .args(["remote", "get-url", "--push", remote])
@@ -206,12 +217,15 @@ pub fn resolve_effective_push_url(git_root: &Path, remote: &str) -> Result<GitPu
         .unwrap_or_default()
         .trim()
         .to_string();
-    Ok(GitPushRemote {
-        remote: remote.to_string(),
-        transport_kind: push_transport_kind(&url),
-        host: remote_host(&url),
-        effective_push_url: redact_push_url(&url),
-    })
+    Ok((
+        GitPushRemote {
+            remote: remote.to_string(),
+            transport_kind: push_transport_kind(&url),
+            host: remote_host(&url),
+            effective_push_url: redact_push_url(&url),
+        },
+        url,
+    ))
 }
 
 /// Transport family of a Git URL (ssh, https, local, or unknown).
@@ -324,6 +338,88 @@ pub(crate) fn non_interactive_push_env_for(
             .map(|_| String::new())
         });
     non_interactive_push_env(caller_git_ssh_command.as_deref())
+}
+
+/// A remote branch head read through the effective push transport.
+#[derive(Debug, Clone)]
+pub struct GitRemoteHeadRead {
+    /// The effective push destination the read targeted; credentials
+    /// redacted.
+    pub resolved: GitPushRemote,
+    /// The branch head on the destination. `None` on a successful read means
+    /// the branch does not exist there yet (the normal first-publication
+    /// state).
+    pub head: Option<String>,
+    /// Whether the read reached the destination.
+    pub success: bool,
+    /// Trimmed, redacted stderr for transport classification and diagnostics
+    /// when the read failed; empty on success.
+    pub stderr: String,
+}
+
+/// Read a remote branch head over the effective push transport (#10734).
+///
+/// Callers checking a branch they are about to publish to must observe the
+/// same destination the push would contact — the push URL after
+/// `pushInsteadOf` rewrites, not the fetch URL — so this runs `ls-remote`
+/// against the resolved effective push URL through the core Git execution
+/// path that applies configured host transport, with the same
+/// non-interactive, bounded environment as a publication push:
+/// `GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes` only when the caller has no
+/// `GIT_SSH_COMMAND`, and the shared non-interactive push deadline. Callers
+/// classify a failed read's `stderr` with [`classify_git_push_failure`].
+pub fn remote_branch_head_over_push_transport(
+    git_root: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<GitRemoteHeadRead> {
+    let (resolved, push_url) = resolve_effective_push_url_with_target(git_root, remote)?;
+    let pattern = format!("refs/heads/{branch}");
+    let args = ["ls-remote", "--heads", push_url.as_str(), pattern.as_str()];
+    let env = non_interactive_push_env_for(git_root, &args);
+    let output = super::primitives::run_git_output_with_env_timeout(
+        git_root,
+        &args,
+        &format!("git ls-remote {remote} {pattern} over the effective push URL"),
+        &env,
+        DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
+    );
+    let policy = crate::redaction::RedactionPolicy::default();
+    // The raw push URL may carry embedded credentials and Git echoes it in
+    // failure output; swap it for the redacted form before any diagnostics.
+    let display_push_url = resolved.effective_push_url.clone();
+    let redact = move |stderr: &str| {
+        policy
+            .redact_embedded_urls(&stderr.replace(push_url.as_str(), &display_push_url))
+            .trim()
+            .to_string()
+    };
+    match output {
+        Ok(output) if output.status.success() => Ok(GitRemoteHeadRead {
+            resolved,
+            head: String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                .map(str::to_string),
+            success: true,
+            stderr: String::new(),
+        }),
+        Ok(output) => Ok(GitRemoteHeadRead {
+            resolved,
+            head: None,
+            success: false,
+            stderr: redact(&String::from_utf8_lossy(&output.stderr)),
+        }),
+        // Spawn failures and deadline expiry keep the push's single
+        // stderr-driven failure path: report them as a failed read whose
+        // synthesized message classifies like any other transport failure.
+        Err(error) => Ok(GitRemoteHeadRead {
+            resolved,
+            head: None,
+            success: false,
+            stderr: redact(&error.message),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +755,127 @@ mod tests {
             let temp = tempfile::tempdir().expect("repo");
             git(temp.path(), &["init", "-q"]);
             assert!(resolve_effective_push_url(temp.path(), "origin").is_err());
+        });
+    }
+
+    #[test]
+    fn remote_head_read_targets_the_push_instead_of_destination() {
+        with_isolated_home(|_| {
+            let origin = tempfile::tempdir().expect("origin");
+            git(origin.path(), &["init", "--bare", "-b", "main"]);
+            let temp = tempfile::tempdir().expect("repo");
+            let repo = temp.path();
+            git(repo, &["init", "-q", "-b", "main"]);
+            git(repo, &["config", "user.email", "test@example.com"]);
+            git(repo, &["config", "user.name", "Test"]);
+            std::fs::write(repo.join("base.txt"), "base").expect("base file");
+            git(repo, &["add", "."]);
+            git(repo, &["commit", "-m", "base"]);
+            git(repo, &["push", origin.path().to_str().unwrap(), "main"]);
+            // The fetch URL stays an SSH remote; pushes are routed to the
+            // reachable local destination by the env-configured rewrite.
+            git(
+                repo,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@git.example.test:acme/repo.git",
+                ],
+            );
+            let head = crate::git::run_git(repo, &["rev-parse", "main"], "git rev-parse main")
+                .expect("main head")
+                .trim()
+                .to_string();
+            git(
+                repo,
+                &[
+                    "config",
+                    &format!("url.{}.pushInsteadOf", origin.path().display()),
+                    "git@git.example.test:acme/repo.git",
+                ],
+            );
+
+            let read = remote_branch_head_over_push_transport(repo, "origin", "main")
+                .expect("read through the effective push URL");
+
+            assert!(read.success);
+            assert_eq!(read.head.as_deref(), Some(head.as_str()));
+            assert_eq!(read.stderr, "");
+            assert_eq!(read.resolved.transport_kind, GitPushTransportKind::Local);
+            assert_eq!(
+                read.resolved.effective_push_url,
+                origin.path().to_str().unwrap()
+            );
+        });
+    }
+
+    #[test]
+    fn remote_head_read_failure_keeps_classified_transport_evidence() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("repo");
+            let repo = temp.path();
+            git(repo, &["init", "-q"]);
+            git(
+                repo,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@git.example.test:acme/repo.git",
+                ],
+            );
+            // A configured core.sshCommand keeps BatchMode from being layered
+            // on and fails the transport deterministically, without touching
+            // process-global environment other tests may be reading.
+            let fixture = tempfile::tempdir().expect("fixture");
+            let ssh = fixture.path().join("down-ssh");
+            std::fs::write(
+                &ssh,
+                "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n",
+            )
+            .expect("ssh fixture");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod ssh fixture");
+            }
+            git(repo, &["config", "core.sshCommand", ssh.to_str().unwrap()]);
+
+            let read = remote_branch_head_over_push_transport(repo, "origin", "feature")
+                .expect("read outcome");
+
+            assert!(!read.success);
+            assert_eq!(read.head, None);
+            assert_eq!(
+                classify_git_push_failure(&read.stderr),
+                GitPushTransportClass::TransportUnreachable
+            );
+            assert!(read.stderr.contains("Connection refused"));
+            assert_eq!(read.resolved.host.as_deref(), Some("git.example.test"));
+            assert_eq!(read.resolved.transport_kind, GitPushTransportKind::Ssh);
+        });
+    }
+
+    #[test]
+    fn remote_head_read_reports_absent_branch_as_a_successful_none() {
+        with_isolated_home(|_| {
+            let origin = tempfile::tempdir().expect("origin");
+            git(origin.path(), &["init", "--bare", "-b", "main"]);
+            let temp = tempfile::tempdir().expect("repo");
+            let repo = temp.path();
+            git(repo, &["init", "-q"]);
+            git(
+                repo,
+                &["remote", "add", "origin", origin.path().to_str().unwrap()],
+            );
+
+            let read = remote_branch_head_over_push_transport(repo, "origin", "feature")
+                .expect("read outcome");
+
+            assert!(read.success);
+            assert_eq!(read.head, None);
         });
     }
 }
