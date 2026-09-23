@@ -145,6 +145,20 @@ emits it: older cores reject unknown inventory fields by design. Older extension
 providers remain compatible with the newer core because the field is optional;
 their inventory is reported as complete unless they supply bounded-scan evidence.
 
+`ExternalStorageInventory` also accepts an additive, optional `native_contracts`
+list (#14955). A provider declares a versioned capability id (e.g. a
+runtime-specific compaction command) and reports whether this inventory pass
+could execute it. `satisfied` means the provider's own probe of that capability
+ran; it may still find nothing reclaimable, which is a genuine clean result.
+`unsatisfied` means the probe itself failed and carries the invocation the
+provider attempted and its observed failure. Core aggregates unsatisfied
+entries into `ExternalStorageCleanupOutput.unsatisfied_native_contracts` and the
+`cleanup` command's `unsatisfied_native_contract_count`, distinct from
+`candidate_count`, so a broken provider probe is never flattened into a clean
+zero-candidate result. This is provider-neutral core aggregation: declaring and
+probing a native contract is entirely the extension's responsibility, and older
+providers that omit the field are unaffected.
+
 ## Read-Only Invocation
 
 `extension::invoke::invoke_api` synchronously executes one explicitly selected

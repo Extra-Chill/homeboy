@@ -1571,6 +1571,14 @@ pub struct CleanupInventoryOutput {
     /// Records that require a separate reconciliation authority before cleanup
     /// can act on them. They are excluded from `candidate_count`.
     pub reconciliation_blocker_count: usize,
+    /// Provider-declared native contracts that could not be executed this
+    /// pass, summed across categories.
+    ///
+    /// Distinct from `candidate_count == 0`: a satisfied probe that found
+    /// nothing reclaimable is a genuine clean result, while a nonzero count
+    /// here means a declared capability is broken and reclaimable bytes
+    /// behind it stay invisible until it is fixed (#14955).
+    pub unsatisfied_native_contract_count: usize,
     /// Categories that executed and removed at least one resource. Counted in
     /// categories, never in resources.
     pub applied_category_count: usize,
@@ -1612,6 +1620,9 @@ pub struct CleanupInventoryCategory {
     pub applied_count: usize,
     pub skipped_count: usize,
     pub reconciliation_blocker_count: usize,
+    /// Provider-declared native contracts this category could not execute.
+    /// See [`CleanupInventoryOutput::unsatisfied_native_contract_count`].
+    pub unsatisfied_native_contract_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub output: Value,
@@ -2555,6 +2566,10 @@ fn cleanup_inventory_with_deadline(
         .iter()
         .map(|category| category.reconciliation_blocker_count)
         .sum();
+    let unsatisfied_native_contract_count = categories
+        .iter()
+        .map(|category| category.unsatisfied_native_contract_count)
+        .sum();
     let estimated_bytes = categories
         .iter()
         .map(|category| category.estimated_bytes)
@@ -2575,13 +2590,11 @@ fn cleanup_inventory_with_deadline(
     let actionable = cleanup_actionable(&categories, apply);
     let output = serde_json::to_value(CleanupInventoryOutput {
         command: "cleanup.inventory",
-        status: if failed_category_count > 0 {
-            "partial_failure"
-        } else if continuation_category_count > 0 {
-            "partial"
-        } else {
-            "succeeded"
-        },
+        status: cleanup_inventory_status(
+            failed_category_count,
+            unsatisfied_native_contract_count,
+            continuation_category_count,
+        ),
         mode: if apply { "apply" } else { "dry_run" },
         category_count: categories.len(),
         failed_category_count,
@@ -2591,6 +2604,7 @@ fn cleanup_inventory_with_deadline(
         applied_count,
         skipped_count,
         reconciliation_blocker_count,
+        unsatisfied_native_contract_count,
         applied_category_count,
         estimated_bytes,
         reclaimed_bytes,
@@ -2603,8 +2617,51 @@ fn cleanup_inventory_with_deadline(
     })?;
     Ok(CleanupInventoryResult {
         output,
-        exit_code: if failed_category_count == 0 { 0 } else { 1 },
+        exit_code: cleanup_inventory_exit_code(
+            failed_category_count,
+            unsatisfied_native_contract_count,
+        ),
     })
+}
+
+/// Aggregate status for one `cleanup.inventory` pass.
+///
+/// A failed category or an unsatisfied native contract both mean the pass
+/// cannot be taken at face value, so both elevate the run out of `succeeded`.
+/// They are counted separately: a failed category means execution itself did
+/// not complete, while an unsatisfied contract means execution completed but
+/// a provider-declared capability could not run, which is a different repair
+/// (#14955). A bounded continuation alone -- no failures, no unsatisfied
+/// contracts -- stays `partial`, not a failure (#12727).
+fn cleanup_inventory_status(
+    failed_category_count: usize,
+    unsatisfied_native_contract_count: usize,
+    continuation_category_count: usize,
+) -> &'static str {
+    if failed_category_count > 0 || unsatisfied_native_contract_count > 0 {
+        "partial_failure"
+    } else if continuation_category_count > 0 {
+        "partial"
+    } else {
+        "succeeded"
+    }
+}
+
+/// Process exit code for one `cleanup.inventory` pass.
+///
+/// Nonzero for the same two conditions that elevate `status` to
+/// `partial_failure`, so a scheduled `homeboy cleanup --apply` reports
+/// `needs_attention` through the existing schedule-notification exit-code
+/// path instead of silently looking like a healthy, unchanged run (#14955).
+fn cleanup_inventory_exit_code(
+    failed_category_count: usize,
+    unsatisfied_native_contract_count: usize,
+) -> i32 {
+    if failed_category_count == 0 && unsatisfied_native_contract_count == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn cleanup_replay_command(args: &CleanupArgs, full: bool, include_cursor: bool) -> String {
@@ -3180,6 +3237,7 @@ fn cleanup_category_timeout_failure(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: serde_json::json!({
@@ -3341,6 +3399,7 @@ fn store_unavailable_category(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: serde_json::to_value(store).unwrap_or(Value::Null),
@@ -3389,6 +3448,7 @@ fn cleanup_category_failure(
         applied_count: 0,
         skipped_count: 1,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: 0,
         reclaimed_bytes: 0,
         output: error.details,
@@ -3568,6 +3628,7 @@ fn repo_artifacts_category(
         applied_count: output.applied_count,
         skipped_count: output.skipped_count + failure_count,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: output.estimated_bytes,
         reclaimed_bytes: output.reclaimed_bytes,
         output: serde_json::to_value(output.diagnostics).map_err(|error| {
@@ -3810,6 +3871,18 @@ struct CleanupCategoryCommands {
 /// A dry run naturally applies nothing, so this marker is apply-only.
 const CLEANUP_CATEGORY_OUTCOME_NO_EFFECT: &str = "no_effect";
 
+/// Outcome marker for a category holding at least one unsatisfied
+/// provider-declared native contract.
+///
+/// Distinct from `completed`: a satisfied probe that finds zero candidates is
+/// a genuine clean result, while an unsatisfied contract means the provider
+/// could not even run its own probe, so `candidate_count` proves nothing about
+/// what is actually reclaimable. Reporting that as `completed` is what let a
+/// 107 GB opencode.db with ~99 GB of live payload stay invisible behind
+/// `candidate_count: 0` (#14955). Takes priority over `no_effect` when both
+/// conditions hold, since the broken probe is the more fundamental problem.
+const CLEANUP_CATEGORY_OUTCOME_CONTRACT_UNSATISFIED: &str = "contract_unsatisfied";
+
 fn category_outcome(apply: bool, metrics: &CleanupCategoryMetrics) -> String {
     if apply && metrics.candidate_count > 0 && metrics.applied_count == 0 {
         CLEANUP_CATEGORY_OUTCOME_NO_EFFECT.to_string()
@@ -3841,6 +3914,7 @@ fn external_storage_category(
     apply: bool,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let inventory_complete = output.inventory_complete;
+    let unsatisfied_native_contract_count = output.unsatisfied_native_contracts.len();
     category_from_output(
         EXTERNAL_STORAGE_METADATA,
         apply,
@@ -3856,6 +3930,14 @@ fn external_storage_category(
     .map(|mut category| {
         if !inventory_complete {
             category.inventory_completeness = "partial".to_string();
+        }
+        category.unsatisfied_native_contract_count = unsatisfied_native_contract_count;
+        if unsatisfied_native_contract_count > 0 {
+            // A declared capability the provider could not execute makes
+            // `candidate_count` unable to prove a clean root: reclaimable
+            // bytes may exist behind it and would otherwise stay invisible
+            // behind `completed` (#14955).
+            category.outcome = CLEANUP_CATEGORY_OUTCOME_CONTRACT_UNSATISFIED.to_string();
         }
         vec![category]
     })
@@ -3885,6 +3967,7 @@ fn category_from_command<T: Serialize>(
         applied_count: metrics.applied_count,
         skipped_count: metrics.skipped_count,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: metrics.estimated_bytes,
         reclaimed_bytes: metrics.reclaimed_bytes,
         output: serde_json::to_value(output).map_err(|err| {
@@ -3959,6 +4042,7 @@ fn persisted_artifacts_category(
         applied_count: persisted.removed_record_count,
         skipped_count: persisted.skipped_count,
         reconciliation_blocker_count: 0,
+        unsatisfied_native_contract_count: 0,
         estimated_bytes: persisted.totals.planned_size_bytes,
         reclaimed_bytes: persisted.totals.removed_size_bytes,
         output,
@@ -3996,6 +4080,7 @@ fn remote_lab_workspace_categories(
                 applied_count: 0,
                 skipped_count: 1,
                 reconciliation_blocker_count: 0,
+                unsatisfied_native_contract_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: serde_json::json!({ "runner_id": status.runner_id, "connected": status.connected }),
@@ -4171,6 +4256,23 @@ fn cleanup_actionable(
                 CommandNextAction::new(
                     format!("reconcile {}", category.category.replace('_', " ")),
                     "homeboy worktree inventory --apply",
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
+        if category.unsatisfied_native_contract_count > 0 {
+            // Unlike a reconciliation blocker, homeboy has no command that
+            // fixes a broken provider-declared contract -- that repair lives
+            // in the extension. The action points at the category's own
+            // evidence, which carries the contract id, failed invocation, and
+            // observed failure (#14955).
+            actionable.next_actions.push(
+                CommandNextAction::new(
+                    format!(
+                        "investigate {} native contract",
+                        category.category.replace('_', " ")
+                    ),
+                    category.specialist_command.clone(),
                 )
                 .with_kind(CommandNextActionKind::Repair),
             );
@@ -6113,6 +6215,7 @@ mod tests {
                 applied_count: 0,
                 skipped_count: 0,
                 reconciliation_blocker_count: 0,
+                unsatisfied_native_contract_count: 0,
                 estimated_bytes: 0,
                 reclaimed_bytes: 0,
                 output: Value::Null,
@@ -6385,6 +6488,7 @@ mod tests {
                 unknown_bytes_is_lower_bound: true,
                 inventory_complete: false,
                 incomplete_roots: Vec::new(),
+                unsatisfied_native_contracts: Vec::new(),
                 providers: Vec::new(),
             },
             false,
@@ -6397,6 +6501,144 @@ mod tests {
         let mut complete = category.into_iter().next().expect("category");
         complete.inventory_completeness = "complete".to_string();
         assert!(!is_bounded_continuation(&complete));
+    }
+
+    fn unsatisfied_contract_fixture() -> cleanup::ExternalStorageUnsatisfiedContract {
+        cleanup::ExternalStorageUnsatisfiedContract {
+            provider_id: "opencode.external-storage-retention".to_string(),
+            contract_id: "opencode.db.compact-events.v1".to_string(),
+            invocation: "opencode db event-log-status".to_string(),
+            failure: "SQL syntax error".to_string(),
+        }
+    }
+
+    /// An unsatisfied native contract must surface a distinct, non-`completed`
+    /// outcome and a nonzero typed blocker count, even though the provider
+    /// reported zero candidates -- the exact shape of the regression that hid
+    /// a 99 GB unreclaimed SQLite event table behind `outcome: completed`,
+    /// `candidate_count: 0` (#14955).
+    #[test]
+    fn external_storage_category_surfaces_unsatisfied_native_contracts_distinctly() {
+        let category = external_storage_category(
+            cleanup::ExternalStorageCleanupOutput {
+                provider_count: 1,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                unknown_bytes: 0,
+                unknown_bytes_is_lower_bound: false,
+                inventory_complete: true,
+                incomplete_roots: Vec::new(),
+                unsatisfied_native_contracts: vec![unsatisfied_contract_fixture()],
+                providers: Vec::new(),
+            },
+            false,
+        )
+        .expect("external storage category")
+        .into_iter()
+        .next()
+        .expect("category");
+        assert_eq!(category.candidate_count, 0);
+        assert_eq!(category.unsatisfied_native_contract_count, 1);
+        assert_eq!(category.outcome, "contract_unsatisfied");
+        assert_ne!(
+            category.outcome, "completed",
+            "an unsatisfied contract must never be reported as a clean completion"
+        );
+        // Not a bounded continuation: the contract cannot be resumed by
+        // scanning more, and inventory itself completed successfully.
+        assert!(!is_bounded_continuation(&category));
+    }
+
+    /// A satisfied contract with zero candidates is the genuine clean result
+    /// this behavior must keep distinguishable from an unsatisfied one, even
+    /// though both report `candidate_count == 0`.
+    #[test]
+    fn external_storage_category_reports_a_satisfied_empty_probe_as_completed() {
+        let category = external_storage_category(
+            cleanup::ExternalStorageCleanupOutput {
+                provider_count: 1,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                unknown_bytes: 0,
+                unknown_bytes_is_lower_bound: false,
+                inventory_complete: true,
+                incomplete_roots: Vec::new(),
+                unsatisfied_native_contracts: Vec::new(),
+                providers: Vec::new(),
+            },
+            false,
+        )
+        .expect("external storage category")
+        .into_iter()
+        .next()
+        .expect("category");
+        assert_eq!(category.candidate_count, 0);
+        assert_eq!(category.unsatisfied_native_contract_count, 0);
+        assert_eq!(category.outcome, "completed");
+    }
+
+    /// An unsatisfied native contract must elevate the aggregate `status` and
+    /// exit code out of a silent success, so a scheduled `homeboy cleanup
+    /// --apply` reports `needs_attention` instead of flattening into a clean
+    /// zero-candidate run (#14955).
+    #[test]
+    fn cleanup_inventory_status_and_exit_code_reflect_unsatisfied_native_contracts() {
+        assert_eq!(cleanup_inventory_status(0, 0, 0), "succeeded");
+        assert_eq!(cleanup_inventory_status(0, 1, 0), "partial_failure");
+        assert_eq!(cleanup_inventory_exit_code(0, 0), 0);
+        assert_eq!(cleanup_inventory_exit_code(0, 1), 1);
+        // A failed category and an unsatisfied contract both elevate status;
+        // neither one masks the other's presence in the exit code.
+        assert_eq!(cleanup_inventory_status(1, 1, 0), "partial_failure");
+        assert_eq!(cleanup_inventory_exit_code(1, 1), 1);
+        // A bounded continuation alone, with no failures or unsatisfied
+        // contracts, stays a resumable `partial`, not a failure (#12727).
+        assert_eq!(cleanup_inventory_status(0, 0, 1), "partial");
+    }
+
+    /// The unsatisfied-contract next action names the concrete evidence
+    /// command, distinct from the reconciliation-blocker action it sits
+    /// alongside.
+    #[test]
+    fn cleanup_actionable_surfaces_an_investigate_action_for_unsatisfied_contracts() {
+        let mut category = external_storage_category(
+            cleanup::ExternalStorageCleanupOutput {
+                provider_count: 1,
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 0,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                unknown_bytes: 0,
+                unknown_bytes_is_lower_bound: false,
+                inventory_complete: true,
+                incomplete_roots: Vec::new(),
+                unsatisfied_native_contracts: vec![unsatisfied_contract_fixture()],
+                providers: Vec::new(),
+            },
+            false,
+        )
+        .expect("external storage category")
+        .into_iter()
+        .next()
+        .expect("category");
+        category.specialist_command = "homeboy cleanup --include external-storage".to_string();
+        let actionable = cleanup_actionable(&[category], false);
+        assert_eq!(actionable.next_actions.len(), 1);
+        assert_eq!(
+            actionable.next_actions[0].label,
+            "investigate external storage native contract"
+        );
+        assert_eq!(
+            actionable.next_actions[0].command,
+            "homeboy cleanup --include external-storage"
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ mod external_storage;
 pub use external_storage::{
     cleanup_external_storage_from_extensions, cleanup_external_storage_with_providers,
     ExternalStorageCleanupOptions, ExternalStorageCleanupOutput,
+    ExternalStorageUnsatisfiedContract,
 };
 pub mod leaked_test_homes;
 pub use leaked_test_homes::{
