@@ -18,6 +18,16 @@ if [[ ! -f composer.json ]]; then
 fi
 
 PAYLOAD="${HOMEBOY_SETTINGS_JSON:-}"
+# Composer treats a leading "v" as insignificant: "v1.2.3" and "1.2.3" are the
+# same release. Packages published from tags such as "v1.2.3" report the
+# prefixed form in composer.lock, while callers commonly request the bare
+# version, so every equality check goes through this, and every ordering check
+# strips the prefix before version_compare, which does not understand it
+# ("v0.17.0" > "0.16.1" is false there, which would let a downgrade through).
+same_version() {
+  [[ "${1#[vV]}" == "${2#[vV]}" ]]
+}
+
 read_field() {
   printf '%s' "${PAYLOAD}" | jq -er --arg key "$1" '.dependency[$key] // empty' 2>/dev/null || true
 }
@@ -117,12 +127,12 @@ LOCK_VERSION="$(jq -r --arg package "${PACKAGE}" '((.packages // []) + (."packag
 
 if [[ -n "${REQUESTED_VERSION}" && -n "${LOCK_VERSION}" ]] && php -r \
   'exit(version_compare($argv[1], $argv[2], ">") ? 0 : 1);' \
-  "${LOCK_VERSION}" "${REQUESTED_VERSION}"; then
+  "${LOCK_VERSION#[vV]}" "${REQUESTED_VERSION#[vV]}"; then
   echo "Error: refusing to downgrade ${PACKAGE} from ${LOCK_VERSION} to ${REQUESTED_VERSION}" >&2
   exit 1
 fi
 
-if [[ "${MODE}" != "verify" && "${MODE}" != "dry-run" && -n "${REQUESTED_VERSION}" && "${CURRENT_VERSION}" == "${REQUESTED_VERSION}" && "${LOCK_VERSION}" == "${REQUESTED_VERSION}" ]]; then
+if [[ "${MODE}" != "verify" && "${MODE}" != "dry-run" && -n "${REQUESTED_VERSION}" ]] && same_version "${CURRENT_VERSION}" "${REQUESTED_VERSION}" && same_version "${LOCK_VERSION}" "${REQUESTED_VERSION}"; then
   SOURCE_OK="true"
   SHA_OK="true"
   INLINE_METADATA_OK="true"
@@ -162,7 +172,7 @@ if [[ -z "${RESOLVED_VERSION}" || "${RESOLVED_VERSION}" == "null" ]]; then
   echo "Error: Composer did not resolve ${PACKAGE}" >&2
   exit 1
 fi
-if [[ -n "${REQUESTED_VERSION}" && "${RESOLVED_VERSION}" != "${REQUESTED_VERSION}" ]]; then
+if [[ -n "${REQUESTED_VERSION}" ]] && ! same_version "${RESOLVED_VERSION}" "${REQUESTED_VERSION}"; then
   echo "Error: Composer resolved ${PACKAGE} to ${RESOLVED_VERSION}, expected ${REQUESTED_VERSION}" >&2
   exit 1
 fi
@@ -173,7 +183,7 @@ if [[ "${LATEST_STABLE}" == "true" ]]; then
   fi
   if [[ -n "${LOCK_VERSION}" ]] && php -r \
     'exit(version_compare($argv[1], $argv[2], ">") ? 0 : 1);' \
-    "${LOCK_VERSION}" "${RESOLVED_VERSION}"; then
+    "${LOCK_VERSION#[vV]}" "${RESOLVED_VERSION#[vV]}"; then
     echo "Error: latest stable discovery would downgrade ${PACKAGE} from ${LOCK_VERSION} to ${RESOLVED_VERSION}" >&2
     exit 1
   fi

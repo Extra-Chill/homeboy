@@ -155,4 +155,44 @@ inline_changed_out="$(cd "${INLINE}" && HOMEBOY_SETTINGS_JSON='{"dependency":{"p
 echo "${inline_changed_out}" | jq -e '.success == true and .changed == true' >/dev/null
 jq -e '.repositories[0].package.source.reference == "dispatch-2" and .repositories[0].package.dist.reference == "dispatch-2"' "${INLINE}/composer.json" >/dev/null
 
+# Packages published from "v"-prefixed tags report "v1.2.3" in composer.lock,
+# while callers request the bare "1.2.3". Composer treats these as the same
+# release, so the action must too: an exact bare request resolves, a repeated
+# request is a no-op, and a lock ahead of the request is still a downgrade.
+V_ARTIFACTS="${WORK_DIR}/v-artifacts"
+mkdir -p "${V_ARTIFACTS}"
+make_package "${WORK_DIR}/pkg-v-1.0" "v1.0.0" "${V_ARTIFACTS}/acme-library-v1.0.0.zip"
+make_package "${WORK_DIR}/pkg-v-1.1" "v1.1.0" "${V_ARTIFACTS}/acme-library-v1.1.0.zip"
+
+VPREFIX="${WORK_DIR}/v-prefix"
+mkdir -p "${VPREFIX}"
+cat > "${VPREFIX}/composer.json" <<JSON
+{
+  "name": "acme/v-prefix-app",
+  "require": { "acme/library": "v1.0.0" },
+  "repositories": [{ "type": "artifact", "url": "${V_ARTIFACTS}" }]
+}
+JSON
+(cd "${VPREFIX}" && composer install --no-interaction --no-scripts --no-progress >/dev/null)
+jq -e '.packages[] | select(.name == "acme/library") | .version == "v1.0.0"' "${VPREFIX}/composer.lock" >/dev/null
+
+vprefix_out="$(cd "${VPREFIX}" && HOMEBOY_SETTINGS_JSON='{"dependency":{"package":"acme/library","version":"1.1.0"}}' "${UPDATE_DEP_SH}")"
+echo "${vprefix_out}" | jq -e '.success == true and .changed == true' >/dev/null
+jq -e '.packages[] | select(.name == "acme/library") | .version == "v1.1.0"' "${VPREFIX}/composer.lock" >/dev/null
+
+vprefix_json_hash="$(shasum "${VPREFIX}/composer.json" | cut -d' ' -f1)"
+vprefix_lock_hash="$(shasum "${VPREFIX}/composer.lock" | cut -d' ' -f1)"
+vprefix_repeat_out="$(cd "${VPREFIX}" && HOMEBOY_SETTINGS_JSON='{"dependency":{"package":"acme/library","version":"1.1.0"}}' "${UPDATE_DEP_SH}")"
+echo "${vprefix_repeat_out}" | jq -e '.success == true and .changed == false' >/dev/null
+[[ "${vprefix_json_hash}" == "$(shasum "${VPREFIX}/composer.json" | cut -d' ' -f1)" ]]
+[[ "${vprefix_lock_hash}" == "$(shasum "${VPREFIX}/composer.lock" | cut -d' ' -f1)" ]]
+
+set +e
+vprefix_downgrade_err="$(cd "${VPREFIX}" && HOMEBOY_SETTINGS_JSON='{"dependency":{"package":"acme/library","version":"1.0.0"}}' "${UPDATE_DEP_SH}" 2>&1 >/dev/null)"
+vprefix_downgrade_status=$?
+set -e
+[[ ${vprefix_downgrade_status} -ne 0 ]]
+printf '%s\n' "${vprefix_downgrade_err}" | grep -q 'refusing to downgrade'
+[[ "${vprefix_lock_hash}" == "$(shasum "${VPREFIX}/composer.lock" | cut -d' ' -f1)" ]]
+
 echo "PASS: release-update-dependency-composer-smoke"
