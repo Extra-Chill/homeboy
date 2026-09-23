@@ -106,6 +106,9 @@
   "deps": {
     "extension_script": "scripts/deps/deps-runner.sh"
   },
+  "component_env": {
+    "detect_script": "scripts/env/detect.sh"
+  },
   "platform": {
     "discovery": {
       "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"name\"' 2>/dev/null",
