@@ -35,6 +35,7 @@ use crate::agent_task_timeout_artifacts::{
     is_actionable_patch_artifact, is_empty_patch_artifact, is_patch_artifact_kind,
 };
 use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::git::GitPushTransportClass;
 use homeboy_core::{Error, Result};
 
 use super::apply::{
@@ -3435,39 +3436,14 @@ fn declared_base_transport_error(
 
 /// Classify a base-preflight failure as transport rather than a bad ref.
 ///
-/// Every needle names diagnostic evidence emitted by Git, SSH, or the TLS
-/// stack. A bare `proxy` needle used to match here, which classified any
-/// failure whose remote host merely contained that word — including a local
-/// credential failure that is transport-related for unrelated reasons.
+/// Delegates to the shared core classifier (`classify_git_push_failure`) so
+/// promotion's base preflight and finalization's publication push report one
+/// consistent transport taxonomy: every typed outcome except `Other` is
+/// transport evidence. Every needle names diagnostic evidence emitted by Git,
+/// SSH, or the TLS stack; a remote host that merely contains the word
+/// `proxy` is not evidence.
 fn is_git_transport_failure(stderr: &str) -> bool {
-    let stderr = stderr.to_ascii_lowercase();
-    [
-        "unable to access",
-        "couldn't connect",
-        "could not resolve host",
-        "connection timed out",
-        "connection refused",
-        "connection closed",
-        "connection reset",
-        "network is unreachable",
-        "no route to host",
-        "broken pipe",
-        "proxy connect",
-        "proxy error",
-        "proxy authentication",
-        "proxycommand",
-        "tls handshake",
-        "ssl certificate",
-        "ssl connect error",
-        "permission denied (publickey",
-        "could not read from remote repository",
-        "authentication failed",
-        "host key verification failed",
-        "agent refused operation",
-        "sign_and_send_pubkey",
-    ]
-    .iter()
-    .any(|needle| stderr.contains(needle))
+    homeboy_core::git::classify_git_push_failure(stderr) != GitPushTransportClass::Other
 }
 
 fn status_for_report(

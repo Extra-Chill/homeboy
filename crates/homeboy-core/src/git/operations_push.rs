@@ -1,10 +1,13 @@
 use serde::Deserialize;
+use std::path::Path;
+use std::time::Duration;
 
 use crate::config::read_json_spec_to_string;
 use crate::error::{Error, Result};
 use crate::output::BulkResult;
 
 use super::operation_output::{run_bulk_ids, GitOutput};
+use super::push_transport::{non_interactive_push_env_for, DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT};
 use super::{execute_git, resolve_target};
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +52,13 @@ pub struct PushOptions {
     pub refspec: Option<String>,
     /// Clear the GitHub Actions checkout extraheader so URL auth wins.
     pub strip_extraheader: bool,
+    /// Run non-interactively: no terminal prompts and SSH `BatchMode=yes`
+    /// (via `GIT_SSH_COMMAND` only when the caller has not set one), so a
+    /// user-presence prompt cannot hang the push (#10734).
+    pub non_interactive: bool,
+    /// Terminate the push after this budget; requires `non_interactive`.
+    /// Defaults to [`DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT`].
+    pub timeout: Option<Duration>,
 }
 
 /// Push local commits for a component.
@@ -97,9 +107,47 @@ pub fn push_at(
         args.push(refspec);
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    if options.non_interactive {
+        return non_interactive_bounded_push(&id, &path, &arg_refs, options.timeout);
+    }
     let output =
         execute_git(&path, &arg_refs).map_err(|e| Error::git_command_failed(e.to_string()))?;
     Ok(GitOutput::from_output(id, path, "push", output))
+}
+
+/// Run the push non-interactively under a deadline, reporting an incomplete
+/// run (timeout, spawn failure) as a failed [`GitOutput`] so callers keep a
+/// single stderr-driven failure path for transport classification.
+fn non_interactive_bounded_push(
+    id: &str,
+    path: &str,
+    arg_refs: &[&str],
+    timeout: Option<Duration>,
+) -> Result<GitOutput> {
+    let timeout = timeout.unwrap_or(DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT);
+    let env = non_interactive_push_env_for(Path::new(path), arg_refs);
+    let output = match super::primitives::run_git_output_with_env_timeout(
+        Path::new(path),
+        arg_refs,
+        "git push",
+        &env,
+        timeout,
+    ) {
+        Ok(output) => GitOutput::from_output(id.to_string(), path.to_string(), "push", output),
+        Err(error) => {
+            let policy = crate::redaction::RedactionPolicy::default();
+            GitOutput {
+                component_id: id.to_string(),
+                path: path.to_string(),
+                action: "push".to_string(),
+                success: false,
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: policy.redact_string(&error.message),
+            }
+        }
+    };
+    Ok(output)
 }
 
 /// Host of an `https://` GitHub remote URL (github.com or Enterprise), if the
@@ -170,6 +218,8 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
                 token: token.clone(),
                 refspec: refspec.clone(),
                 strip_extraheader,
+                non_interactive: false,
+                timeout: None,
             },
         )
     }))

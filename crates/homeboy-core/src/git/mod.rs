@@ -17,6 +17,7 @@ mod pr_policy;
 mod pr_refresh;
 mod primitives;
 mod primitives_query;
+pub mod push_transport;
 pub mod release_download;
 mod remote_tracking_authority;
 pub mod subtree;
@@ -109,6 +110,11 @@ pub use primitives_query::{
     output_optional_bytes, output_optional_within, remote_origin_url, remote_url, repo_root,
     rev_parse, short_head_revision, status_porcelain, status_porcelain_bytes,
     status_porcelain_scoped, toplevel, BoundedGitRead, DEFAULT_GIT_READ_PROBE_TIMEOUT,
+};
+pub use push_transport::{
+    classify_git_push_failure, non_interactive_push_env, redact_push_url,
+    resolve_effective_push_url, GitPushRemote, GitPushTransportClass, GitPushTransportKind,
+    DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 pub use remote_tracking_authority::with_remote_tracking_authority_until;
 pub use transport::{

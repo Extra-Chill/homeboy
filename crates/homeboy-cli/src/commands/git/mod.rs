@@ -429,6 +429,8 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
                     token,
                     refspec,
                     strip_extraheader,
+                    non_interactive: false,
+                    timeout: None,
                 },
                 path.as_deref(),
             )?;
