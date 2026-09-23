@@ -126,6 +126,22 @@ pub fn fail_next_cook_index_projection_write_for_test() {
     store::fail_next_cook_index_projection_write_for_test();
 }
 
+/// Number of times historical Cook index import has run on this thread since
+/// the last [`reset_historical_cook_index_import_invocations_for_test`].
+/// Proves a submission's admission performed no historical projection work
+/// (#14962).
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn historical_cook_index_import_invocations_for_test() -> u32 {
+    store::historical_cook_index_import_invocations_for_test()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn reset_historical_cook_index_import_invocations_for_test() {
+    store::reset_historical_cook_index_import_invocations_for_test();
+}
+
 pub(crate) use cancellation::is_already_terminal_cancel_error;
 #[cfg(test)]
 pub(crate) use cancellation::{

@@ -2492,6 +2492,74 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path).expect("read output"), stdout);
     }
 
+    /// The first durable write of every real submission
+    /// (`DetachedCookAdmission::establish` ->
+    /// `record_detached_cook_handoff_parent_in_store`) must not depend on
+    /// historical Cook index import: a corrupt, unparseable on-disk index for
+    /// an unrelated historical cook must not block admission of a new one
+    /// (#14962). Before this fix the same store operations opened through
+    /// `open_observation_initialized`, which imports every historical index
+    /// on the hot path and would have propagated this parse failure straight
+    /// into admission.
+    #[test]
+    fn detached_cook_admission_survives_a_corrupt_historical_cook_index() {
+        crate::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            let corrupt_index_path = store.cook_index_path("unrelated-historical-cook");
+            std::fs::create_dir_all(
+                corrupt_index_path
+                    .parent()
+                    .expect("corrupt historical index parent"),
+            )
+            .expect("create corrupt historical index parent");
+            std::fs::write(&corrupt_index_path, b"{ this is not valid json")
+                .expect("write corrupt historical Cook index");
+
+            let cook_id = "cook-admits-despite-corrupt-history";
+            let mut admission = DetachedCookAdmission::establish(cook_id).expect(
+                "a corrupt unrelated historical Cook index must not block admission (#14962)",
+            );
+
+            // Bounded, not `exact_record`: reading back through the corrupt
+            // sibling's own imported alias projection is a *different*,
+            // deliberately still-importing read path (#14962 keeps it that
+            // way), so it is expected to keep failing on real corruption.
+            // This assertion instead confirms admission's own durable write
+            // committed the new run, without going through that import.
+            let parent = store
+                .read_record_bounded(cook_id)
+                .expect("newly admitted parent is durable despite the corrupt sibling index");
+            assert_eq!(parent.metadata["detached_cook_handoff"]["cook_id"], cook_id);
+            admission.release();
+        });
+    }
+
+    /// Admitting a new Cook needs only the minimal durable write for the new
+    /// run; historical Cook index import and eligibility projection must run
+    /// somewhere else, never synchronously on this hot path (#14962).
+    #[test]
+    fn detached_cook_admission_imports_no_historical_cook_index_projection() {
+        crate::test_support::with_isolated_home(|_| {
+            agent_task_lifecycle::reset_historical_cook_index_import_invocations_for_test();
+
+            let mut admission =
+                DetachedCookAdmission::establish("cook-admits-without-historical-import")
+                    .expect("persist parent before any launcher input work");
+
+            assert_eq!(
+                agent_task_lifecycle::historical_cook_index_import_invocations_for_test(),
+                0,
+                "admitting a new Cook must not run historical Cook index import or \
+                 eligibility projection on its hot path (#14962)"
+            );
+
+            // Release rather than drop-fail: the assertion above is the test,
+            // and releasing avoids attributing unrelated interrupted-owner
+            // cleanup work to admission's own invocation count.
+            admission.release();
+        });
+    }
+
     #[test]
     fn interrupted_pre_supervisor_admission_is_terminal_and_discoverable() {
         crate::test_support::with_isolated_home(|_| {
