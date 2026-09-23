@@ -1933,17 +1933,47 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<CleanupInventor
     let deadline = SystemTime::now().checked_add(cleanup_inventory_timeout(args.apply));
     let mut result = cleanup_inventory_with_deadline(args, deadline)?;
     // An interactive aggregate has no scheduler to perform its next bounded
-    // pass. Do not acknowledge an incomplete mutation inventory as success:
-    // callers must receive the continuation action and a non-zero exit.
+    // pass. Do not acknowledge an incomplete mutation inventory as success
+    // when there is retention work left undone: callers must receive the
+    // continuation action and a non-zero exit.
     finalize_synchronous_cleanup_result(&mut result);
     Ok(result)
 }
 
+/// Force a resumable, synchronous continuation into a failing envelope —
+/// unless there was nothing to reclaim and nothing broke.
+///
+/// `cleanup_inventory_with_deadline` already reports a bounded pass that
+/// exhausted its per-category time budget as `partial` with a zero exit: it
+/// is a resumable continuation, not a fault (#12727). A durable job or
+/// `automatic-retention` owns its own retry cadence and can leave that
+/// truthful `partial` status alone. A synchronous, one-shot caller cannot: it
+/// has no scheduler of its own to perform the next bounded pass, so it must
+/// still surface a non-zero exit *when retention work remains outstanding*.
+///
+/// But an inventory that timed out scanning categories that found zero
+/// candidates, left zero reconciliation blockers, and recorded zero category
+/// failures did not fail to perform retention — there was no retention work
+/// pending for it to fail at. Forcing that case to `partial_failure`
+/// fabricated a retention failure out of an idle sweep and drove a scheduled
+/// `disk-pressure-retention` pass to 337 consecutive failures while every
+/// category reported zero candidates (#14956). That degraded-coverage state
+/// stays visible in `status: "partial"`, `continuation_required: true`, and
+/// each category's own `outcome`/`inventory_completeness` — it is preserved,
+/// just no longer reported as a scheduled-run failure.
 fn finalize_synchronous_cleanup_result(result: &mut CleanupInventoryResult) {
-    if result.exit_code == 0 && result.output["continuation_required"] == true {
-        result.output["status"] = Value::String("partial_failure".to_string());
-        result.exit_code = 1;
+    if result.exit_code != 0 || result.output["continuation_required"] != true {
+        return;
     }
+    let candidate_count = result.output["candidate_count"].as_u64().unwrap_or(0);
+    let reconciliation_blocker_count = result.output["reconciliation_blocker_count"]
+        .as_u64()
+        .unwrap_or(0);
+    if candidate_count == 0 && reconciliation_blocker_count == 0 {
+        return;
+    }
+    result.output["status"] = Value::String("partial_failure".to_string());
+    result.exit_code = 1;
 }
 
 /// Aggregate sweep budget.
@@ -5687,11 +5717,15 @@ mod tests {
         });
     }
 
-    /// Interactive cleanup has no scheduler to consume a bounded continuation.
-    /// Its envelope must therefore fail consistently while exposing one replay
-    /// action owned by the aggregate, rather than a stripped specialist hint.
+    /// A category that times out before it dispatches has nothing to reclaim
+    /// and nothing that failed. Its envelope must therefore report success
+    /// while still exposing the continuation action, rather than fabricating
+    /// a retention failure out of an idle sweep (#14956). Operator-visible
+    /// evidence of the incomplete coverage — the aggregate's own `partial`
+    /// status, `continuation_required`, and the replay action — stays intact.
     #[test]
-    fn timed_out_scoped_cleanup_is_non_successful_and_replays_the_aggregate_policy() {
+    fn timed_out_scoped_cleanup_with_nothing_to_reclaim_still_succeeds_and_replays_the_aggregate_policy(
+    ) {
         homeboy::test_support::with_isolated_home(|_root| {
             let expired = SystemTime::now()
                 .checked_sub(Duration::from_secs(60))
@@ -5713,6 +5747,10 @@ mod tests {
             )
             .expect("aggregate result");
             let mut result = result;
+            assert_eq!(
+                result.output["candidate_count"], 0,
+                "a category that times out before dispatch inventories nothing"
+            );
             finalize_synchronous_cleanup_result(&mut result);
             let envelope =
                 crate::commands::utils::response::cli_response_for_json_result_for_command(
@@ -5722,12 +5760,13 @@ mod tests {
                     None,
                 );
 
-            assert_eq!(envelope.exit_code, 1);
-            assert!(!envelope.success);
-            assert_eq!(envelope.status, "partial_failure");
+            assert_eq!(envelope.exit_code, 0);
+            assert!(envelope.success);
+            assert_eq!(envelope.status, "succeeded");
             assert_eq!(
                 envelope.data.as_ref().expect("data")["status"],
-                "partial_failure"
+                "partial",
+                "the incomplete coverage stays visible in the payload's own status"
             );
             assert_eq!(envelope.next_actions.len(), 1);
             assert_eq!(
@@ -5735,6 +5774,55 @@ mod tests {
                 "homeboy cleanup --include repo-artifacts --exclude controller-runtimes --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
             );
         });
+    }
+
+    fn synchronous_continuation_result(
+        candidate_count: u64,
+        reconciliation_blocker_count: u64,
+    ) -> CleanupInventoryResult {
+        CleanupInventoryResult {
+            output: serde_json::json!({
+                "status": "partial",
+                "continuation_required": true,
+                "candidate_count": candidate_count,
+                "failed_category_count": 0,
+                "reconciliation_blocker_count": reconciliation_blocker_count,
+            }),
+            exit_code: 0,
+        }
+    }
+
+    /// #14956: a bounded pass that timed out inventorying categories with
+    /// nothing to reclaim and nothing blocked on reconciliation is truthful
+    /// degraded coverage, not a synchronous failure.
+    #[test]
+    fn synchronous_continuation_with_no_reclaim_work_pending_is_not_forced_into_failure() {
+        let mut result = synchronous_continuation_result(0, 0);
+        finalize_synchronous_cleanup_result(&mut result);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.output["status"], "partial");
+    }
+
+    /// A bounded pass that left reclaimable candidates un-inventoried is
+    /// retention work a one-shot synchronous caller cannot resume on its own
+    /// — it still needs a non-zero exit and the aggregate's replay action.
+    #[test]
+    fn synchronous_continuation_with_reclaim_work_pending_still_fails() {
+        let mut result = synchronous_continuation_result(4, 0);
+        finalize_synchronous_cleanup_result(&mut result);
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.output["status"], "partial_failure");
+    }
+
+    /// Records blocked on reconciliation are outstanding work even though
+    /// they are excluded from `candidate_count`; they must not be waved
+    /// through as "nothing to reclaim".
+    #[test]
+    fn synchronous_continuation_with_reconciliation_blockers_still_fails() {
+        let mut result = synchronous_continuation_result(0, 2);
+        finalize_synchronous_cleanup_result(&mut result);
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.output["status"], "partial_failure");
     }
 
     /// The budget check runs before dispatch, so no category is ever started
