@@ -13,8 +13,15 @@ fn hanging_category_returns_typed_partial_evidence_and_later_category_completes(
     let output = fixture.run(&["cleanup", "--include", "repo-artifacts,controller-runtimes"]);
 
     assert!(started.elapsed() < Duration::from_secs(15), "{output:#}");
-    assert_eq!(output["success"], false, "{output:#}");
-    assert_eq!(output["data"]["status"], "partial_failure", "{output:#}");
+    // The timed-out category found nothing to reclaim and nothing failed, so
+    // this is truthful degraded coverage rather than a scheduled-run failure
+    // (#14956). The incomplete coverage itself stays visible below in
+    // `data.status`, `continuation_required`, and each category's own
+    // `outcome`/`inventory_completeness`.
+    assert_eq!(output["success"], true, "{output:#}");
+    assert_eq!(output["data"]["status"], "partial", "{output:#}");
+    assert_eq!(output["data"]["continuation_required"], true, "{output:#}");
+    assert_eq!(output["data"]["candidate_count"], 0, "{output:#}");
     assert_eq!(output["data"]["failed_category_count"], 0, "{output:#}");
     let categories = output["data"]["categories"]
         .as_array()

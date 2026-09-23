@@ -1015,4 +1015,140 @@ mod tests {
             assert!(!state.is_unhealthy());
         });
     }
+
+    /// Installs a notification transport that always "delivers" (a bare
+    /// `true` invocation), so a test can tell "notify was never attempted"
+    /// (should stay `false`) apart from "notify was attempted and delivered".
+    fn install_always_delivering_transport(id: &str) {
+        let mut manifest: homeboy_extension_contract::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Schedule regression test transport",
+                "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": id,
+                    "command": ["true"],
+                }]
+            }))
+            .expect("transport manifest");
+        manifest.id = format!("schedule-regression-{id}");
+        crate::extension::catalog::save_manifest(&manifest).expect("install transport");
+    }
+
+    fn disk_pressure_retention_schedule(id: &str, transport_id: &str) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            command: Some(vec!["cleanup".to_string(), "--apply".to_string()]),
+            exec: None,
+            steps: Vec::new(),
+            every: Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on: NotifyPolicy::Failure,
+            on_overlap: OverlapPolicy::default(),
+            notification_transport: Some(transport_id.to_string()),
+            notification_route: Some("ops-channel".to_string()),
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// #14956. A cleanup pass whose inventory timed out but found zero
+    /// candidates and zero failed categories is truthful degraded coverage,
+    /// not a scheduled-run failure. It must not count toward
+    /// `consecutive_failures`, and `notify_on: failure` must not fire — even
+    /// though the underlying evidence still shows `continuation_required` and
+    /// per-category `outcome: "timed_out"`.
+    ///
+    /// This is the exact envelope shape a fixed `homeboy cleanup --apply`
+    /// reports for that case: top-level `status: "succeeded"`, `exit_code:
+    /// 0`, with the incomplete coverage preserved under `data`.
+    #[test]
+    fn a_retention_pass_with_zero_candidates_and_partial_inventory_does_not_fail_the_schedule() {
+        crate::test_support::with_isolated_home(|_| {
+            let transport_id = "disk-pressure.no-failure";
+            install_always_delivering_transport(transport_id);
+            let schedule = disk_pressure_retention_schedule(
+                "disk-pressure-retention-no-failure",
+                transport_id,
+            );
+            let runner = StubRunner(serde_json::json!({
+                "status": "succeeded",
+                "exit_code": 0,
+                "data": {
+                    "status": "partial",
+                    "continuation_required": true,
+                    "candidate_count": 0,
+                    "failed_category_count": 0,
+                    "categories": [
+                        {
+                            "category": "repo_artifacts",
+                            "outcome": "timed_out",
+                            "inventory_completeness": "partial",
+                        },
+                        {
+                            "category": "controller_runtimes",
+                            "outcome": "timed_out",
+                            "inventory_completeness": "partial",
+                        },
+                    ],
+                },
+            }));
+
+            let outcome = run_schedule(&schedule, &runner);
+            assert_eq!(outcome.status, "succeeded");
+            assert_eq!(outcome.exit_code, 0);
+            assert!(
+                !outcome.notified,
+                "a non-failure must not fire a notify_on: failure notification"
+            );
+
+            let state = load_state(&schedule.id);
+            assert_eq!(
+                state.consecutive_failures, 0,
+                "an empty, timed-out inventory pass must not count as a failure"
+            );
+            assert!(!state.is_unhealthy());
+        });
+    }
+
+    /// The same schedule genuinely unable to perform retention — a category
+    /// actually failed — must still be classified as a failed run: it counts
+    /// toward `consecutive_failures` and `notify_on: failure` still fires.
+    #[test]
+    fn a_genuine_retention_failure_still_fails_the_schedule_and_notifies() {
+        crate::test_support::with_isolated_home(|_| {
+            let transport_id = "disk-pressure.genuine-failure";
+            install_always_delivering_transport(transport_id);
+            let schedule = disk_pressure_retention_schedule(
+                "disk-pressure-retention-genuine-failure",
+                transport_id,
+            );
+            let runner = StubRunner(serde_json::json!({
+                "status": "partial_failure",
+                "exit_code": 1,
+                "data": {
+                    "status": "partial_failure",
+                    "failed_category_count": 2,
+                    "candidate_count": 0,
+                    "categories": [
+                        { "category": "repo_artifacts", "outcome": "failed" },
+                        { "category": "controller_runtimes", "outcome": "failed" },
+                    ],
+                },
+            }));
+
+            let outcome = run_schedule(&schedule, &runner);
+            assert_eq!(outcome.status, "partial_failure");
+            assert_eq!(outcome.exit_code, 1);
+            assert!(
+                outcome.notified,
+                "a genuine retention failure must still notify"
+            );
+
+            let state = load_state(&schedule.id);
+            assert_eq!(state.consecutive_failures, 1);
+            assert!(state.is_unhealthy());
+        });
+    }
 }
