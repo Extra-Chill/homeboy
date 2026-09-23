@@ -7750,9 +7750,14 @@ fn substantive_candidate_in_store(
     if !std::path::Path::new(&aggregate_path).exists() {
         return None;
     }
+    // Candidate substantiveness is projection-time eligibility input reached
+    // from historical Cook index import (#14914): an initializing aggregate
+    // read here re-enters that import mid-projection and recurses until the
+    // stack overflows. `read_aggregate_bounded` never opens an initializing
+    // observation store, matching the bounded record read above.
     let aggregate = match lifecycle_store {
-        Some(store) => store.read_aggregate(run_id),
-        None => store::read_aggregate(run_id),
+        Some(store) => store.read_aggregate_bounded(run_id),
+        None => store::read_aggregate_bounded(run_id),
     };
     let Ok(aggregate) = aggregate else {
         return None;
@@ -7811,6 +7816,20 @@ pub fn exact_record_in_store(
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     lifecycle_store.read_record(&sanitize_run_id(run_id))
+}
+
+/// Read one exact durable run identity without initializing, migrating, or
+/// backfilling resource projections.
+///
+/// Projection-time callers — resource-projection and eligibility building —
+/// must use this rather than [`exact_record_in_store`]: an initializing open
+/// re-enters the historical Cook index import that started the projection and
+/// recurses until the stack overflows (#14914).
+pub fn exact_record_bounded_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    lifecycle_store.read_record_bounded(&sanitize_run_id(run_id))
 }
 
 // The ambient `reconcile_scope_run_ids()` shim that used to sit here is gone;

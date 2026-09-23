@@ -421,3 +421,93 @@ fn orphaned_historical_cook_index_does_not_block_canonical_lifecycle_records() {
         .expect("read orphan projection")
         .is_none());
 }
+
+/// Importing a historical Cook index projects retry eligibility for the run it
+/// names. For a terminal cook-owned attempt with a recipe successor, that
+/// projection consults the durable retry lineage, and every read on that path
+/// must be non-initializing: an initializing open re-enters this very import
+/// and recurses until the stack overflows (#14914).
+#[test]
+fn historical_cook_index_import_survives_retry_projection_for_a_failed_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        // Retry eligibility resolves its own store from the ambient
+        // environment, so the fixture must live in the isolated home the
+        // projection will resolve.
+        let store =
+            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+        let data_root = store.data_root();
+        let cook_id = "retry-projection-cook";
+        let failed_run = format!("{cook_id}-attempt-2-failed");
+        let pending_successor_run = format!("{cook_id}-attempt-3-pending");
+
+        let mut failed = record(&store, &failed_run, "retry-projection");
+        failed.state = AgentTaskRunState::Failed;
+        failed.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Failed);
+        failed.metadata["cook_id"] = json!(cook_id);
+        failed.metadata["cook_attempt"] = json!(2);
+        store.write_record(&failed).expect("write failed attempt");
+
+        let plan = test_plan();
+        let recipe = crate::agent_task_service::AgentTaskCookRecipe {
+            schema: crate::agent_task_service::COOK_RECIPE_SCHEMA.to_string(),
+            cook_id: cook_id.to_string(),
+            attempts: vec![
+                crate::agent_task_service::AgentTaskCookRecipeAttempt {
+                    attempt: 2,
+                    run_id: failed_run.clone(),
+                    plan: plan.clone(),
+                },
+                crate::agent_task_service::AgentTaskCookRecipeAttempt {
+                    attempt: 3,
+                    run_id: pending_successor_run,
+                    plan,
+                },
+            ],
+            promotion_transport: json!({}),
+            gate_policy: json!({}),
+            retry_budget: json!({ "max_attempts": 3 }),
+            finalization: json!({}),
+            source_refs: Vec::new(),
+            runtime_generation: "test-runtime".to_string(),
+            sensitive_mappings: Vec::new(),
+            harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
+        };
+        crate::agent_task_service::CookRecipeStore::from_data_root(data_root.clone())
+            .persist_recipe(&recipe)
+            .expect("write durable recipe");
+
+        let index_path = data_root
+            .join("agent-task-cooks")
+            .join(cook_id)
+            .join("index.json");
+        std::fs::create_dir_all(index_path.parent().expect("index parent"))
+            .expect("create historical index parent");
+        homeboy_core::engine::local_files::write_json_file(
+            &index_path,
+            &crate::agent_task_lifecycle::AgentTaskCookIndex {
+                schema: crate::agent_task_lifecycle::records::schemas::COOK_INDEX.to_string(),
+                cook_id: cook_id.to_string(),
+                latest_run_id: failed_run.clone(),
+                latest_substantive_candidate: None,
+                cancellation_fence: None,
+                attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                    attempt: 2,
+                    run_id: failed_run.clone(),
+                    recorded_at: "retry-projection".to_string(),
+                }],
+            },
+        )
+        .expect("write historical index");
+
+        let observation = store
+            .open_observation_initialized()
+            .expect("import must terminate without re-entering itself");
+        assert!(observation
+            .control_plane_resource_projection("agent_task_run", cook_id)
+            .expect("read imported projection")
+            .is_some());
+        store
+            .read_record(&failed_run)
+            .expect("failed attempt stays readable after import");
+    });
+}
