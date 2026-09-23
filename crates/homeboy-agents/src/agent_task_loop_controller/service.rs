@@ -355,12 +355,7 @@ fn persist_loop_work_identity(loop_id: &str, job_id: &str) -> Result<()> {
                 .next_actions
                 .iter()
                 .find(|action| {
-                    matches!(
-                        action.status,
-                        crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-                    )
+                    action.status.is_open()
                 })
                 .map(|action| action.action_id.clone())
                 .or_else(|| record.next_actions.last().map(|action| action.action_id.clone())),
