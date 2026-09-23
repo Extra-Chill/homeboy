@@ -29,6 +29,7 @@ impl ControlPlaneActionDelegate for DeployActionDelegate {
         &self,
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
+        _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
         resume_deploy_action(run, request)
     }
@@ -37,6 +38,7 @@ impl ControlPlaneActionDelegate for DeployActionDelegate {
         &self,
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
+        _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
         recover_deploy_action(run, request)
     }

@@ -494,13 +494,26 @@ mod fanout_batch_read_tests {
             };
             let mut stale = request.clone();
             stale.expected_updated_at = Some("stale-version".to_string());
-            assert!(homeboy_core::control_plane::execute_action(&requested, &stale).is_err());
-            let first = homeboy_core::control_plane::execute_action(&requested, &request)
-                .expect("cancel action");
+            assert!(homeboy_core::control_plane::execute_action(
+                &requested,
+                &stale,
+                &homeboy_core::control_plane::ControlPlaneInvocationContext::default()
+            )
+            .is_err());
+            let first = homeboy_core::control_plane::execute_action(
+                &requested,
+                &request,
+                &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+            )
+            .expect("cancel action");
             assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
             assert!(store.coordinator_is_cancelled("cancel-action-batch"));
-            let replay = homeboy_core::control_plane::execute_action(&requested, &request)
-                .expect("replay cancel action");
+            let replay = homeboy_core::control_plane::execute_action(
+                &requested,
+                &request,
+                &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+            )
+            .expect("replay cancel action");
             assert_eq!(first, replay);
             let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
                 method: homeboy_core::http_api::HttpMethod::Post,
@@ -570,7 +583,11 @@ mod fanout_batch_read_tests {
                 confirmed: true,
             };
             let recovered = FanoutBatchActionDelegate
-                .recover(&run, &request)
+                .recover(
+                    &run,
+                    &request,
+                    &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+                )
                 .expect("stored receipt recovery");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
             assert_eq!(recovered.result.data["status"], "partial_failure");
@@ -613,7 +630,11 @@ mod fanout_batch_read_tests {
                 ..Default::default()
             };
             let error = FanoutBatchActionDelegate
-                .execute(&run, &request)
+                .execute(
+                    &run,
+                    &request,
+                    &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+                )
                 .expect_err("execution without admitted authority must fail closed");
             assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
             assert!(
@@ -716,7 +737,11 @@ mod fanout_batch_read_tests {
                 ..Default::default()
             };
             let recovered = FanoutBatchActionDelegate
-                .recover(&run, &request)
+                .recover(
+                    &run,
+                    &request,
+                    &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+                )
                 .expect("reconcile completed child effect");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
             assert_eq!(recovered.result.data["status"], "succeeded");
@@ -791,7 +816,11 @@ mod fanout_batch_read_tests {
                     confirmed: true,
                 };
                 let error = FanoutBatchActionDelegate
-                    .recover(&run, &request)
+                    .recover(
+                        &run,
+                        &request,
+                        &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+                    )
                     .expect_err("invalid receipt must remain unknown");
                 assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
             }
@@ -1324,6 +1353,7 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
         &self,
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
+        _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
         self.execute_inner(run, request)
     }
@@ -1332,6 +1362,7 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
         &self,
         run: &homeboy_core::observation::RunRecord,
         request: &ControlPlaneActionRequest,
+        _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
         if request.action == ControlPlaneAction::Resume {
             if let Some(receipt) = Self::stored_resume_receipt(&run.id, &request.effect_id)? {
@@ -1608,21 +1639,17 @@ impl FanoutBatchActionDelegate {
                 } else {
                     ControlPlaneActionOutcome::Failed
                 };
-                let action_result = ControlPlaneActionDelegateResult {
+                let result = fanout_batch_resume_action_result(&result.value)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let mut action_result = ControlPlaneActionDelegateResult {
                     outcome,
                     result: ControlPlaneActionPayload {
                         schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
-                        data: serde_json::to_value(
-                            fanout_batch_resume_action_result(&result.value)
-                                .map_err(|error| ControlPlaneError::unavailable(error.message))?,
-                        )
-                        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+                        data: serde_json::to_value(&result)
+                            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
                     },
                     message: None,
                 };
-                let result = fanout_batch_resume_action_result(&result.value)
-                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-                let mut action_result = action_result;
                 if Self::resume_effects_are_admitted(action_result.outcome, &result) {
                     let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
                         executor,
@@ -1788,7 +1815,11 @@ impl FanoutBatchDomainService {
             },
         )?;
         let (children, child_read_errors) = self.canonical_children(&report.batch)?;
-        append_child_read_errors(&mut report, &child_read_errors);
+        append_child_read_errors(
+            &mut report.unavailable_child_runs,
+            &report.batch,
+            &child_read_errors,
+        );
         Ok(FanoutBatchDomainProjection {
             status: report,
             children,
@@ -1808,7 +1839,11 @@ impl FanoutBatchDomainService {
         )?;
         let batch = self.batch_store.read_batch_record(batch_id)?;
         let (children, child_read_errors) = self.canonical_children(&batch)?;
-        append_artifact_read_errors(&mut report, &batch, &child_read_errors);
+        append_child_read_errors(
+            &mut report.unavailable_child_runs,
+            &batch,
+            &child_read_errors,
+        );
         Ok(FanoutBatchArtifactsProjection {
             artifacts: report,
             children,
@@ -1817,14 +1852,7 @@ impl FanoutBatchDomainService {
     }
 
     pub fn child_run_exists(&self, run_id: &str) -> homeboy_core::Result<bool> {
-        let run_id = RunId::new(run_id).map_err(|error| {
-            homeboy_core::Error::validation_invalid_argument(
-                "run_id",
-                error.to_string(),
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+        let run_id = parse_run_id(run_id)?;
         match homeboy_core::control_plane::run(&run_id) {
             Ok(_) => Ok(true),
             Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(false),
@@ -1991,14 +2019,7 @@ impl FanoutBatchDomainService {
         let mut children = BTreeMap::new();
         let mut child_read_errors = BTreeMap::new();
         for child in &batch.child_runs {
-            let id = RunId::new(&child.run_id).map_err(|error| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "run_id",
-                    error.to_string(),
-                    Some(child.run_id.clone()),
-                    None,
-                )
-            })?;
+            let id = parse_run_id(&child.run_id)?;
             match homeboy_core::control_plane::run(&id) {
                 Ok(run) => {
                     children.insert(child.run_id.clone(), run);
@@ -2014,36 +2035,10 @@ impl FanoutBatchDomainService {
     }
 }
 
+/// Record canonical child reads that failed as unavailable issues, without
+/// duplicating a child the batch projection already reported.
 fn append_child_read_errors(
-    report: &mut AgentTaskBatchStatusReport,
-    errors: &BTreeMap<String, String>,
-) {
-    for child in &report.batch.child_runs {
-        let Some(problem) = errors.get(&child.run_id) else {
-            continue;
-        };
-        if report
-            .unavailable_child_runs
-            .iter()
-            .any(|issue| issue.run_id == child.run_id)
-        {
-            continue;
-        }
-        report
-            .unavailable_child_runs
-            .push(AgentTaskBatchChildIssue {
-                task_id: child.task_id.clone(),
-                run_id: child.run_id.clone(),
-                last_known_state: Some(child.state),
-                status_command: child_status_command(&child.run_id),
-                artifacts_command: child_artifacts_command(&child.run_id),
-                problem: format!("canonical child resource unavailable: {problem}"),
-            });
-    }
-}
-
-fn append_artifact_read_errors(
-    report: &mut AgentTaskBatchArtifactsReport,
+    issues: &mut Vec<AgentTaskBatchChildIssue>,
     batch: &AgentTaskBatchRecord,
     errors: &BTreeMap<String, String>,
 ) {
@@ -2051,23 +2046,17 @@ fn append_artifact_read_errors(
         let Some(problem) = errors.get(&child.run_id) else {
             continue;
         };
-        if report
-            .unavailable_child_runs
-            .iter()
-            .any(|issue| issue.run_id == child.run_id)
-        {
+        if issues.iter().any(|issue| issue.run_id == child.run_id) {
             continue;
         }
-        report
-            .unavailable_child_runs
-            .push(AgentTaskBatchChildIssue {
-                task_id: child.task_id.clone(),
-                run_id: child.run_id.clone(),
-                last_known_state: Some(child.state),
-                status_command: child_status_command(&child.run_id),
-                artifacts_command: child_artifacts_command(&child.run_id),
-                problem: format!("canonical child resource unavailable: {problem}"),
-            });
+        issues.push(AgentTaskBatchChildIssue {
+            task_id: child.task_id.clone(),
+            run_id: child.run_id.clone(),
+            last_known_state: Some(child.state),
+            status_command: child_status_command(&child.run_id),
+            artifacts_command: child_artifacts_command(&child.run_id),
+            problem: format!("canonical child resource unavailable: {problem}"),
+        });
     }
 }
 
@@ -2077,6 +2066,17 @@ fn child_status_command(run_id: &str) -> String {
 
 fn child_artifacts_command(run_id: &str) -> String {
     format!("homeboy agent-task artifacts {run_id}")
+}
+
+fn parse_run_id(run_id: &str) -> homeboy_core::Result<RunId> {
+    RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })
 }
 
 pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core::Error {
@@ -5160,14 +5160,7 @@ impl<L: EventLookup> OrchestrationService<L> {
 
 /// Read one canonical run resource from the current controller installation.
 pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
+    let requested_id = parse_run_id(run_id)?;
     if let Some(batch) = batch_resource_from_current_environment(&requested_id)
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?
     {
@@ -5200,14 +5193,7 @@ pub fn review_from_current_environment(
     run_id: &str,
     request: &ControlPlaneRunReviewRequest,
 ) -> homeboy_core::Result<ControlPlaneRunReview> {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
+    let requested_id = parse_run_id(run_id)?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .review(&requested_id, request)
@@ -5235,21 +5221,18 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
-    let requested = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
+    let requested = parse_run_id(run_id)?;
     if AgentTaskBatchStore::from_current_data_root()?
         .batch_path(run_id)
         .exists()
     {
         register();
-        return homeboy_core::control_plane::execute_action(&requested, request)
-            .map_err(control_plane_error_to_homeboy);
+        return homeboy_core::control_plane::execute_action(
+            &requested,
+            request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+        .map_err(control_plane_error_to_homeboy);
     }
     execute_action_from_current_environment_with_delegates(
         run_id,
@@ -5311,61 +5294,38 @@ pub fn execute_fanout_child_resume_action(
     executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
     dispatcher: FanoutResumeDispatcherFactory,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
-    OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action_with_delegates(
-            &requested_id,
-            request,
-            |resolved, parameters, _intent| default_retry(resolved, parameters),
-            move |resolved, action_request| {
-                let rerun_completed_gates = action_request
-                    .parameters
-                    .data
-                    .get("rerun_completed_gates")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| {
-                        homeboy_core::Error::validation_invalid_argument(
-                            "parameters.rerun_completed_gates",
-                            "fanout child resume requires an explicit gate invalidation decision",
-                            None,
-                            None,
-                        )
-                    })?;
-                let cooked = crate::agent_task_service::resume_cook(
-                    resolved,
-                    executor,
-                    dispatcher,
-                    rerun_completed_gates,
-                )?;
-                let aggregate = crate::agent_task_lifecycle::read_aggregate(resolved)?;
-                Ok(crate::agent_task_service::AgentTaskRunResult {
-                    exit_code: cooked.exit_code,
-                    value: aggregate,
-                })
-            },
-            |promotion, _intent| default_promote(promotion),
-        )
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound
-            | ControlPlaneErrorClass::InvalidArgument
-            | ControlPlaneErrorClass::CursorExpired => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "action",
-                    error.message,
-                    None,
-                    None,
-                )
-            }
-            _ => homeboy_core::Error::internal_unexpected(error.message),
-        })
+    execute_action_from_current_environment_with_delegates(
+        run_id,
+        request,
+        |resolved, parameters, _intent| default_retry(resolved, parameters),
+        move |resolved, action_request| {
+            let rerun_completed_gates = action_request
+                .parameters
+                .data
+                .get("rerun_completed_gates")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    homeboy_core::Error::validation_invalid_argument(
+                        "parameters.rerun_completed_gates",
+                        "fanout child resume requires an explicit gate invalidation decision",
+                        None,
+                        None,
+                    )
+                })?;
+            let cooked = crate::agent_task_service::resume_cook(
+                resolved,
+                executor,
+                dispatcher,
+                rerun_completed_gates,
+            )?;
+            let aggregate = crate::agent_task_lifecycle::read_aggregate(resolved)?;
+            Ok(crate::agent_task_service::AgentTaskRunResult {
+                exit_code: cooked.exit_code,
+                value: aggregate,
+            })
+        },
+        |promotion, _intent| default_promote(promotion),
+    )
 }
 
 pub fn execute_promotion_action_from_current_environment(
@@ -5410,14 +5370,7 @@ where
         &ControlPlaneActionRequest,
     ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
-    let requested_id = RunId::new(run_id).map_err(|error| {
-        homeboy_core::Error::validation_invalid_argument(
-            "run_id",
-            error.to_string(),
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
+    let requested_id = parse_run_id(run_id)?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
@@ -7258,18 +7211,6 @@ impl ControlPlaneProvider for RegisteredProvider {
         &self,
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
-    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
-        self.execute_action_with_context(
-            requested_id,
-            request,
-            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-        )
-    }
-
-    fn execute_action_with_context(
-        &self,
-        requested_id: &RunId,
-        request: &ControlPlaneActionRequest,
         context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
@@ -7330,7 +7271,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                 crate::agent_task_batch::AgentTaskBatchState::Succeeded
                     | crate::agent_task_batch::AgentTaskBatchState::Cancelled
             );
-            return homeboy_core::control_plane::execute_delegated_action_with_context(
+            return homeboy_core::control_plane::execute_delegated_action(
                 &observation,
                 &synthetic,
                 request,
@@ -7377,7 +7318,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                                         == ControlPlaneActionAvailability::Available
                             })
                         });
-                    return homeboy_core::control_plane::execute_delegated_action_with_context(
+                    return homeboy_core::control_plane::execute_delegated_action(
                         &observation,
                         &record,
                         request,
@@ -7428,6 +7369,7 @@ impl ControlPlaneProvider for RegisteredProvider {
                     (!available).then(|| {
                         format!("control-plane action is unavailable for run {requested_id}")
                     }),
+                    context,
                     || {
                         let current = observation
                             .get_run(requested_id.as_str())
@@ -7645,6 +7587,7 @@ mod loop_control_plane_tests {
                         homeboy_core::control_plane::execute_action(
                             &first_canonical,
                             &first_request,
+                            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
                         )
                     },
                 )
@@ -7660,6 +7603,7 @@ mod loop_control_plane_tests {
                         homeboy_core::control_plane::execute_action(
                             &second_canonical,
                             &second_request,
+                            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
                         )
                     },
                 )
@@ -7946,8 +7890,12 @@ mod loop_control_plane_tests {
             stale.effect_id =
                 homeboy_control_plane_contract::EffectId("loop-stale-precondition".to_string());
             stale.idempotency_key = "loop-stale-precondition".to_string();
-            let stale_error = homeboy_core::control_plane::execute_action(&canonical, &stale)
-                .expect_err("stale stop must not be admitted");
+            let stale_error = homeboy_core::control_plane::execute_action(
+                &canonical,
+                &stale,
+                &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+            )
+            .expect_err("stale stop must not be admitted");
             assert_eq!(
                 stale_error.class,
                 homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument

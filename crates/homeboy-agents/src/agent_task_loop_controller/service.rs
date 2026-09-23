@@ -88,16 +88,7 @@ pub fn stop_loop(
         },
         confirmed: true,
     };
-    let acknowledgement =
-        homeboy_core::control_plane::execute_action(&run, &request).map_err(|error| match error
-            .class
-        {
-            homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
-            | homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound => {
-                Error::validation_invalid_argument("loop_id", error.message, None, None)
-            }
-            _ => Error::internal_unexpected(error.message),
-        })?;
+    let acknowledgement = execute_loop_action(&run, &request)?;
     if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
         return Err(Error::internal_unexpected(
             acknowledgement
@@ -107,6 +98,24 @@ pub fn stop_loop(
         ));
     }
     Ok((load_controller(loop_id)?, acknowledgement))
+}
+
+fn execute_loop_action(
+    run: &RunId,
+    request: &ControlPlaneActionRequest,
+) -> Result<ControlPlaneActionAcknowledgement> {
+    homeboy_core::control_plane::execute_action(
+        run,
+        request,
+        &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+    )
+    .map_err(|error| match error.class {
+        homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+        | homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound => {
+            Error::validation_invalid_argument("loop_id", error.message, None, None)
+        }
+        _ => Error::internal_unexpected(error.message),
+    })
 }
 
 /// Adapt loop resume to the canonical action service. The CLI supplies only
@@ -138,16 +147,7 @@ pub fn resume_loop(
         },
         confirmed: true,
     };
-    let acknowledgement =
-        homeboy_core::control_plane::execute_action(&run, &request).map_err(|error| match error
-            .class
-        {
-            homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
-            | homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound => {
-                Error::validation_invalid_argument("loop_id", error.message, None, None)
-            }
-            _ => Error::internal_unexpected(error.message),
-        })?;
+    let acknowledgement = execute_loop_action(&run, &request)?;
     if acknowledgement.outcome == ControlPlaneActionOutcome::Failed {
         return Err(Error::internal_unexpected(
             acknowledgement
@@ -390,63 +390,40 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
-    ) -> std::result::Result<
-        ControlPlaneActionDelegateResult,
-        homeboy_control_plane_contract::ControlPlaneError,
-    > {
-        self.execute_with_context(
-            run,
-            request,
-            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-        )
-    }
-
-    fn execute_with_context(
-        &self,
-        run: &RunRecord,
-        request: &ControlPlaneActionRequest,
         context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
-        match request.action {
-            ControlPlaneAction::Cancel => self.stop(run, request, false, context),
-            ControlPlaneAction::Resume => self.resume(run, request, context),
-            _ => Err(
-                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
-                    "agent-task loop supports only cancel and resume",
-                ),
-            ),
-        }
+        self.dispatch(run, request, false, context)
     }
 
     fn recover(
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
-        self.recover_with_context(
-            run,
-            request,
-            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-        )
+        self.dispatch(run, request, true, context)
     }
+}
 
-    fn recover_with_context(
+impl LoopActionDelegate {
+    fn dispatch(
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
+        recovering: bool,
         context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<
         ControlPlaneActionDelegateResult,
         homeboy_control_plane_contract::ControlPlaneError,
     > {
         match request.action {
-            ControlPlaneAction::Cancel => self.stop(run, request, true, context),
+            ControlPlaneAction::Cancel => self.stop(run, request, recovering, context),
             ControlPlaneAction::Resume => self.resume(run, request, context),
             _ => Err(
                 homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
@@ -455,9 +432,7 @@ impl ControlPlaneActionDelegate for LoopActionDelegate {
             ),
         }
     }
-}
 
-impl LoopActionDelegate {
     fn stop(
         &self,
         run: &RunRecord,
