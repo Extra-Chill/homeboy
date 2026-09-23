@@ -7,8 +7,11 @@ use super::{
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
-    commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find, push_at, run_git,
-    CommitOptions, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find,
+    push_at, remote_branch_head_over_push_transport, resolve_default_remote,
+    resolve_effective_push_url, run_git, CommitOptions, GitPushRemote, GitPushTransportClass,
+    GitPushTransportKind, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
+    DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
@@ -421,15 +424,36 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         commit_sha: &str,
         head: &str,
     ) -> Result<AgentTaskPublicationGitTracking> {
+        // Resolve the transport the push will actually use (pushurl beats a
+        // pushInsteadOf rewrite) before mutating anything, so a classified
+        // failure can report it (#10734).
+        let push_remote = resolve_default_remote(Path::new(path));
+        let effective_remote = resolve_effective_push_url(Path::new(path), &push_remote).ok();
         let output = push_at(
             None,
             PushOptions {
                 refspec: Some(format!("{commit_sha}:refs/heads/{head}")),
+                non_interactive: true,
+                timeout: Some(DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT),
                 ..Default::default()
             },
             Some(path),
         )?;
         if !output.success {
+            let classification = classify_git_push_failure(&output.stderr);
+            if classification != GitPushTransportClass::Other {
+                return Err(blocked_publication_push_error(
+                    effective_remote.as_ref().unwrap_or(&GitPushRemote {
+                        remote: push_remote.clone(),
+                        effective_push_url: String::new(),
+                        transport_kind: GitPushTransportKind::Unknown,
+                        host: None,
+                    }),
+                    classification,
+                    &output.stderr,
+                    PushPreflightPhase::Push,
+                ));
+            }
             return Err(Error::git_command_failed(format!(
                 "git push failed: {}",
                 output.stderr
@@ -765,27 +789,132 @@ fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// Read the live remote branch head through the effective push transport
+/// (#10734): the destination the publication push targets (pushurl beats a
+/// `pushInsteadOf` rewrite), contacted the same way the push contacts it —
+/// configured host transport, `GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes`
+/// only without a caller `GIT_SSH_COMMAND`, bounded by the push deadline —
+/// so a read that cannot reach the push destination classifies as the same
+/// recoverable blocked operator action as the push instead of an
+/// unclassified failure.
 fn remote_branch_head(path: &str, head: &str) -> Result<Option<String>> {
-    let output = std::process::Command::new("git")
-        .args([
-            "ls-remote",
-            "--heads",
-            "origin",
-            &format!("refs/heads/{head}"),
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !output.status.success() {
+    let git_root = Path::new(path);
+    let remote = resolve_default_remote(git_root);
+    let read = remote_branch_head_over_push_transport(git_root, &remote, head)?;
+    if !read.success {
+        let classification = classify_git_push_failure(&read.stderr);
+        if classification != GitPushTransportClass::Other {
+            return Err(blocked_publication_push_error(
+                &read.resolved,
+                classification,
+                &read.stderr,
+                PushPreflightPhase::RemoteHeadRead,
+            ));
+        }
         return Err(Error::git_command_failed(format!(
-            "could not read live origin head `{head}` before publication: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "could not read live `{remote}` head `{head}` before publication: {}",
+            read.stderr
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .map(str::to_string))
+    Ok(read.head)
+}
+
+/// Publication step a classified transport failure blocked, distinguishing
+/// the pre-publication remote-head read from the push itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PushPreflightPhase {
+    Push,
+    RemoteHeadRead,
+}
+
+impl PushPreflightPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Push => "push",
+            Self::RemoteHeadRead => "remote_head_read",
+        }
+    }
+
+    fn blocked_action(self) -> &'static str {
+        match self {
+            Self::Push => "publication push to",
+            Self::RemoteHeadRead => "pre-publication read of the remote head from",
+        }
+    }
+}
+
+/// A push (or the pre-publication remote-head read routed over the same push
+/// transport) that failed for a classified transport/authentication reason is
+/// a recoverable blocked operator action, not a candidate failure: the commit
+/// already exists locally, and retrying finalization after recovery resumes
+/// the same verified candidate without a duplicate commit or PR (#10734).
+fn blocked_publication_push_error(
+    resolved: &GitPushRemote,
+    classification: GitPushTransportClass,
+    stderr: &str,
+    phase: PushPreflightPhase,
+) -> Error {
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    let sanitized_stderr = policy.redact_embedded_urls(stderr).trim().to_string();
+    let host = resolved.host.clone().unwrap_or_default();
+    let recovery = push_recovery_hint(resolved, classification, &host);
+    let mut error = Error::internal_unexpected(format!(
+        "{} remote `{}` over {} transport is blocked by a recoverable operator action ({}): retrying finalization after recovery reuses the same verified candidate; {}",
+        phase.blocked_action(),
+        resolved.remote,
+        resolved.transport_kind.label(),
+        classification.label(),
+        sanitized_stderr,
+    ))
+    .with_retryable(true);
+    error.details["field"] = serde_json::json!("publication_push");
+    error.details["git_push_preflight"] = serde_json::json!({
+        "schema": "homeboy/git-push-preflight/v1",
+        "phase": phase.label(),
+        "remote": resolved.remote,
+        "effective_push_url": resolved.effective_push_url,
+        "transport_kind": resolved.transport_kind.label(),
+        "host": resolved.host,
+        "classification": classification.label(),
+        "git_stderr": sanitized_stderr,
+        "recovery": recovery,
+    });
+    error.hints.push(homeboy_error::Hint { message: recovery });
+    error
+}
+
+/// Generic, host-agnostic recovery wording. Homeboy never rewrites the
+/// remote, disables commit signing, or injects credentials; it names the
+/// operator-owned options instead.
+fn push_recovery_hint(
+    resolved: &GitPushRemote,
+    classification: GitPushTransportClass,
+    host: &str,
+) -> String {
+    let retry = "then retry finalization; the same verified candidate is reused without creating a duplicate commit or PR";
+    match classification {
+        GitPushTransportClass::SshAgentRefused
+            if resolved.transport_kind == GitPushTransportKind::Ssh && !host.is_empty() =>
+        {
+            format!(
+                "The SSH agent refused to sign for `{host}` (a user-presence-gated agent refuses while the screen is locked). Unlock the host or authorize the agent, {retry}. Alternatively, keep pushes working by configuring github_hosts.{host}.env with `url.https://{host}/.pushInsteadOf` to route pushes over HTTPS, and remove a redundant remote.{}.pushurl if one is set (Git ignores pushInsteadOf when an explicit pushurl exists).",
+                resolved.remote
+            )
+        }
+        GitPushTransportClass::SshAgentRefused => format!(
+            "The SSH agent refused to sign. Unlock the host or authorize the agent, {retry}."
+        ),
+        GitPushTransportClass::SshAgentUnavailable => format!(
+            "The SSH agent is unavailable (no agent connection could be opened). Restore the agent socket, {retry}."
+        ),
+        GitPushTransportClass::AuthRejected => format!(
+            "The push was rejected by authentication. Restore credential access (authorize the SSH key or refresh the HTTPS credential helper), {retry}."
+        ),
+        GitPushTransportClass::TransportUnreachable => format!(
+            "The push remote is currently unreachable (network, DNS, or proxy; some proxies only reconnect after the session is unlocked). Restore reachability, {retry}."
+        ),
+        GitPushTransportClass::Other => unreachable!("caller filters the Other class"),
+    }
 }
 
 /// Returns `true` when `remote_head` is contained in the finalization candidate
@@ -1082,8 +1211,20 @@ fn deserialize_persisted_value<T: DeserializeOwned>(
 mod remote_base_tests {
     use super::*;
     use std::process::Command;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use homeboy_core::test_support::run_git_command as git;
+
+    /// `GIT_SSH_COMMAND` and the `GIT_CONFIG_*` rewrite layers are
+    /// process-global, so tests that set them must not overlap.
+    static PUSH_TRANSPORT_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn push_transport_env_lock() -> MutexGuard<'static, ()> {
+        PUSH_TRANSPORT_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp repo");
@@ -1229,7 +1370,22 @@ mod remote_base_tests {
     fn failed_push_does_not_mutate_branch_tracking() {
         let (repo, origin) = publication_repo();
         let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
-        drop(origin);
+        // A rejecting pre-receive hook fails the push with non-transport
+        // evidence, so the generic `git push failed` path is exercised.
+        std::fs::write(
+            origin.path().join("hooks/pre-receive"),
+            "#!/bin/sh\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                origin.path().join("hooks/pre-receive"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
 
         let error = RealAgentTaskPrFinalizationBackend
             .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
@@ -1237,6 +1393,234 @@ mod remote_base_tests {
 
         assert!(error.message.contains("git push failed"));
         assert!(upstream(repo.path()).is_err());
+    }
+
+    #[test]
+    fn ssh_agent_refused_push_is_a_retryable_blocked_action_and_retry_reuses_the_candidate() {
+        let _env = push_transport_env_lock();
+        // The remote is addressed through an SSH-shaped URL so the push goes
+        // through GIT_SSH_COMMAND, where a fixture agent refuses to sign
+        // while the screen is locked (#10734).
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let repo = repo();
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@git.example.test:acme/repo.git",
+            ],
+        );
+        git(
+            repo.path(),
+            &["push", origin.path().to_str().unwrap(), "main"],
+        );
+        git(repo.path(), &["checkout", "-b", "feature"]);
+        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
+        git(repo.path(), &["add", "feature.txt"]);
+        git(repo.path(), &["commit", "-m", "feature"]);
+        let path = repo.path().to_str().unwrap().to_string();
+        let commit_sha = git_output(&path, &["rev-parse", "HEAD"]).unwrap();
+
+        let fixture = tempfile::tempdir().unwrap();
+        let ssh_fixture = fixture.path().join("refusing-ssh");
+        std::fs::write(
+            &ssh_fixture,
+            "#!/bin/sh\nprintf '%s\\n' 'sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation' >&2\nprintf '%s\\n' 'git@git.example.test: Permission denied (publickey).' >&2\nexit 255\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ssh_fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _fixture_ssh = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_SSH_COMMAND",
+            ssh_fixture.to_str().unwrap(),
+        );
+
+        let error = RealAgentTaskPrFinalizationBackend
+            .push_branch(&path, &commit_sha, "feature")
+            .expect_err("agent refusal blocks publication");
+
+        assert_eq!(error.retryable, Some(true));
+        let preflight = &error.details["git_push_preflight"];
+        assert_eq!(preflight["schema"], "homeboy/git-push-preflight/v1");
+        assert_eq!(preflight["remote"], "origin");
+        assert_eq!(preflight["classification"], "ssh_agent_refused");
+        assert_eq!(preflight["transport_kind"], "ssh");
+        assert_eq!(preflight["host"], "git.example.test");
+        assert_eq!(
+            preflight["effective_push_url"],
+            "git@git.example.test:acme/repo.git"
+        );
+        assert!(preflight["git_stderr"]
+            .as_str()
+            .unwrap()
+            .contains("agent refused operation"));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("pushInsteadOf")
+                && hint.message.to_ascii_lowercase().contains("unlock")
+                && hint.message.contains("github_hosts.git.example.test.env")));
+
+        // The blocked push leaves branch tracking untouched and the origin
+        // never receives the branch.
+        assert!(upstream(repo.path()).is_err());
+        assert!(git_output(
+            &path,
+            &["rev-parse", "--verify", "refs/remotes/origin/feature"]
+        )
+        .is_err());
+        assert!(git_output(
+            origin.path().to_str().unwrap(),
+            &["rev-parse", "--verify", "refs/heads/feature"],
+        )
+        .is_err());
+
+        // Operator recovery: route pushes over a working transport with the
+        // same env-configured rewrite the host policy would apply, then
+        // retry finalization. The retry pushes the same commit exactly once.
+        drop(_fixture_ssh);
+        let _count = homeboy_core::test_support::EnvVarGuard::set("GIT_CONFIG_COUNT", "1");
+        let _key = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_CONFIG_KEY_0",
+            format!("url.{}.pushInsteadOf", origin.path().display()),
+        );
+        let _value = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_CONFIG_VALUE_0",
+            "git@git.example.test:acme/repo.git",
+        );
+
+        let tracking = RealAgentTaskPrFinalizationBackend
+            .push_branch(&path, &commit_sha, "feature")
+            .expect("retry publishes the same candidate");
+
+        assert_eq!(tracking.verified_remote_sha, commit_sha);
+        assert_eq!(tracking.remote, "origin");
+        assert_eq!(
+            upstream(repo.path()).unwrap(),
+            "refs/remotes/origin/feature"
+        );
+        assert_eq!(
+            git_output(
+                origin.path().to_str().unwrap(),
+                &["rev-parse", "refs/heads/feature"],
+            )
+            .unwrap(),
+            commit_sha
+        );
+        // Exactly one commit reached the remote branch beyond the pushed
+        // base — no duplicate.
+        assert_eq!(
+            git_output(
+                origin.path().to_str().unwrap(),
+                &["rev-list", "--count", "main..refs/heads/feature"],
+            )
+            .unwrap(),
+            "1"
+        );
+        // The remote-head reconciliation finalization relies on now sees the
+        // candidate already published — no push required — with a clean
+        // worktree, so a further retry neither commits nor pushes.
+        let main_sha = git_output(&path, &["rev-parse", "main"]).unwrap();
+        assert_eq!(
+            RealAgentTaskPrFinalizationBackend
+                .candidate_state(&path, &base("main", &main_sha), "feature")
+                .expect("reconciled candidate"),
+            AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["feature.txt".to_string()],
+                push_required: false,
+            }
+        );
+    }
+
+    #[test]
+    fn remote_head_read_honors_push_instead_of_over_the_fetch_url() {
+        let _env = push_transport_env_lock();
+        // The remote is addressed through an SSH-shaped fetch URL whose
+        // transport is down; the operator routes pushes to a reachable local
+        // destination with the same env-configured rewrite the host policy
+        // would apply. The pre-publication remote-head read must follow the
+        // effective push URL, not the fetch URL (#10734).
+        let origin = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        let repo = repo();
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@git.example.test:acme/repo.git",
+            ],
+        );
+        git(
+            repo.path(),
+            &["push", origin.path().to_str().unwrap(), "main"],
+        );
+        let path = repo.path().to_str().unwrap().to_string();
+        let main_sha = git_output(&path, &["rev-parse", "main"]).unwrap();
+
+        let fixture = tempfile::tempdir().unwrap();
+        let ssh_fixture = fixture.path().join("unreachable-ssh");
+        std::fs::write(
+            &ssh_fixture,
+            "#!/bin/sh\nprintf '%s\\n' 'ssh: connect to host git.example.test port 22: Connection refused' >&2\nexit 255\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ssh_fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _fixture_ssh = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_SSH_COMMAND",
+            ssh_fixture.to_str().unwrap(),
+        );
+
+        // While the fetch URL's transport is down, the read fails with the
+        // same classified, retryable blocked action the push reports, with a
+        // phase distinguishing the remote-head read from the push.
+        let error = remote_branch_head(&path, "main").expect_err("fetch URL transport is down");
+        assert_eq!(error.retryable, Some(true));
+        let preflight = &error.details["git_push_preflight"];
+        assert_eq!(preflight["schema"], "homeboy/git-push-preflight/v1");
+        assert_eq!(preflight["phase"], "remote_head_read");
+        assert_eq!(preflight["classification"], "transport_unreachable");
+        assert_eq!(preflight["remote"], "origin");
+        assert_eq!(preflight["transport_kind"], "ssh");
+        assert_eq!(preflight["host"], "git.example.test");
+        assert_eq!(
+            preflight["effective_push_url"],
+            "git@git.example.test:acme/repo.git"
+        );
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("Restore reachability")));
+
+        // Operator recovery: the rewrite routes the read to the effective
+        // push destination, which is reachable, without Git ever contacting
+        // the dead fetch URL.
+        drop(_fixture_ssh);
+        let _count = homeboy_core::test_support::EnvVarGuard::set("GIT_CONFIG_COUNT", "1");
+        let _key = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_CONFIG_KEY_0",
+            format!("url.{}.pushInsteadOf", origin.path().display()),
+        );
+        let _value = homeboy_core::test_support::EnvVarGuard::set(
+            "GIT_CONFIG_VALUE_0",
+            "git@git.example.test:acme/repo.git",
+        );
+
+        assert_eq!(
+            remote_branch_head(&path, "main").expect("reads the effective push destination"),
+            Some(main_sha)
+        );
     }
 
     #[test]

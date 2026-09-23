@@ -460,6 +460,8 @@ mod tools {
                 token: None,
                 refspec: optional_string(input, &["refspec"]).map(str::to_string),
                 strip_extraheader: bool_input(input, "strip_extraheader"),
+                non_interactive: false,
+                timeout: None,
             },
             workspace_path_for(input, true).as_deref(),
         ))
