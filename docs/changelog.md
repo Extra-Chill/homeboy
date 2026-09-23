@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.385.3] - 2026-09-23
+
+### Fixed
+- stop reporting an idle partial sweep as a retention failure
+- keep --detach-after-handoff as a deprecated no-op
+- let a stalled rotation carry its patch forward
+
 ## [0.385.2] - 2026-09-23
 
 ### Fixed
