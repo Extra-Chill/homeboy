@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.49.1] - 2026-09-23
+
+### Fixed
+- report locked Composer versions in deps status
+
 ## [3.49.0] - 2026-09-23
 
 ### Added
