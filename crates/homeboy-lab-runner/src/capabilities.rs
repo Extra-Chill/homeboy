@@ -726,7 +726,13 @@ fn batch_probe_script(
             .map(|arg| shell::quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ");
-        lines.push(format!("if {argv} >/dev/null 2>&1; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t{}\\n'; fi", shell::quote_arg(&probe.diagnostic_env.join(","))));
+        // A failure carries its exit status and a bounded, single-line tail of
+        // the probe's own output, so a refusal names the cause instead of only
+        // the environment variables that might be involved.
+        lines.push(format!(
+            "__homeboy_toolchain_output=$({{ {argv}; }} 2>&1); __homeboy_toolchain_status=$?; if [ \"$__homeboy_toolchain_status\" -eq 0 ]; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t%s (exit %s: %s)\\n' {} \"$__homeboy_toolchain_status\" \"$(printf '%s' \"$__homeboy_toolchain_output\" | tr '\\t\\r\\n' '   ' | tail -c 300)\"; fi",
+            shell::quote_arg(&probe.diagnostic_env.join(","))
+        ));
     }
     lines.push("exit 0".to_string());
     lines.join("\n")
