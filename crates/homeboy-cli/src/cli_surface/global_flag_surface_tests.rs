@@ -31,6 +31,7 @@ fn root_global_flag_surface_is_pinned() {
             "allow-dirty-lab-workspace",
             "artifact-root",
             "delete-workspace-on-failure",
+            "detach-after-handoff",
             "lab-env-json",
             "notification-route",
             "notification-transport",
