@@ -164,6 +164,11 @@ function probeFailure(result, identity, probeName) {
 		return verdict('configuration_failure', identity, 'Use an OpenCode CLI that keeps readiness command output within the declared bound.', false, `${probeName}_output_limit`);
 	}
 	if (result.error?.code === 'ETIMEDOUT' || result.signal) {
+		// OpenCode retries provider quota and billing rejections internally and
+		// logs each attempt to stderr, so a probe can time out on a definitive
+		// provider verdict. Classify from the output captured before the kill.
+		const providerVerdict = interruptedProviderVerdict(output, identity, probeName);
+		if (providerVerdict) return providerVerdict;
 		return verdict('transient_failure', identity, 'Retry the bounded OpenCode readiness probe; the local process did not complete.', true, `${probeName}_interrupted`);
 	}
 	if (result.error) {
@@ -192,6 +197,17 @@ function probeFailure(result, identity, probeName) {
 			return verdict('indeterminate', identity, 'OpenCode could not prove that the selected provider model is usable; do not treat catalog discovery as provider readiness.', true, 'model_probe_unclassified');
 		}
 		return verdict('configuration_failure', identity, 'Configure a compatible OpenCode CLI and provider route, then retry.', false, `${probeName}_rejected`);
+	}
+	return null;
+}
+
+function interruptedProviderVerdict(output, identity, probeName) {
+	if (probeName !== 'model_execution') return null;
+	if (OPENCODE_ACCOUNT_BLOCKED_PATTERN.test(output)) {
+		return verdict('provider_account_blocked', identity, 'Restore provider account access or billing for the selected model, then retry.', false, 'provider_account_blocked');
+	}
+	if (OPENCODE_QUOTA_PATTERN.test(output)) {
+		return verdict('provider_quota', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
 	}
 	return null;
 }

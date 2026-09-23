@@ -171,6 +171,16 @@ try {
 	]) });
 	assert.equal(transient.classification, 'transient_failure');
 	assert.equal(transient.retryable, true);
+	// OpenCode retries a quota rejection until the probe is killed; the stderr
+	// captured before the timeout still carries the provider verdict.
+	const retryLog = 'level=ERROR message="stream error" providerID=openai error.error="AI_APICallError: The usage limit has been reached"\n';
+	const interruptedQuota = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: retryLog })) });
+	assert.equal(interruptedQuota.classification, 'provider_quota');
+	assert.equal(interruptedQuota.reason, 'provider_quota_or_rate_limit');
+	assert.equal(interruptedQuota.retryable, true);
+	const interruptedSilent = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: '' })) });
+	assert.equal(interruptedSilent.classification, 'transient_failure');
+	assert.equal(interruptedSilent.reason, 'model_execution_interrupted');
 	const outputLimit = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe([
 		{ args: ['--version'], result: { error: { code: 'ENOBUFS' }, stdout: '', stderr: '' } },
 	]) });
