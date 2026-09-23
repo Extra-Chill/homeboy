@@ -1,0 +1,11 @@
+{
+  "name": "homeboy-extension-wordpress-wp-scripts-toolchain",
+  "private": true,
+  "description": "Isolated @wordpress/scripts install for the wordpress extension's JS build toolchain (homeboy-extensions#2870). Deliberately its own npm project, separate from wordpress/package.json: @wordpress/scripts pins its own eslint (8.x, classic .eslintrc config) and the extension's own lint tooling in wordpress/package.json pins a newer eslint (9.x, flat config) for `homeboy lint`. A single shared node_modules tree hoists one eslint to the top level and shadows the other wherever a nested dependency (resolve-bin, used internally by `wp-scripts lint-js`) resolves `eslint` from its own hoisted location instead of @wordpress/scripts' nested copy -- verified directly while building this extension. Isolating the install keeps @wordpress/scripts' entire dependency tree (webpack, babel, eslint, stylelint, jest, ...) self-contained, exactly like wordpress/composer.json keeps the PHP toolchain (phpcs, phpstan, wp-cli) out of any consumer's own dependency tree.",
+  "devDependencies": {
+    "@wordpress/scripts": "30.27.0"
+  },
+  "overrides": {
+    "typescript": "5.9.3"
+  }
+}

@@ -601,6 +601,82 @@ Node.js behavior shared with the `nodejs` build runner
 (`nodejs/scripts/lib/local-workspace-deps.sh`); it carries no WordPress
 specifics.
 
+### wp-scripts (JavaScript build toolchain)
+
+The extension ships its own pinned `@wordpress/scripts` (`30.27.0`, the
+latest patch on the `30.x` line five of the ten Extra Chill plugins already
+track via `^30.15.0`), the same way it ships `phpcs`, `phpstan`, and
+`wp-cli` for PHP. A component that invokes `wp-scripts` from an npm script
+(`"build": "wp-scripts build"`, `"lint:js": "wp-scripts lint-js"`,
+`"test:js": "wp-scripts test-unit-js"`, `"lint:css": "wp-scripts
+lint-style"`, ...) no longer has to vendor `@wordpress/scripts` itself.
+
+**Resolution order**, checked once per build/`npm run` invocation:
+
+1. `<component>/node_modules/.bin/wp-scripts` — the component's own,
+   Composer-style: if it exists, it is used, unchanged, and the extension's
+   copy is never consulted. A component that still declares
+   `@wordpress/scripts` in `devDependencies` builds exactly as it does
+   today. No flag day — nothing about this contract requires a component to
+   change anything until it opts in.
+2. The extension's own pinned copy, only when step 1 finds nothing.
+
+The pinned copy lives in its own isolated npm project at
+`wordpress/toolchains/wp-scripts/`, **not** in `wordpress/node_modules`
+alongside the extension's own lint tooling. `wordpress/package.json` pins
+`eslint` 9.x + `@wordpress/eslint-plugin` for `homeboy lint`'s flat-config
+ESLint runner; `@wordpress/scripts` pins its own `eslint` 8.x for classic
+`.eslintrc`-config `wp-scripts lint-js`. A single shared `node_modules` tree
+hoists one `eslint` to the top level, and `wp-scripts lint-js` resolves
+`eslint` via the `resolve-bin` package -- itself hoisted -- so it picks up
+whichever `eslint` npm hoisted rather than `@wordpress/scripts`'s own nested
+copy. This is not theoretical: it was hit and confirmed while building this
+feature (`resolve-bin` found the extension's flat-config `eslint` 9.x and
+`wp-scripts lint-js` failed with "You're using eslint.config.js, some
+command line flags are no longer available"). The isolated install sidesteps
+it entirely, the same way `wordpress/composer.json`'s own dependency tree
+never collides with a consumer's Composer packages.
+
+**Consumer contract for a custom `webpack.config.js`.** Seven of the ten
+Extra Chill plugins have one, and all seven begin the same way:
+
+```js
+const defaultConfig = require( '@wordpress/scripts/config/webpack.config' );
+```
+
+That `require()` resolves relative to the consumer's own `node_modules` —
+removing the `@wordpress/scripts` dependency breaks it with
+`MODULE_NOT_FOUND` unless something else supplies the module. When the
+extension is supplying `wp-scripts` (resolution step 2 above), it exports
+`HOMEBOY_WP_SCRIPTS_WEBPACK_CONFIG`, the absolute path to its own
+`@wordpress/scripts/config/webpack.config.js`. The one-line change a
+consumer makes when it drops its own `@wordpress/scripts` dependency:
+
+```js
+const defaultConfig = require( process.env.HOMEBOY_WP_SCRIPTS_WEBPACK_CONFIG || '@wordpress/scripts/config/webpack.config' );
+```
+
+The `|| '@wordpress/scripts/...'` fallback keeps the same line working
+unchanged for any component that still vendors its own copy (the env var is
+simply unset in that case, resolution step 1 above already used the local
+binary, and this `require()` never runs against anything but the
+component's own installed package).
+
+The extension also exports `NODE_PATH` (its own `node_modules`, appended
+after whatever the component already has — Node consults `NODE_PATH` last,
+so this can never shadow a package the component genuinely has installed)
+as defense in depth: an unmodified `require( '@wordpress/scripts/config/webpack.config' )`
+that has not adopted the env var yet still resolves. This is not the
+documented contract to build against going forward — the env var is — but it
+means dropping the dependency and rewriting the `require()` line do not have
+to land in the same commit.
+
+Components with no custom `webpack.config.js` at all (three of the ten) need
+no changes beyond dropping the `devDependencies` entry: `wp-scripts build`'s
+own default config resolves its `src/index.js` entry relative to the
+directory it runs in (the component's own working directory), independent
+of where the `wp-scripts` binary itself lives.
+
 ## Bench runner
 
 Bench workloads run through WP Codebox. WP Codebox owns the disposable WordPress

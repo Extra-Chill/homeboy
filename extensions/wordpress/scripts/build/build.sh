@@ -87,6 +87,12 @@ homeboy_runner_harness_init --component-alias PLUGIN_PATH
 EXTENSION_COLLECTION_PATH="$(dirname "$EXTENSION_PATH")"
 LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${EXTENSION_COLLECTION_PATH}/nodejs/scripts/lib/local-workspace-deps.sh}"
 
+# Resolves `wp-scripts` to the extension's own pinned @wordpress/scripts
+# whenever a component invokes it without vendoring a local copy (#2870).
+WP_SCRIPTS_TOOLCHAIN_HELPER="${HOMEBOY_RUNTIME_WP_SCRIPTS_TOOLCHAIN:-${SCRIPT_DIR}/../lib/wp-scripts-toolchain.sh}"
+# shellcheck source=../lib/wp-scripts-toolchain.sh
+source "$WP_SCRIPTS_TOOLCHAIN_HELPER"
+
 # Output functions
 print_status() {
     echo -e "${BLUE}[BUILD]${NC} $1"
@@ -469,7 +475,17 @@ install_frontend_dependencies() {
 
     case "$build_tool" in
         wordpress-scripts)
-            expected_bin="wp-scripts"
+            # Only require a LOCAL wp-scripts binary when the component
+            # actually vendors @wordpress/scripts. A component that invokes
+            # `wp-scripts` from an npm script without declaring the
+            # dependency is relying on the wordpress extension's own pinned
+            # copy (applied later via
+            # homeboy_wordpress_apply_extension_wp_scripts_toolchain) and
+            # must not be forced into an install loop chasing a binary that
+            # was never going to land in its own node_modules (#2870).
+            if homeboy_wordpress_package_declares_wp_scripts "package.json"; then
+                expected_bin="wp-scripts"
+            fi
             ;;
         vite)
             expected_bin="vite"
@@ -578,9 +594,13 @@ build_frontend_assets() {
 
     # Determine build tool
     local build_tool=""
-    if grep -q "@wordpress/scripts" "package.json"; then
+    if grep -q "@wordpress/scripts" "package.json" || homeboy_wordpress_package_scripts_invoke_wp_scripts "package.json"; then
         build_tool="wordpress-scripts"
-        print_status "Detected @wordpress/scripts build tool"
+        if homeboy_wordpress_package_declares_wp_scripts "package.json"; then
+            print_status "Detected @wordpress/scripts build tool"
+        else
+            print_status "Detected wp-scripts build tool with no local @wordpress/scripts dependency; will use the wordpress extension's pinned copy"
+        fi
     elif grep -q '"vite"' "package.json"; then
         build_tool="vite"
         print_status "Detected Vite build tool"
@@ -605,6 +625,13 @@ build_frontend_assets() {
     if ! apply_local_workspace_overrides; then
         print_error "Local workspace dependency override failed"
         exit 1
+    fi
+
+    # Hand `wp-scripts` off to the extension's pinned copy when this
+    # component has none of its own. No-op when a local
+    # node_modules/.bin/wp-scripts already exists (#2870).
+    if [ "$build_tool" = "wordpress-scripts" ]; then
+        homeboy_wordpress_apply_extension_wp_scripts_toolchain "$(pwd)" "$EXTENSION_PATH"
     fi
 
     # Run the build command
@@ -671,13 +698,19 @@ build_nested_packages() {
         if grep -q '"build"' "package.json"; then
             # Detect common build tools for better stale node_modules handling.
             local nested_build_tool=""
-            if grep -q "@wordpress/scripts" "package.json"; then
+            if grep -q "@wordpress/scripts" "package.json" || homeboy_wordpress_package_scripts_invoke_wp_scripts "package.json"; then
                 nested_build_tool="wordpress-scripts"
             elif grep -q '"vite"' "package.json"; then
                 nested_build_tool="vite"
             fi
 
             install_frontend_dependencies "$nested_build_tool" "  "
+
+            # Hand `wp-scripts` off to the extension's pinned copy when this
+            # nested package has none of its own (#2870).
+            if [ "$nested_build_tool" = "wordpress-scripts" ]; then
+                homeboy_wordpress_apply_extension_wp_scripts_toolchain "$(pwd)" "$EXTENSION_PATH"
+            fi
 
             # Run build
             print_status "  Running build for $pkg_dir..."

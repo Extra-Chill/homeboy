@@ -205,7 +205,10 @@
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",
     "test:replay-envelope": "node tests/replay-envelope-smoke.js",
-    "fixture-workload-matrix": "node scripts/fixture-workload-matrix.mjs"
+    "fixture-workload-matrix": "node scripts/fixture-workload-matrix.mjs",
+    "test:wp-scripts-extension-toolchain-backward-compat": "bash scripts/build/wp-scripts-extension-toolchain-backward-compat-smoke.sh",
+    "test:wp-scripts-extension-toolchain-no-local": "bash scripts/build/wp-scripts-extension-toolchain-no-local-smoke.sh",
+    "test:wp-scripts-extension-toolchain-custom-webpack": "bash scripts/build/wp-scripts-extension-toolchain-custom-webpack-smoke.sh"
   },
   "devDependencies": {
     "@wordpress/eslint-plugin": "^25.3.0",

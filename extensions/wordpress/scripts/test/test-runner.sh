@@ -32,6 +32,13 @@ if [ -f "$PROJECT_SCRIPTS_HELPER" ]; then
     source "$PROJECT_SCRIPTS_HELPER"
 fi
 
+# Resolves `wp-scripts` to the extension's own pinned @wordpress/scripts for
+# declared JS test scripts (`wp-scripts test-unit-js`) that a component
+# invokes without vendoring a local copy (#2870).
+WP_SCRIPTS_TOOLCHAIN_HELPER="${HOMEBOY_RUNTIME_WP_SCRIPTS_TOOLCHAIN:-${SCRIPT_DIR}/../lib/wp-scripts-toolchain.sh}"
+# shellcheck source=../lib/wp-scripts-toolchain.sh
+source "$WP_SCRIPTS_TOOLCHAIN_HELPER"
+
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Extension path: $EXTENSION_PATH"
     echo "DEBUG: Component: ${HOMEBOY_COMPONENT_ID:-none}"
@@ -902,6 +909,11 @@ homeboy_wordpress_run_declared_js_test_files() {
         echo "ERROR: could not hydrate dependencies for owning package ${package_root}; install its lockfile dependencies before running '${JS_TEST_SCRIPT}'" >&2
         return 2
     fi
+
+    # Hand `wp-scripts` off to the extension's pinned copy when the owning
+    # package has none of its own. No-op when a local
+    # node_modules/.bin/wp-scripts already exists (#2870).
+    homeboy_wordpress_apply_extension_wp_scripts_toolchain "$package_root" "$EXTENSION_PATH"
 
     echo "Running declared JavaScript tests..."
     echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"

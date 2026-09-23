@@ -95,6 +95,17 @@ jobs:
           composer install --no-interaction --no-progress --prefer-dist
           npm install
 
+      # Isolated from wordpress/'s own npm install (see
+      # wordpress/toolchains/wp-scripts/package.json) so this pin's
+      # dependency tree never collides with the extension's own lint
+      # tooling. Without this install, the wp-scripts-extension-toolchain-*
+      # self-checks degrade to a SKIP rather than exercising the real
+      # toolchain (homeboy-extensions#2870).
+      - name: Install wordpress extension's wp-scripts toolchain
+        if: matrix.component == 'wordpress'
+        working-directory: wordpress/toolchains/wp-scripts
+        run: npm install
+
       - name: Run lint self-checks
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
