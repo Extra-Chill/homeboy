@@ -119,6 +119,27 @@ impl DependencyProvider {
         }
     }
 
+    /// The package manager this provider installs with, for labelling results.
+    ///
+    /// Adapter and manifest providers declare their package manager statically,
+    /// so reading it runs nothing. This matters because their `status` command
+    /// is a readiness probe, not an identity lookup: for pnpm and yarn it is
+    /// `install --frozen-lockfile --offline`, which can only succeed against a
+    /// populated store and therefore fails on every fresh checkout — exactly
+    /// the checkout an install is about to populate. Extension and script
+    /// providers only report their package manager through `status`.
+    pub(crate) fn package_manager_id(&self, component: &Component, path: &Path) -> Result<String> {
+        match self {
+            DependencyProvider::Manifest(provider) => Ok(provider.manifest.provider.clone()),
+            DependencyProvider::Adapter(provider) => {
+                Ok(provider.adapter.package_manager().id.clone())
+            }
+            DependencyProvider::Extension(_) | DependencyProvider::ComponentScript(_) => self
+                .status(component, path, None)
+                .map(|status| status.package_manager),
+        }
+    }
+
     pub(crate) fn handles_package(
         &self,
         component: &Component,

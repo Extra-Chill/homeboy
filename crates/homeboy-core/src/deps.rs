@@ -774,9 +774,9 @@ pub fn install_for_resolved(
     let mut installs = Vec::new();
     let mut package_managers = Vec::new();
     for provider in providers {
-        let status = provider.status(component, &dependency_root, None)?;
+        let package_manager = provider.package_manager_id(component, &dependency_root)?;
         if let Some(result) = provider.install(component, &dependency_root)? {
-            package_managers.push(status.package_manager);
+            package_managers.push(package_manager);
             installs.push(result);
         }
     }
@@ -1455,6 +1455,71 @@ mod tests {
 
             assert!(outcomes.is_empty());
             assert!(!project.path().join("node_modules").exists());
+        });
+    }
+
+    /// A package manager's `status` command is a readiness probe. For pnpm and
+    /// yarn it is `install --frozen-lockfile --offline`, which fails on any
+    /// checkout whose store is empty — every fresh CI runner. Installing must
+    /// not depend on that probe succeeding, because populating the store is
+    /// exactly what the install is for.
+    #[test]
+    fn install_runs_even_when_the_readiness_probe_fails_on_a_fresh_checkout() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+            std::fs::write(
+                root.join("index.json"),
+                r#"{
+                    "schema":"homeboy-extension/dependency-adapter-index/v1",
+                    "manifests":[{"id":"offline-probe","ecosystem":"nodejs","path":"examples/offline-probe.json"}]
+                }"#,
+            )
+            .expect("adapter index");
+            std::fs::write(
+                root.join("examples/offline-probe.json"),
+                r#"{
+                    "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                    "id":"offline-probe",
+                    "version":1,
+                    "ecosystem":"nodejs",
+                    "project_signals":{"root_files":["package.json"]},
+                    "package_managers":[{
+                        "id":"offline-probe-pm",
+                        "selection":{"priority":1,"default":true,"files":["offline-probe.lock"]},
+                        "commands":{
+                            "status":{"command":"echo 'missing from the store, cannot download offline' >&2; exit 1","success_exit_codes":[0]},
+                            "install":{"command":"touch installed.marker","success_exit_codes":[0]}
+                        },
+                        "outputs":[{"path":"installed.marker","kind":"file"}]
+                    }]
+                }"#,
+            )
+            .expect("adapter manifest");
+
+            let project = tempfile::tempdir().expect("project");
+            std::fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"fresh-checkout","private":true}"#,
+            )
+            .expect("package.json");
+            std::fs::write(project.path().join("offline-probe.lock"), "").expect("lockfile");
+            let component = Component {
+                id: "fresh-checkout".to_string(),
+                local_path: project.path().display().to_string(),
+                ..Default::default()
+            };
+
+            let result = install_for_resolved(&component, project.path())
+                .expect("a failing readiness probe must not block the install")
+                .expect("the project exposes a dependency provider");
+
+            assert_eq!(result.package_manager, "offline-probe-pm");
+            assert_eq!(result.installs.len(), 1);
+            assert_eq!(result.installs[0].status, Some(0));
+            assert!(project.path().join("installed.marker").is_file());
         });
     }
 
