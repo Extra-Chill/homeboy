@@ -4,6 +4,9 @@ use homeboy::runner::runners::{
     self as runner, ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerExecOutput,
 };
 use serde_json::Value;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::Duration;
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
@@ -240,7 +243,10 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 dry_run,
             };
             let runner_id = options.runner_id.clone();
-            map_refresh_homeboy(&runner_id, runner::refresh_homeboy_binary(options))
+            let progress = RefreshProgress::admit(&runner_id, &options)?;
+            let result = runner::refresh_homeboy_binary(options);
+            let admission = progress.finish();
+            map_refresh_homeboy_with_admission(result, admission)
         }
         RunnerCommand::DevSync {
             runner_id,
@@ -683,13 +689,102 @@ fn runner_exec_command_output(
     super::types::RunnerExecutionCommandOutput { output, actionable }
 }
 
-fn map_refresh_homeboy(
-    runner_id: &str,
+struct RefreshRunAdmission {
+    store: ObservationStore,
+    run_id: String,
+}
+
+struct RefreshProgress {
+    admission: RefreshRunAdmission,
+    stop: Option<Sender<()>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl RefreshProgress {
+    fn admit(
+        runner_id: &str,
+        options: &runner::HomeboyBinaryRefreshOptions,
+    ) -> homeboy::core::Result<Self> {
+        let store = ObservationStore::open_initialized()?;
+        let requested_mode = match &options.mode {
+            runner::HomeboyBinaryRefreshMode::Materialize => "materialize",
+            runner::HomeboyBinaryRefreshMode::Select { .. } => "select",
+        };
+        let run = store.start_run(
+            NewRunRecord::builder("runner_refresh_homeboy")
+                .component_id(runner_id)
+                .command("homeboy runner refresh-homeboy")
+                .current_homeboy_version()
+                .metadata(serde_json::json!({
+                    "dry_run": options.dry_run,
+                    "progress": {
+                        "phase": "refresh",
+                        "requested_mode": requested_mode,
+                        "state": "running",
+                        "heartbeat": true
+                    }
+                }))
+                .build(),
+        )?;
+        let run_id = run.id;
+        eprintln!(
+            "HOMEBOY_REFRESH_PROGRESS {{\"run_id\":\"{}\",\"phase\":\"refresh\",\"requested_mode\":\"{}\",\"state\":\"running\"}}",
+            run_id, requested_mode
+        );
+
+        let (stop, worker_stop) = mpsc::channel();
+        let heartbeat_run_id = run_id.clone();
+        let heartbeat_mode = requested_mode.to_string();
+        let heartbeat_dry_run = options.dry_run;
+        let worker = thread::spawn(move || loop {
+            match worker_stop.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            let Ok(store) = ObservationStore::open_initialized() else {
+                continue;
+            };
+            let _ = store.update_running_run_metadata(
+                &heartbeat_run_id,
+                serde_json::json!({
+                    "dry_run": heartbeat_dry_run,
+                    "progress": {
+                        "phase": "refresh",
+                        "requested_mode": heartbeat_mode.as_str(),
+                        "state": "running",
+                        "heartbeat": true
+                    }
+                }),
+            );
+            eprintln!(
+                    "HOMEBOY_REFRESH_PROGRESS {{\"run_id\":\"{}\",\"phase\":\"refresh\",\"requested_mode\":\"{}\",\"state\":\"running\",\"heartbeat\":true}}",
+                    heartbeat_run_id, heartbeat_mode
+                );
+        });
+
+        Ok(Self {
+            admission: RefreshRunAdmission { store, run_id },
+            stop: Some(stop),
+            worker: Some(worker),
+        })
+    }
+
+    fn finish(mut self) -> RefreshRunAdmission {
+        self.stop.take().map(|stop| drop(stop));
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        self.admission
+    }
+}
+
+fn map_refresh_homeboy_with_admission(
     result: CmdResult<runner::HomeboyBinaryRefreshOutput>,
+    admission: RefreshRunAdmission,
 ) -> CmdResult<RunnerCommandOutput> {
     match result {
         Err(mut error) => {
-            let artifacts = persist_refresh_error_artifacts(runner_id, &error)?;
+            let artifacts = persist_refresh_error_artifacts(&error, admission)?;
             error.details["artifacts"] =
                 serde_json::to_value(artifacts).map_err(|serialization| {
                     homeboy::core::Error::internal_json(
@@ -700,7 +795,7 @@ fn map_refresh_homeboy(
             Err(error)
         }
         Ok((mut output, exit_code)) => {
-            let artifacts = persist_refresh_artifacts(&output, exit_code)?;
+            let artifacts = persist_refresh_artifacts(&output, exit_code, admission)?;
             output.artifacts = Some(artifacts);
             let actionable = output.failure.as_ref().map(|failure| {
                 let mut metadata = failure
@@ -755,19 +850,11 @@ fn map_refresh_homeboy(
 fn persist_refresh_artifacts(
     output: &runner::HomeboyBinaryRefreshOutput,
     exit_code: i32,
+    admission: RefreshRunAdmission,
 ) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
     use std::io::Write;
 
-    let store = ObservationStore::open_initialized()?;
-    let run = store.start_run(
-        NewRunRecord::builder("runner_refresh_homeboy")
-            .component_id(output.runner_id.clone())
-            .command("homeboy runner refresh-homeboy")
-            .current_homeboy_version()
-            .metadata(serde_json::json!({ "dry_run": output.dry_run }))
-            .build(),
-    )?;
-    let run_id = run.id;
+    let RefreshRunAdmission { store, run_id } = admission;
     let store_artifact = |kind: &str, content: &str| -> homeboy::core::Result<String> {
         let mut file = tempfile::NamedTempFile::new().map_err(|error| {
             homeboy::core::Error::internal_io(error.to_string(), Some(format!("create {kind}")))
@@ -812,7 +899,10 @@ fn persist_refresh_artifacts(
     let _ = store.finish_run(
         &run_id,
         status,
-        Some(serde_json::json!({ "exit_code": exit_code })),
+        Some(serde_json::json!({
+            "exit_code": exit_code,
+            "progress": { "state": "finished", "heartbeat": false }
+        })),
     );
     Ok(runner::HomeboyBinaryRefreshArtifacts {
         run_id,
@@ -823,21 +913,12 @@ fn persist_refresh_artifacts(
 }
 
 fn persist_refresh_error_artifacts(
-    runner_id: &str,
     error: &homeboy::core::Error,
+    admission: RefreshRunAdmission,
 ) -> homeboy::core::Result<runner::HomeboyBinaryRefreshArtifacts> {
     use std::io::Write;
 
-    let store = ObservationStore::open_initialized()?;
-    let run = store.start_run(
-        NewRunRecord::builder("runner_refresh_homeboy")
-            .component_id(runner_id)
-            .command("homeboy runner refresh-homeboy")
-            .current_homeboy_version()
-            .metadata(serde_json::json!({ "outcome": "error" }))
-            .build(),
-    )?;
-    let run_id = run.id;
+    let RefreshRunAdmission { store, run_id } = admission;
     let mut file = tempfile::NamedTempFile::new().map_err(|source| {
         homeboy::core::Error::internal_io(
             source.to_string(),
@@ -878,7 +959,14 @@ fn persist_refresh_error_artifacts(
         &artifact_id,
         serde_json::json!({ "schema": "homeboy/runner-refresh-artifact/v1", "redacted": true }),
     )?;
-    let _ = store.finish_run(&run_id, RunStatus::Error, None);
+    let _ = store.finish_run(
+        &run_id,
+        RunStatus::Error,
+        Some(serde_json::json!({
+            "outcome": "error",
+            "progress": { "state": "finished", "heartbeat": false }
+        })),
+    );
     let error_log = format!("homeboy://run/{run_id}/artifact/{artifact_id}");
     Ok(runner::HomeboyBinaryRefreshArtifacts {
         run_id,
@@ -922,6 +1010,23 @@ fn map_worker(result: CmdResult<ReverseRunnerWorkerOutput>) -> CmdResult<RunnerC
 mod tests {
     use super::*;
 
+    fn test_admission(runner_id: &str) -> RefreshRunAdmission {
+        let store = ObservationStore::open_initialized().expect("observation store");
+        let run = store
+            .start_run(
+                NewRunRecord::builder("runner_refresh_homeboy")
+                    .component_id(runner_id)
+                    .command("homeboy runner refresh-homeboy")
+                    .current_homeboy_version()
+                    .build(),
+            )
+            .expect("refresh run");
+        RefreshRunAdmission {
+            store,
+            run_id: run.id,
+        }
+    }
+
     #[test]
     fn recipe_run_provider_inventory_has_typed_command_output() {
         homeboy::test_support::with_isolated_home(|_| {
@@ -938,6 +1043,32 @@ mod tests {
                     "providers": []
                 })
             );
+        });
+    }
+
+    #[test]
+    fn refresh_progress_finishes_without_waiting_for_heartbeat_interval() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let progress = RefreshProgress::admit(
+                "lab",
+                &runner::HomeboyBinaryRefreshOptions {
+                    runner_id: "lab".to_string(),
+                    mode: runner::HomeboyBinaryRefreshMode::Select {
+                        binary_path: "/runner/homeboy".to_string(),
+                    },
+                    source: None,
+                    git_ref: None,
+                    target_dir: None,
+                    reconnect: false,
+                    force: false,
+                    allow_downgrade: false,
+                    dry_run: true,
+                },
+            )
+            .expect("admit refresh progress");
+            let started = std::time::Instant::now();
+            let _ = progress.finish();
+            assert!(started.elapsed() < Duration::from_millis(500));
         });
     }
 
@@ -1006,7 +1137,8 @@ mod tests {
                 artifacts: None,
             };
             let (mapped, exit_code) =
-                map_refresh_homeboy("lab", Ok((output, 2))).expect("mapped output");
+                map_refresh_homeboy_with_admission(Ok((output, 2)), test_admission("lab"))
+                    .expect("mapped output");
             assert_eq!(exit_code, 2);
             let value = serde_json::to_value(mapped).expect("JSON envelope");
             assert_eq!(value["_homeboy_actionable"]["run"]["id"], "run-1");
@@ -1080,7 +1212,8 @@ mod tests {
                 artifacts: None,
             };
             let (mapped, exit_code) =
-                map_refresh_homeboy("lab", Ok((output, 0))).expect("mapped output");
+                map_refresh_homeboy_with_admission(Ok((output, 0)), test_admission("lab"))
+                    .expect("mapped output");
             assert_eq!(exit_code, 0);
             let value = serde_json::to_value(mapped).expect("JSON envelope");
             let run_id = value["artifacts"]["run_id"]
@@ -1111,7 +1244,8 @@ mod tests {
                 None,
                 None,
             );
-            let error = map_refresh_homeboy("lab", Err(error)).expect_err("refresh error");
+            let error = map_refresh_homeboy_with_admission(Err(error), test_admission("lab"))
+                .expect_err("refresh error");
             let run_id = error.details["artifacts"]["run_id"]
                 .as_str()
                 .expect("durable run id");
