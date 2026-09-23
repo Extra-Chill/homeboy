@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.384.0] - 2026-09-23
+
+### Added
+- surface unsatisfied provider native contracts
+
+### Changed
+- collapse duplicated action paths and fanout recovery ledger
+- adopt loop control-plane actions
+- wait for complete child PID publication
+
+### Fixed
+- pin test bare remotes to main instead of the host default branch
+- stop lifecycle import re-entering itself through retry projection
+- classify push transport and auth failures as retryable blocked actions
+- persist detached Cook recovery linkage
+- resolve created worktrees from the caller's source path
+- cook homeboy
+- expose refresh progress before build completes
+
 ## [0.383.15] - 2026-09-22
 
 ### Fixed
