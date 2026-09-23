@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.49.0] - 2026-09-23
+
+### Added
+- provide the JS build toolchain (@wordpress/scripts) the way the extension already provides the PHP one
+
 ## [3.48.9] - 2026-09-23
 
 ### Fixed
