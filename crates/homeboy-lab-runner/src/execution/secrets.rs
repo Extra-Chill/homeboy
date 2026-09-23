@@ -126,13 +126,17 @@ pub(super) fn resolve_runner_secret_env_for_command_with_fallbacks(
 pub(crate) fn provision_provider_file_secret_sources_for_runner(
     runner: &Runner,
     command: &[String],
+    source_args: &[String],
     required_names: &[String],
     request_env: &HashMap<String, String>,
 ) -> Result<()> {
     if !is_agent_task_run_plan_command(command) || required_names.is_empty() {
         return Ok(());
     }
-    let fallback_sources = provider_secret_sources_for_discovered_providers();
+    // Resolve against the plan's selected route so provider-scoped credential
+    // files (for example an `openai-oauth` default) are provisioned too.
+    let fallback_sources =
+        crate::lab::secrets::agent_task_controller_credential_sources(source_args)?;
     let provisions = provider_file_secret_source_provisions(required_names, &fallback_sources);
     if provisions.is_empty() {
         return Ok(());
