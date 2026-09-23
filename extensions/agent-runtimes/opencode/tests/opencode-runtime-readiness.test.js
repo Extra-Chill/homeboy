@@ -44,7 +44,7 @@ function readyResponses(providerResult = fixtures.success, model = 'gpt-5.6-terr
 		{ args: ['--version'], result: { status: 0, stdout: '1.18.25\n', stderr: '' } },
 		{ args: ['auth', 'list'], result: { status: 0, stdout: `Credentials ~/.local/share/opencode/auth.json\n${provider} oauth\n`, stderr: '' } },
 		{ args: ['models', provider], result: { status: 0, stdout: `${provider}/${model}\n`, stderr: '' } },
-		{ args: ['run', '--model', `${provider}/${model}`, '--format', 'json', '--agent', 'homeboy-readiness', '--title', 'homeboy-readiness', 'Reply with exactly READY. Do not access files, run commands, or make changes.'], result: providerResult },
+		{ args: ['run', '--print-logs', '--log-level', 'ERROR', '--model', `${provider}/${model}`, '--format', 'json', '--agent', 'homeboy-readiness', '--title', 'homeboy-readiness', 'Reply with exactly READY. Do not access files, run commands, or make changes.'], result: providerResult },
 	];
 }
 

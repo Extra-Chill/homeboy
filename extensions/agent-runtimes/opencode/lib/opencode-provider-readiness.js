@@ -144,7 +144,10 @@ function runModelProbe(probe, executable, args, selected, env, config, options) 
 	}
 	try {
 		result = runProbe(probe, executable, args, [
-			'run', '--model', `${selected.provider}/${selected.model}`, '--format', 'json',
+			// Older OpenCode CLIs only emit provider errors to stderr with
+			// --print-logs; interrupted probes are classified from that output.
+			'run', '--print-logs', '--log-level', 'ERROR',
+			'--model', `${selected.provider}/${selected.model}`, '--format', 'json',
 			'--agent', OPENCODE_READINESS_AGENT, '--title', OPENCODE_READINESS_AGENT,
 			OPENCODE_READINESS_PROMPT,
 		], readinessProbeEnvironment(env), config, cwd);
