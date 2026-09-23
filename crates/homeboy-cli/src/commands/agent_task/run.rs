@@ -5457,29 +5457,35 @@ fn normalize_cook_repository_identity(args: &mut AgentTaskCookArgs) -> homeboy::
         source_identities.push((flag, resolved.clone()));
         identities.extend(resolved);
     }
-    if let Some(to_worktree) = args.to_worktree.as_deref() {
-        // A handle that has not been materialized locally is a provisioning
-        // request, not repository evidence. An existing path or native handle
-        // can attest its Git remote just like --cwd.
-        if cook_workspace_path(to_worktree)?.is_some() {
-            let resolved = cook_repository_identities_for_workspace(
-                "--to-worktree",
-                to_worktree,
-                args.component.as_deref().or(args.dispatch.repo.as_deref()),
-            )?;
-            source_identities.push(("--to-worktree", resolved.clone()));
-            identities.extend(resolved);
-        }
+    // A handle that has not been materialized locally is a provisioning
+    // request, not repository evidence. An existing path or native handle can
+    // attest its Git remote just like --cwd. This distinction governs both the
+    // identity evidence below and whether --to-worktree counts as a supplied
+    // workspace when no identity is found.
+    let materialized_to_worktree = match args.to_worktree.as_deref() {
+        Some(to_worktree) => cook_workspace_path(to_worktree)?
+            .is_some()
+            .then(|| to_worktree.to_string()),
+        None => None,
+    };
+    if let Some(to_worktree) = materialized_to_worktree.as_deref() {
+        let resolved = cook_repository_identities_for_workspace(
+            "--to-worktree",
+            to_worktree,
+            args.component.as_deref().or(args.dispatch.repo.as_deref()),
+        )?;
+        source_identities.push(("--to-worktree", resolved.clone()));
+        identities.extend(resolved);
     }
     if identities.is_empty() {
         if args.dispatch.workspace.is_some()
             || args.dispatch.cwd.is_some()
-            || args.to_worktree.is_some()
+            || materialized_to_worktree.is_some()
         {
             let supplied_workspaces = [
                 args.dispatch.workspace.as_deref(),
                 args.dispatch.cwd.as_deref(),
-                args.to_worktree.as_deref(),
+                materialized_to_worktree.as_deref(),
             ]
             .into_iter()
             .flatten()
@@ -6221,8 +6227,20 @@ fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
     Ok(format!("fix/issue-{number}-{}", slugify_cook_branch(repo)))
 }
 
+/// Reduce an issue URL to the issue it names.
+///
+/// Links copied from GitHub commonly carry a query string or a fragment
+/// (`.../issues/123?source=...#details`). Neither is part of the issue's
+/// identity, so both are dropped before the issue number is read; otherwise a
+/// valid issue URL is rejected as not ending in a number.
 fn normalize_cook_task_url(task_url: &str) -> String {
-    task_url.trim().trim_end_matches('/').to_string()
+    task_url
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 fn slugify_cook_branch(value: &str) -> String {

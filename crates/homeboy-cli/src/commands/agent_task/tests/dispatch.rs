@@ -716,9 +716,12 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
             assert_eq!(identity["repository_name"], "blocks-engine");
             assert_eq!(identity["component_id"], "php-transformer");
         }
+        // Deferred worktree handles are keyed by the selected primary
+        // component, not the repository alias (#14593), so provider lookup
+        // resolves the same component the Cook was scoped to.
         assert_eq!(
             issue.to_worktree.as_deref(),
-            Some("blocks-engine@fix-issue-12844-blocks-engine")
+            Some("php-transformer@fix-issue-12844-blocks-engine")
         );
         assert_eq!(issue.base.as_deref(), Some("trunk"));
         let replay = super::super::run::cook_replay_argv(&issue);
@@ -1589,7 +1592,12 @@ fn cook_rejects_destination_with_a_different_repository_identity() {
             destination.path(),
             "https://github.com/example/two.git",
         );
-        let args = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+        // An existing --to-worktree is repository evidence (#14154), so a
+        // destination whose remote conflicts with the workspace is rejected
+        // while the destination is resolved, before any plan is compiled.
+        // Both checkouts were supplied by the caller, so naming both remotes
+        // is what lets them see which one to correct.
+        let error = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
@@ -1603,15 +1611,16 @@ fn cook_rejects_destination_with_a_different_repository_identity() {
             "fixture".to_string(),
             "--no-finalize".to_string(),
         ]))
-        .expect("resolve source identity");
-
-        let error =
-            super::super::run::compile_cook_plan(&args, json!({ "path": destination.path() }))
-                .expect_err("destination remote must match Cook repository identity");
+        .expect_err("destination remote must match Cook repository identity");
         assert!(error
             .message
-            .contains("does not match resolved `git://github.com/example/one`"));
-        assert!(!error.message.contains("git://github.com/example/two"));
+            .contains("must resolve to the same configured repository identity"));
+        assert!(error
+            .message
+            .contains("--workspace: git://github.com/example/one"));
+        assert!(error
+            .message
+            .contains("--to-worktree: git://github.com/example/two"));
     });
 }
 
