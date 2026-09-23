@@ -16,10 +16,10 @@ use homeboy_engine_primitives::command::{
 use homeboy_engine_primitives::template;
 use homeboy_extension_contract::{
     ExternalStorageIncompleteRoot, ExternalStorageInventory, ExternalStorageItem,
-    ExternalStorageOperation, ExternalStorageReclaimResult, ExternalStorageReclaimTarget,
-    ExternalStorageRequest, ExternalStorageResourceClass, ExternalStorageRetentionProviderConfig,
-    EXTERNAL_STORAGE_RETENTION_SCHEMA, MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS,
-    MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
+    ExternalStorageNativeContractStatus, ExternalStorageOperation, ExternalStorageReclaimResult,
+    ExternalStorageReclaimTarget, ExternalStorageRequest, ExternalStorageResourceClass,
+    ExternalStorageRetentionProviderConfig, EXTERNAL_STORAGE_RETENTION_SCHEMA,
+    MAX_EXTERNAL_STORAGE_RECLAIM_TARGETS, MAX_EXTERNAL_STORAGE_REQUEST_BYTES,
 };
 use serde::Serialize;
 
@@ -51,6 +51,14 @@ pub struct ExternalStorageCleanupOutput {
     pub unknown_bytes_is_lower_bound: bool,
     pub inventory_complete: bool,
     pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
+    /// Provider-declared native contracts this pass could not execute.
+    ///
+    /// Distinct from `candidate_count == 0`: a satisfied probe that finds
+    /// nothing reclaimable is a genuine clean result, while an entry here
+    /// means a declared capability is broken and reclaimable bytes behind it
+    /// stay invisible until it is fixed (#14955).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsatisfied_native_contracts: Vec<ExternalStorageUnsatisfiedContract>,
     pub providers: Vec<ExternalStorageProviderOutput>,
 }
 
@@ -66,8 +74,25 @@ pub struct ExternalStorageProviderOutput {
     pub unknown_bytes_is_lower_bound: bool,
     pub inventory_complete: bool,
     pub incomplete_roots: Vec<ExternalStorageIncompleteRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsatisfied_native_contracts: Vec<ExternalStorageUnsatisfiedContract>,
     pub candidates: Vec<ExternalStorageEvidence>,
     pub applied: Vec<ExternalStorageEvidence>,
+}
+
+/// A typed, actionable blocker for one provider-declared native contract this
+/// inventory pass could not execute.
+///
+/// Carries exactly what an operator needs to act: which contract, what the
+/// provider tried to run, and what it observed. It is aggregated separately
+/// from `candidate_count` so a broken probe can never be reported as a clean
+/// root that found nothing (#14955).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExternalStorageUnsatisfiedContract {
+    pub provider_id: String,
+    pub contract_id: String,
+    pub invocation: String,
+    pub failure: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +151,7 @@ pub fn cleanup_external_storage_with_providers(
         unknown_bytes_is_lower_bound: false,
         inventory_complete: true,
         incomplete_roots: Vec::new(),
+        unsatisfied_native_contracts: Vec::new(),
         providers: Vec::new(),
     };
     let mut remaining_count = options.limit;
@@ -156,6 +182,22 @@ pub fn cleanup_external_storage_with_providers(
             ));
         }
         validate_inventory_item_ids(&inventory)?;
+        let unsatisfied_native_contracts = inventory
+            .native_contracts
+            .iter()
+            .filter_map(|contract| match &contract.status {
+                ExternalStorageNativeContractStatus::Unsatisfied {
+                    invocation,
+                    failure,
+                } => Some(ExternalStorageUnsatisfiedContract {
+                    provider_id: provider.id.clone(),
+                    contract_id: contract.contract_id.clone(),
+                    invocation: invocation.clone(),
+                    failure: failure.clone(),
+                }),
+                ExternalStorageNativeContractStatus::Satisfied => None,
+            })
+            .collect::<Vec<_>>();
         let pressured_roots = pressured_roots(&inventory, options.reserve_bytes);
         let candidates = plan(
             &inventory.items,
@@ -233,6 +275,7 @@ pub fn cleanup_external_storage_with_providers(
                 .completeness
                 .as_ref()
                 .map_or_else(Vec::new, |value| value.incomplete_roots.clone()),
+            unsatisfied_native_contracts: unsatisfied_native_contracts.clone(),
             candidates: candidate_evidence,
             applied: applied_evidence,
         };
@@ -259,6 +302,9 @@ pub fn cleanup_external_storage_with_providers(
         output
             .incomplete_roots
             .extend(provider_output.incomplete_roots.clone());
+        output
+            .unsatisfied_native_contracts
+            .extend(unsatisfied_native_contracts);
         output.providers.push(provider_output);
     }
     Ok(output)
@@ -983,6 +1029,141 @@ mod tests {
         assert!(output.unknown_bytes_is_lower_bound);
         assert_eq!(output.incomplete_roots[0].reason, "entry_limit");
         assert!(!output.providers[0].inventory_complete);
+    }
+
+    /// Runs an inventory-only provider that declares the given `native_contracts`
+    /// JSON fragment and no reclaimable items, mirroring the shape an installed
+    /// provider like `opencode.external-storage-retention` returns.
+    #[cfg(unix)]
+    fn native_contract_provider(
+        id: &str,
+        native_contracts: serde_json::Value,
+    ) -> ExternalStorageRetentionProviderConfig {
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA, "provider_id": id, "generation": "g1",
+            "native_contracts": native_contracts,
+        });
+        ExternalStorageRetentionProviderConfig {
+            id: id.to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    fn run_native_contract_fixture(
+        provider: ExternalStorageRetentionProviderConfig,
+    ) -> ExternalStorageCleanupOutput {
+        cleanup_external_storage_with_providers(
+            &[provider],
+            ExternalStorageCleanupOptions {
+                apply: false,
+                min_age_days: 0,
+                max_bytes: u64::MAX,
+                reserve_bytes: 0,
+                limit: 10,
+                evidence_limit: 10,
+                deadline: None,
+            },
+        )
+        .expect("native contract fixture cleanup")
+    }
+
+    /// Deterministic contract test 1/3 (#14955): a declared native contract the
+    /// provider could not execute must surface as a typed, actionable blocker
+    /// identifying the contract id, the failed invocation, and the observed
+    /// failure -- not as an empty, "nothing to do" result.
+    #[cfg(unix)]
+    #[test]
+    fn unsatisfied_native_contract_surfaces_a_typed_blocker_with_zero_candidates() {
+        let output = run_native_contract_fixture(native_contract_provider(
+            "opencode.external-storage-retention",
+            serde_json::json!([{
+                "contract_id": "opencode.db.compact-events.v1",
+                "status": "unsatisfied",
+                "invocation": "opencode db event-log-status",
+                // No shell metacharacters (this JSON travels through a
+                // single-quoted `sh -c` argument in the test fixture below).
+                "failure": "SQL syntax error near event-log-status",
+            }]),
+        ));
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(output.reclaimed_bytes, 0);
+        assert_eq!(output.unsatisfied_native_contracts.len(), 1);
+        let blocker = &output.unsatisfied_native_contracts[0];
+        assert_eq!(blocker.provider_id, "opencode.external-storage-retention");
+        assert_eq!(blocker.contract_id, "opencode.db.compact-events.v1");
+        assert_eq!(blocker.invocation, "opencode db event-log-status");
+        assert_eq!(blocker.failure, "SQL syntax error near event-log-status");
+        assert_eq!(
+            output.providers[0].unsatisfied_native_contracts.len(),
+            1,
+            "the blocker is also visible on the owning provider's own output"
+        );
+    }
+
+    /// Deterministic contract test 2/3 (#14955): a satisfied probe that finds
+    /// nothing reclaimable is the genuine clean result the aggregate must keep
+    /// distinguishable from an unsatisfied contract, even though both report
+    /// `candidate_count == 0`.
+    #[cfg(unix)]
+    #[test]
+    fn satisfied_native_contract_with_zero_candidates_is_a_clean_result_not_a_blocker() {
+        let output = run_native_contract_fixture(native_contract_provider(
+            "opencode.external-storage-retention",
+            serde_json::json!([{
+                "contract_id": "opencode.db.compact-events.v1",
+                "status": "satisfied",
+            }]),
+        ));
+        assert_eq!(output.candidate_count, 0);
+        assert!(
+            output.unsatisfied_native_contracts.is_empty(),
+            "a satisfied probe that found nothing must not report a blocker"
+        );
+        assert!(output.providers[0].unsatisfied_native_contracts.is_empty());
+    }
+
+    /// Deterministic contract test 3/3 (#14955): a satisfied contract does not
+    /// suppress ordinary reclaimable candidates the same inventory reports, so
+    /// all three states -- unsatisfied, satisfied-and-empty, and
+    /// satisfied-with-candidates -- stay distinguishable in aggregate output.
+    #[cfg(unix)]
+    #[test]
+    fn satisfied_native_contract_with_candidates_still_reports_them() {
+        let inventory = serde_json::json!({
+            "schema": EXTERNAL_STORAGE_RETENTION_SCHEMA,
+            "provider_id": "opencode.external-storage-retention",
+            "generation": "g1",
+            "native_contracts": [{
+                "contract_id": "opencode.db.compact-events.v1",
+                "status": "satisfied",
+            }],
+            "items": [{
+                "id": "scratch-1", "root_id": "tmp", "class": "scratch", "bytes": 10,
+                "locator": "external/tmp/scratch-1", "reconstructable": true, "active": false,
+                "referenced": false, "ownership_known": true, "age_days": 7,
+                "reclaim_token": "token-1"
+            }]
+        });
+        let provider = ExternalStorageRetentionProviderConfig {
+            id: "opencode.external-storage-retention".to_string(),
+            command: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("printf '%s' '{}'", inventory),
+                "fixture".to_string(),
+            ],
+            timeout_seconds: 1,
+        };
+        let output = run_native_contract_fixture(provider);
+        assert_eq!(output.candidate_count, 1);
+        assert!(output.unsatisfied_native_contracts.is_empty());
     }
 
     #[cfg(unix)]

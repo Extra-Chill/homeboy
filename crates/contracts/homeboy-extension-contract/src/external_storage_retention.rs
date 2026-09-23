@@ -131,10 +131,68 @@ pub struct ExternalStorageInventory {
     /// non-reclaimable. This additive field is optional for v1 providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completeness: Option<ExternalStorageInventoryCompleteness>,
+    /// Provider-native capabilities this inventory pass probed, such as a
+    /// runtime-specific compaction command. Omission means the provider
+    /// declares none, preserving compatibility with existing v1 providers.
+    ///
+    /// A native contract the provider cannot execute is a distinct state from
+    /// an empty `items` list: the former means reclaimable bytes may exist
+    /// and stay invisible until the contract works again, while the latter
+    /// means the provider looked and found nothing. Flattening the two into
+    /// a zero candidate count hid a 99 GB unreclaimed SQLite event table
+    /// behind a `completed` outcome (#14955).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_contracts: Vec<ExternalStorageNativeContract>,
 }
 
 fn default_external_storage_schema() -> String {
     EXTERNAL_STORAGE_RETENTION_SCHEMA.to_string()
+}
+
+/// One provider-declared native capability and whether this inventory pass
+/// could execute it.
+///
+/// A provider declares a contract for a capability it — not core — knows how
+/// to run natively (e.g. compacting its own event log). Core never invokes
+/// the underlying capability itself; it only aggregates and surfaces whether
+/// the provider's own probe of that capability succeeded.
+///
+/// `deny_unknown_fields` is deliberately omitted: serde does not support it on
+/// a struct with a `#[serde(flatten)]` field, since the flattened field must
+/// stay free to absorb the status-specific keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalStorageNativeContract {
+    /// Stable, versioned capability identity, e.g.
+    /// `opencode.db.compact-events.v1`. Never a path or free-text description.
+    pub contract_id: String,
+    #[serde(flatten)]
+    pub status: ExternalStorageNativeContractStatus,
+}
+
+/// Whether a declared native contract's probe succeeded.
+///
+/// `Satisfied` and `Unsatisfied` are distinguished by the tag itself, so a
+/// provider cannot report "unsatisfied" while omitting the invocation and
+/// failure an operator needs to act on it, and core cannot mistake a working
+/// probe that found nothing for a broken one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExternalStorageNativeContractStatus {
+    /// The provider successfully probed the contract. It may still find
+    /// nothing reclaimable through it right now; that is a genuine clean
+    /// result, not a blocker.
+    Satisfied,
+    /// The provider could not execute the invocation its native contract
+    /// depends on. Reclaimable bytes may exist behind this capability and are
+    /// invisible until the contract is fixed; this is an actionable blocker,
+    /// never a clean root.
+    Unsatisfied {
+        /// The concrete invocation the provider attempted (a command line or
+        /// equivalent), for bounded operator evidence.
+        invocation: String,
+        /// The provider's observed failure, bounded for operator evidence.
+        failure: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,5 +256,66 @@ mod tests {
         assert_eq!(inventory.schema, EXTERNAL_STORAGE_RETENTION_SCHEMA);
         assert_eq!(inventory.unknown_bytes, 9);
         assert!(inventory.completeness.is_none());
+    }
+
+    #[test]
+    fn native_contracts_omission_defaults_empty_for_existing_v1_providers() {
+        let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
+            "provider_id": "fixture-runtime",
+            "generation": "generation-1",
+        }))
+        .expect("inventory without native_contracts parses");
+        assert!(inventory.native_contracts.is_empty());
+    }
+
+    #[test]
+    fn unsatisfied_native_contract_round_trips_invocation_and_failure() {
+        let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
+            "provider_id": "opencode.external-storage-retention",
+            "generation": "generation-1",
+            "native_contracts": [{
+                "contract_id": "opencode.db.compact-events.v1",
+                "status": "unsatisfied",
+                "invocation": "opencode db event-log-status",
+                "failure": "SQL syntax error near 'event-log-status'",
+            }]
+        }))
+        .expect("inventory with an unsatisfied native contract parses");
+        assert_eq!(inventory.native_contracts.len(), 1);
+        let contract = &inventory.native_contracts[0];
+        assert_eq!(contract.contract_id, "opencode.db.compact-events.v1");
+        match &contract.status {
+            ExternalStorageNativeContractStatus::Unsatisfied {
+                invocation,
+                failure,
+            } => {
+                assert_eq!(invocation, "opencode db event-log-status");
+                assert_eq!(failure, "SQL syntax error near 'event-log-status'");
+            }
+            ExternalStorageNativeContractStatus::Satisfied => {
+                panic!("expected an unsatisfied native contract")
+            }
+        }
+        let round_tripped = serde_json::to_value(&inventory).expect("re-serializes");
+        let reparsed: ExternalStorageInventory =
+            serde_json::from_value(round_tripped).expect("round trip parses");
+        assert_eq!(reparsed, inventory);
+    }
+
+    #[test]
+    fn satisfied_native_contract_carries_no_failure_fields() {
+        let inventory: ExternalStorageInventory = serde_json::from_value(serde_json::json!({
+            "provider_id": "opencode.external-storage-retention",
+            "generation": "generation-1",
+            "native_contracts": [{
+                "contract_id": "opencode.db.compact-events.v1",
+                "status": "satisfied",
+            }]
+        }))
+        .expect("inventory with a satisfied native contract parses");
+        assert_eq!(
+            inventory.native_contracts[0].status,
+            ExternalStorageNativeContractStatus::Satisfied
+        );
     }
 }
