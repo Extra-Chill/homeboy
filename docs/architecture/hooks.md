@@ -1,6 +1,6 @@
 # Hooks System
 
-Homeboy provides a general-purpose hook/event system for lifecycle extensibility. Both components and extensions can declare hooks that run shell commands at named lifecycle events.
+Homeboy provides a general-purpose hook/event system for lifecycle extensibility. Extensions, deploy targets (projects), and components can all declare hooks that run shell commands at named lifecycle events.
 
 ## Overview
 
@@ -16,21 +16,25 @@ Hooks are stored as a map of event names to command lists:
 }
 ```
 
-When an event fires, Homeboy resolves commands from two sources (in order):
+For a **component-scoped** event (e.g. `post:deploy`), Homeboy resolves commands from three sources, in order:
 
 1. **Extension hooks** — platform-level behavior from linked extensions
-2. **Component hooks** — user-level customization
+2. **Project hooks** — site-level policy, declared on the deploy target itself (`Project::hooks`)
+3. **Component hooks** — user-level customization
 
 Commands execute sequentially in the component's `local_path` directory via `sh -c`.
 
+`post:deploy:project` is a different shape: it is **deploy-target-scoped**, not component-scoped. It is declared only on the project's `hooks` map and is never merged from extensions or components — see [Deploy-Target-Scoped Hooks](#deploy-target-scoped-hooks-post-deployproject) below.
+
 ## Events
 
-| Event | When it runs | Failure mode |
-|-------|-------------|--------------|
-| `pre:version:bump` | After version targets are updated, before git commit | Fatal |
-| `post:version:bump` | After pre-bump hooks, before git commit | Fatal |
-| `post:release` | After the release pipeline completes | Non-fatal |
-| `post:deploy` | After deploy completes | Non-fatal |
+| Event | Scope | When it runs | Failure mode |
+|-------|-------|-------------|--------------|
+| `pre:version:bump` | Component | After version targets are updated, before git commit | Fatal |
+| `post:version:bump` | Component | After pre-bump hooks, before git commit | Fatal |
+| `post:release` | Component | After the release pipeline completes | Non-fatal |
+| `post:deploy` | Component | After each component's deploy completes (once per component) | Non-fatal |
+| `post:deploy:project` | Deploy target (project) | Once per deploy invocation, after the last component | Non-fatal |
 
 **Fatal** means a non-zero exit code aborts the operation. **Non-fatal** means failures are logged as warnings but the operation succeeds.
 
@@ -104,14 +108,42 @@ Template variables available in `post:deploy` hooks:
 
 Extension-level `post:deploy` hooks apply to all components using that extension. For example, the WordPress extension activates plugins and flushes cache after every deploy. Component-level hooks can add additional commands.
 
+### Project-level `post:deploy` hooks
+
+A project can also declare `post:deploy` in its own `hooks` map (`Project::hooks`, distinct from `component_overrides[id].hooks`). These merge into every component deployed to that project, between extension hooks and component hooks — see [Resolution Order](#resolution-order). This is for a step that is a property of *this project's* components in general (e.g. every plugin on this site should also run a per-plugin sanity check), not a step scoped to the deploy invocation as a whole.
+
+### Deploy-target-scoped hooks: `post:deploy:project`
+
+`post:deploy:project` runs **once per deploy invocation**, after every component has finished deploying — not once per component. It exists for a step that belongs to *where* you deploy, not to any one component or platform: the canonical example is a site-wide page-cache purge, which only needs to run once even when a deploy touches ten plugins.
+
+It is declared only on the project:
+
+```json
+{
+  "id": "extrachill-site",
+  "hooks": {
+    "post:deploy:project": [
+      "wp extrachill-cache purge --all --path={{base_path}} --allow-root"
+    ]
+  }
+}
+```
+
+Unlike `post:deploy`, this event is **never merged from extensions or components** — only `Project::hooks` is consulted. This is deliberate: routing a site-specific step like a cache purge through a generic, vendor-neutral extension is exactly the layering problem this event exists to avoid (a generic WordPress extension should not name every site's cache plugin). If a step genuinely belongs to a component or a platform, it belongs in `post:deploy`/extension hooks instead, not here.
+
+Runs only when at least one component actually deployed. Non-fatal, remote via SSH, and expands the same `{{base_path}}` template variable as `post:deploy` (plus `{{projectId}}`); `{{component_id}}` and `{{install_dir}}` are not available since the event is not tied to one component.
+
 ## Resolution Order
 
-When hooks fire for an event, commands are collected in this order:
+For a **component-scoped** event (`post:deploy`), commands are collected in this order:
 
 1. **Extension hooks** — iterate linked extensions, collect `hooks[event]` from each manifest
-2. **Component hooks** — collect `hooks[event]` from the component config
+2. **Project hooks** — collect `hooks[event]` from the project's own `Project::hooks`
+3. **Component hooks** — collect `hooks[event]` from the resolved component config
 
-Extension hooks run first so platform behavior executes before user customization.
+Extension hooks run first so platform behavior executes before site policy, which runs before user/component customization.
+
+For the **deploy-target-scoped** event (`post:deploy:project`), there is no merge: only the project's `Project::hooks[event]` runs, once, after every component in the deploy has finished. Extensions and components cannot declare it.
 
 ## Execution Details
 
@@ -179,14 +211,19 @@ Extension hooks merge with component hooks at resolution time. They are not stor
 
 The hook engine lives in `crates/homeboy-core/src/engine/hooks.rs` and provides:
 
-- `resolve_hooks(component, event)` — merge extension + component hooks for an event
-- `run_hooks(component, event, failure_mode)` — resolve and execute locally
-- `run_hooks_remote(ssh_client, component, event, failure_mode, vars)` — resolve, expand template variables, and execute via SSH
+- `resolve_hooks(component, event)` — merge extension + component hooks for an event (no project layer)
+- `resolve_hooks_with_project(component, project_hooks, event)` — merge extension + project + component hooks for an event
+- `run_hooks(component, event, failure_mode)` — resolve and execute locally (no project layer)
+- `run_hooks_remote(ssh_client, component, event, failure_mode, vars)` — resolve (no project layer), expand template variables, and execute via SSH
+- `run_hooks_remote_with_project(ssh_client, component, project_hooks, event, failure_mode, vars)` — resolve with the project layer, expand template variables, and execute via SSH; used for `post:deploy`
+- `run_project_scoped_hooks_remote(ssh_client, target_hooks, event, failure_mode, vars)` — read only a deploy target's own hook map (no extension/component merge), expand template variables, and execute via SSH; used for `post:deploy:project`
 - `run_commands(commands, working_dir, event, failure_mode)` — low-level local executor
 - `run_commands_remote(ssh_client, commands, event, failure_mode)` — low-level remote executor
 - `events::*` — constants for standard event names
 - `HookFailureMode` — `Fatal` or `NonFatal`
 - `HookRunResult` / `HookCommandResult` — structured results
+
+The `post:deploy:project` call site — deciding whether anything deployed and invoking the hook exactly once per deploy run — lives in `crates/homeboy-deploy/src/orchestration/project_hooks.rs`.
 
 ## Related
 

@@ -25,6 +25,7 @@ pub(super) struct GitDeployInput<'a> {
     pub(super) ctx: &'a RemoteProjectContext,
     pub(super) base_path: &'a str,
     pub(super) install_dir: &'a str,
+    pub(super) project: &'a Project,
     pub(super) local_version: Option<String>,
     pub(super) remote_version: Option<String>,
     pub(super) observation: Option<&'a mut DeployObservation>,
@@ -37,6 +38,7 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
         ctx,
         base_path,
         install_dir,
+        project,
         local_version,
         remote_version,
         observation,
@@ -59,7 +61,7 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 homeboy_core::log_status!("deploy", "Cleanup: {}", summary);
             }
-            run_post_deploy_hooks(&ctx.client, component, install_dir, base_path);
+            run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path);
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
@@ -90,6 +92,18 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
 }
 
 /// Deploy a single file component via atomic SCP.
+pub(super) struct FileDeployInput<'a> {
+    pub(super) component: &'a Component,
+    pub(super) ctx: &'a RemoteProjectContext,
+    pub(super) base_path: &'a str,
+    pub(super) install_dir: &'a str,
+    pub(super) project: &'a Project,
+    pub(super) local_version: Option<String>,
+    pub(super) remote_version: Option<String>,
+    pub(super) observation: Option<&'a mut DeployObservation>,
+}
+
+/// Deploy a single file component via atomic SCP.
 ///
 /// File components (`deploy_strategy: "file"`) skip build entirely — the
 /// `local_path` IS the artifact. The `remote_path` (resolved into `install_dir`)
@@ -97,15 +111,17 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
 ///
 /// The parent directory is created on the remote if it doesn't exist.
 /// Upload uses atomic SCP (temp file + mv) to prevent partial writes.
-pub(super) fn execute_file_deploy(
-    component: &Component,
-    ctx: &RemoteProjectContext,
-    base_path: &str,
-    install_dir: &str,
-    local_version: Option<String>,
-    remote_version: Option<String>,
-    observation: Option<&mut DeployObservation>,
-) -> ComponentDeployResult {
+pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeployResult {
+    let FileDeployInput {
+        component,
+        ctx,
+        base_path,
+        install_dir,
+        project,
+        local_version,
+        remote_version,
+        observation,
+    } = input;
     let local_path = Path::new(&component.local_path);
 
     if !local_path.exists() {
@@ -203,6 +219,7 @@ pub(super) fn execute_file_deploy(
             super::super::version_overrides::run_post_deploy_hooks(
                 &ctx.client,
                 component,
+                project,
                 install_dir,
                 base_path,
             );
@@ -429,7 +446,7 @@ pub(super) fn execute_artifact_deploy(
                     component.id
                 );
             }
-            run_post_deploy_hooks(&ctx.client, component, install_dir, base_path);
+            run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path);
 
             let result = ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")

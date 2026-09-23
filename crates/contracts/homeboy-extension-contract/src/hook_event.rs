@@ -20,6 +20,15 @@ pub enum HookEvent {
     /// Runs after deploy completes.
     #[serde(rename = "post:deploy")]
     PostDeploy,
+    /// Runs once per deploy invocation, after the last component, for a
+    /// project whose deploy included at least one component. Unlike
+    /// `post:deploy`, this event is not resolved per component and is not
+    /// merged from extension manifests — it is declared only on the project
+    /// (or another deploy-target-scoped config), because it names a property
+    /// of the deploy *target*, not a component or a platform. See
+    /// `crates/homeboy-core/src/engine/hooks.rs` module docs.
+    #[serde(rename = "post:deploy:project")]
+    PostDeployProject,
 }
 
 impl HookEvent {
@@ -29,6 +38,7 @@ impl HookEvent {
             HookEvent::PostVersionBump => "post:version:bump",
             HookEvent::PostRelease => "post:release",
             HookEvent::PostDeploy => "post:deploy",
+            HookEvent::PostDeployProject => "post:deploy:project",
         }
     }
 }
@@ -51,6 +61,10 @@ mod tests {
             (HookEvent::PostVersionBump, vec!["post".to_string()]),
             (HookEvent::PostRelease, vec!["release".to_string()]),
             (HookEvent::PostDeploy, vec!["deploy".to_string()]),
+            (
+                HookEvent::PostDeployProject,
+                vec!["deploy-project".to_string()],
+            ),
         ]);
         let serialized = serde_json::to_value(&hooks).expect("serialize hooks");
 
@@ -60,7 +74,8 @@ mod tests {
                 "pre:version:bump": ["pre"],
                 "post:version:bump": ["post"],
                 "post:release": ["release"],
-                "post:deploy": ["deploy"]
+                "post:deploy": ["deploy"],
+                "post:deploy:project": ["deploy-project"]
             })
         );
         assert_eq!(
