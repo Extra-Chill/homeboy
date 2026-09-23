@@ -1,11 +1,23 @@
 //! General hook/event system for lifecycle extensibility.
 //!
-//! Hooks are shell commands that run at named lifecycle events. Both components
-//! and extensions can declare hooks. Extension hooks run first (platform behavior),
-//! then component hooks (user customization).
+//! Hooks are shell commands that run at named lifecycle events. Extensions,
+//! deploy targets (projects), and components can all declare hooks for a
+//! component-scoped event. Extension hooks run first (platform behavior),
+//! then deploy-target hooks (site policy), then component hooks (user
+//! customization) — see [`resolve_hooks_with_extensions_and_project`].
+//!
+//! A deploy-target-scoped event (`HookEvent::PostDeployProject`) is a
+//! different shape: it is not tied to any one component, so it is never
+//! merged from extensions or components — only from the deploy target's own
+//! hook map, via [`run_project_scoped_hooks_remote`]. This is deliberate:
+//! a step like a site-wide cache purge is a property of *where* you deploy
+//! to, not of a component or a platform, and letting extensions declare it
+//! would reopen exactly the vendor-name-in-a-generic-layer problem this event
+//! exists to avoid (homeboy#14973).
 //!
 //! Event naming convention: `pre:operation` / `post:operation`
-//! Examples: `pre:version:bump`, `post:version:bump`, `post:release`, `post:deploy`
+//! Examples: `pre:version:bump`, `post:version:bump`, `post:release`,
+//! `post:deploy`, `post:deploy:project`
 
 use crate::component::Component;
 use crate::engine::template;
@@ -50,7 +62,25 @@ pub enum HookFailureMode {
 ///
 /// A configured extension is part of the component's declared behavior. Failing
 /// to load it must fail hook resolution rather than silently changing the plan.
+///
+/// This does not merge in deploy-target (project) hooks. Use
+/// [`resolve_hooks_with_project`] where a deploy target is available.
 pub fn resolve_hooks(component: &Component, event: HookEvent) -> Result<Vec<String>> {
+    resolve_hooks_with_project(component, None, event)
+}
+
+/// Resolve hooks for a component, also merging in deploy-target-scoped hooks
+/// declared on the project (or another deploy-target-scoped hook map).
+///
+/// Execution order:
+/// 1. Extension hooks (platform behavior)
+/// 2. Deploy-target hooks (site policy) — `project_hooks`, when present
+/// 3. Component hooks (user customization)
+pub fn resolve_hooks_with_project(
+    component: &Component,
+    project_hooks: Option<&HashMap<HookEvent, Vec<String>>>,
+    event: HookEvent,
+) -> Result<Vec<String>> {
     let mut manifests = Vec::new();
     if let Some(ref extensions) = component.extensions {
         let mut extension_ids: Vec<_> = extensions.keys().collect();
@@ -59,13 +89,34 @@ pub fn resolve_hooks(component: &Component, event: HookEvent) -> Result<Vec<Stri
             manifests.push(crate::extension::catalog::load_extension(extension_id)?);
         }
     }
-    resolve_hooks_with_extensions(component, &manifests, event)
+    resolve_hooks_with_extensions_and_project(component, &manifests, project_hooks, event)
 }
 
 /// Resolve hooks from manifests the caller has already loaded and validated.
+///
+/// Does not merge in deploy-target (project) hooks. Use
+/// [`resolve_hooks_with_extensions_and_project`] where a deploy target is
+/// available.
 pub fn resolve_hooks_with_extensions(
     component: &Component,
     extensions: &[ExtensionManifest],
+    event: HookEvent,
+) -> Result<Vec<String>> {
+    resolve_hooks_with_extensions_and_project(component, extensions, None, event)
+}
+
+/// Resolve hooks from manifests the caller has already loaded and validated,
+/// merging in deploy-target-scoped hooks declared on the project (or another
+/// deploy-target-scoped hook map) between extension and component hooks.
+///
+/// Execution order:
+/// 1. Extension hooks (platform behavior)
+/// 2. Deploy-target hooks (site policy) — `project_hooks`, when present
+/// 3. Component hooks (user customization)
+pub fn resolve_hooks_with_extensions_and_project(
+    component: &Component,
+    extensions: &[ExtensionManifest],
+    project_hooks: Option<&HashMap<HookEvent, Vec<String>>>,
     event: HookEvent,
 ) -> Result<Vec<String>> {
     let mut commands = Vec::new();
@@ -92,7 +143,15 @@ pub fn resolve_hooks_with_extensions(
         }
     }
 
-    // Component hooks second.
+    // Deploy-target (project) hooks second — site policy, after platform
+    // behavior and before the component's own customization.
+    if let Some(project_hooks) = project_hooks {
+        if let Some(project_commands) = project_hooks.get(&event) {
+            commands.extend(project_commands.clone());
+        }
+    }
+
+    // Component hooks third.
     if let Some(component_commands) = component.hooks.get(&event) {
         commands.extend(component_commands.clone());
     }
@@ -169,6 +228,9 @@ pub fn run_commands(
 /// (using `{{key}}` syntax), then executes each command on the remote server.
 /// Uses the same resolution order as `run_hooks` (extension hooks first, then
 /// component hooks).
+///
+/// Does not merge in deploy-target (project) hooks. Use
+/// [`run_hooks_remote_with_project`] where a deploy target is available.
 pub fn run_hooks_remote(
     ssh_client: &SshClient,
     component: &Component,
@@ -176,7 +238,47 @@ pub fn run_hooks_remote(
     failure_mode: HookFailureMode,
     vars: &HashMap<String, String>,
 ) -> Result<HookRunResult> {
-    let commands = resolve_hooks(component, event)?;
+    run_hooks_remote_with_project(ssh_client, component, None, event, failure_mode, vars)
+}
+
+/// Run all hooks for a given event remotely via SSH, also merging in
+/// deploy-target-scoped hooks declared on the project (or another
+/// deploy-target-scoped hook map).
+///
+/// Resolution order: extension hooks, then deploy-target hooks, then
+/// component hooks — see [`resolve_hooks_with_extensions_and_project`].
+pub fn run_hooks_remote_with_project(
+    ssh_client: &SshClient,
+    component: &Component,
+    project_hooks: Option<&HashMap<HookEvent, Vec<String>>>,
+    event: HookEvent,
+    failure_mode: HookFailureMode,
+    vars: &HashMap<String, String>,
+) -> Result<HookRunResult> {
+    let commands = resolve_hooks_with_project(component, project_hooks, event)?;
+    let expanded: Vec<String> = commands
+        .iter()
+        .map(|c| template::render_map(c, vars))
+        .collect();
+    run_commands_remote(ssh_client, &expanded, event, failure_mode)
+}
+
+/// Run a deploy-target-scoped event (e.g. `HookEvent::PostDeployProject`)
+/// remotely via SSH.
+///
+/// Unlike `run_hooks_remote`/`run_hooks_remote_with_project`, this does not
+/// resolve or merge component or extension hooks — a deploy-target-scoped
+/// event is not tied to any one component, and (by design) extensions cannot
+/// declare it. Only `target_hooks` (the project's own `hooks` map) is
+/// consulted.
+pub fn run_project_scoped_hooks_remote(
+    ssh_client: &SshClient,
+    target_hooks: &HashMap<HookEvent, Vec<String>>,
+    event: HookEvent,
+    failure_mode: HookFailureMode,
+    vars: &HashMap<String, String>,
+) -> Result<HookRunResult> {
+    let commands = target_hooks.get(&event).cloned().unwrap_or_default();
     let expanded: Vec<String> = commands
         .iter()
         .map(|c| template::render_map(c, vars))
@@ -298,6 +400,105 @@ mod tests {
     }
 
     #[test]
+    fn resolve_hooks_with_project_none_matches_resolve_hooks() {
+        let mut component = Component::new(
+            "test".to_string(),
+            "/tmp/test".to_string(),
+            "".to_string(),
+            None,
+        );
+        component
+            .hooks
+            .insert(HookEvent::PostDeploy, vec!["echo component".to_string()]);
+
+        assert_eq!(
+            resolve_hooks_with_project(&component, None, HookEvent::PostDeploy).unwrap(),
+            resolve_hooks(&component, HookEvent::PostDeploy).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_hooks_with_project_merges_project_hooks_between_extension_and_component() {
+        with_isolated_home(|home| {
+            write_extension_with_hook(home.path(), "wordpress", "echo extension");
+            let mut component = Component::new(
+                "test".to_string(),
+                "/tmp/test".to_string(),
+                "".to_string(),
+                None,
+            );
+            component.extensions = Some(HashMap::from([(
+                "wordpress".to_string(),
+                ScopedExtensionConfig::default(),
+            )]));
+            component.hooks.insert(
+                HookEvent::PreVersionBump,
+                vec!["echo component".to_string()],
+            );
+
+            let project_hooks =
+                HashMap::from([(HookEvent::PreVersionBump, vec!["echo project".to_string()])]);
+
+            let commands = resolve_hooks_with_project(
+                &component,
+                Some(&project_hooks),
+                HookEvent::PreVersionBump,
+            )
+            .unwrap();
+
+            assert_eq!(
+                commands,
+                vec![
+                    "echo extension".to_string(),
+                    "echo project".to_string(),
+                    "echo component".to_string(),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_hooks_with_project_ignores_project_hooks_for_unrelated_event() {
+        let component = Component::new(
+            "test".to_string(),
+            "/tmp/test".to_string(),
+            "".to_string(),
+            None,
+        );
+        let project_hooks =
+            HashMap::from([(HookEvent::PostDeploy, vec!["wp cache purge".to_string()])]);
+
+        let commands =
+            resolve_hooks_with_project(&component, Some(&project_hooks), HookEvent::PreVersionBump)
+                .unwrap();
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn resolve_hooks_with_project_omits_project_only_hooks_when_no_project_hooks_declared() {
+        // A project with an empty `hooks` map (or without one at all) must
+        // resolve identically to `None` — adding the field must not change
+        // existing components' behavior.
+        let component = Component::new(
+            "test".to_string(),
+            "/tmp/test".to_string(),
+            "".to_string(),
+            None,
+        );
+        let empty_project_hooks: HashMap<HookEvent, Vec<String>> = HashMap::new();
+
+        assert_eq!(
+            resolve_hooks_with_project(
+                &component,
+                Some(&empty_project_hooks),
+                HookEvent::PostDeploy
+            )
+            .unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn resolve_hooks_sorts_extensions_and_rejects_missing_configured_extension() {
         with_isolated_home(|home| {
             write_extension_with_hook(home.path(), "zebra", "echo zebra");
@@ -389,6 +590,83 @@ mod tests {
             HookFailureMode::NonFatal,
         )
         .unwrap();
+        assert!(!result.all_succeeded);
+        assert_eq!(result.commands.len(), 2);
+        assert!(!result.commands[0].success);
+        assert!(result.commands[1].success);
+    }
+
+    fn local_ssh_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn run_project_scoped_hooks_remote_runs_only_target_hooks() {
+        let target_hooks = HashMap::from([(
+            HookEvent::PostDeployProject,
+            vec!["echo {{base_path}}".to_string()],
+        )]);
+        let vars = HashMap::from([("base_path".to_string(), "/var/www/site".to_string())]);
+
+        let result = run_project_scoped_hooks_remote(
+            &local_ssh_client(),
+            &target_hooks,
+            HookEvent::PostDeployProject,
+            HookFailureMode::NonFatal,
+            &vars,
+        )
+        .unwrap();
+
+        assert!(result.all_succeeded);
+        assert_eq!(result.commands.len(), 1);
+        assert_eq!(result.commands[0].command, "echo /var/www/site");
+        assert_eq!(result.commands[0].stdout.trim(), "/var/www/site");
+    }
+
+    #[test]
+    fn run_project_scoped_hooks_remote_is_empty_when_event_not_declared() {
+        let target_hooks = HashMap::from([(
+            HookEvent::PostDeploy,
+            vec!["echo should-not-run".to_string()],
+        )]);
+
+        let result = run_project_scoped_hooks_remote(
+            &local_ssh_client(),
+            &target_hooks,
+            HookEvent::PostDeployProject,
+            HookFailureMode::NonFatal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(result.all_succeeded);
+        assert!(result.commands.is_empty());
+    }
+
+    #[test]
+    fn run_project_scoped_hooks_remote_non_fatal_continues_on_failure() {
+        let target_hooks = HashMap::from([(
+            HookEvent::PostDeployProject,
+            vec!["exit 1".to_string(), "echo still-runs".to_string()],
+        )]);
+
+        let result = run_project_scoped_hooks_remote(
+            &local_ssh_client(),
+            &target_hooks,
+            HookEvent::PostDeployProject,
+            HookFailureMode::NonFatal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
         assert!(!result.all_succeeded);
         assert_eq!(result.commands.len(), 2);
         assert!(!result.commands[0].success);

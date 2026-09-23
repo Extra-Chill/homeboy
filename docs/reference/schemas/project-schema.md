@@ -38,6 +38,10 @@ matter when the workflow needs environment context.
   "changelog_next_section_aliases": [],
   "cli_path": "string",
   "extensions": {},
+  "hooks": {
+    "post:deploy": ["wp cache flush --path={{base_path}} --allow-root"],
+    "post:deploy:project": ["wp cache purge --all --path={{base_path}} --allow-root"]
+  },
   "deployment_provenance": {
     "mode": "accepted-ref",
     "forge_evidence": [{
@@ -96,6 +100,7 @@ matter when the workflow needs environment context.
 - **`extensions`** (object): Extension-specific settings for this project
   - Keys are extension IDs
   - Values are flat extension setting objects; `version` is reserved for extension version constraints
+- **`hooks`** (object): Lifecycle hooks declared on the project itself (the deploy target), distinct from `component_overrides[id].hooks`. For a component-scoped event (currently `post:deploy`), these merge into every component deployed to this project, between extension hooks and component hooks. `post:deploy:project` is a separate, project-scoped event that runs once per deploy invocation, after the last component — not once per component — and is declared only here; extensions and components cannot contribute to it. See [hooks](../../architecture/hooks.md).
 - **`deployment_provenance`** (object): Optional fail-closed deployment source policy. Omit it to preserve legacy deploy behavior.
   - **`mode`**: `any` (default), `immutable-ref`, `release`, or `accepted-ref`.
   - **`forge_evidence`**: Optional SHA-bound forge records (`sha`, `forge`, `reference`). `accepted-ref` accepts a validated release set, a resolved release tag, or an exact SHA matching one of these records.

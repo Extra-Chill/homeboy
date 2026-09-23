@@ -17,7 +17,8 @@ use super::super::version_overrides::is_self_deploy;
 use super::preflight::{resolve_preflight_artifact_path, validate_preflight_file_artifact};
 use super::release_plan::{release_artifact_plan, ReleaseArtifactPlan};
 use super::strategies::{
-    execute_artifact_deploy, execute_file_deploy, execute_git_deploy, GitDeployInput,
+    execute_artifact_deploy, execute_file_deploy, execute_git_deploy, FileDeployInput,
+    GitDeployInput,
 };
 use homeboy_core::git::release_download::ReleaseArtifactLease;
 
@@ -340,6 +341,7 @@ pub(crate) fn execute_preflighted_component_deploy(
             ctx,
             base_path,
             install_dir: &prepared.install_dir,
+            project,
             local_version: prepared.local_version.clone(),
             remote_version: prepared.remote_version.clone(),
             observation,
@@ -347,15 +349,16 @@ pub(crate) fn execute_preflighted_component_deploy(
     }
 
     if strategy == "file" {
-        return execute_file_deploy(
+        return execute_file_deploy(FileDeployInput {
             component,
             ctx,
             base_path,
-            &prepared.install_dir,
-            prepared.local_version.clone(),
-            prepared.remote_version.clone(),
+            install_dir: &prepared.install_dir,
+            project,
+            local_version: prepared.local_version.clone(),
+            remote_version: prepared.remote_version.clone(),
             observation,
-        );
+        });
     }
 
     execute_artifact_deploy(prepared, ctx, base_path, project, observation)

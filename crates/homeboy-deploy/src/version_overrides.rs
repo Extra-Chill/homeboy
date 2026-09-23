@@ -834,6 +834,7 @@ fn deploy_override_template_vars(
 pub(super) fn run_post_deploy_hooks(
     ssh_client: &SshClient,
     component: &Component,
+    project: &Project,
     install_dir: &str,
     base_path: &str,
 ) {
@@ -845,9 +846,10 @@ pub(super) fn run_post_deploy_hooks(
     );
     vars.insert(TemplateVars::BASE_PATH.to_string(), base_path.to_string());
 
-    match hooks::run_hooks_remote(
+    match hooks::run_hooks_remote_with_project(
         ssh_client,
         component,
+        Some(&project.hooks),
         HookEvent::PostDeploy,
         HookFailureMode::NonFatal,
         &vars,
@@ -1058,8 +1060,40 @@ mod tests {
             id: "fixture".to_string(),
             ..Default::default()
         };
+        let project = Project::default();
 
-        run_post_deploy_hooks(&local_client(), &component, "/tmp/fixture", "/tmp");
+        run_post_deploy_hooks(
+            &local_client(),
+            &component,
+            &project,
+            "/tmp/fixture",
+            "/tmp",
+        );
+    }
+
+    #[test]
+    fn test_run_post_deploy_hooks_merges_project_hooks() {
+        let component = Component {
+            id: "fixture".to_string(),
+            ..Default::default()
+        };
+        let project = Project {
+            hooks: HashMap::from([(HookEvent::PostDeploy, vec!["echo project-hook".to_string()])]),
+            ..Default::default()
+        };
+
+        // Non-fatal by design: this asserts the call does not panic even
+        // though it exercises a real (local) SSH command. The command
+        // content and ordering are covered by
+        // `resolve_hooks_with_project_merges_project_hooks_between_extension_and_component`
+        // in `homeboy_core::engine::hooks`.
+        run_post_deploy_hooks(
+            &local_client(),
+            &component,
+            &project,
+            "/tmp/fixture",
+            "/tmp",
+        );
     }
 
     #[test]

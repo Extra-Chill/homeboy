@@ -31,6 +31,7 @@ use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactS
 mod modes;
 mod preflight;
 mod prepared_payloads;
+mod project_hooks;
 mod smoke_check;
 
 use modes::{extension_skipped_results, run_check_mode, run_dry_run_mode, CheckModeInput};
@@ -43,6 +44,7 @@ use preflight::{
 #[cfg(test)]
 use prepared_payloads::prepare_component_deployments;
 use prepared_payloads::{prepare_component_deployments_with_payloads, PrepareDeploymentsInput};
+use project_hooks::run_project_scoped_post_deploy_hook;
 use smoke_check::run_post_deploy_smoke;
 
 pub(super) enum PreparedDeployment {
@@ -768,6 +770,16 @@ pub(super) fn apply_prepared_components(
             failed += 1;
         }
         results.push(result);
+    }
+
+    // Project-scoped `post:deploy:project` hook. Runs once per deploy
+    // invocation, after the last component, only when something actually
+    // deployed. Unlike `post:deploy` (resolved per component inside the loop
+    // above), this event is declared only on the project and is never
+    // resolved per component — see homeboy#14973 and the module docs on
+    // `homeboy_core::engine::hooks`.
+    if succeeded > 0 {
+        run_project_scoped_post_deploy_hook(ctx, &project);
     }
 
     // Post-deploy front-end smoke check (opt-in, project-scoped). Runs only when
@@ -2019,6 +2031,121 @@ mod tests {
                 deployed_file.exists(),
                 "artifact bytes must actually land on the target: {}",
                 deployed_file.display()
+            );
+        });
+    }
+
+    /// homeboy#14973: a project-scoped `post:deploy:project` hook must run
+    /// exactly once per deploy invocation, after the last component — not
+    /// once per component the way `post:deploy` does. Two real components
+    /// deploy here; the hook appends one line to a counter file, so a
+    /// per-component regression (two lines) is caught the same way a
+    /// zero-lines regression (never wired up) would be.
+    #[test]
+    fn project_scoped_post_deploy_hook_runs_once_across_a_multi_component_deploy() {
+        with_isolated_home(|home| {
+            let alpha_dir = TempDir::new().expect("alpha component dir");
+            let beta_dir = TempDir::new().expect("beta component dir");
+            for (dir, id) in [(&alpha_dir, "alpha"), (&beta_dir, "beta")] {
+                let manifest = serde_json::json!({
+                    "id": id,
+                    "remote_path": format!("plugins/{id}"),
+                    "build_artifact": "dist",
+                });
+                std::fs::write(dir.path().join("homeboy.json"), manifest.to_string())
+                    .expect("write component manifest");
+                let artifact_dir = dir.path().join("dist");
+                std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+                std::fs::write(artifact_dir.join(format!("{id}.php")), "<?php\n// v1\n")
+                    .expect("artifact payload");
+            }
+
+            let counter_path = home.path().join("post-deploy-project-hook-runs.txt");
+            let project = Project {
+                hooks: HashMap::from([(
+                    homeboy_extension_contract::HookEvent::PostDeployProject,
+                    vec![format!("echo run >> {}", counter_path.display())],
+                )]),
+                ..project_with_component_dirs(&[
+                    ("alpha", alpha_dir.path()),
+                    ("beta", beta_dir.path()),
+                ])
+            };
+
+            let install_root = TempDir::new().expect("install root");
+            // rsync creates the final path segment but not missing
+            // intermediate parents, so pre-create the shared "plugins"
+            // parent both components deploy under.
+            std::fs::create_dir_all(install_root.path().join("plugins"))
+                .expect("pre-create plugins parent dir");
+            let base_path = install_root.path().to_string_lossy().to_string();
+
+            let ctx = RemoteProjectContext {
+                project: project.clone(),
+                server_id: "test-server".to_string(),
+                server: homeboy_core::server::Server {
+                    id: "test-server".to_string(),
+                    aliases: Vec::new(),
+                    host: "localhost".to_string(),
+                    user: "test".to_string(),
+                    port: 22,
+                    identity_file: None,
+                    kind: None,
+                    auth: None,
+                    env: HashMap::new(),
+                    runner: None,
+                },
+                client: crate::test_support::local_client(),
+                base_path: Some(base_path.clone()),
+            };
+
+            let config = DeployConfig {
+                all: true,
+                skip_build: true,
+                no_pull: true,
+                force: true,
+                ..Default::default()
+            };
+
+            let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+            let mut artifacts = crate::preparation::DeploymentArtifactStore::default();
+
+            let deployment = prepare_components(
+                &data_root,
+                &config,
+                &project,
+                &ctx,
+                &base_path,
+                &mut artifacts,
+                None,
+            )
+            .expect("both components must resolve and plan");
+
+            let plan = match deployment {
+                PreparedDeployment::Apply(plan) => plan,
+                PreparedDeployment::Complete(result) => panic!(
+                    "expected an Apply plan for two real components, got a short-circuited \
+                     Complete result: {:?}",
+                    result.summary
+                ),
+            };
+
+            let result = apply_prepared_components(&data_root, *plan, &ctx, &base_path, None)
+                .expect("apply must succeed for both components");
+
+            assert_eq!(
+                result.summary.succeeded, 2,
+                "both components must actually deploy: {:?}",
+                result.results
+            );
+
+            let counter_contents = std::fs::read_to_string(&counter_path).unwrap_or_default();
+            let run_count = counter_contents.lines().filter(|l| *l == "run").count();
+            assert_eq!(
+                run_count, 1,
+                "post:deploy:project must run exactly once for a 2-component deploy, not once \
+                 per component (contents: {:?})",
+                counter_contents
             );
         });
     }

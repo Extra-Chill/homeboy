@@ -145,6 +145,21 @@ pub struct Project {
     /// Omission preserves the legacy deployment behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_provenance: Option<DeploymentProvenancePolicy>,
+
+    /// Lifecycle hooks declared on the deploy target itself, rather than on a
+    /// component or an extension.
+    ///
+    /// Component-scoped events (currently `post:deploy`) declared here merge
+    /// into every component deployed to this project, between extension hooks
+    /// and component hooks — see the resolution order in
+    /// `crate::engine::hooks`. `HookEvent::PostDeployProject` is
+    /// project-scoped: it runs once per deploy invocation, after the last
+    /// component, and is only ever read from this map (extensions and
+    /// components cannot contribute to it). This is where a site-wide step
+    /// like a page-cache purge belongs, instead of being duplicated across
+    /// every component or smuggled into a generic extension.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub hooks: HashMap<homeboy_extension_contract::HookEvent, Vec<String>>,
 }
 
 /// Project-scoped deployment source policy.

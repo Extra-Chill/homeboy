@@ -365,6 +365,18 @@ Extensions like WordPress define `post:deploy` hooks in their manifest. These ru
 }
 ```
 
+### Project-level hooks
+
+A project can declare `post:deploy` in its own `hooks` map. These apply to every component deployed to that project, between extension hooks and component hooks:
+
+```json
+{
+  "hooks": {
+    "post:deploy": ["wp cache flush --path={{base_path}} --allow-root"]
+  }
+}
+```
+
 ### Component-level hooks
 
 Components can add their own `post:deploy` hooks for custom automation:
@@ -377,7 +389,24 @@ Components can add their own `post:deploy` hooks for custom automation:
 }
 ```
 
-Extension hooks run first, then component hooks. All `post:deploy` hooks are non-fatal — failures are logged but do not affect the deploy result.
+Extension hooks run first, then project hooks, then component hooks. All `post:deploy` hooks are non-fatal — failures are logged but do not affect the deploy result.
+
+### Project-scoped hooks: `post:deploy:project`
+
+`post:deploy` above runs once **per component**. For a step that only needs to run once per deploy invocation regardless of how many components deployed — the canonical case being a site-wide page-cache purge — declare `post:deploy:project` on the project instead:
+
+```json
+{
+  "id": "extrachill-site",
+  "hooks": {
+    "post:deploy:project": [
+      "wp extrachill-cache purge --all --path={{base_path}} --allow-root"
+    ]
+  }
+}
+```
+
+This runs once, after the last component in the deploy, only when at least one component actually deployed. It is declared only on the project — extensions and components cannot contribute to it, unlike `post:deploy`. See [hooks](../architecture/hooks.md#deploy-target-scoped-hooks-post-deployproject) for the full rationale and template variables.
 
 ## Related
 
