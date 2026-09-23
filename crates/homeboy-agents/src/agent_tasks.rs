@@ -284,7 +284,8 @@ pub mod lifecycle {
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{
-        fail_next_record_write_for_test, rewrite_record_for_test,
+        fail_next_record_write_for_test, historical_cook_index_import_invocations_for_test,
+        reset_historical_cook_index_import_invocations_for_test, rewrite_record_for_test,
     };
     pub use super::super::agent_task_lifecycle::{record_completed_run, record_promotion};
 }

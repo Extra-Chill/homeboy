@@ -502,7 +502,10 @@ pub fn record_detached_cook_handoff_parent_in_store(
             None,
         ));
     }
-    if let Ok(record) = lifecycle_store.read_record(&cook_id) {
+    // This existence check only needs `cook_id`'s own row; a brand-new
+    // submission does not depend on historical Cook index import to see it,
+    // so it never has to run on this hot path (#14962).
+    if let Ok(record) = lifecycle_store.read_record_bounded(&cook_id) {
         if record.metadata["detached_cook_handoff"]["cook_id"] == cook_id {
             return Ok(record);
         }
@@ -550,8 +553,9 @@ pub fn claim_detached_cook_handoff_parent_in_store(
     // detached child — claims again with that same owner id. Refusing because
     // admission has advanced is a self-collision: the owner is asking for the
     // handoff it already holds (#14768). Identity match here is not a second
-    // owner; it is idempotent re-entry.
-    if let Ok(existing) = lifecycle_store.read_record(&cook_id) {
+    // owner; it is idempotent re-entry. Bounded because this read never needs
+    // historical Cook index import for `cook_id`'s own row (#14962).
+    if let Ok(existing) = lifecycle_store.read_record_bounded(&cook_id) {
         let handoff = &existing.metadata["detached_cook_handoff"];
         if handoff["cook_id"] == cook_id
             && handoff["launcher_id"] == launcher_id
@@ -619,7 +623,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         )?;
         return Ok(record);
     }
-    let existing = lifecycle_store.read_record(&cook_id).ok();
+    let existing = lifecycle_store.read_record_bounded(&cook_id).ok();
     let mut error = Error::validation_invalid_argument(
         "cook_id",
         "detached Cook handoff is already owned or has advanced",
@@ -3162,7 +3166,11 @@ where
     let mut preserved_controller_runtime = None;
     let mut pre_execution_recovery = false;
     let mut pre_execution_runtime_recovery = false;
-    if let Ok(existing) = lifecycle_store.read_record(&run_id) {
+    // A submission only needs `run_id`'s own row to merge forward, whether
+    // it is brand new or a resubmission of a record this same write path
+    // already committed to SQLite; historical Cook index import never
+    // affects that lookup, so it must not run on this hot path (#14962).
+    if let Ok(existing) = lifecycle_store.read_record_bounded(&run_id) {
         let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
         let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
         if existing_fanout.is_some()
@@ -3307,7 +3315,8 @@ where
             // The admission claim checks this state under the queue lock. Read
             // it once more before recording runtime provenance or dispatching
             // any provider work in case cancellation won immediately after.
-            if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
+            // Bounded: this run's own just-committed row, not history (#14962).
+            if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
                 if cancelled.state.is_terminal() && !pre_execution_runtime_recovery {
                     return Ok(cancelled);
                 }
@@ -3341,7 +3350,8 @@ where
             // Cancellation is persisted before removing a queue entry. Do not
             // overwrite that terminal lifecycle state with a synthetic
             // pre-execution admission failure when the waiter wakes up.
-            if let Ok(cancelled) = lifecycle_store.read_record(&run_id) {
+            // Bounded: this run's own just-committed row, not history (#14962).
+            if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
                 if cancelled.state == AgentTaskRunState::Cancelled
                     || cancelled.metadata["controller_admission_cancellation_requested"] == true
                 {

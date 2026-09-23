@@ -248,6 +248,24 @@ impl AgentTaskLifecycleStore {
         Ok(store)
     }
 
+    /// Open this store's observation database initialized for a durable
+    /// write, without importing historical Cook indexes.
+    ///
+    /// A write only touches the row for its own run identity. Historical
+    /// Cook index import backfills OTHER, pre-SQLite records into the
+    /// resource projection and has no bearing on the row being written, so
+    /// requiring it before every write put the eligibility-projection
+    /// recursion #14914 crashed on (fixed by #14960's re-entrancy guard) onto
+    /// the hot path of every real submission's first durable write (#14962).
+    /// Read paths that resolve retry eligibility, adoption, or a historical
+    /// Cook alias still need the import and must keep calling
+    /// [`Self::open_observation_initialized`].
+    pub(crate) fn open_observation_initialized_without_historical_import(
+        &self,
+    ) -> Result<ObservationStore> {
+        ObservationStore::open_initialized_for_lifecycle_in_roots(&self.roots)
+    }
+
     /// One-way compatibility migration for the former Cook-index authority.
     /// Index files are imported before this lifecycle store serves actions or
     /// mutable reads; conflicting aliases fail closed instead of selecting a
@@ -261,6 +279,9 @@ impl AgentTaskLifecycleStore {
     /// loudly here instead of overflowing; concurrent imports on other threads
     /// remain ordinary idempotent upserts.
     fn import_historical_cook_indexes(&self, observation: &ObservationStore) -> Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        HISTORICAL_COOK_INDEX_IMPORT_INVOCATIONS
+            .set(HISTORICAL_COOK_INDEX_IMPORT_INVOCATIONS.get() + 1);
         let already_importing = IMPORT_IN_PROGRESS.with(|flag| {
             if flag.get() {
                 return true;
@@ -853,6 +874,21 @@ impl AgentTaskLifecycleStore {
         read_record_in_store(self, run_id)
     }
 
+    /// Read one durable record and self-heal its own resource projection if
+    /// missing, without running the historical Cook index directory scan.
+    ///
+    /// Identical to [`Self::read_record`] except for that scan: a legacy row
+    /// that predates the resource-projection table still gets its own
+    /// projection backfilled here, same as an ordinary `read_record` would,
+    /// but importing OTHER, unrelated historical records never has to happen
+    /// on a write's own read-modify-write cycle (#14962).
+    pub(crate) fn read_record_without_historical_import(
+        &self,
+        run_id: &str,
+    ) -> Result<AgentTaskRunRecord> {
+        read_record_without_historical_import_in_store(self, run_id)
+    }
+
     /// List every durable agent-task record from this store's own observation
     /// database.
     ///
@@ -1316,7 +1352,14 @@ impl AgentTaskLifecycleStore {
         run_id: &str,
         mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
     ) -> Result<Option<AgentTaskRunRecord>> {
-        let mut record = self.read_record(run_id)?;
+        // Mutation reads and rewrites this run's own row; it never needs the
+        // historical Cook index directory scan for a different, pre-SQLite
+        // record (#14962). It still self-heals *this* row's own resource
+        // projection if missing (`read_record_without_historical_import`),
+        // same as an ordinary `read_record` would, so a legacy row does not
+        // silently defer that repair onto whichever unrelated read happens to
+        // follow it.
+        let mut record = self.read_record_without_historical_import(run_id)?;
         if !mutate(&mut record) {
             return Ok(None);
         }
@@ -1327,7 +1370,10 @@ impl AgentTaskLifecycleStore {
     /// Complete terminal projection after the record lock has been released:
     /// receipt first, then the workspace owner lease.
     pub(crate) fn project_terminal_record_after_unlock(&self, run_id: &str) -> Result<()> {
-        let record = self.read_record(run_id)?;
+        // Terminal projection reads back the row this same commit just wrote,
+        // self-healing its own resource projection if missing but never
+        // running the historical Cook index directory scan (#14962).
+        let record = self.read_record_without_historical_import(run_id)?;
         self.workspace_terminal_authority_store()
             .persist_terminal_from_record(&record)
             .and_then(|_| {
@@ -1389,6 +1435,13 @@ thread_local! {
     /// Fail only the derived Cook-index materialization. Its SQLite projection
     /// is already committed when this hook runs.
     static FAIL_NEXT_COOK_INDEX_PROJECTION_WRITE: Cell<bool> = const { Cell::new(false) };
+    /// Count of [`AgentTaskLifecycleStore::import_historical_cook_indexes`]
+    /// invocations observed on this thread. A durable write's own opener
+    /// ([`AgentTaskLifecycleStore::open_observation_initialized_without_historical_import`])
+    /// never increments this; only a caller that still opens through
+    /// [`AgentTaskLifecycleStore::open_observation_initialized`] does. Proves
+    /// admission performs no historical projection work (#14962).
+    static HISTORICAL_COOK_INDEX_IMPORT_INVOCATIONS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// A crashed notifier cannot release its provisional claim. A bounded lease
@@ -1626,6 +1679,18 @@ pub(super) fn fail_next_record_write_for_test() {
     FAIL_NEXT_RECORD_WRITE.set(true);
 }
 
+/// Number of times historical Cook index import has run on this thread since
+/// the last [`reset_historical_cook_index_import_invocations_for_test`].
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn historical_cook_index_import_invocations_for_test() -> u32 {
+    HISTORICAL_COOK_INDEX_IMPORT_INVOCATIONS.get()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn reset_historical_cook_index_import_invocations_for_test() {
+    HISTORICAL_COOK_INDEX_IMPORT_INVOCATIONS.set(0);
+}
+
 #[cfg(test)]
 pub(super) fn interrupt_after_terminal_commit_for_test() {
     INTERRUPT_AFTER_TERMINAL_COMMIT.set(true);
@@ -1664,7 +1729,11 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             Some(record.run_id.clone()),
         ));
     }
-    let store = lifecycle_store.open_observation_initialized()?;
+    // This write only touches the row for `record.run_id`; historical Cook
+    // index import backfills OTHER, pre-SQLite records and has no bearing on
+    // it, so requiring it here put projection eligibility on the hot path of
+    // every real submission's first durable write (#14962).
+    let store = lifecycle_store.open_observation_initialized_without_historical_import()?;
     let existing = store.get_run(&record.run_id)?;
     let homeboy_version = existing
         .as_ref()
@@ -1840,6 +1909,47 @@ pub(super) fn read_record_in_store(
     let record = record_from_run(&run)?;
     // Existing lifecycle rows predate the resource table. Their exact run
     // projection is imported once; Cook aliases were imported at store startup.
+    if store
+        .control_plane_resource_projection("agent_task_run", &record.run_id)?
+        .is_none()
+    {
+        let projection = agent_task_resource_projection(lifecycle_store, &record, None)?;
+        if let Some(mission) = crate::agent_task_lifecycle::canonical_mission(&record)? {
+            store.upsert_imported_run_with_mission_and_resource_projection(
+                &run,
+                mission.as_str(),
+                &projection,
+                true,
+            )?;
+        } else {
+            store.upsert_imported_run_with_resource_projection(&run, &projection, true)?;
+        }
+    }
+    Ok(record)
+}
+
+/// [`AgentTaskLifecycleStore::read_record_without_historical_import`] against
+/// explicitly injected roots. Mirrors [`read_record_in_store`] exactly except
+/// it opens through [`AgentTaskLifecycleStore::open_observation_initialized_without_historical_import`]
+/// instead of the historical-import-including opener (#14962).
+fn read_record_without_historical_import_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskRunRecord> {
+    let store = lifecycle_store.open_observation_initialized_without_historical_import()?;
+    let run = store.get_run(run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run record not found: {run_id}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let record = record_from_run(&run)?;
+    // Same per-record self-healing backfill as `read_record_in_store`: a
+    // legacy row's own missing resource projection is repaired on read
+    // regardless of whether this particular read also imports other,
+    // unrelated historical records.
     if store
         .control_plane_resource_projection("agent_task_run", &record.run_id)?
         .is_none()
@@ -2545,7 +2655,9 @@ fn read_mirrored_aggregate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<AgentTaskAggregate>> {
-    let store = lifecycle_store.open_observation_initialized()?;
+    // The aggregate mirrored beside `run_id`'s own row never depends on
+    // historical Cook index import (#14962).
+    let store = lifecycle_store.open_observation_initialized_without_historical_import()?;
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
