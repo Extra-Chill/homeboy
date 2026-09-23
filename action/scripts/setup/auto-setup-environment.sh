@@ -55,7 +55,9 @@ if [ -f "package.json" ] && [ -n "${PORTABLE_NODE:-}" ]; then
     if [ -f "package-lock.json" ]; then
       npm ci --no-audit --no-fund 2>&1
     elif [ -f "pnpm-lock.yaml" ]; then
-      npx pnpm install --frozen-lockfile 2>&1
+      # The "Enable declared package manager" step puts the component's pinned
+      # pnpm on PATH. `npx pnpm` would fetch whatever pnpm is latest instead.
+      pnpm install --frozen-lockfile 2>&1
     elif [ -f "yarn.lock" ]; then
       yarn install --frozen-lockfile 2>&1
     else

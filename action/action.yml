@@ -507,6 +507,16 @@ runs:
       with:
         node-version: ${{ steps.detect-env.outputs.portable-node }}
 
+    # setup-node provides npm only. A component that declares a pnpm or yarn
+    # packageManager needs that binary on PATH for every step that invokes it
+    # directly, including Homeboy's dependency preflight.
+    - name: Enable declared package manager
+      if: steps.detect-env.outputs.portable-node != ''
+      shell: bash
+      env:
+        COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
+      run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'enable declared package manager' -- bash ${{ github.action_path }}/scripts/setup/enable-package-manager.sh
+
     # The Rust extension can select `cargo nextest` as its test runner
     # (`rust_test_runner`), which gives process-per-test isolation instead of
     # Cargo's shared-process threading. When nextest is absent the extension
