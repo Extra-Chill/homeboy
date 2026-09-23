@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.4] - 2026-09-23
+
+### Fixed
+- enable the component's declared Node package manager
+
 ## [2.20.3] - 2026-09-22
 
 ### Fixed
