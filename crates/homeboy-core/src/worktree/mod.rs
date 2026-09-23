@@ -921,6 +921,7 @@ pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueue
                 run_id: request.run_id.clone(),
                 cleanup_policy: None,
                 require_handoff_freshness: false,
+                source_path: None,
             })
             .map(|created| created.record.worktree_path)
         };

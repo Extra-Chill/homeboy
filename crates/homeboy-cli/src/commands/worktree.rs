@@ -496,6 +496,7 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
             run_id,
             cleanup_policy: cleanup_policy.map(Into::into),
             require_handoff_freshness,
+            source_path: None,
         })?),
         WorktreeCommand::Import {
             component_id,

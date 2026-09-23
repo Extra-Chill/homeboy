@@ -3057,6 +3057,7 @@ fn prepare_component_worktree_workspace(
         run_id: run_id.map(str::to_string),
         cleanup_policy: cleanup_policy.clone(),
         require_handoff_freshness: false,
+        source_path: None,
     })?;
     let (root, cleanup, materialization) = {
         let record = created.record;
