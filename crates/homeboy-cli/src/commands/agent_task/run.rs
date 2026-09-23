@@ -2411,122 +2411,146 @@ mod preview_tests {
         });
     }
 
-    /// #14731: preview must resolve `homeboy review test` — the exact gate
-    /// documented in Cook's own `--help` quick start — against the resolved
-    /// placement and refuse admission before a provider is dispatched, since
-    /// that gate is a portable Lab route that defers without a ready runner.
-    #[test]
-    fn preview_rejects_admission_for_a_lab_routed_gate_with_no_ready_lab_runner() {
-        crate::test_support::with_isolated_home(|_| {
-            let source = tempfile::NamedTempFile::new().expect("prompt source");
-            std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
-            let repository = tempfile::tempdir().expect("repository");
-            let primary = repository.path().join("primary");
-            let workspace = repository.path().join("task-worktree");
-            assert!(std::process::Command::new("git")
-                .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
-                .status()
-                .expect("initialize primary")
-                .success());
-            for (key, value) in [
-                ("user.email", "fixture@example.test"),
-                ("user.name", "Fixture"),
-            ] {
-                assert!(std::process::Command::new("git")
-                    .args([
-                        "-C",
-                        primary.to_str().expect("UTF-8 primary"),
-                        "config",
-                        key,
-                        value
-                    ])
-                    .status()
-                    .expect("configure fixture repository")
-                    .success());
-            }
-            std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
-            assert!(std::process::Command::new("git")
-                .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
-                .status()
-                .expect("stage fixture")
-                .success());
+    /// Shared fixture for the `#14731`/`#14963` gate-admission tests below: a
+    /// real Git repository with a linked worktree, and a Cook `--preview`
+    /// invocation whose declared `--verify` gate is the caller's choice. No
+    /// Lab runner is registered at all — the readiness snapshot a real
+    /// dispatch would compute is `absent`, with no available runners.
+    fn preview_cook_result_for_declared_gate(
+        verify_gate: &str,
+    ) -> homeboy::core::Result<(serde_json::Value, i32)> {
+        let source = tempfile::NamedTempFile::new().expect("prompt source");
+        std::fs::write(source.path(), "Inspect the task workspace.\n").expect("write prompt");
+        let repository = tempfile::tempdir().expect("repository");
+        let primary = repository.path().join("primary");
+        let workspace = repository.path().join("task-worktree");
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet", primary.to_str().expect("UTF-8 primary")])
+            .status()
+            .expect("initialize primary")
+            .success());
+        for (key, value) in [
+            ("user.email", "fixture@example.test"),
+            ("user.name", "Fixture"),
+        ] {
             assert!(std::process::Command::new("git")
                 .args([
                     "-C",
                     primary.to_str().expect("UTF-8 primary"),
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "fixture"
+                    "config",
+                    key,
+                    value
                 ])
                 .status()
-                .expect("commit fixture")
+                .expect("configure fixture repository")
                 .success());
-            assert!(std::process::Command::new("git")
-                .args([
-                    "-C",
-                    primary.to_str().expect("UTF-8 primary"),
-                    "worktree",
-                    "add",
-                    "--quiet",
-                    "-b",
-                    "task",
-                    workspace.to_str().expect("UTF-8 workspace"),
-                ])
-                .status()
-                .expect("create linked workspace")
-                .success());
-
-            let cli = Cli::try_parse_from([
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "cook".to_string(),
-                "--preview".to_string(),
-                "--backend".to_string(),
-                "fixture".to_string(),
-                "--repo".to_string(),
-                "fixture-repository".to_string(),
-                "--prompt".to_string(),
-                format!("@{}", source.path().display()),
-                "--to-worktree".to_string(),
-                workspace.to_str().expect("UTF-8 workspace").to_string(),
-                "--no-finalize".to_string(),
-                "--verify".to_string(),
-                "homeboy review test fixture-repository".to_string(),
+        }
+        std::fs::write(primary.join("fixture"), "fixture\n").expect("write fixture");
+        assert!(std::process::Command::new("git")
+            .args(["-C", primary.to_str().expect("UTF-8 primary"), "add", "."])
+            .status()
+            .expect("stage fixture")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture"
             ])
-            .expect("parse preview");
+            .status()
+            .expect("commit fixture")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-C",
+                primary.to_str().expect("UTF-8 primary"),
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "task",
+                workspace.to_str().expect("UTF-8 workspace"),
+            ])
+            .status()
+            .expect("create linked workspace")
+            .success());
 
-            // No lab runner is registered at all: the readiness snapshot a
-            // real dispatch would compute is `absent`, with no available
-            // runners — the exact condition that made `homeboy review test`
-            // defer at execution time in the reported session.
-            crate::cli_runtime::capture_preflight_result_for_test(
-                &cli,
-                Some(
-                    crate::core::parsed_command_preflight::LabReadinessSnapshot {
-                        state: "absent".to_string(),
-                        selected_runner_id: None,
-                        available_runner_ids: Vec::new(),
-                        reasons: Vec::new(),
-                        remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
-                        repair_admitted_runner_ids: Vec::new(),
-                    },
-                ),
-            );
+        let cli = Cli::try_parse_from([
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--preview".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--repo".to_string(),
+            "fixture-repository".to_string(),
+            "--prompt".to_string(),
+            format!("@{}", source.path().display()),
+            "--to-worktree".to_string(),
+            workspace.to_str().expect("UTF-8 workspace").to_string(),
+            "--no-finalize".to_string(),
+            "--verify".to_string(),
+            verify_gate.to_string(),
+        ])
+        .expect("parse preview");
 
-            let Commands::AgentTask(agent_task) = cli.command else {
-                panic!("agent-task command");
-            };
-            let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
-                panic!("Cook command");
-            };
+        crate::cli_runtime::capture_preflight_result_for_test(
+            &cli,
+            Some(
+                crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                    state: "absent".to_string(),
+                    selected_runner_id: None,
+                    available_runner_ids: Vec::new(),
+                    reasons: Vec::new(),
+                    remediation_commands: vec!["homeboy runner connect <runner-id>".to_string()],
+                    repair_admitted_runner_ids: Vec::new(),
+                },
+            ),
+        );
 
-            let error =
-                preview_cook(*args, None).expect_err("an unexecutable gate must block preview");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(args) = agent_task.command else {
+            panic!("Cook command");
+        };
+        preview_cook(*args, None)
+    }
+
+    /// #14963: a bare `homeboy review test` gate — the exact gate documented
+    /// in Cook's own `--help` quick start — must be *admitted* under local
+    /// placement with no ready Lab runner. It either runs locally (the
+    /// common case: resource admission only engages under measured pressure)
+    /// or gracefully defers to a recoverable `Deferred` gate outcome
+    /// (#14731); rejecting it before provider dispatch refused strictly more
+    /// than the risk it guarded against.
+    #[test]
+    fn preview_admits_a_bare_review_test_gate_with_no_ready_lab_runner() {
+        crate::test_support::with_isolated_home(|_| {
+            preview_cook_result_for_declared_gate("homeboy review test fixture-repository")
+                .expect("a bare review test gate can run locally or defer gracefully");
+        });
+    }
+
+    /// #14731 / #14963: preview must still refuse a `homeboy review test`
+    /// gate that *pins* an unavailable Lab route — `--placement lab` has no
+    /// local fallback and hard-fails at execution time instead of deferring,
+    /// so admitting it would dispatch a provider whose verify gate is
+    /// already known to fail.
+    #[test]
+    fn preview_rejects_admission_for_a_pinned_lab_gate_with_no_ready_lab_runner() {
+        crate::test_support::with_isolated_home(|_| {
+            let error = preview_cook_result_for_declared_gate(
+                "homeboy review test fixture-repository --placement lab",
+            )
+            .expect_err("a gate pinned to an unavailable Lab route must block preview");
             assert!(
                 error
                     .message
-                    .contains("homeboy review test fixture-repository"),
+                    .contains("homeboy review test fixture-repository --placement lab"),
                 "{}",
                 error.message
             );
