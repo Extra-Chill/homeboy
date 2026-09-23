@@ -1293,10 +1293,23 @@ impl AgentTaskScheduler {
                     // implementation-provider budget. Independent candidate
                     // tasks still follow the plan's candidate-completion policy;
                     // this only prevents sequential rotation of the same task.
-                    let candidate_ready_for_convergence = outcome
-                        .artifacts
-                        .iter()
-                        .any(is_fingerprinted_actionable_patch_artifact);
+                    //
+                    // A stalled provider is the one exception (#14965). Unlike a
+                    // genuine timeout or provider failure, a liveness stall says
+                    // nothing about the task itself — the provider simply went
+                    // silent — so holding its patch for human review would strand
+                    // the run exactly where an operator previously had to notice
+                    // the stall and move the work to the next provider by hand.
+                    // Falling through to the ordinary rotation path instead lets
+                    // a configured rotation entry's explicit `adoption` (never
+                    // applied implicitly — see `select_candidate_adoption`) carry
+                    // that patch into the next provider.
+                    let candidate_ready_for_convergence = outcome.failure_classification
+                        != Some(AgentTaskFailureClassification::Stalled)
+                        && outcome
+                            .artifacts
+                            .iter()
+                            .any(is_fingerprinted_actionable_patch_artifact);
                     let rotation_takes_over = !candidate_ready_for_convergence
                         && AgentTaskScheduleSupport::rotation_policy_for_request(
                             &running_task.request,
