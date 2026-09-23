@@ -530,71 +530,6 @@ mod fanout_batch_read_tests {
     }
 
     #[test]
-    fn batch_resume_recovery_reattaches_the_durable_receipt_without_context() {
-        with_isolated_home(|_| {
-            let effect_id =
-                action_effect_id("test", "resume-recovery-batch", "resume", "recovery-effect");
-            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
-            let receipt = serde_json::json!({
-                "outcome": "failed",
-                "result": {
-                    "schema": "homeboy/control-plane-resume-result/v1",
-                    "data": {
-                        "schema": "homeboy/agent-task-cook-batch/v1",
-                        "batch_id": "resume-recovery-batch",
-                        "status": "partial_failure",
-                        "total": 1,
-                        "queued": 0,
-                        "running": 0,
-                        "succeeded": 0,
-                        "failed": 1,
-                        "cancelled": 0,
-                        "timed_out": 0,
-                        "cooks": []
-                    }
-                }
-            });
-            let mut actions = serde_json::Map::new();
-            actions.insert(effect_id.0.clone(), receipt);
-            store
-                .persist_fanout_run_batch(
-                    "resume-recovery-batch",
-                    "resume-recovery-plan",
-                    &[FanoutRunBatchChild {
-                        task_id: "child".to_string(),
-                        run_id: "resume-recovery-child".to_string(),
-                    }],
-                    serde_json::json!({ "control_plane_actions": actions }),
-                )
-                .expect("persist batch");
-            let run = homeboy_core::observation::RunRecord {
-                id: "resume-recovery-batch".to_string(),
-                kind: "agent-task-fanout".to_string(),
-                ..Default::default()
-            };
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id,
-                action: ControlPlaneAction::Resume,
-                idempotency_key: "recovery-effect".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: true,
-            };
-            let recovered = FanoutBatchActionDelegate
-                .recover(
-                    &run,
-                    &request,
-                    &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
-                )
-                .expect("stored receipt recovery");
-            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
-            assert_eq!(recovered.result.data["status"], "partial_failure");
-        });
-    }
-
-    #[test]
     fn batch_resume_requires_admitted_authority_for_execution() {
         with_isolated_home(|_| {
             let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
@@ -1342,7 +1277,7 @@ pub struct FanoutBatchDomainService {
     lifecycle: AgentTaskLifecycleStore,
 }
 
-struct FanoutBatchActionDelegate;
+pub(crate) struct FanoutBatchActionDelegate;
 
 impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
     fn run_kind(&self) -> &'static str {
@@ -1364,11 +1299,12 @@ impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
         request: &ControlPlaneActionRequest,
         _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        // Core replays a stored terminal acknowledgement before reaching the
+        // delegate, so recovery only runs when the effect never terminalized.
+        // The child finalization receipts are the durable record of what the
+        // interrupted resume already harvested; never dispatch it again.
         if request.action == ControlPlaneAction::Resume {
-            if let Some(receipt) = Self::stored_resume_receipt(&run.id, &request.effect_id)? {
-                return Ok(receipt);
-            }
-            return Self::recover_missing_resume_receipt(&run.id);
+            return Self::recover_resume_from_child_finalizations(&run.id);
         }
         // Cancel is independently idempotent: its marker-first implementation
         // is safe to replay even when the action receipt was lost.
@@ -1413,37 +1349,7 @@ impl FanoutBatchActionDelegate {
         factory(authority).map_err(|error| ControlPlaneError::unavailable(error.message))
     }
 
-    fn stored_resume_receipt(
-        batch_id: &str,
-        effect_id: &EffectId,
-    ) -> Result<Option<ControlPlaneActionDelegateResult>, ControlPlaneError> {
-        let store = AgentTaskBatchStore::from_current_data_root()
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-        let record = store
-            .read_batch_record(batch_id)
-            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-        let Some(receipt) = record.metadata.pointer(&format!(
-            "/control_plane_actions/{}",
-            effect_id.0.replace('~', "~0").replace('/', "~1")
-        )) else {
-            return Ok(None);
-        };
-        let outcome =
-            serde_json::from_value(receipt.get("outcome").cloned().unwrap_or(Value::Null))
-                .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
-        let result = serde_json::from_value(receipt.get("result").cloned().unwrap_or(Value::Null))
-            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
-        Ok(Some(ControlPlaneActionDelegateResult {
-            outcome,
-            result,
-            message: receipt
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        }))
-    }
-
-    fn recover_missing_resume_receipt(
+    pub(crate) fn recover_resume_from_child_finalizations(
         batch_id: &str,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
         let store = AgentTaskBatchStore::from_current_data_root()
@@ -1661,19 +1567,6 @@ impl FanoutBatchActionDelegate {
                         )
                         .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 }
-                let store = AgentTaskBatchStore::from_current_data_root()
-                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
-                let receipt = serde_json::json!({
-                    "outcome": action_result.outcome,
-                    "result": &action_result.result,
-                    "message": &action_result.message,
-                });
-                store
-                    .mutate_batch(batch_id, |batch| {
-                        batch.metadata["control_plane_actions"][&request.effect_id.0] = receipt;
-                        Ok(())
-                    })
-                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
                 Ok(action_result)
             }
             ControlPlaneAction::Cancel => {

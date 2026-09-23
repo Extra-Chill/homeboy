@@ -22379,6 +22379,25 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         )
         .expect("resume action replay");
         assert_eq!(replay, acknowledgement);
+
+        // An interrupted resume that never terminalized recovers from the
+        // receipts the real harvest wrote, without dispatching the provider.
+        let recovered =
+            crate::orchestration::FanoutBatchActionDelegate::recover_resume_from_child_finalizations(
+                "batch-9525",
+            )
+            .expect("recover from real child finalization receipts");
+        assert_eq!(
+            recovered.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        );
+        let recovered: crate::orchestration::FanoutBatchResumeActionResult =
+            serde_json::from_value(recovered.result.data).expect("typed recovered result");
+        assert_eq!(recovered.succeeded, 3);
+        assert!(recovered
+            .cooks
+            .iter()
+            .all(|cell| cell.terminal && cell.exit_code == 0));
     });
 }
 
