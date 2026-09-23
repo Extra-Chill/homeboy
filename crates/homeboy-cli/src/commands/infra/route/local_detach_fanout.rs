@@ -206,8 +206,8 @@ pub(super) fn intercept_local_detached_fanout(
         let status = super::local_detach::stream_attached_cook_log(&mut child, &log_path)?;
         return Ok(Some(status.code().unwrap_or(1)));
     }
-    let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout());
-    let child_workload_placement = child_workload_placement(&fanout_id)
+    let handoff = await_durable_handoff(&fanout_id, &mut child, handoff_timeout())?;
+    let child_workload_placement = child_workload_placement(&fanout_id)?
         .or_else(invocation_child_workload_placement)
         .unwrap_or(ChildWorkloadPlacement::Unknown);
 
@@ -528,32 +528,32 @@ fn await_durable_handoff(
     fanout_id: &str,
     child: &mut std::process::Child,
     timeout: Duration,
-) -> DetachedFanoutHandoff {
+) -> homeboy::core::Result<DetachedFanoutHandoff> {
     let started = Instant::now();
     loop {
-        if let Some(mut handoff) = durable_handoff(fanout_id) {
+        if let Some(mut handoff) = durable_handoff(fanout_id)? {
             handoff.waited_ms = started.elapsed().as_millis() as u64;
-            return handoff;
+            return Ok(handoff);
         }
         if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-            return DetachedFanoutHandoff {
+            return Ok(DetachedFanoutHandoff {
                 state: DetachedHandoffState::ExitedBeforeHandoff,
                 expected: None,
                 admitted: None,
                 rejected: None,
                 absent: None,
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
         if started.elapsed() >= timeout {
-            return DetachedFanoutHandoff {
+            return Ok(DetachedFanoutHandoff {
                 state: DetachedHandoffState::CoordinatorStarted,
                 expected: None,
                 admitted: None,
                 rejected: None,
                 absent: None,
                 waited_ms: started.elapsed().as_millis() as u64,
-            };
+            });
         }
         std::thread::sleep(HANDOFF_POLL);
     }
@@ -562,18 +562,38 @@ fn await_durable_handoff(
 /// Read admission only from durable records. A batch roster alone is merely a
 /// coordinator start: it must not be reported as accepted before every child is
 /// either admitted or durably rejected.
-fn durable_handoff(fanout_id: &str) -> Option<DetachedFanoutHandoff> {
-    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
+fn durable_handoff(fanout_id: &str) -> homeboy::core::Result<Option<DetachedFanoutHandoff>> {
+    let service =
+        homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
+    let requested = homeboy_control_plane_contract::RunId::new(fanout_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "fanout_id",
+            error.to_string(),
+            Some(fanout_id.to_string()),
+            None,
+        )
+    })?;
+    let canonical = match homeboy::core::control_plane::run(&requested) {
+        Ok(resource) => resource,
+        Err(error)
+            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
+        {
+            return Ok(None)
+        }
+        Err(error) => {
+            return Err(homeboy::agents::orchestration::control_plane_error_to_homeboy(error))
+        }
+    };
+    let projection = service.status_adjunct(&canonical)?;
+    let record = projection.status.batch;
     let expected = record.child_runs.len();
     let terminal_failure = record.metadata["terminal_failure"].is_object();
-    let admitted = record
-        .child_runs
-        .iter()
-        .filter(|child| {
-            homeboy::agents::agent_tasks::lifecycle::run_record_exists_readonly(&child.run_id)
-                .unwrap_or(false)
-        })
-        .count();
+    let mut admitted = 0;
+    for child in &record.child_runs {
+        if service.child_run_exists(&child.run_id)? {
+            admitted += 1;
+        }
+    }
     let rejected = terminal_failure
         .then_some(expected.saturating_sub(admitted))
         .unwrap_or(0);
@@ -585,14 +605,14 @@ fn durable_handoff(fanout_id: &str) -> Option<DetachedFanoutHandoff> {
     } else {
         DetachedHandoffState::CoordinatorStarted
     };
-    Some(DetachedFanoutHandoff {
+    Ok(Some(DetachedFanoutHandoff {
         state,
         expected: Some(expected),
         admitted: Some(admitted),
         rejected: Some(rejected),
         absent: Some(absent),
         waited_ms: 0,
-    })
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -680,30 +700,61 @@ fn summarize_child_placements(children: Vec<ChildPlacement>) -> ChildWorkloadPla
 /// Prefer materialized child decisions, then fall back to the plan-wide policy
 /// while admission is still in progress. This is a read-only projection: it
 /// must not expire or otherwise mutate coordinator admission.
-fn child_workload_placement(fanout_id: &str) -> Option<ChildWorkloadPlacement> {
-    let record = homeboy::agents::agent_tasks::batch::read_batch_record(fanout_id).ok()?;
-    let children = record
-        .child_runs
-        .iter()
-        .filter_map(|child| {
-            let run = homeboy::agents::agent_tasks::lifecycle::status(&child.run_id).ok()?;
-            Some(ChildPlacement {
-                task_id: child.task_id.clone(),
-                run_id: child.run_id.clone(),
-                placement: workload_from_child_record(&run.metadata)?,
-            })
-        })
-        .collect::<Vec<_>>();
-    if children.len() == record.child_runs.len() {
-        return Some(summarize_child_placements(children));
+fn child_workload_placement(
+    fanout_id: &str,
+) -> homeboy::core::Result<Option<ChildWorkloadPlacement>> {
+    let service =
+        homeboy::agents::orchestration::FanoutBatchDomainService::from_current_environment()?;
+    let requested = homeboy_control_plane_contract::RunId::new(fanout_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "fanout_id",
+            error.to_string(),
+            Some(fanout_id.to_string()),
+            None,
+        )
+    })?;
+    let canonical = match homeboy::core::control_plane::run(&requested) {
+        Ok(resource) => resource,
+        Err(error)
+            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
+        {
+            return Ok(None)
+        }
+        Err(error) => {
+            return Err(homeboy::agents::orchestration::control_plane_error_to_homeboy(error))
+        }
+    };
+    let projection = service.status_adjunct(&canonical)?;
+    let record = projection.status.batch;
+    let mut children = Vec::new();
+    for child in &record.child_runs {
+        let Some(metadata) = service.child_placement_metadata(&child.run_id)? else {
+            continue;
+        };
+        let Some(placement) = workload_from_child_record(&metadata) else {
+            continue;
+        };
+        children.push(ChildPlacement {
+            task_id: child.task_id.clone(),
+            run_id: child.run_id.clone(),
+            placement,
+        });
     }
-    serde_json::from_value::<homeboy::core::parsed_command_preflight::PlacementDirective>(
-        record.metadata.get("placement")?.clone(),
+    if children.len() == record.child_runs.len() {
+        return Ok(Some(summarize_child_placements(children)));
+    }
+    let Some(placement) = record.metadata.get("placement").cloned() else {
+        return Ok(None);
+    };
+    Ok(
+        serde_json::from_value::<homeboy::core::parsed_command_preflight::PlacementDirective>(
+            placement,
+        )
+        .ok()
+        .map(|placement| ChildWorkloadPlacement::Uniform {
+            placement: placement.into(),
+        }),
     )
-    .ok()
-    .map(|placement| ChildWorkloadPlacement::Uniform {
-        placement: placement.into(),
-    })
 }
 
 fn invocation_child_workload_placement() -> Option<ChildWorkloadPlacement> {
@@ -1210,7 +1261,9 @@ mod tests {
             )
             .expect("persist coordinator roster");
 
-            let handoff = durable_handoff("wave-pre-admission").expect("read handoff");
+            let handoff = durable_handoff("wave-pre-admission")
+                .expect("read handoff")
+                .expect("handoff exists");
 
             assert_eq!(handoff.state, DetachedHandoffState::CoordinatorStarted);
             assert_eq!(handoff.expected, Some(1));
@@ -1257,9 +1310,12 @@ mod tests {
             )
             .expect("persist Lab-bound coordinator roster");
 
-            let handoff = durable_handoff("wave-lab-children").expect("read handoff");
+            let handoff = durable_handoff("wave-lab-children")
+                .expect("read handoff")
+                .expect("handoff exists");
             let workload = child_workload_placement("wave-lab-children")
-                .expect("read persisted child placement policy");
+                .expect("read persisted child placement policy")
+                .expect("placement exists");
             let envelope = handoff_envelope(
                 "wave-lab-children",
                 4242,

@@ -496,7 +496,15 @@ fn scoped_run_next_claims_its_fanout_cook_continuation_by_exact_identity() {
             &options.identity.initial_run_id,
         )
         .expect("continuation queued");
-        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-fanout")
+        crate::orchestration::register();
+        let service = crate::orchestration::FanoutBatchDomainService::from_current_environment()
+            .expect("fanout service");
+        let canonical = homeboy_core::control_plane::run(
+            &homeboy_control_plane_contract::RunId::new("scoped-fanout").expect("fanout id"),
+        )
+        .expect("canonical fanout");
+        let scope = service
+            .owned_child_run_ids(&canonical)
             .expect("owned fanout child");
 
         let result = super::super::run_next_with_cook_dispatcher(
@@ -578,7 +586,15 @@ fn scoped_run_next_skips_bad_fanout_continuation_and_claims_queued_child() {
             serde_json::json!({}),
         )
         .expect("fanout persisted");
-        let scope = crate::agent_task_batch::owned_child_run_ids("scoped-recovery")
+        crate::orchestration::register();
+        let service = crate::orchestration::FanoutBatchDomainService::from_current_environment()
+            .expect("fanout service");
+        let canonical = homeboy_core::control_plane::run(
+            &homeboy_control_plane_contract::RunId::new("scoped-recovery").expect("fanout id"),
+        )
+        .expect("canonical fanout");
+        let scope = service
+            .owned_child_run_ids(&canonical)
             .expect("owned children");
 
         let result = super::super::run_next_with_cook_dispatcher(
@@ -22079,6 +22095,27 @@ fn test_reconstruct_dispatcher(
     }
 }
 
+fn test_resume_context(
+    authority: &Value,
+) -> homeboy_core::Result<(
+    crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    crate::orchestration::FanoutResumeDispatcherFactory,
+)> {
+    let Some(reference) = authority
+        .get("provider_catalog_ref")
+        .and_then(Value::as_str)
+    else {
+        return Ok((Arc::new(UnusedExecutor), test_reconstruct_dispatcher));
+    };
+    let catalog = crate::orchestration::resolve_fanout_resume_catalog(reference)?;
+    Ok((
+        Arc::new(
+            crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(catalog),
+        ),
+        test_reconstruct_dispatcher,
+    ))
+}
+
 /// Stage one batch child as if its provider attempt already succeeded on a
 /// runner but the coordinator exited before promotion/finalization: persist the
 /// durable recipe, a terminal Succeeded aggregate, and an applied promotion.
@@ -22180,6 +22217,7 @@ fn stage_terminal_batch_child(
     run_id
 }
 
+#[cfg(unix)]
 #[test]
 fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provider() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -22234,35 +22272,87 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
                     run_id: child_partial.clone(),
                 },
             ],
-            Value::Null,
+            serde_json::json!({
+                "execution_authority": {"schema": "test/fanout-execution-authority/v1"}
+            }),
         )
         .expect("persist batch record");
 
+        // Portfolio reconciliation observes each recorded PR through `gh`.
+        // Serve that observation hermetically instead of depending on the
+        // runner's GitHub authentication.
+        let gh_root = tempfile::tempdir().expect("gh fixture directory");
+        let gh = gh_root.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '{\"state\":\"OPEN\",\"mergedAt\":null,\"reviewDecision\":\"REVIEW_REQUIRED\",\"mergeStateStatus\":\"CLEAN\",\"mergeCommit\":null,\"baseRefName\":\"main\",\"headRefOid\":\"head-sha\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("write gh fixture");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&gh, permissions).expect("make gh fixture executable");
+        }
+        let _path = homeboy_core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                gh_root.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
         // UnusedExecutor asserts the provider is never dispatched again: a
         // terminal child is harvested straight through gates and finalization.
-        // The dispatcher is reconstructed only to satisfy the recipe contract.
-        let result = resume_cook_batch(
-            "batch-9525",
-            Arc::new(UnusedExecutor),
-            test_reconstruct_dispatcher,
-        )
-        .expect("resume harvests terminal children");
+        // Exercise the real registered control-plane delegate and outbox.
+        crate::orchestration::register_fanout_resume_context(test_resume_context);
+        crate::orchestration::register();
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "test",
+                "batch-9525",
+                "resume",
+                "resume-effect",
+            ),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+            idempotency_key: "resume-effect".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+        let requested = homeboy_control_plane_contract::RunId::new("batch-9525").unwrap();
+        let acknowledgement = homeboy_core::control_plane::execute_action(&requested, &request)
+            .expect("resume action harvests terminal children");
+        assert_eq!(
+            acknowledgement.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
+            "resume acknowledgement: {acknowledgement:#?}"
+        );
+        let result: crate::orchestration::FanoutBatchResumeActionResult =
+            serde_json::from_value(acknowledgement.result.data.clone()).expect("typed result");
 
         assert_eq!(
-            result.exit_code, 0,
+            result
+                .cooks
+                .iter()
+                .map(|cook| cook.exit_code)
+                .max()
+                .unwrap_or(1),
+            0,
             "both children finalize green: {:#?}",
-            result.value
+            result
         );
-        assert_eq!(result.value.status, "succeeded");
-        assert_eq!(result.value.total, 3);
-        assert_eq!(result.value.succeeded, 3);
-        assert_eq!(result.value.failed, 0);
-        for cell in &result.value.cooks {
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(result.total, 3);
+        assert_eq!(result.succeeded, 3);
+        assert_eq!(result.failed, 0);
+        for cell in &result.cooks {
             assert_eq!(cell.exit_code, 0);
-            assert_eq!(
-                cell.result.as_ref().map(|report| report.status.as_str()),
-                Some("review_ready")
-            );
+            assert_eq!(cell.status, "review_ready");
+            assert!(cell.terminal);
         }
 
         // Per-child finalization state is reconciled into the durable batch
@@ -22276,16 +22366,192 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         assert!(finalizations.contains_key(&child_b));
         assert!(finalizations.contains_key(&child_partial));
 
-        // Resume is idempotent: a second call still succeeds and does not
-        // redispatch or duplicate a PR (finalization is loaded, not recreated).
-        let second = resume_cook_batch(
-            "batch-9525",
-            Arc::new(UnusedExecutor),
-            test_reconstruct_dispatcher,
+        // The second action is an outbox replay and returns the stored receipt;
+        // no Cook service or provider executor is entered again.
+        let replay = homeboy_core::control_plane::execute_action(&requested, &request)
+            .expect("resume action replay");
+        assert_eq!(replay, acknowledgement);
+    });
+}
+
+#[test]
+fn canonical_fanout_resume_uses_caller_environment_and_config_not_daemon_ambient_state() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary fixture root");
+        let primary = temporary.path().join("primary");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&primary).expect("primary workspace");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&primary)
+                .status()
+                .expect("git fixture command")
+                .success());
+        }
+        std::fs::write(primary.join("README.md"), "fixture\n").expect("fixture file");
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&primary)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-q", "-m", "fixture"])
+            .current_dir(&primary)
+            .status()
+            .expect("git commit")
+            .success());
+        assert!(Command::new("git")
+            .args(["branch", "fixture-base"])
+            .current_dir(&primary)
+            .status()
+            .expect("git base branch")
+            .success());
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&primary)
+            .current_dir(&primary)
+            .status()
+            .expect("git remote")
+            .success());
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&workspace)
+            .arg("HEAD")
+            .current_dir(&primary)
+            .status()
+            .expect("git worktree")
+            .success());
+
+        let marker = temporary.path().join("provider-marker.json");
+        let provider_script = temporary.path().join("provider.js");
+        std::fs::write(
+            &provider_script,
+            format!(
+                "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const patch=req.artifacts_path+'/changes.patch';fs.writeFileSync({:?},JSON.stringify({{authority:process.env.HOMEBOY_FANOUT_CALLER,account:req.executor.config.account,task_id:req.task_id}}));fs.writeFileSync(patch,'diff --git a/README.md b/README.md\\n--- a/README.md\\n+++ b/README.md\\n@@ -1 +1 @@\\n-fixture\\n+resumed\\n');process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',artifacts:[{{schema:'homeboy/agent-task-artifact/v1',id:'patch',kind:'patch',path:patch}},{{schema:'homeboy/agent-task-artifact/v1',id:'marker',kind:'transcript',path:{:?}}}]}}));",
+                marker.display().to_string(),
+                marker.display().to_string()
+            ),
         )
-        .expect("second resume is idempotent");
-        assert_eq!(second.exit_code, 0);
-        assert_eq!(second.value.succeeded, 3);
+        .expect("provider script");
+
+        let _caller =
+            homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_FANOUT_CALLER", "caller-a");
+        let provider: crate::agent_task_provider::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "caller-fixture",
+                "backend": "caller-fixture",
+                "invocation": {
+                    "argv": ["node", provider_script.display().to_string()],
+                    "env": [{"name":"HOMEBOY_FANOUT_CALLER","source":"env","required":true}]
+                },
+                "capabilities": ["structured_outcome"]
+            }))
+            .expect("caller fixture provider");
+        let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        };
+        let cook_id = "fanout-caller-context";
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(BatchAttemptDispatcher {
+                barrier: Arc::new(Barrier::new(1)),
+                entered: Arc::new(AtomicUsize::new(0)),
+                fail: false,
+            }),
+        );
+        options.identity.initial_run_id = cook_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.backend = "caller-fixture".to_string();
+        options.identity.initial_plan.tasks[0].executor.config =
+            serde_json::json!({"account":"account-a"});
+        options.identity.initial_plan.tasks[0].executor.model = Some("caller-model".to_string());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(workspace.display().to_string());
+        options.workspace.to_worktree = workspace.display().to_string();
+        options.workspace.source_worktree_path = Some(workspace.clone());
+        let base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&workspace)
+                .output()
+                .expect("git rev-parse")
+                .stdout,
+        )
+        .expect("base sha")
+        .trim()
+        .to_string();
+        options.workspace.task_base_sha = Some(base_sha.clone());
+        options.finalization.base = "fixture-base".to_string();
+        options.finalization.no_finalize = true;
+        options.gates.verify = vec!["true".to_string()];
+        options.provider_transport.attempt_dispatcher = None;
+        persist_initial_recipe(&options).expect("persist caller recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(cook_id))
+            .expect("submit eligible child");
+
+        let authority_ref =
+            crate::orchestration::persist_fanout_resume_authority(cook_id, &catalog)
+                .expect("persist caller authority");
+        let _daemon =
+            homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_FANOUT_CALLER", "daemon-b");
+        crate::agent_task_batch::persist_fanout_run_batch(
+            cook_id,
+            cook_id,
+            &[crate::agent_task_batch::FanoutRunBatchChild {
+                task_id: cook_id.to_string(),
+                run_id: cook_id.to_string(),
+            }],
+            serde_json::json!({
+                "execution_authority": {
+                    "schema": "homeboy/fanout-execution-authority/v2",
+                    "provider_catalog_ref": authority_ref
+                }
+            }),
+        )
+        .expect("persist canonical batch");
+        let claim = crate::agent_task_batch::claim_fanout_run_batch(cook_id)
+            .expect("claim batch")
+            .expect("batch claim");
+        crate::agent_task_batch::start_fanout_run_batch(cook_id, &claim).expect("start batch");
+
+        crate::orchestration::register_fanout_resume_context(test_resume_context);
+        crate::orchestration::register();
+        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+            effect_id: homeboy_control_plane_contract::action_effect_id(
+                "test",
+                cook_id,
+                "resume",
+                "caller-context",
+            ),
+            action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+            idempotency_key: "caller-context".to_string(),
+            actor: "test".to_string(),
+            expected_updated_at: None,
+            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+            confirmed: true,
+        };
+        let requested = homeboy_control_plane_contract::RunId::new(cook_id).expect("run id");
+        let acknowledgement = homeboy_core::control_plane::execute_action(&requested, &request)
+            .expect("canonical resume action");
+        assert_eq!(
+            acknowledgement.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
+            "{acknowledgement:?}"
+        );
+        let observed: Value =
+            serde_json::from_slice(&std::fs::read(marker).expect("provider marker"))
+                .expect("provider marker JSON");
+        assert_eq!(observed["authority"], "caller-a");
+        assert_eq!(observed["account"], "account-a");
+        assert_eq!(observed["task_id"], "provider");
+        assert_ne!(observed["authority"], "daemon-b");
     });
 }
 

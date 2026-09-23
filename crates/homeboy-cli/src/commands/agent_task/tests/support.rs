@@ -51,13 +51,13 @@ pub(crate) use homeboy::agents::agent_tasks::scheduler::{
 };
 
 pub(crate) use crate::test_support::{controller_runtime_test_executable, with_isolated_home};
+pub(crate) use homeboy::agents::agent_task_loop_controller::{
+    self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopPolicyAction,
+};
 pub(crate) use homeboy::agents::agent_tasks::controller_service as agent_task_controller_service;
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
     AgentTaskRunState,
-};
-pub(crate) use homeboy::agents::agent_tasks::loop_controller::{
-    self as agent_task_loop_controller, AgentTaskLoopActionStatus, AgentTaskLoopPolicyAction,
 };
 pub(crate) use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskExecutionContext, AgentTaskState,

@@ -5,9 +5,11 @@ use homeboy::agents::agent_tasks::batch::{
     claim_fanout_run_batch, persist_fanout_run_batch, record_fanout_run_batch_failure,
     FanoutRunBatchChild,
 };
-use homeboy::agents::agent_tasks::fanout_supervisor::{portfolio_exists, read_portfolio};
+use homeboy::agents::agent_tasks::fanout_supervisor::portfolio_exists;
 use homeboy::agents::agent_tasks::lifecycle::submit_plan;
+use homeboy::agents::agent_tasks::provider::{AgentTaskExecutorProvider, AgentTaskProviderCatalog};
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+use homeboy::agents::orchestration::persist_fanout_resume_authority;
 
 #[test]
 fn fanout_status_exposes_the_durable_supervisor_projection() {
@@ -15,6 +17,21 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
         let plan = AgentTaskPlan::new("fanout-supervisor-cli", Vec::new());
         submit_plan(&plan, Some("cook-child-a")).expect("persist child a");
         submit_plan(&plan, Some("cook-child-b")).expect("persist child b");
+        let mut metadata = authority_metadata("production-interface");
+        metadata["dependency_graph"] = serde_json::json!({
+            "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
+            "readiness": {
+                "states": {
+                    "child-a": "ready",
+                    "child-b": "blocked_by_dependency"
+                },
+                "ready": ["child-a"],
+                "blocked_paths": {
+                    "child-b": ["child-b", "child-a"]
+                },
+                "next_action": "dispatch ready child 'child-a'"
+            }
+        });
         persist_fanout_run_batch(
             "production-interface",
             "production-interface",
@@ -28,22 +45,7 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
                     run_id: "cook-child-b".to_string(),
                 },
             ],
-            serde_json::json!({
-                "dependency_graph": {
-                    "schema": "homeboy/agent-task-fanout-dependency-graph/v1",
-                    "readiness": {
-                        "states": {
-                            "child-a": "ready",
-                            "child-b": "blocked_by_dependency"
-                        },
-                        "ready": ["child-a"],
-                        "blocked_paths": {
-                            "child-b": ["child-b", "child-a"]
-                        },
-                        "next_action": "dispatch ready child 'child-a'"
-                    }
-                }
-            }),
+            metadata,
         )
         .expect("persist fanout batch");
 
@@ -91,6 +93,7 @@ fn fanout_status_exposes_the_durable_supervisor_projection() {
 fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("fanout-supervisor-cli-resume", Vec::new());
+        submit_plan(&plan, Some("production-resume")).expect("persist fanout owner");
         submit_plan(&plan, Some("cook-child")).expect("persist child");
         persist_fanout_run_batch(
             "production-resume",
@@ -99,11 +102,11 @@ fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
                 task_id: "child".to_string(),
                 run_id: "cook-child".to_string(),
             }],
-            serde_json::json!({}),
+            authority_metadata("production-resume"),
         )
         .expect("persist fanout batch");
 
-        for expected_minimum_revision in [2, 4] {
+        for _ in [2, 4] {
             let output = Command::new(homeboy_bin())
                 .args(["agent-task", "fanout", "resume", "production-resume"])
                 .env("HOMEBOY_NO_UPDATE_CHECK", "1")
@@ -112,12 +115,11 @@ fn fanout_resume_runs_and_persists_the_production_supervisor_across_restart() {
             let output: serde_json::Value =
                 serde_json::from_slice(&output.stdout).expect("fanout resume JSON output");
             assert_eq!(
-                output["data"]["portfolio"]["status"]["fanout_id"],
-                "production-resume"
+                output["data"]["cooks"][0]["error"]["code"],
+                "validation.invalid_argument"
             );
-            let portfolio = read_portfolio("production-resume").expect("durable supervisor state");
-            assert!(portfolio.revision >= expected_minimum_revision);
-            assert_eq!(portfolio.children["child"].child_id, "child");
+            assert!(output["data"]["portfolio"].is_null());
+            assert!(!portfolio_exists("production-resume").expect("read portfolio path"));
         }
     });
 }
@@ -131,6 +133,7 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
         let batch_id = "interrupted-independent-children";
         let children = ["child-a", "child-b", "child-c"];
         let plan = AgentTaskPlan::new("interrupted-provider-wave", Vec::new());
+        submit_plan(&plan, Some(batch_id)).expect("persist interrupted batch owner");
         for child in children {
             let run_id = format!("cook-{child}");
             submit_plan(&plan, Some(&run_id)).expect("persist interrupted child");
@@ -144,6 +147,18 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
             )
             .expect("terminalize interrupted child");
         }
+        let mut metadata = authority_metadata(batch_id);
+        metadata["dependency_graph"] = serde_json::json!({
+            "nodes": children.iter().map(|child| serde_json::json!({
+                "id": child,
+                "depends_on": []
+            })).collect::<Vec<_>>()
+        });
+        metadata["declared_trackers"] = serde_json::json!({
+            "child-a": "https://github.com/Extra-Chill/homeboy/issues/14190",
+            "child-b": "https://github.com/Extra-Chill/homeboy/issues/14191",
+            "child-c": "https://github.com/Extra-Chill/homeboy/issues/14192"
+        });
         persist_fanout_run_batch(
             batch_id,
             batch_id,
@@ -154,19 +169,7 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
                     run_id: format!("cook-{child}"),
                 })
                 .collect::<Vec<_>>(),
-            serde_json::json!({
-                "dependency_graph": {
-                    "nodes": children.iter().map(|child| serde_json::json!({
-                        "id": child,
-                        "depends_on": []
-                    })).collect::<Vec<_>>()
-                },
-                "declared_trackers": {
-                    "child-a": "https://github.com/Extra-Chill/homeboy/issues/14190",
-                    "child-b": "https://github.com/Extra-Chill/homeboy/issues/14191",
-                    "child-c": "https://github.com/Extra-Chill/homeboy/issues/14192"
-                }
-            }),
+            metadata,
         )
         .expect("persist interrupted batch");
 
@@ -190,12 +193,8 @@ fn fanout_resume_preserves_interrupted_independent_child_failures() {
             assert_eq!(cell["status"], "failed");
             assert_eq!(cell["exit_code"], 1);
         }
-        for child in output["data"]["portfolio"]["status"]["children"]
-            .as_array()
-            .expect("portfolio children")
-        {
-            assert_eq!(child["tracker"], "declared_unobserved");
-        }
+        assert!(output["data"]["portfolio"].is_null());
+        assert!(!portfolio_exists(batch_id).expect("read portfolio path"));
     });
 }
 
@@ -220,7 +219,7 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
                 task_id: "child".to_string(),
                 run_id: "missing-child-record".to_string(),
             }],
-            serde_json::json!({}),
+            authority_metadata(batch_id),
         )
         .expect("persist fanout batch");
         let claim_id = claim_fanout_run_batch(batch_id)
@@ -282,4 +281,35 @@ fn fanout_status_reports_a_pre_child_coordinator_failure() {
 
 fn homeboy_bin() -> PathBuf {
     PathBuf::from(std::env::var_os("CARGO_BIN_EXE_homeboy").expect("Homeboy binary path"))
+}
+
+fn authority_metadata(batch_id: &str) -> serde_json::Value {
+    let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+        "id": "fanout-hermetic-fixture",
+        "backend": "fanout-hermetic-fixture",
+        "invocation": {
+            "argv": ["fanout-hermetic-provider"],
+            "env": [{
+                "name": "HOMEBOY_FANOUT_FIXTURE",
+                "source": "env",
+                "value": "terminal-observation"
+            }]
+        },
+        "capabilities": ["structured_outcome"]
+    }))
+    .expect("hermetic fanout provider");
+    let reference = persist_fanout_resume_authority(
+        batch_id,
+        &AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        },
+    )
+    .expect("persist admitted fanout authority");
+    serde_json::json!({
+        "execution_authority": {
+            "schema": "homeboy/fanout-execution-authority/v2",
+            "provider_catalog_ref": reference
+        }
+    })
 }

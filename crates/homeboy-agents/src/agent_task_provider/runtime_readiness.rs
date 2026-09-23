@@ -25,11 +25,28 @@ pub struct ProviderRuntimeReadinessCache {
 
 static PROCESS_READINESS_CACHE: OnceLock<Arc<ProviderRuntimeReadinessCacheShared>> =
     OnceLock::new();
+static PROCESS_PROBE_GATE: OnceLock<Arc<ProviderReadinessProbeGate>> = OnceLock::new();
+
+fn process_probe_gate() -> Arc<ProviderReadinessProbeGate> {
+    Arc::clone(PROCESS_PROBE_GATE.get_or_init(|| {
+        Arc::new(ProviderReadinessProbeGate {
+            active: Mutex::new(0),
+            changed: Condvar::new(),
+        })
+    }))
+}
+
+#[derive(Debug)]
+struct ProviderReadinessProbeGate {
+    active: Mutex<usize>,
+    changed: Condvar,
+}
 
 #[derive(Debug)]
 struct ProviderRuntimeReadinessCacheShared {
     state: Mutex<ProviderRuntimeReadinessCacheState>,
     changed: Condvar,
+    probe_gate: Arc<ProviderReadinessProbeGate>,
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +82,7 @@ impl Default for ProviderRuntimeReadinessCache {
             shared: Arc::new(ProviderRuntimeReadinessCacheShared {
                 state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
                 changed: Condvar::new(),
+                probe_gate: process_probe_gate(),
             }),
         }
     }
@@ -80,6 +98,7 @@ impl ProviderRuntimeReadinessCache {
                 Arc::new(ProviderRuntimeReadinessCacheShared {
                     state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
                     changed: Condvar::new(),
+                    probe_gate: process_probe_gate(),
                 })
             })),
         }
@@ -110,15 +129,9 @@ const PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS: usize = 2;
 const MAX_CONCURRENT_PROVIDER_READINESS_PROBES: usize = 4;
 
 #[derive(Debug)]
-struct ProviderReadinessProbeGate {
-    active: Mutex<usize>,
-    changed: Condvar,
-}
+struct ProviderReadinessProbePermit<'a>(&'a ProviderReadinessProbeGate);
 
-#[derive(Debug)]
-struct ProviderReadinessProbePermit(&'static ProviderReadinessProbeGate);
-
-impl Drop for ProviderReadinessProbePermit {
+impl Drop for ProviderReadinessProbePermit<'_> {
     fn drop(&mut self) {
         let mut active = self
             .0
@@ -130,23 +143,19 @@ impl Drop for ProviderReadinessProbePermit {
     }
 }
 
-fn acquire_probe_permit(
+fn acquire_probe_permit<'a>(
+    gate: &'a ProviderReadinessProbeGate,
     deadline: Instant,
     timeout_ms: u64,
-) -> std::result::Result<ProviderReadinessProbePermit, String> {
-    static GATE: OnceLock<ProviderReadinessProbeGate> = OnceLock::new();
-    let gate = GATE.get_or_init(|| ProviderReadinessProbeGate {
-        active: Mutex::new(0),
-        changed: Condvar::new(),
-    });
+) -> std::result::Result<ProviderReadinessProbePermit<'a>, String> {
     acquire_probe_permit_from_gate(gate, deadline, timeout_ms)
 }
 
-fn acquire_probe_permit_from_gate(
-    gate: &'static ProviderReadinessProbeGate,
+fn acquire_probe_permit_from_gate<'a>(
+    gate: &'a ProviderReadinessProbeGate,
     deadline: Instant,
     timeout_ms: u64,
-) -> std::result::Result<ProviderReadinessProbePermit, String> {
+) -> std::result::Result<ProviderReadinessProbePermit<'a>, String> {
     let mut active = gate
         .active
         .lock()
@@ -176,14 +185,11 @@ fn run_readiness_probe_with_gate(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     credential_env: &[(String, String)],
-    gate: Option<&'static ProviderReadinessProbeGate>,
+    gate: &ProviderReadinessProbeGate,
     probe_deadline: Instant,
     probe_timeout_ms: u64,
 ) -> std::result::Result<ProviderReadinessInvocationResult, String> {
-    let _permit = match gate {
-        Some(gate) => acquire_probe_permit_from_gate(gate, probe_deadline, probe_timeout_ms)?,
-        None => acquire_probe_permit(probe_deadline, probe_timeout_ms)?,
-    };
+    let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)?;
     let mut result = Err("provider readiness invocation did not run".to_string());
     for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
         let Some(remaining) = probe_deadline.checked_duration_since(Instant::now()) else {
@@ -585,6 +591,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
         )
         .unwrap_or(u64::MAX);
         let shared = Arc::clone(&cache.shared);
+        let probe_gate = Arc::clone(&cache.shared.probe_gate);
         let probe_request_key = request_key.clone();
         eprintln!(
             "{}",
@@ -608,7 +615,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                         &provider,
                         &config,
                         &credential_env,
-                        None,
+                        probe_gate.as_ref(),
                         probe_deadline,
                         probe_timeout_ms,
                     )
@@ -819,6 +826,19 @@ mod tests {
     };
     use homeboy_core::command_invocation::CommandInvocation;
 
+    fn test_cache() -> ProviderRuntimeReadinessCache {
+        ProviderRuntimeReadinessCache {
+            shared: Arc::new(ProviderRuntimeReadinessCacheShared {
+                state: Mutex::new(ProviderRuntimeReadinessCacheState::default()),
+                changed: Condvar::new(),
+                probe_gate: Arc::new(ProviderReadinessProbeGate {
+                    active: Mutex::new(0),
+                    changed: Condvar::new(),
+                }),
+            }),
+        }
+    }
+
     fn provider(script: &std::path::Path, count: &std::path::Path) -> AgentTaskExecutorProvider {
         let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "runtime.provider",
@@ -879,7 +899,7 @@ mod tests {
             let verdict = readiness_verdict(
                 &provider,
                 &json!({ "model": classification }),
-                &mut ProviderRuntimeReadinessCache::default(),
+                &mut test_cache(),
             )
             .expect("readiness result");
             assert_eq!(verdict.ready, ready, "{classification}");
@@ -900,12 +920,8 @@ mod tests {
         .expect("readiness script");
         let provider = provider(&script, &count);
 
-        let verdict = readiness_verdict(
-            &provider,
-            &json!({ "model": "test" }),
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .expect("readiness result");
+        let verdict = readiness_verdict(&provider, &json!({ "model": "test" }), &mut test_cache())
+            .expect("readiness result");
 
         assert_eq!(verdict.classification, "auth_failure");
         assert!(verdict.retryable);
@@ -917,7 +933,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         let config = json!({ "model": "ready" });
 
         let first = readiness_verdict(&provider, &config, &mut cache).expect("first verdict");
@@ -933,26 +949,27 @@ mod tests {
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
         let config = json!({ "model": "ready" });
+        let mut cache = ProviderRuntimeReadinessCache::process_local();
 
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("first phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("same-credential phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "rotated".to_string())],
-            &mut ProviderRuntimeReadinessCache::process_local(),
+            &mut cache,
         )
         .expect("rotated-credential phase verdict");
 
@@ -964,7 +981,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for account in ["first", "second"] {
             assert!(
@@ -989,7 +1006,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for (cook_id, to_worktree) in [("first", "homeboy@first"), ("second", "homeboy@second")] {
             assert!(
@@ -1026,7 +1043,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         for cook_id in ["first", "second"] {
             assert!(
@@ -1091,7 +1108,7 @@ mod tests {
         let error = preflight_plan_provider_runtime_readiness_with_providers(
             &plan,
             &[provider],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
         )
         .expect_err("provider-owned auth requires a live probe");
 
@@ -1121,7 +1138,7 @@ mod tests {
             .command
             .argv
             .push(recovered.display().to_string());
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         let config = json!({ "model": "recovering" });
 
         assert!(
@@ -1168,7 +1185,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 let provider = provider.clone();
@@ -1202,7 +1219,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         let long_provider = provider.clone();
         let mut long_cache = cache.clone();
         let long = std::thread::spawn(move || {
@@ -1279,7 +1296,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
 
         let short_deadline = crate::agent_task_timeout::now_unix_ms() + 300;
         let short_provider = provider.clone();
@@ -1345,7 +1362,7 @@ mod tests {
             .command
             .argv
             .push(root.path().display().to_string());
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for model in ["a", "b"] {
                 let provider = provider.clone();
@@ -1382,7 +1399,7 @@ mod tests {
             .command
             .argv
             .push(probes.display().to_string());
-        let cache = ProviderRuntimeReadinessCache::default();
+        let cache = test_cache();
         std::thread::scope(|scope| {
             for index in (0..65).chain(std::iter::once(0)) {
                 let provider = provider.clone();
@@ -1452,7 +1469,7 @@ mod tests {
         )
         .expect("readiness script");
         let provider = provider(&script, &count);
-        let mut cache = ProviderRuntimeReadinessCache::default();
+        let mut cache = test_cache();
         for _ in 0..2 {
             assert!(readiness_verdict(&provider, &json!({"model":"error"}), &mut cache).is_err());
         }
@@ -1507,7 +1524,7 @@ mod tests {
             &provider,
             &json!({"model":"retry-deadline"}),
             &[],
-            Some(gate),
+            gate,
             Instant::now() + Duration::from_millis(2_000),
             2_000,
         )
@@ -1557,7 +1574,7 @@ mod tests {
             &provider,
             &json!({"model":"ready"}),
             &[],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1)),
         )
         .expect_err("expired deadline stops before probing");
@@ -1584,7 +1601,7 @@ mod tests {
             &provider,
             &json!({"model":"slow"}),
             &[],
-            &mut ProviderRuntimeReadinessCache::default(),
+            &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms() + 100),
         )
         .expect_err("absolute deadline interrupts readiness");
