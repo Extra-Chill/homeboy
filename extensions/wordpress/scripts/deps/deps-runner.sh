@@ -40,17 +40,45 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(path.join(projectPath, file), 'utf8'));
 }
 
-function pushPackage(name, section, constraint) {
+function pushPackage(name, section, constraint, locked) {
   if (!name || (filter && filter !== name)) return;
-  packages.push({ name, manifest_section: section, constraint: String(constraint) });
+  const entry = { name, manifest_section: section, constraint: String(constraint) };
+  if (locked && locked.version) entry.locked_version = String(locked.version);
+  if (locked && locked.reference) entry.locked_reference = String(locked.reference);
+  packages.push(entry);
+}
+
+// Locked Composer versions come from composer.lock itself, not vendor/, so a
+// fresh checkout reports them without installing anything. The reference is
+// the resolved source commit (or dist reference when there is no source).
+function composerLockedPackages() {
+  const locked = new Map();
+  if (!fs.existsSync(path.join(projectPath, 'composer.lock'))) return locked;
+  let lock;
+  try {
+    lock = readJson('composer.lock');
+  } catch (error) {
+    return locked;
+  }
+  for (const key of ['packages', 'packages-dev']) {
+    for (const pkg of lock[key] || []) {
+      if (!pkg || !pkg.name) continue;
+      locked.set(String(pkg.name), {
+        version: pkg.version,
+        reference: (pkg.source && pkg.source.reference) || (pkg.dist && pkg.dist.reference) || null,
+      });
+    }
+  }
+  return locked;
 }
 
 if (fs.existsSync(path.join(projectPath, 'composer.json'))) {
   const composer = readJson('composer.json');
   if (composer.name) dependencyIdentities.push(String(composer.name));
+  const locked = composerLockedPackages();
   for (const section of ['require', 'require-dev']) {
     for (const [name, constraint] of Object.entries(composer[section] || {})) {
-      pushPackage(name, section, constraint);
+      pushPackage(name, section, constraint, locked.get(name));
     }
   }
   if (fs.existsSync(path.join(projectPath, 'composer.lock'))) lockfiles.push('composer.lock');
