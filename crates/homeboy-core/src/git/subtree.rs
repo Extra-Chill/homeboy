@@ -375,16 +375,16 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
         assert!(
-            Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "git {:?}",
-            args
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
@@ -392,7 +392,7 @@ mod tests {
     fn publishes_nested_subtree_and_retries_identically() {
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
         git(root.path(), &["config", "user.name", "Test"]);
@@ -440,7 +440,7 @@ mod tests {
         git(root.path(), &["commit", "-qm", "release"]);
         git(root.path(), &["tag", "v1"]);
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         let config = SubtreePublicationConfig {
             prefix: "pkg".into(),
             remote: remote.path().display().to_string(),
@@ -460,7 +460,7 @@ mod tests {
     fn rejects_destination_tree_conflict_without_force() {
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
         git(root.path(), &["config", "user.name", "Test"]);
@@ -497,7 +497,7 @@ mod tests {
     fn successive_releases_fast_forward_and_old_tag_replay_conflicts() {
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
         git(root.path(), &["config", "user.name", "Test"]);
@@ -544,7 +544,7 @@ mod tests {
     fn nested_component_invocation_excludes_unrelated_siblings() {
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
         git(root.path(), &["config", "user.name", "Test"]);
@@ -582,7 +582,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = subtree_fixture();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         let config = SubtreePublicationConfig {
             prefix: "pkg".into(),
             remote: remote.path().display().to_string(),
@@ -607,7 +607,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = subtree_fixture();
         let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare", "-q"]);
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         let pid_file = root.path().join("delayed-child.pid");
         let config = SubtreePublicationConfig {
             prefix: "pkg".into(),
