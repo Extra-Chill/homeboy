@@ -74,6 +74,20 @@ pub struct Cli {
     // Keep the execution boundary's effective policy: --wait sets it to false.
     pub detach_after_handoff: bool,
 
+    /// Deprecated: detaching after handoff is the default execution boundary
+    /// now, so this flag no longer changes anything. Accepted as a hidden
+    /// no-op so scripts, prompts, and runbooks written against 0.383.7 do not
+    /// break outright (#14964); pass global `--wait` instead to observe until
+    /// terminal completion.
+    #[arg(
+        long = "detach-after-handoff",
+        id = "deprecated_detach_after_handoff",
+        global = true,
+        hide = true,
+        action = clap::ArgAction::SetTrue
+    )]
+    pub deprecated_detach_after_handoff: bool,
+
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.
     #[arg(long, global = true, value_name = "DIR")]
@@ -1377,7 +1391,18 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["homeboy", "--wait", "status"]).unwrap();
         assert!(!cli.detach_after_handoff);
-        assert!(Cli::try_parse_from(["homeboy", "--detach-after-handoff", "status"]).is_err());
+        // #14964: the retired --detach-after-handoff spelling still parses as
+        // a hidden no-op; it must not resurrect the pre-#14931 default and
+        // must not itself flip --wait's effective policy.
+        let cli = Cli::try_parse_from(["homeboy", "--detach-after-handoff", "status"]).unwrap();
+        assert!(cli.deprecated_detach_after_handoff);
+        assert!(cli.detach_after_handoff, "still detaches by default");
+        let cli =
+            Cli::try_parse_from(["homeboy", "--wait", "--detach-after-handoff", "status"]).unwrap();
+        assert!(
+            !cli.detach_after_handoff,
+            "--wait still wins when both the current and retired flags are passed"
+        );
         let cli = Cli::try_parse_from(["homeboy", "runner", "exec", "lab", "--", "tool", "--wait"])
             .unwrap();
         assert!(
@@ -1643,6 +1668,8 @@ mod tests {
 
 #[cfg(test)]
 mod global_flag_surface_tests;
+
+pub(crate) mod retired_flags;
 
 pub mod reference_docs;
 /// Reject `--runner` combined with an explicit `--placement`.

@@ -1028,6 +1028,8 @@ impl CliRuntime {
     ) -> std::process::ExitCode {
         let command_identity = command_identity_from_matches(&matches);
 
+        warn_if_deprecated_flags_used(&matches);
+
         // Extract --output early so it's available for all code paths (including
         // extension CLI commands which exit before Cli::from_arg_matches).
         let mut output_file: Option<String> = matches
@@ -3799,6 +3801,24 @@ fn command_identity_from_matches(matches: &ArgMatches) -> output::CommandIdentit
         output::CommandIdentity::top_level(command)
     } else {
         output::CommandIdentity::with_operation(command, operation)
+    }
+}
+
+/// Diagnose retired public flags kept as hidden no-ops (#14964). Checked
+/// against `matches` rather than the typed `Cli` because this runs before
+/// `Cli::from_arg_matches` on every command path, including extension
+/// commands parsed through the augmented tree in [`Self::parse_matches`],
+/// which may not declare Homeboy's own retired-flag compatibility fields —
+/// hence `contains_id` instead of the panicking accessor.
+fn warn_if_deprecated_flags_used(matches: &ArgMatches) {
+    for flag in crate::cli_surface::retired_flags::RETIRED_FLAGS {
+        if matches.contains_id(flag.id) && matches.get_flag(flag.id) {
+            eprintln!(
+                "warning: --{} is deprecated and is now a no-op; detached is now the default. \
+                 Use global `--wait` to observe to completion.",
+                flag.long
+            );
+        }
     }
 }
 
