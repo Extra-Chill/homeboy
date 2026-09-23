@@ -13,6 +13,7 @@ pub const AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA: &str =
     "homeboy/agent-task-provider-launch-context/v1";
 pub const AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV: &str =
     "HOMEBOY_AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON";
+pub const FANOUT_EXECUTION_AUTHORITY_SCHEMA: &str = "homeboy/fanout-execution-authority/v3";
 
 // These are process mechanics, not credentials. Provider-specific additions
 // must be declared by the provider invocation instead of widening this list.
@@ -190,6 +191,89 @@ impl AgentTaskProviderLaunchContext {
     }
 }
 
+/// Apply the public part of a persisted fanout admission without allowing a
+/// global env-name map to rewrite another provider's secret declaration.
+pub fn apply_admitted_public_environment(
+    providers: &mut [AgentTaskExecutorProvider],
+    provider_public_env: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    for provider in providers {
+        let request: AgentTaskRequest = serde_json::from_value(serde_json::json!({
+            "task_id": "fanout-resume-environment",
+            "executor": { "backend": provider.backend },
+            "instructions": ""
+        }))
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        let secret_names = super::secrets::provider_secret_env_plan(provider, &request)
+            .secret_env_names()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let public = provider_public_env
+            .get(&provider.id)
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "fanout.execution_authority.provider_public_env",
+                    format!(
+                        "missing public environment projection for provider `{}`",
+                        provider.id
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+        for (name, value) in public {
+            if secret_names.contains(name) {
+                return Err(Error::validation_invalid_argument(
+                    "fanout.execution_authority.provider_public_env",
+                    format!("public environment cannot override secret provider variable `{name}`"),
+                    None,
+                    None,
+                ));
+            }
+            let value = value.as_str().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "fanout.execution_authority.provider_public_env",
+                    format!(
+                        "provider `{}` has a non-string value for `{name}`",
+                        provider.id
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+            let env_ref = provider
+                .invocation
+                .env
+                .iter_mut()
+                .find(|env| env.name == *name)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "fanout.execution_authority.provider_public_env",
+                        format!(
+                            "provider `{}` has undeclared variable `{name}`",
+                            provider.id
+                        ),
+                        None,
+                        None,
+                    )
+                })?;
+            if env_ref.redacted == Some(true) || env_ref.source.as_deref() == Some("secret_env") {
+                return Err(Error::validation_invalid_argument(
+                    "fanout.execution_authority.provider_public_env",
+                    format!("public environment cannot override secret provider variable `{name}`"),
+                    None,
+                    None,
+                ));
+            }
+            env_ref.value = Some(value.to_string());
+            env_ref.source = Some("value".to_string());
+            env_ref.redacted = Some(false);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +351,38 @@ mod tests {
             .iter()
             .any(|name| name == &secret_name));
         assert!(!record.metadata.to_string().contains(&secret_value));
+    }
+
+    #[test]
+    fn admitted_public_environment_is_scoped_before_secret_classification() {
+        let mut public = provider("OTHER_SECRET");
+        public.id = "public-provider".to_string();
+        public.invocation.env = vec![serde_json::from_value(json!({
+            "name": "SHARED_VALUE", "source": "env"
+        }))
+        .expect("public env")];
+
+        let mut secret = provider("SHARED_VALUE");
+        secret.id = "secret-provider".to_string();
+        let mut providers = vec![public, secret];
+        let projections = serde_json::json!({
+            "public-provider": { "SHARED_VALUE": "public" },
+            "secret-provider": {}
+        });
+        apply_admitted_public_environment(
+            &mut providers,
+            projections.as_object().expect("projections"),
+        )
+        .expect("provider-scoped projection");
+
+        assert_eq!(
+            providers[0].invocation.env[0].value.as_deref(),
+            Some("public")
+        );
+        assert!(providers[1].invocation.env[0].value.is_none());
+        assert_eq!(
+            providers[1].invocation.env[0].source.as_deref(),
+            Some("secret_env")
+        );
     }
 }

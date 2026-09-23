@@ -1025,7 +1025,7 @@ fn legacy_child_recovery_exact_evidence_is_idempotent_and_conflicts_fail_closed(
 }
 
 #[test]
-fn exact_no_pid_recovery_requires_unexpected_termination_and_refuses_process_contradiction() {
+fn exact_no_pid_recovery_uses_current_lease_authority_when_launcher_evidence_is_stale() {
     let daemon = fake_daemon(4242, "lease-dead");
     let mismatch = super::reconcile_dead_lease_orphans_with_operations(
         "other-lease",
@@ -1048,12 +1048,47 @@ fn exact_no_pid_recovery_requires_unexpected_termination_and_refuses_process_con
             pid_is_running: |_| false,
             acquire_owner: || Ok(Some(())),
             prove_no_owner: || Ok(vec!["no owner".to_string()]),
-            reconcile: |_| unreachable!("missing evidence blocks mutation"),
-            start: || unreachable!("missing evidence blocks replacement"),
+            reconcile: |_| {
+                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
+                    expected_lease_id: "lease-dead".to_string(),
+                    matching_job_ids: vec![uuid::Uuid::nil()],
+                    ..Default::default()
+                })
+            },
+            start: || Ok(fake_daemon(4343, "replacement")),
         },
     )
-    .expect_err("missing unexpected-exit evidence is refused");
-    assert!(missing.message.contains("unexpected-termination evidence"));
+    .expect("operator authority does not depend on the lost launcher's record");
+    assert!(missing.termination_evidence.is_none());
+    assert!(missing
+        .ownership_proof
+        .iter()
+        .any(|proof| proof.contains("confirm-workload-processes-absent")));
+
+    let stale = super::reconcile_dead_lease_orphans_with_operations(
+        "lease-dead",
+        super::DeadLeaseOrphanRecoveryOperations {
+            status: || {
+                let mut status = dead_status_with_unexpected_termination(daemon.clone());
+                status.termination_evidence.as_mut().unwrap().lease_id =
+                    Some("old-lease".to_string());
+                Ok(status)
+            },
+            pid_is_running: |_| false,
+            acquire_owner: || Ok(Some(())),
+            prove_no_owner: || Ok(vec!["no owner".to_string()]),
+            reconcile: |_| {
+                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
+                    expected_lease_id: "lease-dead".to_string(),
+                    matching_job_ids: vec![uuid::Uuid::nil()],
+                    ..Default::default()
+                })
+            },
+            start: || Ok(fake_daemon(4344, "replacement-2")),
+        },
+    )
+    .expect("stale launcher evidence does not block current proof");
+    assert!(stale.termination_evidence.is_none());
 
     let status = dead_status_with_unexpected_termination(daemon.clone());
     let contradiction = super::reconcile_dead_lease_orphans_with_operations(
@@ -1102,7 +1137,10 @@ fn exact_no_pid_recovery_starts_only_after_reconciliation() {
     .expect("exact reconciliation succeeds before replacement");
     assert_eq!(result.reconciled_job_ids, vec![job]);
     assert_eq!(
-        result.termination_evidence.classification,
+        result
+            .termination_evidence
+            .expect("valid termination evidence is retained")
+            .classification,
         DaemonTerminationClassification::UnexpectedExit
     );
     assert_eq!(result.replacement.lease_id, "replacement");

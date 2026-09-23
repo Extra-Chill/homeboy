@@ -475,7 +475,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
         bundle_id: "quality".to_string(),
         entity_id: Some("artifact:summary".to_string()),
         run_id: None,
-        status: AgentTaskGateBundleStatus::Failed,
+        status: AgentTaskLoopGateStatus::Failed,
         checks: Vec::new(),
         recorded_at: "2026-06-11T00:00:00Z".to_string(),
     });
@@ -495,7 +495,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "required-artifacts"
             && gate.entity_id.is_none()
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Missing
+            && gate.status == AgentTaskLoopGateStatus::Missing
             && gate
                 .problems
                 .contains(&"acceptance gate has no recorded result".to_string())
@@ -503,7 +503,7 @@ fn status_diagnostics_surface_missing_and_failed_acceptance_gates() {
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "quality"
             && gate.entity_id.as_deref() == Some("artifact:summary")
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Failed
+            && gate.status == AgentTaskLoopGateStatus::Failed
             && gate.result_id.as_deref() == Some("gate-result-1")
             && gate
                 .problems
@@ -531,7 +531,7 @@ fn status_diagnostics_surface_pending_acceptance_gate() {
         bundle_id: "manual-only".to_string(),
         entity_id: Some("artifact:summary".to_string()),
         run_id: None,
-        status: AgentTaskGateBundleStatus::Pending,
+        status: AgentTaskLoopGateStatus::Pending,
         checks: Vec::new(),
         recorded_at: "2026-06-11T00:00:00Z".to_string(),
     });
@@ -551,7 +551,7 @@ fn status_diagnostics_surface_pending_acceptance_gate() {
     assert_eq!(diagnostics.summary.missing_acceptance_gate_count, 0);
     assert!(diagnostics.acceptance_gates.iter().any(|gate| {
         gate.bundle_id == "manual-only"
-            && gate.status == AgentTaskLoopAcceptanceGateStatus::Pending
+            && gate.status == AgentTaskLoopGateStatus::Pending
             && gate
                 .problems
                 .contains(&"acceptance gate is pending an external/manual result".to_string())
@@ -1169,4 +1169,38 @@ fn verify_commands_are_reusable_gate_bundle_checks() {
     assert_eq!(bundle.checks[0].kind, AgentTaskGateBundleCheckKind::Command);
     assert_eq!(bundle.checks[0].input["command"], json!("cargo test --lib"));
     assert!(bundle.checks[0].retryable);
+}
+
+#[test]
+fn stale_writer_cannot_turn_a_stopped_loop_back_on() {
+    with_isolated_home(|_| {
+        let record = create_controller("stale-writer", "repair", "v1").expect("created");
+        // The loop's work job loaded this copy before the stop landed.
+        let mut stale = load_controller(&record.loop_id).expect("stale copy");
+
+        let mut stopped = load_controller(&record.loop_id).expect("fresh copy");
+        stamp_loop_runtime_metadata(&mut stopped.metadata, false, None, false)
+            .expect("stop runtime");
+        write_controller(&stopped).expect("persist stop");
+
+        stale.phase = "work-progress".to_string();
+        stamp_loop_runtime_metadata(&mut stale.metadata, true, None, true)
+            .expect("stale revolution");
+        write_controller(&stale).expect("stale write");
+
+        let persisted = load_controller(&record.loop_id).expect("persisted");
+        assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], false);
+        assert_eq!(
+            persisted.phase, "work-progress",
+            "non-runtime changes apply"
+        );
+
+        // Resume reloads the stopped record, so it legitimately turns the loop on.
+        let mut resumed = load_controller(&record.loop_id).expect("resume copy");
+        stamp_loop_runtime_metadata(&mut resumed.metadata, true, None, false)
+            .expect("resume runtime");
+        write_controller(&resumed).expect("persist resume");
+        let persisted = load_controller(&record.loop_id).expect("resumed");
+        assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], true);
+    });
 }

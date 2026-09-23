@@ -152,10 +152,6 @@ impl From<Option<AgentTaskLoopGateStatus>> for AgentTaskLoopGateStatus {
     }
 }
 
-/// Backwards-compatible source alias for the old diagnostics vocabulary.
-/// New policy, result, and diagnostic fields use `AgentTaskLoopGateStatus`.
-pub type AgentTaskLoopAcceptanceGateStatus = AgentTaskLoopGateStatus;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskLoopAcceptanceGateDiagnostic {
     pub bundle_id: String,

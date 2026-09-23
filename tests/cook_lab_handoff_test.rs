@@ -1138,7 +1138,9 @@ fn no_runner_lab_or_local_cook_reaches_local_execution() {
     );
     let terminal_output = context.root().join("terminal.json");
     let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    cook.env("GITHUB_ACTIONS", "true").args([
+    cook.env("GITHUB_ACTIONS", "true");
+    cook.env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0");
+    cook.args([
         "--placement",
         "lab-or-local",
         "--wait",

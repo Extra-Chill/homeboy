@@ -513,6 +513,7 @@ mod tools {
             run_id: optional_string(input, &["run_id", "task_ref"]).map(str::to_string),
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         })
         .map_err(|error| AgentTaskDiagnostic {
             class: "agent_tool.homeboy_error".to_string(),

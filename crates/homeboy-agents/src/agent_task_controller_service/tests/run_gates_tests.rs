@@ -136,7 +136,7 @@ fn run_gates_blocks_on_pending_manual_check() {
         assert_eq!(diagnostics.summary.failed_acceptance_gate_count, 0);
         assert!(diagnostics.acceptance_gates.iter().any(|gate| {
             gate.bundle_id == "manual-only"
-                && gate.status == controller::AgentTaskLoopAcceptanceGateStatus::Pending
+                && gate.status == controller::AgentTaskLoopGateStatus::Pending
                 && gate
                     .problems
                     .contains(&"acceptance gate is pending an external/manual result".to_string())

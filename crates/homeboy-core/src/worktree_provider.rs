@@ -407,6 +407,7 @@ impl NativeWorktreeProvider {
                 }
             }),
             require_handoff_freshness: false,
+            source_path: None,
         })?;
         Ok(WorktreeProvision {
             destination: WorktreeProvisionDestination {
@@ -840,6 +841,7 @@ mod tests {
                 run_id: None,
                 cleanup_policy: None,
                 require_handoff_freshness: false,
+                source_path: None,
             })
             .expect("create task worktree");
             let path = PathBuf::from(&created.record.worktree_path);

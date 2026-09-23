@@ -269,6 +269,14 @@ impl WorkJobHandler for CookWorkHandler {
         AGENT_TASK_COOK_JOB_VERSION
     }
 
+    fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
+        AgentTaskCookJob::parse(request.clone()).ok().map(|job| {
+            job.request
+                .pinned_retry_run_id
+                .unwrap_or(job.request.cook_id)
+        })
+    }
+
     fn public_request(&self, request: &Value) -> Result<Value> {
         Ok(AgentTaskCookJob::parse(request.clone())?.public_projection())
     }
@@ -675,6 +683,7 @@ pub fn cook_job_submission_for_launcher(
     child_pid: u32,
     child_start_identity: &ProcessStartIdentity,
 ) -> Result<Value> {
+    register_cook_work_handler();
     let job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
         schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
         cook_id: cook_id.to_string(),
@@ -701,6 +710,7 @@ pub fn cook_retry_job_submission(
     child_start_identity: &ProcessStartIdentity,
     child_session_ref: &str,
 ) -> Result<Value> {
+    register_cook_work_handler();
     let job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
         schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
         cook_id: cook_id.to_string(),
@@ -752,6 +762,16 @@ mod tests {
     }
 
     #[test]
+    fn detached_cook_submission_declares_its_durable_linkage() {
+        let submission = submission("cook-linked-at-admission", 4242);
+
+        assert_eq!(
+            WorkJobDriver.linked_durable_run_id(&submission["request"]),
+            Some("cook-linked-at-admission".to_string())
+        );
+    }
+
+    #[test]
     fn retry_supervisors_are_owned_by_the_exact_retry_run() {
         let first = cook_retry_job_submission(
             "cook-retry",
@@ -797,6 +817,10 @@ mod tests {
         assert_eq!(
             first_job.request.pinned_retry_run_id.as_deref(),
             first_job.run_id.as_deref()
+        );
+        assert_eq!(
+            WorkJobDriver.linked_durable_run_id(&first["request"]),
+            Some("cook-retry-attempt-2".to_string())
         );
     }
 

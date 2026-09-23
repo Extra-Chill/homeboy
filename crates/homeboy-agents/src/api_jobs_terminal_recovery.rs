@@ -20,7 +20,8 @@ struct AgentTaskTerminalRecoveryProviderImpl;
 
 impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl {
     fn recovered_terminal_agent_task_job(&self, run_id: &str) -> Option<RecoveredTerminalJob> {
-        let result = agent_task_service::persisted_terminal_run_result(run_id).ok()??;
+        let resolved_run_id = crate::agent_task_lifecycle::resolve_run_id(run_id).ok()?;
+        let result = agent_task_service::persisted_terminal_run_result(&resolved_run_id).ok()??;
         let status = match result.value.status {
             AgentTaskAggregateStatus::Succeeded
             | AgentTaskAggregateStatus::CandidateRecoverable => JobStatus::Succeeded,
@@ -29,7 +30,7 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
             | AgentTaskAggregateStatus::PartialFailure
             | AgentTaskAggregateStatus::Failed => JobStatus::Failed,
         };
-        let run_id = run_id.to_string();
+        let run_id = resolved_run_id;
         let artifacts = result
             .value
             .artifact_bindings
@@ -68,7 +69,9 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         let lifecycle_store =
             crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
                 .ok()?;
-        let record = lifecycle_store.read_record_bounded(run_id).ok()?;
+        let resolved_run_id =
+            crate::agent_task_lifecycle::resolve_run_id_in_store(&lifecycle_store, run_id).ok()?;
+        let record = lifecycle_store.read_record_bounded(&resolved_run_id).ok()?;
         if record.state.is_terminal() {
             Some(DaemonLinkedDurableRunState::Terminal)
         } else {
@@ -187,6 +190,15 @@ mod tests {
                 metadata: json!({}),
             };
             store.write_record(&record).expect("write linked record");
+            store
+                .write_cook_index_attempt(
+                    "cook-alias-for-terminal-recovery",
+                    1,
+                    run_id,
+                    "2026-09-12T00:00:00Z".to_string(),
+                    None,
+                )
+                .expect("write cook alias");
 
             let calls = Arc::new(AtomicUsize::new(0));
             let _guard = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider(
@@ -224,6 +236,9 @@ mod tests {
                 .expect("write terminal record");
             assert!(AgentTaskTerminalRecoveryProviderImpl
                 .recovered_terminal_agent_task_job(run_id)
+                .is_some());
+            assert!(AgentTaskTerminalRecoveryProviderImpl
+                .recovered_terminal_agent_task_job("cook-alias-for-terminal-recovery")
                 .is_some());
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         });

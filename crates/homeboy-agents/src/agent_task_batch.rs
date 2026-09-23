@@ -696,7 +696,7 @@ fn stalled_admission_recovery_command_with(
         })
 }
 
-fn reconcile_status_in_store<S, P, E>(
+fn project_status_in_store<S, P, E>(
     store: &AgentTaskBatchStore,
     batch_id: &str,
     mut child_status: S,
@@ -1125,44 +1125,6 @@ pub fn fanout_blocked_child_run_ids_in_store(
     ))
 }
 
-/// Resolve the durable child runs owned by a fanout. The mutable batch roster is
-/// only an index: each listed run must independently prove its persisted plan
-/// was created for this batch before it can be dispatched.
-pub fn owned_child_run_ids(batch_id: &str) -> Result<HashSet<String>> {
-    AgentTaskBatchStore::from_current_data_root()?.owned_child_run_ids(batch_id)
-}
-
-pub fn owned_child_run_ids_in_store(
-    store: &AgentTaskBatchStore,
-    batch_id: &str,
-) -> Result<HashSet<String>> {
-    owned_child_run_ids_for(
-        store.read_batch(batch_id)?,
-        agent_task_lifecycle::load_controller_plan,
-    )
-}
-
-fn owned_child_run_ids_for(
-    batch: AgentTaskBatchRecord,
-    mut load_controller_plan: impl FnMut(&str) -> Result<AgentTaskPlan>,
-) -> Result<HashSet<String>> {
-    let mut owned = HashSet::new();
-    for child in batch.child_runs {
-        let plan = load_controller_plan(&child.run_id)?;
-        let plan_batch_id = plan.metadata.get("batch_id").and_then(Value::as_str);
-        if plan_batch_id != Some(batch.batch_id.as_str()) {
-            return Err(Error::validation_invalid_argument(
-                "fanout",
-                "fanout child roster entry does not match the durable child plan batch lineage",
-                Some(child.run_id),
-                None,
-            ));
-        }
-        owned.insert(child.run_id);
-    }
-    Ok(owned)
-}
-
 /// A child is resumable when its provider attempt reached a terminal, recoverable
 /// state (it produced a candidate patch) but the cook never recorded a
 /// finalization — i.e. promotion/gates/PR were owned by a coordinator that
@@ -1203,7 +1165,7 @@ pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
 /// this report cannot fail while being wrong — it renders a batch roster from
 /// one home and child artifacts from another, and every count in it reads back
 /// self-consistent (#7505, #12619).
-fn artifacts_in_store(
+pub fn artifacts_in_store(
     store: &AgentTaskBatchStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     batch_id: &str,
@@ -1212,7 +1174,7 @@ fn artifacts_in_store(
     // projection-readiness probes are the ambient `persisted_status` and
     // `terminal_artifact_projection_readiness_bounded`. Naming their rooted
     // siblings here is what keeps the whole report in one home.
-    let report = reconcile_status_in_store(
+    let report = project_status_in_store(
         store,
         batch_id,
         |run_id| agent_task_lifecycle::status_in_store(lifecycle_store, run_id),
@@ -1630,7 +1592,31 @@ impl AgentTaskBatchStore {
         P: FnMut(&str) -> Result<Option<String>>,
         E: FnMut(&str) -> Result<bool>,
     {
-        reconcile_status_in_store(
+        project_status_in_store(
+            self,
+            batch_id,
+            child_status,
+            projection_readiness,
+            lifecycle_record_exists,
+        )
+    }
+
+    /// Read the durable batch projection without admission expiry or any
+    /// ambient-store lookup. Domain adapters use this after resolving the
+    /// canonical control-plane batch resource.
+    pub fn status_readonly_with<S, P, E>(
+        &self,
+        batch_id: &str,
+        child_status: S,
+        projection_readiness: P,
+        lifecycle_record_exists: E,
+    ) -> Result<AgentTaskBatchStatusReport>
+    where
+        S: FnMut(&str) -> Result<agent_task_lifecycle::AgentTaskRunRecord>,
+        P: FnMut(&str) -> Result<Option<String>>,
+        E: FnMut(&str) -> Result<bool>,
+    {
+        project_status_in_store(
             self,
             batch_id,
             child_status,
@@ -1690,11 +1676,6 @@ impl AgentTaskBatchStore {
 
     pub fn fanout_blocked_child_run_ids(&self, batch_id: &str) -> Result<Option<HashSet<String>>> {
         fanout_blocked_child_run_ids_in_store(self, batch_id)
-    }
-
-    /// Resolve the durable child runs owned by a fanout.
-    pub fn owned_child_run_ids(&self, batch_id: &str) -> Result<HashSet<String>> {
-        owned_child_run_ids_in_store(self, batch_id)
     }
 
     /// The ambient half of the pair: this method's historical contract is that
@@ -1783,6 +1764,26 @@ impl AgentTaskBatchStore {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
         serde_json::from_str(&raw).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(format!("parse agent-task batch {}", batch_id)),
+            )
+        })
+    }
+
+    pub fn read_batch_if_exists(&self, batch_id: &str) -> Result<Option<AgentTaskBatchRecord>> {
+        let path = self.batch_path(batch_id);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ))
+            }
+        };
+        serde_json::from_str(&raw).map(Some).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some(format!("parse agent-task batch {}", batch_id)),
@@ -2328,44 +2329,6 @@ mod tests {
             status.commands.run_next,
             "homeboy agent-task run-next --fanout batch_audit"
         );
-    }
-
-    #[test]
-    fn owned_child_runs_reject_a_tampered_batch_roster() {
-        let (_temp, batch_store, lifecycle_store) = batch_and_lifecycle_stores();
-        let plan = AgentTaskPlan::new("fanout/ownership", vec![request("a")]);
-        let batch = batch_store
-            .submit_plan_batch_with(
-                &plan,
-                Some("batch-ownership"),
-                |run_id| lifecycle_store.record_exists(run_id),
-                |child, run_id| {
-                    lifecycle_store
-                        .submit_plan_with_runtime_admission(child, run_id, |_| Ok(json!({})))
-                },
-            )
-            .expect("batch submitted");
-        let child_run_id = &batch.child_runs[0].run_id;
-
-        let plan_path = lifecycle_store.controller_plan_path(child_run_id);
-        let mut child_plan: Value =
-            serde_json::from_slice(&fs::read(&plan_path).expect("child plan")).expect("plan JSON");
-        child_plan["metadata"]["batch_id"] = json!("other-batch");
-        fs::write(
-            &plan_path,
-            serde_json::to_vec(&child_plan).expect("encode plan"),
-        )
-        .expect("tamper child plan");
-
-        let error = owned_child_run_ids_for(
-            batch_store
-                .read_batch("batch-ownership")
-                .expect("batch record"),
-            |run_id| lifecycle_store.read_controller_plan(run_id),
-        )
-        .expect_err("lineage mismatch rejected");
-        assert_eq!(error.details["field"], "fanout");
-        assert!(error.message.contains("batch lineage"));
     }
 
     #[test]

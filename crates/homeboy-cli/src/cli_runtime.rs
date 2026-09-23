@@ -636,6 +636,37 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     crate::runner::register_runner_continuation_provider();
 }
 
+/// Resolve a fanout batch's admitted provider catalog into the executor and
+/// dispatcher its resume must use; no ambient provider discovery.
+fn fanout_resume_execution_context(
+    authority: &serde_json::Value,
+) -> homeboy::core::Result<(
+    homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor,
+    homeboy::agents::orchestration::FanoutResumeDispatcherFactory,
+)> {
+    let reference = authority
+        .get("provider_catalog_ref")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "fanout.execution_authority",
+                "fanout resume authority is missing its private provider catalog reference",
+                None,
+                None,
+            )
+        })?;
+    let catalog = homeboy::agents::orchestration::resolve_fanout_resume_catalog(reference)?;
+    Ok((
+        std::sync::Arc::new(
+            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::from_catalog(
+                catalog,
+            ),
+        ),
+        crate::commands::route::reconstruct_cook_attempt_dispatcher,
+    ))
+}
+
 /// Register every provider hook the CLI wires after the startup terminal-run
 /// reconcile.
 ///
@@ -721,6 +752,7 @@ fn register_startup_providers_after_reconcile(
     // Register the orchestration service behind daemon HTTP control-plane
     // routes without making core depend on the agent-task subsystem.
     crate::agents::orchestration::register();
+    crate::agents::orchestration::register_fanout_resume_context(fanout_resume_execution_context);
     // Register the bench agent-task matrix provider so core's cross-rig
     // bench comparison can project rig entries into an agent-task matrix
     // without depending on the agent-task subsystem.

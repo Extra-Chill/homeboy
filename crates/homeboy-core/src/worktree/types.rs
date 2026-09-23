@@ -724,6 +724,13 @@ pub struct WorktreeCreateOptions {
     pub run_id: Option<String>,
     pub cleanup_policy: Option<CleanupPolicy>,
     pub require_handoff_freshness: bool,
+    /// Path of the checkout the caller already resolved for this component.
+    ///
+    /// When set, the component is resolved from this path rather than by id
+    /// alone. Callers that hold a resolved component must pass it: resolving
+    /// by id alone relies on a local registry or on the process's current
+    /// directory, and neither exists in CI (#14952).
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]

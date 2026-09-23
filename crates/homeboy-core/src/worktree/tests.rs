@@ -557,6 +557,7 @@ fn registered_create_fixture(home: &Path, id: &str) -> (PathBuf, WorktreeCreateO
             run_id: None,
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         },
     )
 }
@@ -611,6 +612,7 @@ fn create_branches_from_the_shared_base_when_the_primary_checkout_has_drifted() 
             run_id: None,
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         })
         .expect("create from a drifted primary checkout");
 
@@ -653,6 +655,7 @@ fn create_accepts_an_existing_repository_path_without_component_registration() {
             run_id: None,
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         })
         .expect("create from repository path");
 
@@ -667,6 +670,68 @@ fn create_accepts_an_existing_repository_path_without_component_registration() {
         );
         assert_eq!(created.record.branch, "fix/repository-path");
         assert!(Path::new(&created.record.worktree_path).is_dir());
+    });
+}
+
+/// CI has no component registry and runs from wherever the job happens to be,
+/// so a caller that already resolved a component must be able to create its
+/// worktree from that checkout. An unregistered monorepo component, named by
+/// id alone, is only reachable through `source_path` (#14952).
+#[test]
+fn create_resolves_an_unregistered_component_from_its_source_path() {
+    crate::test_support::with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let source = parent.join("monorepo");
+        let package = source.join("packages").join("example");
+        fs::create_dir_all(&package).expect("package directory");
+        run_git(&source, &["init", "-q", "-b", "main"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(
+            package.join("homeboy.json"),
+            "{\"id\":\"example-package\"}\n",
+        )
+        .expect("component config");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+
+        let options = |source_path: Option<String>| WorktreeCreateOptions {
+            component_id: "example-package".to_string(),
+            branch: "release-example".to_string(),
+            from: Some("HEAD".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+            source_path,
+        };
+
+        // Run from a directory unrelated to the checkout, as a CI job may.
+        let unrelated = home.path().join("elsewhere");
+        fs::create_dir_all(&unrelated).expect("unrelated directory");
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&unrelated).expect("enter unrelated directory");
+
+        let by_id_alone = create(options(None));
+        let with_source = create(options(Some(package.to_string_lossy().to_string())));
+
+        std::env::set_current_dir(previous).expect("restore current dir");
+
+        let error = by_id_alone.expect_err("an unregistered id alone cannot be resolved");
+        assert_eq!(error.code.as_str(), "component.not_found");
+
+        let created = with_source.expect("create from the resolved source path");
+        assert_eq!(created.record.component_id, "example-package");
+        assert_eq!(
+            Path::new(&created.record.source_checkout)
+                .canonicalize()
+                .expect("source checkout"),
+            source.canonicalize().expect("repository root"),
+            "the worktree is a checkout of the whole repository"
+        );
+        assert!(Path::new(&created.record.worktree_path)
+            .join("packages/example/homeboy.json")
+            .is_file());
     });
 }
 
@@ -946,6 +1011,7 @@ fn owned_worktree_survives_push_and_pr_boundary_until_finalization_and_cwd_exit(
             run_id: Some(owner.to_string()),
             cleanup_policy: Some(CleanupPolicy::RemoveWhenSafe),
             require_handoff_freshness: false,
+            source_path: None,
         })
         .expect("owned worktree");
         let path = PathBuf::from(&created.record.worktree_path);
@@ -1345,6 +1411,7 @@ fn create_partial_clone_worktree_requires_configured_host_transport() {
             run_id: None,
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         })
         .expect_err("blobless worktree add cannot reach an unrouted HTTPS origin");
         assert_eq!(missing_err.code.as_str(), "git.command_failed");
@@ -1387,6 +1454,7 @@ fn create_partial_clone_worktree_requires_configured_host_transport() {
             run_id: None,
             cleanup_policy: None,
             require_handoff_freshness: false,
+            source_path: None,
         })
         .expect("configured rewrite hydrates missing checkout blobs");
         let worktree = PathBuf::from(&created.record.worktree_path);

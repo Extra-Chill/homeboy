@@ -50,7 +50,10 @@ pub fn controller_request_dispatch_command(
         task_id: optional_string(dispatch, "task_id"),
         core: DispatchCoreInputs {
             tasks_json: optional_string(dispatch, "tasks_json"),
-            provider_config: optional_string(dispatch, "provider_config"),
+            provider_config: optional_string(dispatch, "provider_config").or_else(|| {
+                optional_string(dispatch, "provider_config_ref")
+                    .map(|reference| format!("@{reference}"))
+            }),
             client_context: optional_string(dispatch, "client_context"),
             generated_fanout_context: false,
             // An absent key is "unspecified", not "one execution and no

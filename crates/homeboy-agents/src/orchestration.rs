@@ -48,12 +48,21 @@ use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
     ControlPlaneRetryParameters,
 };
-use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use homeboy_core::control_plane::{
+    register_control_plane_action_delegate, register_control_plane_provider,
+    ControlPlaneActionDelegate, ControlPlaneActionDelegateResult, ControlPlaneProvider,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::agent_task_batch::{
+    AgentTaskBatchArtifactsReport, AgentTaskBatchChildIssue, AgentTaskBatchRecord,
+    AgentTaskBatchStatusReport, AgentTaskBatchStore,
+};
 use crate::agent_task_lifecycle::{
     canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
@@ -85,11 +94,709 @@ const INTERNAL_ACTION_EVENT_KEY_PREFIX: &str = "homeboy-internal-action:";
 const INTERNAL_PROGRESS_EVENT_KEY_PREFIX: &str = "homeboy-internal-progress:";
 const RUN_CURSOR_BOUND: usize = 1024;
 
+pub type FanoutResumeDispatcherFactory = fn(
+    &Value,
+) -> homeboy_core::Result<
+    Option<std::sync::Arc<dyn crate::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+>;
+
+pub type FanoutResumeExecutionContextFactory = fn(
+    &Value,
+) -> homeboy_core::Result<(
+    crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    FanoutResumeDispatcherFactory,
+)>;
+
+pub const FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA: &str = "homeboy/agent-task-fanout-child-resume/v1";
+
+static FANOUT_RESUME_CONTEXT_FACTORY: OnceLock<
+    RwLock<Option<FanoutResumeExecutionContextFactory>>,
+> = OnceLock::new();
+
+pub fn register_fanout_resume_context(factory: FanoutResumeExecutionContextFactory) {
+    *FANOUT_RESUME_CONTEXT_FACTORY
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("fanout resume context registry poisoned") = Some(factory);
+}
+
+/// Persist the admitted provider catalog as private resume authority. The
+/// batch record stores only this reference; recipes retain the selected
+/// provider/account/config inputs used by each child.
+pub fn persist_fanout_resume_authority(
+    batch_id: &str,
+    catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+) -> homeboy_core::Result<String> {
+    let root = homeboy_core::paths::homeboy_data()?.join("fanout-resume-authority");
+    std::fs::create_dir_all(&root).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(root.display().to_string()))
+    })?;
+    let mut provider_public_env = BTreeMap::new();
+    for provider in &catalog.providers {
+        let request: crate::agent_task_provider::AgentTaskRequest = serde_json::from_value(
+            serde_json::json!({"task_id":"fanout-admission", "executor":{"backend":provider.backend}, "instructions":""}),
+        ).map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+        let secret_names = crate::agent_task_provider::provider_secret_env_plan(provider, &request)
+            .secret_env_names()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut public_env = BTreeMap::new();
+        for env_ref in &provider.invocation.env {
+            if secret_names.contains(&env_ref.name)
+                || env_ref.redacted.unwrap_or(false)
+                || !matches!(env_ref.source.as_deref(), Some("env"))
+            {
+                continue;
+            }
+            if let Some(value) = env_ref
+                .value
+                .clone()
+                .or_else(|| std::env::var(&env_ref.name).ok())
+            {
+                public_env.insert(env_ref.name.clone(), value);
+            }
+        }
+        provider_public_env.insert(provider.id.clone(), public_env);
+    }
+    let authority = serde_json::json!({
+        "schema": crate::agent_task_provider::FANOUT_EXECUTION_AUTHORITY_SCHEMA,
+        "batch_id": batch_id,
+        "catalog": catalog,
+        "provider_public_env": provider_public_env,
+    });
+    // The private JSON writer persists pretty JSON with a trailing newline;
+    // hash the exact durable bytes so the reference is verifiable on reload.
+    let bytes = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&authority)
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?
+    )
+    .into_bytes();
+    let digest = homeboy_engine_primitives::content_hash::sha256_hex(&bytes);
+    let path = root.join(format!("{digest}.json"));
+    if !path.exists() {
+        homeboy_core::engine::local_files::write_json_file_owner_only(&path, &authority)?;
+    }
+    Ok(path.display().to_string())
+}
+
+/// Load and materialize one immutable admitted provider catalog. This is the
+/// owning service boundary used by production and tests alike.
+pub fn resolve_fanout_resume_catalog(
+    reference: &str,
+) -> homeboy_core::Result<crate::agent_task_provider::AgentTaskProviderCatalog> {
+    let data_root = homeboy_core::paths::homeboy_data()?;
+    let path = Path::new(reference);
+    if !path.starts_with(&data_root) {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "reference is outside the private data root",
+            None,
+            None,
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| {
+        homeboy_core::Error::internal_io(error.to_string(), Some(reference.to_string()))
+    })?;
+    let expected_digest = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if expected_digest != homeboy_engine_primitives::content_hash::sha256_hex(&bytes) {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority",
+            "private authority content digest does not match its reference",
+            None,
+            None,
+        ));
+    }
+    let authority: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    if authority["schema"] != crate::agent_task_provider::FANOUT_EXECUTION_AUTHORITY_SCHEMA {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "fanout.execution_authority.schema",
+            "unsupported fanout execution authority schema",
+            None,
+            None,
+        ));
+    }
+    let mut catalog: crate::agent_task_provider::AgentTaskProviderCatalog =
+        serde_json::from_value(authority["catalog"].clone())
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    let env = authority["provider_public_env"]
+        .as_object()
+        .ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "fanout.execution_authority.provider_public_env",
+                "missing provider environment projections",
+                None,
+                None,
+            )
+        })?;
+    crate::agent_task_provider::apply_admitted_public_environment(&mut catalog.providers, env)?;
+    Ok(catalog)
+}
+
 /// One bounded non-reconciling read of the durable record and optional plan.
 #[derive(Debug, Clone)]
 pub struct RunSnapshot {
     pub record: AgentTaskRunRecord,
     pub plan: Option<AgentTaskPlan>,
+}
+
+#[cfg(test)]
+mod fanout_batch_read_tests {
+    use super::{
+        FanoutBatchActionDelegate, FanoutBatchDomainService, FanoutBatchResumeActionResult,
+    };
+    use crate::agent_task_batch::{AgentTaskBatchStore, FanoutRunBatchChild};
+    use homeboy_control_plane_contract::{
+        action_effect_id, ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, ControlPlaneErrorClass, RunId,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    };
+    use homeboy_core::control_plane::ControlPlaneActionDelegate;
+    use homeboy_core::test_support::with_isolated_home;
+    use serde_json::{json, Value};
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static MISSING_RECEIPT_CONTEXT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn unexpected_resume_context(
+        _authority: &serde_json::Value,
+    ) -> homeboy_core::Result<(
+        crate::agent_task_scheduler::SharedAgentTaskExecutor,
+        super::FanoutResumeDispatcherFactory,
+    )> {
+        MISSING_RECEIPT_CONTEXT_CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(homeboy_core::Error::internal_unexpected(
+            "missing-receipt recovery entered execution context",
+        ))
+    }
+
+    #[test]
+    fn batch_status_is_read_only_and_uses_the_durable_roster() {
+        with_isolated_home(|_| {
+            super::register();
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "read-only-batch",
+                    "read-only-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "read-only-child".to_string(),
+                    }],
+                    json!({"declared_trackers": {"child": "tracker://child"}}),
+                )
+                .expect("persist batch");
+            let path = store.batch_path("read-only-batch");
+            let before = fs::read(&path).expect("batch bytes before read");
+
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let requested =
+                homeboy_control_plane_contract::RunId::new("read-only-batch").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("canonical batch");
+            let projection = service.status_adjunct(&canonical).expect("status");
+
+            assert_eq!(projection.status.batch.child_runs.len(), 1);
+            assert!(
+                projection.children.is_empty(),
+                "missing child is not invented"
+            );
+
+            assert_eq!(before, fs::read(path).expect("batch bytes after read"));
+        });
+    }
+
+    #[test]
+    fn fanout_resume_context_rejects_ambient_discovery_without_admitted_authority() {
+        let error = match super::FanoutBatchActionDelegate::context(&serde_json::Value::Null) {
+            Ok(_) => panic!("resume must not discover daemon ambient context"),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("execution authority is unavailable"));
+    }
+
+    #[test]
+    fn fanout_resume_authority_is_a_private_catalog_reference() {
+        with_isolated_home(|_| {
+            let mut catalog = crate::agent_task_provider::AgentTaskProviderCatalog::default();
+            catalog.version = Some("A".to_string());
+            let expected_first = catalog.clone();
+            let reference = super::persist_fanout_resume_authority("same-batch", &catalog)
+                .expect("persist private authority A");
+            let first = std::fs::read(&reference).expect("read authority A");
+            catalog.version = Some("C".to_string());
+            let second_reference = super::persist_fanout_resume_authority("same-batch", &catalog)
+                .expect("persist private authority C");
+            assert_ne!(
+                reference, second_reference,
+                "admissions need immutable references"
+            );
+            assert_eq!(
+                first,
+                std::fs::read(&reference).expect("authority A remains unchanged")
+            );
+            let bytes = std::fs::read(&reference).expect("read private authority");
+            let authority: Value = serde_json::from_slice(&bytes).expect("authority round trip");
+            let restored: crate::agent_task_provider::AgentTaskProviderCatalog =
+                serde_json::from_value(authority["catalog"].clone()).expect("catalog round trip");
+            assert_eq!(restored, expected_first);
+            assert!(!reference.contains("secret"));
+        });
+    }
+
+    #[test]
+    fn canonical_batch_projection_keeps_existing_terminal_child_and_tolerates_missing_child() {
+        with_isolated_home(|_| {
+            super::register();
+            let batch_store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let lifecycle =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+            let existing = "batch-parity-existing";
+            let record: crate::agent_task_lifecycle::AgentTaskRunRecord = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": existing,
+                "plan_id": "batch-parity",
+                "state": "succeeded",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "artifact_refs": [{"task_id": "child", "kind": "result", "uri": "homeboy://artifact/child"}],
+                "metadata": {"batch_id": "batch-parity"}
+            }))
+            .expect("child record");
+            lifecycle.write_record(&record).expect("write child");
+            batch_store
+                .persist_fanout_run_batch(
+                    "batch-parity",
+                    "batch-parity",
+                    &[
+                        FanoutRunBatchChild {
+                            task_id: "child".to_string(),
+                            run_id: existing.to_string(),
+                        },
+                        FanoutRunBatchChild {
+                            task_id: "missing".to_string(),
+                            run_id: "batch-parity-missing".to_string(),
+                        },
+                    ],
+                    json!({}),
+                )
+                .expect("persist batch");
+            batch_store
+                .mutate_batch("batch-parity", |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    Ok(())
+                })
+                .expect("terminalize batch");
+
+            let requested =
+                homeboy_control_plane_contract::RunId::new("batch-parity").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("batch resource");
+            assert_eq!(
+                canonical.state,
+                homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+            );
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: "/v1/control-plane/runs/batch-parity".to_string(),
+                body: None,
+            })
+            .expect("HTTP batch resource");
+            assert_eq!(http.status, 200);
+            assert_eq!(http.body["resource"]["run"], "batch-parity");
+            assert_eq!(http.body["resource"]["state"], "succeeded");
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let projection = service.status_adjunct(&canonical).expect("status adjunct");
+            assert_eq!(projection.children.len(), 1);
+            assert_eq!(projection.status.totals.succeeded, 1);
+            assert_eq!(projection.status.admission.admitted, 1);
+
+            let artifacts = service
+                .artifacts_adjunct(&canonical)
+                .expect("artifacts adjunct");
+            assert_eq!(artifacts.artifacts.batch_id, "batch-parity");
+            assert!(artifacts
+                .artifacts
+                .unavailable_child_runs
+                .iter()
+                .any(|child| child.run_id == "batch-parity-missing"));
+        });
+    }
+
+    #[test]
+    fn fanout_scope_rejects_a_roster_entry_with_the_wrong_batch_lineage() {
+        with_isolated_home(|_| {
+            super::register();
+            let batch_store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            batch_store
+                .persist_fanout_run_batch(
+                    "lineage-batch",
+                    "lineage-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "lineage-child".to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            let lifecycle =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+            let mut plan = crate::agent_task_schedule::AgentTaskPlan::new("lineage-plan", vec![]);
+            plan.metadata = json!({"batch_id": "different-batch"});
+            lifecycle
+                .write_controller_plan("lineage-child", &plan)
+                .expect("write child plan");
+
+            let requested = RunId::new("lineage-batch").expect("batch id");
+            let canonical = homeboy_core::control_plane::run(&requested).expect("batch resource");
+            let service = FanoutBatchDomainService::from_current_environment().expect("service");
+            let error = service
+                .owned_child_run_ids(&canonical)
+                .expect_err("wrong lineage must be rejected");
+            assert!(error.message.contains("batch lineage"));
+        });
+    }
+
+    #[test]
+    fn batch_cancel_uses_marker_first_and_replays_the_canonical_ack() {
+        with_isolated_home(|_| {
+            super::register();
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "cancel-action-batch",
+                    "cancel-action-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "unstarted".to_string(),
+                        run_id: "cancel-action-child".to_string(),
+                    }],
+                    serde_json::json!({}),
+                )
+                .expect("persist batch");
+            let requested = RunId::new("cancel-action-batch").expect("batch id");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id("test", "cancel-action-batch", "cancel", "same"),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "same".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: serde_json::json!({ "reason": "test" }),
+                },
+                confirmed: true,
+            };
+            let mut stale = request.clone();
+            stale.expected_updated_at = Some("stale-version".to_string());
+            assert!(homeboy_core::control_plane::execute_action(&requested, &stale).is_err());
+            let first = homeboy_core::control_plane::execute_action(&requested, &request)
+                .expect("cancel action");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert!(store.coordinator_is_cancelled("cancel-action-batch"));
+            let replay = homeboy_core::control_plane::execute_action(&requested, &request)
+                .expect("replay cancel action");
+            assert_eq!(first, replay);
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Post,
+                path: "/v1/control-plane/runs/cancel-action-batch/actions".to_string(),
+                body: Some(serde_json::to_value(&request).expect("action request JSON")),
+            })
+            .expect("HTTP replay");
+            assert_eq!(http.status, 200);
+            assert_eq!(
+                http.body["resource"],
+                serde_json::to_value(first).expect("ack JSON")
+            );
+        });
+    }
+
+    #[test]
+    fn batch_resume_recovery_reattaches_the_durable_receipt_without_context() {
+        with_isolated_home(|_| {
+            let effect_id =
+                action_effect_id("test", "resume-recovery-batch", "resume", "recovery-effect");
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let receipt = serde_json::json!({
+                "outcome": "failed",
+                "result": {
+                    "schema": "homeboy/control-plane-resume-result/v1",
+                    "data": {
+                        "schema": "homeboy/agent-task-cook-batch/v1",
+                        "batch_id": "resume-recovery-batch",
+                        "status": "partial_failure",
+                        "total": 1,
+                        "queued": 0,
+                        "running": 0,
+                        "succeeded": 0,
+                        "failed": 1,
+                        "cancelled": 0,
+                        "timed_out": 0,
+                        "cooks": []
+                    }
+                }
+            });
+            let mut actions = serde_json::Map::new();
+            actions.insert(effect_id.0.clone(), receipt);
+            store
+                .persist_fanout_run_batch(
+                    "resume-recovery-batch",
+                    "resume-recovery-plan",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-recovery-child".to_string(),
+                    }],
+                    serde_json::json!({ "control_plane_actions": actions }),
+                )
+                .expect("persist batch");
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-recovery-batch".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id,
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "recovery-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let recovered = FanoutBatchActionDelegate
+                .recover(&run, &request)
+                .expect("stored receipt recovery");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(recovered.result.data["status"], "partial_failure");
+        });
+    }
+
+    #[test]
+    fn batch_resume_requires_admitted_authority_for_execution() {
+        with_isolated_home(|_| {
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "resume-without-authority",
+                    "resume-without-authority",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-without-authority-child".to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id(
+                    "test",
+                    "resume-without-authority",
+                    "resume",
+                    "missing-authority",
+                ),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "missing-authority".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-without-authority".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let error = FanoutBatchActionDelegate
+                .execute(&run, &request)
+                .expect_err("execution without admitted authority must fail closed");
+            assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
+            assert!(
+                error
+                    .message
+                    .contains("re-run the fanout with an admitted caller context"),
+                "unexpected authority error: {}",
+                error.message
+            );
+        });
+    }
+
+    #[test]
+    fn batch_resume_effects_follow_domain_outcome_state() {
+        let report = |status: &str| FanoutBatchResumeActionResult {
+            schema: "homeboy/agent-task-cook-batch/v1".to_string(),
+            batch_id: "batch".to_string(),
+            status: status.to_string(),
+            total: 1,
+            queued: 0,
+            running: 0,
+            succeeded: usize::from(status == "succeeded"),
+            failed: usize::from(status == "partial_failure"),
+            cancelled: 0,
+            timed_out: 0,
+            cooks: Vec::new(),
+        };
+
+        assert!(FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Succeeded,
+            &report("succeeded")
+        ));
+        assert!(FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Failed,
+            &report("partial_failure")
+        ));
+        assert!(!FanoutBatchActionDelegate::resume_effects_are_admitted(
+            ControlPlaneActionOutcome::Failed,
+            &report("failed")
+        ));
+    }
+
+    #[test]
+    fn batch_resume_missing_receipt_reattaches_child_reconciliation_without_execution() {
+        with_isolated_home(|_| {
+            MISSING_RECEIPT_CONTEXT_CALLS.store(0, Ordering::SeqCst);
+            super::register_fanout_resume_context(unexpected_resume_context);
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            store
+                .persist_fanout_run_batch(
+                    "resume-missing-receipt",
+                    "resume-missing-receipt",
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: "resume-missing-receipt-child".to_string(),
+                    }],
+                    json!({
+                        "child_finalizations": {
+                            "resume-missing-receipt-child": {
+                                "status": "review_ready",
+                                "exit_code": 0,
+                                "provenance": {
+                                    "source": "resume_cook_batch",
+                                    "batch_id": "resume-missing-receipt",
+                                    "child_run_id": "resume-missing-receipt-child",
+                                    "generation": 1
+                                }
+                            }
+                        }
+                    }),
+                )
+                .expect("persist batch");
+            store
+                .mutate_batch("resume-missing-receipt", |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    batch.child_runs[0].state =
+                        crate::agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                    Ok(())
+                })
+                .expect("persist terminal child receipt");
+
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: action_effect_id(
+                    "test",
+                    "resume-missing-receipt",
+                    "resume",
+                    "missing-receipt-effect",
+                ),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "missing-receipt-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::empty(),
+                confirmed: true,
+            };
+            let run = homeboy_core::observation::RunRecord {
+                id: "resume-missing-receipt".to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            let recovered = FanoutBatchActionDelegate
+                .recover(&run, &request)
+                .expect("reconcile completed child effect");
+            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(recovered.result.data["status"], "succeeded");
+            assert_eq!(recovered.result.data["cooks"][0]["terminal"], true);
+            assert_eq!(MISSING_RECEIPT_CONTEXT_CALLS.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn batch_resume_recovery_rejects_missing_malformed_and_stale_child_receipts() {
+        with_isolated_home(|_| {
+            let store = AgentTaskBatchStore::from_current_data_root().expect("batch store");
+            let batch_id = "invalid-resume-receipts";
+            let child_id = "invalid-resume-receipts-child";
+            store
+                .persist_fanout_run_batch(
+                    batch_id,
+                    batch_id,
+                    &[FanoutRunBatchChild {
+                        task_id: "child".to_string(),
+                        run_id: child_id.to_string(),
+                    }],
+                    json!({}),
+                )
+                .expect("persist batch");
+            store
+                .mutate_batch(batch_id, |batch| {
+                    batch.state = crate::agent_task_batch::AgentTaskBatchState::Succeeded;
+                    batch.child_runs[0].state =
+                        crate::agent_task_lifecycle::AgentTaskRunState::Succeeded;
+                    Ok(())
+                })
+                .expect("terminalize child");
+
+            let run = homeboy_core::observation::RunRecord {
+                id: batch_id.to_string(),
+                kind: "agent-task-fanout".to_string(),
+                ..Default::default()
+            };
+            for (suffix, receipt) in [
+                (
+                    "missing-status",
+                    json!({
+                        "exit_code": 0,
+                        "provenance": {"source": "resume_cook_batch", "batch_id": batch_id, "child_run_id": child_id, "generation": 1}
+                    }),
+                ),
+                ("malformed", json!("not-an-object")),
+                (
+                    "stale-generation",
+                    json!({
+                        "status": "review_ready",
+                        "exit_code": 0,
+                        "provenance": {"source": "old-resume", "batch_id": batch_id, "child_run_id": child_id, "generation": 0}
+                    }),
+                ),
+            ] {
+                store
+                    .mutate_batch(batch_id, |batch| {
+                        batch.metadata["child_finalizations"][child_id] = receipt;
+                        Ok(())
+                    })
+                    .expect("write invalid receipt");
+                let request = ControlPlaneActionRequest {
+                    schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                    effect_id: action_effect_id("test", batch_id, "resume", suffix),
+                    action: ControlPlaneAction::Resume,
+                    idempotency_key: suffix.to_string(),
+                    actor: "test".to_string(),
+                    expected_updated_at: None,
+                    parameters: ControlPlaneActionPayload::empty(),
+                    confirmed: true,
+                };
+                let error = FanoutBatchActionDelegate
+                    .recover(&run, &request)
+                    .expect_err("invalid receipt must remain unknown");
+                assert_eq!(error.class, ControlPlaneErrorClass::Unavailable);
+            }
+        });
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +1301,799 @@ impl<L: RunLookup> OrchestrationService<L> {
             reference_type,
             references: references_for_record(&snapshot.record, reference_type)?,
         })
+    }
+}
+
+/// Agent-owned domain adjunct for a canonical fanout run resource. The
+/// control-plane provider owns the batch `ControlPlaneRun`; this service adds
+/// the persisted batch envelope and child relationships without creating a
+/// second resource protocol.
+pub struct FanoutBatchDomainService {
+    batch_store: AgentTaskBatchStore,
+    lifecycle: AgentTaskLifecycleStore,
+}
+
+struct FanoutBatchActionDelegate;
+
+impl ControlPlaneActionDelegate for FanoutBatchActionDelegate {
+    fn run_kind(&self) -> &'static str {
+        "agent-task-fanout"
+    }
+
+    fn execute(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        self.execute_inner(run, request)
+    }
+
+    fn recover(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        if request.action == ControlPlaneAction::Resume {
+            if let Some(receipt) = Self::stored_resume_receipt(&run.id, &request.effect_id)? {
+                return Ok(receipt);
+            }
+            return Self::recover_missing_resume_receipt(&run.id);
+        }
+        // Cancel is independently idempotent: its marker-first implementation
+        // is safe to replay even when the action receipt was lost.
+        self.execute_inner(run, request)
+    }
+}
+
+impl FanoutBatchActionDelegate {
+    fn resume_effects_are_admitted(
+        outcome: ControlPlaneActionOutcome,
+        result: &FanoutBatchResumeActionResult,
+    ) -> bool {
+        outcome == ControlPlaneActionOutcome::Succeeded
+            || (outcome == ControlPlaneActionOutcome::Failed && result.status == "partial_failure")
+    }
+
+    fn context(
+        authority: &Value,
+    ) -> Result<
+        (
+            crate::agent_task_scheduler::SharedAgentTaskExecutor,
+            FanoutResumeDispatcherFactory,
+        ),
+        ControlPlaneError,
+    > {
+        if !authority.is_object() {
+            return Err(ControlPlaneError::unavailable(
+                "fanout resume execution authority is unavailable; re-run the fanout with an admitted caller context",
+            ));
+        }
+        let factory = FANOUT_RESUME_CONTEXT_FACTORY
+            .get_or_init(|| RwLock::new(None))
+            .read()
+            .expect("fanout resume context registry poisoned")
+            .as_ref()
+            .copied()
+            .ok_or_else(|| {
+                ControlPlaneError::unavailable(
+                    "fanout resume execution context is not registered for this runtime",
+                )
+            })?;
+        factory(authority).map_err(|error| ControlPlaneError::unavailable(error.message))
+    }
+
+    fn stored_resume_receipt(
+        batch_id: &str,
+        effect_id: &EffectId,
+    ) -> Result<Option<ControlPlaneActionDelegateResult>, ControlPlaneError> {
+        let store = AgentTaskBatchStore::from_current_data_root()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let record = store
+            .read_batch_record(batch_id)
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let Some(receipt) = record.metadata.pointer(&format!(
+            "/control_plane_actions/{}",
+            effect_id.0.replace('~', "~0").replace('/', "~1")
+        )) else {
+            return Ok(None);
+        };
+        let outcome =
+            serde_json::from_value(receipt.get("outcome").cloned().unwrap_or(Value::Null))
+                .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+        let result = serde_json::from_value(receipt.get("result").cloned().unwrap_or(Value::Null))
+            .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?;
+        Ok(Some(ControlPlaneActionDelegateResult {
+            outcome,
+            result,
+            message: receipt
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }))
+    }
+
+    fn recover_missing_resume_receipt(
+        batch_id: &str,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        let store = AgentTaskBatchStore::from_current_data_root()
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let batch = store
+            .read_batch_record(batch_id)
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        let Some(finalizations) = batch
+            .metadata
+            .get("child_finalizations")
+            .and_then(Value::as_object)
+        else {
+            return Err(ControlPlaneError::unavailable(format!(
+                "fanout resume outcome for `{batch_id}` is unknown: no child reconciliation receipts exist; reconcile the batch before retrying"
+            )));
+        };
+
+        // These receipts are written after each child is harvested. Only when
+        // every roster entry has one and the durable child state is terminal can
+        // they prove that resume completed without needing another provider call.
+        if batch
+            .child_runs
+            .iter()
+            .any(|child| !child.state.is_terminal() || !finalizations.contains_key(&child.run_id))
+        {
+            return Err(ControlPlaneError::unavailable(format!(
+                "fanout resume outcome for `{batch_id}` is unknown: child reconciliation is incomplete; reconcile the batch before retrying"
+            )));
+        }
+
+        let mut cooks = Vec::with_capacity(batch.child_runs.len());
+        let mut succeeded = 0;
+        let mut failed = 0;
+        let mut cancelled = 0;
+        let mut timed_out = 0;
+        for child in &batch.child_runs {
+            let receipt = &finalizations[&child.run_id];
+            let receipt_object = receipt.as_object().ok_or_else(|| {
+                ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: malformed child receipt `{}`",
+                    child.run_id
+                ))
+            })?;
+            let status = receipt_object
+                .get("status")
+                .and_then(Value::as_str)
+                .filter(|status| !status.is_empty())
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no status",
+                        child.run_id
+                    ))
+                })?
+                .to_string();
+            let exit_code = receipt_object
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok())
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no valid exit code",
+                        child.run_id
+                    ))
+                })?;
+            let provenance = receipt_object
+                .get("provenance")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has no provenance",
+                        child.run_id
+                    ))
+                })?;
+            if provenance.get("source").and_then(Value::as_str) != Some("resume_cook_batch")
+                || provenance.get("batch_id").and_then(Value::as_str) != Some(batch_id)
+                || provenance.get("child_run_id").and_then(Value::as_str) != Some(&child.run_id)
+                || provenance
+                    .get("generation")
+                    .and_then(Value::as_i64)
+                    .is_none()
+            {
+                return Err(ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` has stale or incomplete provenance",
+                    child.run_id
+                )));
+            }
+            let status_is_success = matches!(
+                status.as_str(),
+                "review_ready"
+                    | "draft_published"
+                    | "completed"
+                    | "intentional_no_change"
+                    | "no_candidate"
+                    | "no_changes"
+                    | "green_no_finalize"
+            );
+            let state_consistent = match child.state {
+                crate::agent_task_lifecycle::AgentTaskRunState::Cancelled => {
+                    status == "cancelled" && exit_code != 0
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::Succeeded => {
+                    exit_code == 0 && status_is_success
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | crate::agent_task_lifecycle::AgentTaskRunState::PartialRecoverable => {
+                    exit_code == 0 && status_is_success
+                }
+                crate::agent_task_lifecycle::AgentTaskRunState::Failed
+                | crate::agent_task_lifecycle::AgentTaskRunState::PartialFailure => {
+                    exit_code != 0 || !status_is_success
+                }
+                _ => false,
+            };
+            if !state_consistent {
+                return Err(ControlPlaneError::unavailable(format!(
+                    "fanout resume outcome for `{batch_id}` is unknown: child receipt `{}` conflicts with durable state",
+                    child.run_id
+                )));
+            }
+            match status.as_str() {
+                "cancelled" => cancelled += 1,
+                "timed_out" => timed_out += 1,
+                _ if exit_code == 0 => succeeded += 1,
+                _ => failed += 1,
+            }
+            cooks.push(FanoutBatchResumeCookResult {
+                cook_id: child.task_id.clone(),
+                initial_run_id: child.run_id.clone(),
+                status,
+                exit_code,
+                result: None,
+                error: receipt
+                    .get("error")
+                    .cloned()
+                    .filter(|error| !error.is_null()),
+                terminal: true,
+            });
+        }
+        let report = FanoutBatchResumeActionResult {
+            schema: "homeboy/agent-task-cook-batch/v1".to_string(),
+            batch_id: batch_id.to_string(),
+            status: batch.state.outcome_status().to_string(),
+            total: cooks.len(),
+            queued: 0,
+            running: 0,
+            succeeded,
+            failed,
+            cancelled,
+            timed_out,
+            cooks,
+        };
+        Ok(ControlPlaneActionDelegateResult {
+            outcome: if batch.state == crate::agent_task_batch::AgentTaskBatchState::Succeeded {
+                ControlPlaneActionOutcome::Succeeded
+            } else {
+                ControlPlaneActionOutcome::Failed
+            },
+            result: ControlPlaneActionPayload {
+                schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                data: serde_json::to_value(report)
+                    .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+            },
+            message: Some("reattached from durable child reconciliation receipts".to_string()),
+        })
+    }
+
+    fn execute_inner(
+        &self,
+        run: &homeboy_core::observation::RunRecord,
+        request: &ControlPlaneActionRequest,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        let batch_id = run.id.as_str();
+        match request.action {
+            ControlPlaneAction::Resume => {
+                let batch = AgentTaskBatchStore::from_current_data_root()
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?
+                    .read_batch_record(batch_id)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let authority = batch.metadata.get("execution_authority").ok_or_else(|| {
+                    ControlPlaneError::unavailable(format!(
+                        "fanout resume execution authority for `{batch_id}` is unavailable; re-run the fanout with an admitted caller context"
+                    ))
+                })?;
+                let (executor, dispatcher) = Self::context(authority)?;
+                let result = crate::agent_task_service::resume_cook_batch(
+                    batch_id,
+                    executor.clone(),
+                    dispatcher,
+                )
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let outcome = if result.exit_code == 0 {
+                    ControlPlaneActionOutcome::Succeeded
+                } else {
+                    ControlPlaneActionOutcome::Failed
+                };
+                let action_result = ControlPlaneActionDelegateResult {
+                    outcome,
+                    result: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                        data: serde_json::to_value(
+                            fanout_batch_resume_action_result(&result.value)
+                                .map_err(|error| ControlPlaneError::unavailable(error.message))?,
+                        )
+                        .map_err(|error| ControlPlaneError::unavailable(error.to_string()))?,
+                    },
+                    message: None,
+                };
+                let result = fanout_batch_resume_action_result(&result.value)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let mut action_result = action_result;
+                if Self::resume_effects_are_admitted(action_result.outcome, &result) {
+                    let transport = crate::agent_task_fanout_service::FanoutResumeTransport {
+                        executor,
+                        dispatcher,
+                    };
+                    action_result.result.data["portfolio"] =
+                        crate::agent_task_fanout_service::resume_effects(
+                            batch_id, &result, &transport,
+                        )
+                        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                }
+                let store = AgentTaskBatchStore::from_current_data_root()
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                let receipt = serde_json::json!({
+                    "outcome": action_result.outcome,
+                    "result": &action_result.result,
+                    "message": &action_result.message,
+                });
+                store
+                    .mutate_batch(batch_id, |batch| {
+                        batch.metadata["control_plane_actions"][&request.effect_id.0] = receipt;
+                        Ok(())
+                    })
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                Ok(action_result)
+            }
+            ControlPlaneAction::Cancel => {
+                crate::agent_task_service::cook_batch_job::cancel_batch_children(batch_id)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+                Ok(ControlPlaneActionDelegateResult {
+                    outcome: ControlPlaneActionOutcome::Succeeded,
+                    result: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
+                        data: serde_json::json!({ "batch_id": batch_id }),
+                    },
+                    message: None,
+                })
+            }
+            _ => Err(ControlPlaneError::invalid_argument(
+                "agent-task fanout supports only cancel and resume",
+            )),
+        }
+    }
+}
+
+pub struct FanoutBatchDomainProjection {
+    pub status: AgentTaskBatchStatusReport,
+    pub children: BTreeMap<String, ControlPlaneRun>,
+    pub child_read_errors: BTreeMap<String, String>,
+}
+
+pub struct FanoutBatchArtifactsProjection {
+    pub artifacts: AgentTaskBatchArtifactsReport,
+    pub children: BTreeMap<String, ControlPlaneRun>,
+    pub child_read_errors: BTreeMap<String, String>,
+}
+
+/// Typed wire result for a canonical fanout resume action. `terminal` is
+/// projected by Cook from its declared disposition; consumers must not infer
+/// it from an exit code or an open status string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutBatchResumeActionResult {
+    pub schema: String,
+    pub batch_id: String,
+    pub status: String,
+    pub total: usize,
+    pub queued: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub timed_out: usize,
+    pub cooks: Vec<FanoutBatchResumeCookResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutBatchResumeCookResult {
+    pub cook_id: String,
+    pub initial_run_id: String,
+    pub status: String,
+    pub exit_code: i32,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    pub terminal: bool,
+}
+
+fn fanout_batch_resume_action_result(
+    report: &crate::agent_task_service::AgentTaskCookBatchReport,
+) -> homeboy_core::Result<FanoutBatchResumeActionResult> {
+    let cooks = report
+        .cooks
+        .iter()
+        .map(|cook| {
+            Ok(FanoutBatchResumeCookResult {
+                cook_id: cook.cook_id.clone(),
+                initial_run_id: cook.initial_run_id.clone(),
+                status: cook.status.clone(),
+                exit_code: cook.exit_code,
+                result: cook
+                    .result
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+                error: cook
+                    .error
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+                terminal: cook.lifecycle().terminal,
+            })
+        })
+        .collect::<homeboy_core::Result<Vec<_>>>()?;
+    Ok(FanoutBatchResumeActionResult {
+        schema: report.schema.to_string(),
+        batch_id: report.batch_id.clone(),
+        status: report.status.clone(),
+        total: report.total,
+        queued: report.queued,
+        running: report.running,
+        succeeded: report.succeeded,
+        failed: report.failed,
+        cancelled: report.cancelled,
+        timed_out: report.timed_out,
+        cooks,
+    })
+}
+
+impl FanoutBatchDomainService {
+    pub fn from_current_environment() -> homeboy_core::Result<Self> {
+        // The in-process CLI uses the same provider route as HTTP. Registration
+        // is idempotent and also keeps isolated callers from falling back to
+        // the no-op provider during tests or embedded invocation.
+        register();
+        Ok(Self {
+            batch_store: AgentTaskBatchStore::from_current_data_root()?,
+            lifecycle: AgentTaskLifecycleStore::from_current_environment()?,
+        })
+    }
+
+    pub fn status_adjunct(
+        &self,
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<FanoutBatchDomainProjection> {
+        let batch_id = canonical.run.as_str();
+        let mut report = self.batch_store.status_readonly_with(
+            batch_id,
+            |run_id| crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id),
+            |run_id| {
+                crate::agent_task_lifecycle::terminal_artifact_projection_readiness_bounded_in_store(
+                    &self.lifecycle,
+                    run_id,
+                )
+            },
+            |run_id| {
+                crate::agent_task_lifecycle::run_record_exists_readonly_in_store(
+                    &self.lifecycle,
+                    run_id,
+                )
+            },
+        )?;
+        let (children, child_read_errors) = self.canonical_children(&report.batch)?;
+        append_child_read_errors(&mut report, &child_read_errors);
+        Ok(FanoutBatchDomainProjection {
+            status: report,
+            children,
+            child_read_errors,
+        })
+    }
+
+    pub fn artifacts_adjunct(
+        &self,
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<FanoutBatchArtifactsProjection> {
+        let batch_id = canonical.run.as_str();
+        let mut report = crate::agent_task_batch::artifacts_in_store(
+            &self.batch_store,
+            &self.lifecycle,
+            batch_id,
+        )?;
+        let batch = self.batch_store.read_batch_record(batch_id)?;
+        let (children, child_read_errors) = self.canonical_children(&batch)?;
+        append_artifact_read_errors(&mut report, &batch, &child_read_errors);
+        Ok(FanoutBatchArtifactsProjection {
+            artifacts: report,
+            children,
+            child_read_errors,
+        })
+    }
+
+    pub fn child_run_exists(&self, run_id: &str) -> homeboy_core::Result<bool> {
+        let run_id = RunId::new(run_id).map_err(|error| {
+            homeboy_core::Error::validation_invalid_argument(
+                "run_id",
+                error.to_string(),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        match homeboy_core::control_plane::run(&run_id) {
+            Ok(_) => Ok(true),
+            Err(error) if error.class == ControlPlaneErrorClass::NotFound => Ok(false),
+            Err(error) => Err(control_plane_error_to_homeboy(error)),
+        }
+    }
+
+    /// Return the roster roots and their durable retry descendants. The batch
+    /// file is only an index: every returned run must prove its controller plan
+    /// belongs to this batch. Keeping this check here makes CLI and daemon
+    /// fanout scoping use the same ownership boundary.
+    pub fn owned_child_run_ids(
+        &self,
+        canonical: &ControlPlaneRun,
+    ) -> homeboy_core::Result<HashSet<String>> {
+        let batch_id = canonical.run.as_str();
+        let batch = self.batch_store.read_batch(batch_id)?;
+        let mut owned = HashSet::new();
+        let mut pending = batch
+            .child_runs
+            .iter()
+            .map(|child| child.run_id.clone())
+            .collect::<Vec<_>>();
+        while let Some(run_id) = pending.pop() {
+            if !owned.insert(run_id.clone()) {
+                continue;
+            }
+            let plan = crate::agent_task_lifecycle::load_controller_plan_in_store(
+                &self.lifecycle,
+                &run_id,
+            )?;
+            if plan.metadata.get("batch_id").and_then(Value::as_str) != Some(batch_id) {
+                return Err(homeboy_core::Error::validation_invalid_argument(
+                    "fanout",
+                    "fanout child roster entry does not match the durable child plan batch lineage",
+                    Some(run_id),
+                    None,
+                ));
+            }
+            for successor in self.lifecycle.read_retry_successors(&run_id)? {
+                pending.push(successor.run_id);
+            }
+        }
+        Ok(owned)
+    }
+
+    pub fn child_placement_metadata(&self, run_id: &str) -> homeboy_core::Result<Option<Value>> {
+        match crate::agent_task_lifecycle::status_in_store(&self.lifecycle, run_id) {
+            Ok(record) => Ok(Some(record.metadata)),
+            Err(error) if is_run_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Project only the persisted portfolio snapshot. Live PR/Git observation
+    /// belongs to resume or background supervision, never to a status read.
+    pub fn durable_portfolio_status(
+        &self,
+        batch: &AgentTaskBatchRecord,
+        children: &BTreeMap<String, ControlPlaneRun>,
+    ) -> homeboy_core::Result<Value> {
+        match crate::agent_task_fanout_supervisor::read_portfolio(&batch.batch_id) {
+            Ok(portfolio) => serde_json::to_value(portfolio.status(&self.portfolio_observations(
+                batch,
+                children,
+                Some(&portfolio),
+            )))
+            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None)),
+            Err(_) => {
+                let mut portfolio =
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio::new(
+                        batch.batch_id.clone(),
+                        batch.child_runs.iter().map(|child| {
+                            let tracker_ref = batch.metadata["declared_trackers"][&child.task_id]
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| {
+                                    format!("homeboy://agent-task/run/{}", child.run_id)
+                                });
+                            crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioChild {
+                                child_id: child.task_id.clone(),
+                                tracker_ref,
+                                run_id: child.run_id.clone(),
+                                source_sha: None,
+                                base_sha: None,
+                                head_sha: None,
+                                evidence_generation: 0,
+                                finding_fingerprints: Default::default(),
+                                finding_fingerprint_recency: Default::default(),
+                                blocker: None,
+                                next_action: None,
+                            }
+                        }),
+                    );
+                let observations = self.portfolio_observations(batch, children, None);
+                let status = if batch.metadata.get("dependency_graph").is_some() {
+                    let dependencies =
+                        crate::agent_task_fanout_service::durable_graph_dependencies(batch)?;
+                    portfolio.reconcile(observations.values().cloned(), &dependencies)
+                } else {
+                    portfolio.status(&observations)
+                };
+                serde_json::to_value(status)
+                    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
+            }
+        }
+    }
+
+    fn portfolio_observations(
+        &self,
+        batch: &AgentTaskBatchRecord,
+        children: &BTreeMap<String, ControlPlaneRun>,
+        stored: Option<&crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolio>,
+    ) -> BTreeMap<String, crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioObservation>
+    {
+        batch
+            .child_runs
+            .iter()
+            .map(|child| {
+                let resource = children.get(&child.run_id);
+                let tracker = if batch.metadata["declared_trackers"][&child.task_id].is_string() {
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutTrackerState::DeclaredUnobserved
+                } else {
+                    Default::default()
+                };
+                let provider = match resource.map(|resource| resource.state) {
+                    Some(ControlPlaneState::Succeeded) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Succeeded
+                    }
+                    Some(ControlPlaneState::Running) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Running
+                    }
+                    Some(ControlPlaneState::Failed | ControlPlaneState::Cancelled | ControlPlaneState::TimedOut) => {
+                        crate::agent_task_fanout_supervisor::AgentTaskFanoutProviderState::Failed
+                    }
+                    _ => Default::default(),
+                };
+                let stored_child = stored.and_then(|portfolio| portfolio.children.get(&child.task_id));
+                (
+                    child.task_id.clone(),
+                    crate::agent_task_fanout_supervisor::AgentTaskFanoutPortfolioObservation {
+                        child_id: child.task_id.clone(),
+                        tracker,
+                        provider,
+                        candidate: stored_child
+                            .map(|child| crate::agent_task_fanout_supervisor::AgentTaskFanoutCandidateState {
+                                source_sha: child.source_sha.clone(),
+                                base_sha: child.base_sha.clone(),
+                                head_sha: child.head_sha.clone(),
+                                ..Default::default()
+                            })
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn canonical_children(
+        &self,
+        batch: &AgentTaskBatchRecord,
+    ) -> homeboy_core::Result<(BTreeMap<String, ControlPlaneRun>, BTreeMap<String, String>)> {
+        let mut children = BTreeMap::new();
+        let mut child_read_errors = BTreeMap::new();
+        for child in &batch.child_runs {
+            let id = RunId::new(&child.run_id).map_err(|error| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "run_id",
+                    error.to_string(),
+                    Some(child.run_id.clone()),
+                    None,
+                )
+            })?;
+            match homeboy_core::control_plane::run(&id) {
+                Ok(run) => {
+                    children.insert(child.run_id.clone(), run);
+                }
+                Err(error) if error.class == ControlPlaneErrorClass::NotFound => {}
+                Err(error) if error.class == ControlPlaneErrorClass::Unavailable => {
+                    child_read_errors.insert(child.run_id.clone(), error.message);
+                }
+                Err(error) => return Err(control_plane_error_to_homeboy(error)),
+            }
+        }
+        Ok((children, child_read_errors))
+    }
+}
+
+fn append_child_read_errors(
+    report: &mut AgentTaskBatchStatusReport,
+    errors: &BTreeMap<String, String>,
+) {
+    for child in &report.batch.child_runs {
+        let Some(problem) = errors.get(&child.run_id) else {
+            continue;
+        };
+        if report
+            .unavailable_child_runs
+            .iter()
+            .any(|issue| issue.run_id == child.run_id)
+        {
+            continue;
+        }
+        report
+            .unavailable_child_runs
+            .push(AgentTaskBatchChildIssue {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                last_known_state: Some(child.state),
+                status_command: child_status_command(&child.run_id),
+                artifacts_command: child_artifacts_command(&child.run_id),
+                problem: format!("canonical child resource unavailable: {problem}"),
+            });
+    }
+}
+
+fn append_artifact_read_errors(
+    report: &mut AgentTaskBatchArtifactsReport,
+    batch: &AgentTaskBatchRecord,
+    errors: &BTreeMap<String, String>,
+) {
+    for child in &batch.child_runs {
+        let Some(problem) = errors.get(&child.run_id) else {
+            continue;
+        };
+        if report
+            .unavailable_child_runs
+            .iter()
+            .any(|issue| issue.run_id == child.run_id)
+        {
+            continue;
+        }
+        report
+            .unavailable_child_runs
+            .push(AgentTaskBatchChildIssue {
+                task_id: child.task_id.clone(),
+                run_id: child.run_id.clone(),
+                last_known_state: Some(child.state),
+                status_command: child_status_command(&child.run_id),
+                artifacts_command: child_artifacts_command(&child.run_id),
+                problem: format!("canonical child resource unavailable: {problem}"),
+            });
+    }
+}
+
+fn child_status_command(run_id: &str) -> String {
+    format!("homeboy agent-task status {run_id}")
+}
+
+fn child_artifacts_command(run_id: &str) -> String {
+    format!("homeboy agent-task artifacts {run_id}")
+}
+
+pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core::Error {
+    match error.class {
+        ControlPlaneErrorClass::InvalidArgument | ControlPlaneErrorClass::CursorExpired => {
+            homeboy_core::Error::validation_invalid_argument(
+                "control_plane",
+                error.message,
+                None,
+                None,
+            )
+        }
+        ControlPlaneErrorClass::NotFound
+        | ControlPlaneErrorClass::Unavailable
+        | ControlPlaneErrorClass::Unknown => {
+            homeboy_core::Error::internal_unexpected(error.message)
+        }
     }
 }
 
@@ -1890,6 +3390,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
             action_name(request.action),
             request.idempotency_key
         );
+        let fanout_child_resume = request.action == ControlPlaneAction::Resume
+            && request.parameters.schema == FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA;
         let (outcome, resource, result, message) = if let Some(reason) =
             action_unavailability(&record, request.action)
         {
@@ -2311,7 +3813,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         crate::agent_task_service::terminal_transport_recovery_required(
                             requested_id.as_str(),
                         );
-                    let terminal_projection_recovery = record.state.is_terminal()
+                    let terminal_projection_recovery = !fanout_child_resume
+                        && record.state.is_terminal()
                         && record.runner_id().is_some()
                         && record.runner_job_id().is_some();
                     let resumed = (|| -> homeboy_core::Result<_> {
@@ -2486,6 +3989,8 @@ fn recover_interrupted_action_acknowledgement(
     request: &ControlPlaneActionRequest,
     accepted_at: &str,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    let fanout_child_resume = request.action == ControlPlaneAction::Resume
+        && request.parameters.schema == FANOUT_CHILD_RESUME_PARAMETERS_SCHEMA;
     let current = store
         .read_record(&original.run_id)
         .map_err(map_lifecycle_error)?;
@@ -2610,7 +4115,37 @@ fn recover_interrupted_action_acknowledgement(
                 Some("recovered from the durable terminal admission state".to_string()),
             )
         }
-        ControlPlaneAction::Resume if current.state.is_terminal() => {
+                ControlPlaneAction::Resume if current.state.is_terminal() && fanout_child_resume => {
+                    match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id)
+                    {
+                        Ok(aggregate) => {
+                            let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
+                            let aggregate =
+                                crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate);
+                            (
+                                if exit_code == 0 {
+                                    ControlPlaneActionOutcome::Succeeded
+                                } else {
+                                    ControlPlaneActionOutcome::Failed
+                                },
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                                    data: serde_json::json!({
+                                        "aggregate": aggregate,
+                                        "exit_code": exit_code,
+                                        "recovered": true,
+                                    }),
+                                },
+                                Some("recovered from the durable child aggregate".to_string()),
+                            )
+                        }
+                        Err(_) => failed(
+                            "fanout child resume was interrupted without an authoritative aggregate; no second execution was attempted",
+                        )?,
+                    }
+                }
+                ControlPlaneAction::Resume if current.state.is_terminal() => {
             match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id) {
                 Ok(aggregate) => {
                     let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
@@ -3633,6 +5168,11 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
             None,
         )
     })?;
+    if let Some(batch) = batch_resource_from_current_environment(&requested_id)
+        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?
+    {
+        return Ok(batch);
+    }
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .run(&requested_id)
@@ -3695,6 +5235,22 @@ pub fn execute_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if AgentTaskBatchStore::from_current_data_root()?
+        .batch_path(run_id)
+        .exists()
+    {
+        register();
+        return homeboy_core::control_plane::execute_action(&requested, request)
+            .map_err(control_plane_error_to_homeboy);
+    }
     execute_action_from_current_environment_with_delegates(
         run_id,
         request,
@@ -3745,6 +5301,71 @@ pub fn execute_resume_action_from_current_environment(
         |resolved, _intent| crate::agent_task_service::resume(resolved.to_string(), executor),
         |promotion, _intent| default_promote(promotion),
     )
+}
+
+/// Execute a fanout child continuation through the canonical action outbox,
+/// retaining the admission-time executor and dispatcher supplied by the owner.
+pub fn execute_fanout_child_resume_action(
+    run_id: &str,
+    request: &ControlPlaneActionRequest,
+    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    dispatcher: FanoutResumeDispatcherFactory,
+) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
+    let requested_id = RunId::new(run_id).map_err(|error| {
+        homeboy_core::Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    OrchestrationService::new(LifecycleStoreLookup::new(store))
+        .execute_action_with_delegates(
+            &requested_id,
+            request,
+            |resolved, parameters, _intent| default_retry(resolved, parameters),
+            move |resolved, action_request| {
+                let rerun_completed_gates = action_request
+                    .parameters
+                    .data
+                    .get("rerun_completed_gates")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| {
+                        homeboy_core::Error::validation_invalid_argument(
+                            "parameters.rerun_completed_gates",
+                            "fanout child resume requires an explicit gate invalidation decision",
+                            None,
+                            None,
+                        )
+                    })?;
+                let cooked = crate::agent_task_service::resume_cook(
+                    resolved,
+                    executor,
+                    dispatcher,
+                    rerun_completed_gates,
+                )?;
+                let aggregate = crate::agent_task_lifecycle::read_aggregate(resolved)?;
+                Ok(crate::agent_task_service::AgentTaskRunResult {
+                    exit_code: cooked.exit_code,
+                    value: aggregate,
+                })
+            },
+            |promotion, _intent| default_promote(promotion),
+        )
+        .map_err(|error| match error.class {
+            ControlPlaneErrorClass::NotFound
+            | ControlPlaneErrorClass::InvalidArgument
+            | ControlPlaneErrorClass::CursorExpired => {
+                homeboy_core::Error::validation_invalid_argument(
+                    "action",
+                    error.message,
+                    None,
+                    None,
+                )
+            }
+            _ => homeboy_core::Error::internal_unexpected(error.message),
+        })
 }
 
 pub fn execute_promotion_action_from_current_environment(
@@ -4943,6 +6564,7 @@ fn generic_observation_state(status: &str) -> ControlPlaneRunState {
         "running" => ControlPlaneRunState::Running,
         "pass" => ControlPlaneRunState::Succeeded,
         "fail" | "error" => ControlPlaneRunState::Failed,
+        "cancelled" => ControlPlaneRunState::Cancelled,
         "skipped" => ControlPlaneRunState::Skipped,
         _ => ControlPlaneRunState::Unknown,
     }
@@ -5091,6 +6713,44 @@ fn generic_observation_execution(
     })
 }
 
+fn batch_resource_from_current_environment(
+    requested_id: &RunId,
+) -> Result<Option<ControlPlaneRun>, ControlPlaneError> {
+    let store = AgentTaskBatchStore::from_current_data_root()
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let path = store.batch_path(requested_id.as_str());
+    if !path.exists() {
+        return Ok(None);
+    }
+    let batch = store
+        .read_batch_record(requested_id.as_str())
+        .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+    let run = RunId::new(&batch.batch_id)
+        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
+    let mut resource = ControlPlaneRun::new(run);
+    resource.state = match batch.state {
+        crate::agent_task_batch::AgentTaskBatchState::Planning
+        | crate::agent_task_batch::AgentTaskBatchState::Admitting
+        | crate::agent_task_batch::AgentTaskBatchState::Queued => ControlPlaneState::Queued,
+        crate::agent_task_batch::AgentTaskBatchState::Running => ControlPlaneState::Running,
+        crate::agent_task_batch::AgentTaskBatchState::Succeeded => ControlPlaneState::Succeeded,
+        crate::agent_task_batch::AgentTaskBatchState::PartialFailure => {
+            ControlPlaneState::PartialFailure
+        }
+        crate::agent_task_batch::AgentTaskBatchState::Failed => ControlPlaneState::Failed,
+        crate::agent_task_batch::AgentTaskBatchState::Cancelled => ControlPlaneState::Cancelled,
+        crate::agent_task_batch::AgentTaskBatchState::TimedOut => ControlPlaneState::TimedOut,
+    };
+    resource.phase = Some("fanout_batch".to_string());
+    resource.owner = Some(ControlPlaneOwner {
+        kind: "agent-task-fanout".to_string(),
+        id: batch.batch_id,
+    });
+    resource.created_at = batch.submitted_at;
+    resource.updated_at = batch.updated_at;
+    Ok(Some(resource))
+}
+
 struct RegisteredProvider;
 
 impl ControlPlaneProvider for RegisteredProvider {
@@ -5129,20 +6789,32 @@ impl ControlPlaneProvider for RegisteredProvider {
     }
 
     fn run(&self, requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+        if let Some(batch) = batch_resource_from_current_environment(requested_id)? {
+            return Ok(batch);
+        }
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         let observation = store
             .open_observation_readonly()
             .map_err(map_lifecycle_error)?;
+        let resolved_id = observation
+            .control_plane_resource_projection(
+                crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                requested_id.as_str(),
+            )
+            .map_err(map_lifecycle_error)?
+            .map(|projection| projection.resource_id)
+            .unwrap_or_else(|| requested_id.to_string());
         if let Some(record) = observation
-            .get_run(requested_id.as_str())
+            .get_run(&resolved_id)
             .map_err(map_lifecycle_error)?
         {
             if record.kind != "agent-task" {
-                if observation
-                    .get_run_mission(&record.id)
-                    .map_err(map_lifecycle_error)?
-                    .is_none()
+                if record.kind != "agent-task-loop"
+                    && observation
+                        .get_run_mission(&record.id)
+                        .map_err(map_lifecycle_error)?
+                        .is_none()
                 {
                     return Err(ControlPlaneError::not_found(format!(
                         "control-plane run not found: {requested_id}"
@@ -5587,17 +7259,153 @@ impl ControlPlaneProvider for RegisteredProvider {
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        self.execute_action_with_context(
+            requested_id,
+            request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+    }
+
+    fn execute_action_with_context(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         let observation = store
             .open_observation_initialized()
             .map_err(map_lifecycle_error)?;
+        if batch_resource_from_current_environment(requested_id)?.is_some() {
+            let batch_store = AgentTaskBatchStore::from_current_data_root()
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            let record = batch_store
+                .read_batch_record(requested_id.as_str())
+                .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+            // Batch admission predates the observation store. Materialize the
+            // canonical action identity once, immediately before the first
+            // action, so the outbox foreign key and later HTTP/CLI replays use
+            // the same durable run identity without changing batch files.
+            if observation
+                .get_run(&record.batch_id)
+                .map_err(map_lifecycle_error)?
+                .is_none()
+            {
+                if let Err(error) = observation.start_run_with_id(
+                    homeboy_core::observation::NewRunRecord::builder("agent-task-fanout")
+                        .metadata(serde_json::json!({ "batch_id": record.batch_id }))
+                        .build(),
+                    record.batch_id.clone(),
+                ) {
+                    // Another action admission may have won the get-then-create
+                    // race. Re-read before treating the conflict as an outage.
+                    if observation
+                        .get_run(&record.batch_id)
+                        .map_err(map_lifecycle_error)?
+                        .is_none()
+                    {
+                        return Err(map_lifecycle_error(error));
+                    }
+                }
+            }
+            let synthetic = homeboy_core::observation::RunRecord {
+                id: record.batch_id.clone(),
+                kind: "agent-task-fanout".to_string(),
+                started_at: record.submitted_at.clone(),
+                status: format!("{:?}", record.state).to_lowercase(),
+                metadata_json: serde_json::json!({ "batch_id": record.batch_id }),
+                ..Default::default()
+            };
+            let version = record
+                .updated_at
+                .clone()
+                .unwrap_or(record.submitted_at.clone());
+            let available = matches!(
+                request.action,
+                ControlPlaneAction::Resume | ControlPlaneAction::Cancel
+            ) && !matches!(
+                record.state,
+                crate::agent_task_batch::AgentTaskBatchState::Succeeded
+                    | crate::agent_task_batch::AgentTaskBatchState::Cancelled
+            );
+            return homeboy_core::control_plane::execute_delegated_action_with_context(
+                &observation,
+                &synthetic,
+                request,
+                "fanout_batch",
+                &version,
+                available,
+                (!available).then(|| "fanout batch action is not currently available".to_string()),
+                context,
+                || {
+                    batch_resource_from_current_environment(requested_id)?.ok_or_else(|| {
+                        ControlPlaneError::not_found("fanout batch resource disappeared")
+                    })
+                },
+            )?
+            .ok_or_else(|| {
+                ControlPlaneError::invalid_argument(
+                    "fanout batch action delegate is not registered",
+                )
+            });
+        }
+        let resolved_id = observation
+            .control_plane_resource_projection(
+                crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                requested_id.as_str(),
+            )
+            .map_err(map_lifecycle_error)?
+            .map(|projection| projection.resource_id)
+            .unwrap_or_else(|| requested_id.to_string());
         if let Some(record) = observation
-            .get_run(requested_id.as_str())
+            .get_run(&resolved_id)
             .map_err(map_lifecycle_error)?
         {
             if record.kind != "agent-task" {
+                if record.kind == "agent-task-loop" {
+                    let resource = generic_observation_run(&observation, &record)?;
+                    let available =
+                        matches!(
+                            request.action,
+                            ControlPlaneAction::Cancel | ControlPlaneAction::Resume
+                        ) && resource.action_eligibility.as_ref().is_some_and(|report| {
+                            report.actions.iter().any(|eligibility| {
+                                eligibility.action == request.action
+                                    && eligibility.availability
+                                        == ControlPlaneActionAvailability::Available
+                            })
+                        });
+                    return homeboy_core::control_plane::execute_delegated_action_with_context(
+                        &observation,
+                        &record,
+                        request,
+                        crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                        record
+                            .metadata_json
+                            .pointer("/controller/updated_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&record.started_at),
+                        available,
+                        (!available).then(|| "loop action is not currently available".to_string()),
+                        context,
+                        || {
+                            let current = observation
+                                .get_run(&record.id)
+                                .map_err(map_lifecycle_error)?
+                                .ok_or_else(|| {
+                                    ControlPlaneError::not_found("loop resource not found")
+                                })?;
+                            generic_observation_run(&observation, &current)
+                        },
+                    )?
+                    .ok_or_else(|| {
+                        ControlPlaneError::invalid_argument(
+                            "loop action delegate is not registered",
+                        )
+                    });
+                }
                 let resource = generic_observation_run(&observation, &record)?;
                 if resource.mission.is_none() {
                     return Err(ControlPlaneError::not_found(format!(
@@ -5658,7 +7466,524 @@ impl ControlPlaneProvider for RegisteredProvider {
 
 /// Register the orchestration service as the HTTP control-plane provider.
 pub fn register() {
+    static BATCH_REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BATCH_REGISTERED.get_or_init(|| {
+        register_control_plane_action_delegate(std::sync::Arc::new(FanoutBatchActionDelegate));
+    });
+    crate::agent_task_loop_controller::register_control_plane_action_delegate();
     register_control_plane_provider(Box::new(RegisteredProvider));
+}
+
+#[cfg(test)]
+mod loop_control_plane_tests {
+    use crate::agent_task_loop_controller::{
+        control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
+        resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
+    };
+    use homeboy_control_plane_contract::{
+        ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
+        ControlPlaneActionRequest, EffectId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+    };
+    use homeboy_core::test_support::{with_isolated_home, ControllerJobHarness};
+    use serde_json::json;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn loop_status_is_read_only_and_does_not_infer_missing_work_success() {
+        let metadata = json!({
+            "runtime": { "on": true },
+            "work_job": { "job_id": "missing-loop-work" }
+        });
+        let before = metadata.clone();
+        let work = loop_work_status(
+            &metadata,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        );
+
+        assert_eq!(metadata, before);
+        assert_eq!(work["job_id"], "missing-loop-work");
+        assert_eq!(work["status"], "unavailable");
+    }
+
+    #[test]
+    fn loop_status_does_not_rewrite_controller_bytes() {
+        with_isolated_home(|_| {
+            let record = create_controller("loop/read-only", "repair", "v1").expect("created");
+            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
+                .expect("path");
+            let before = std::fs::read(&path).expect("controller bytes");
+            crate::agent_task_loop_controller::controller_status_report(&record.loop_id)
+                .expect("status");
+            let after = std::fs::read(path).expect("controller bytes");
+            assert_eq!(before, after);
+        });
+    }
+
+    fn admit_loop_work_through_real_harness(
+        loop_id: &str,
+        _generation: &str,
+        submission: serde_json::Value,
+    ) -> homeboy_core::Result<serde_json::Value> {
+        let driver: Arc<dyn homeboy_core::daemon::controller_job_driver::ControllerJobDriver> =
+            Arc::new(crate::agent_task_service::WorkJobDriver);
+        let work_request = submission["request"].clone();
+        let harness = ControllerJobHarness::new(Arc::clone(&driver), work_request.clone())?;
+        let job_id = harness.job()?.id.to_string();
+        let mut record = crate::agent_task_loop_controller::load_controller(loop_id)?;
+        record.metadata["work_job"] = json!({
+            "schema": "homeboy/agent-task-loop-work-ref/v1",
+            "job_id": job_id,
+            "state": "submitted",
+        });
+        crate::agent_task_loop_controller::write_controller(&record)?;
+        let prepared = driver.prepare(work_request)?;
+        let execution_driver = Arc::clone(&driver);
+        let execution_harness = Arc::new(harness);
+        let execution = std::thread::spawn({
+            let harness = Arc::clone(&execution_harness);
+            move || execution_driver.execute(prepared, harness.handle())
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let active = crate::agent_task_loop_controller::load_controller(loop_id)?
+                .metadata
+                .get("active_provider_runs")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|runs| !runs.is_empty());
+            if active {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(homeboy_core::Error::internal_unexpected(
+                    "real loop WorkJob did not admit provider",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        execution_harness.request_cancellation("test loop WorkJob completion")?;
+        let checkpoint = execution_harness.checkpoint()?.ok_or_else(|| {
+            homeboy_core::Error::internal_unexpected("missing WorkJob checkpoint")
+        })?;
+        driver.cancel(&checkpoint)?;
+        execution
+            .join()
+            .map_err(|_| homeboy_core::Error::internal_unexpected("WorkJob thread panicked"))??;
+        Ok(json!({
+            "schema": "homeboy/agent-task-loop-work-submission/v1",
+            "loop_id": loop_id,
+            "job_id": job_id,
+            "state": "submitted",
+            "admission": "created",
+        }))
+    }
+
+    #[test]
+    fn concurrent_loop_resume_actions_share_one_real_work_job_and_revolution() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let marker = tempfile::NamedTempFile::new().expect("provider marker");
+            let marker_path = marker.path().display().to_string();
+            let mut record =
+                create_controller("loop/concurrent-resume", "repair", "v1").expect("created");
+            record.record_action(
+                crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::SpawnTask {
+                    dedupe_key: "concurrent-real-provider".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "mode": "dispatch",
+                        "dispatch": { "backend": "concurrent-fixture", "prompt": "run" }
+                    }),
+                },
+                "real concurrent resume provider",
+            );
+            let provider = json!({
+                "id": "concurrent-fixture",
+                "backend": "concurrent-fixture",
+                "command_argv": [
+                    "sh", "-c",
+                    format!(
+                        "printf x >> {}; sleep 0.2; printf '%s' '{{\"schema\":\"homeboy/agent-task-outcome/v1\",\"task_id\":\"fixture\",\"status\":\"succeeded\"}}'",
+                        marker_path
+                    )
+                ],
+                "capabilities": ["structured_outcome"]
+            });
+            stamp_loop_runtime_metadata(&mut record.metadata, true, None, false)
+                .expect("runtime metadata");
+            write_controller(&record).expect("controller");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("loop-concurrent-real-effect".to_string()),
+                action: ControlPlaneAction::Resume,
+                idempotency_key: "loop-concurrent-real-idempotency".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: ControlPlaneActionPayload {
+                    schema: "homeboy/agent-task-loop-resume-parameters/v1".to_string(),
+                    data: json!({
+                        "dispatch_defaults": {
+                            "backend": "concurrent-fixture",
+                            "provider_catalog": { "providers": [provider] }
+                        }
+                    }),
+                },
+                confirmed: true,
+            };
+            let barrier = Arc::new(Barrier::new(2));
+            let first_request = request.clone();
+            let first_barrier = Arc::clone(&barrier);
+            let first_canonical = canonical.clone();
+            let first = std::thread::spawn(move || {
+                first_barrier.wait();
+                crate::agent_task_loop_controller::with_test_loop_work_admitter(
+                    admit_loop_work_through_real_harness,
+                    || {
+                        homeboy_core::control_plane::execute_action(
+                            &first_canonical,
+                            &first_request,
+                        )
+                    },
+                )
+            });
+            let second_request = request.clone();
+            let second_barrier = Arc::clone(&barrier);
+            let second_canonical = canonical.clone();
+            let second = std::thread::spawn(move || {
+                second_barrier.wait();
+                crate::agent_task_loop_controller::with_test_loop_work_admitter(
+                    admit_loop_work_through_real_harness,
+                    || {
+                        homeboy_core::control_plane::execute_action(
+                            &second_canonical,
+                            &second_request,
+                        )
+                    },
+                )
+            });
+            let first = first
+                .join()
+                .expect("first action thread")
+                .expect("first action");
+            let second = second
+                .join()
+                .expect("second action thread")
+                .expect("second action");
+            assert_eq!(first, second, "concurrent acknowledgements diverged");
+            assert_eq!(
+                first.outcome,
+                ControlPlaneActionOutcome::Succeeded,
+                "ack={first:?}"
+            );
+
+            let persisted = crate::agent_task_loop_controller::load_controller(&record.loop_id)
+                .expect("persisted controller");
+            let job_id = persisted.metadata["work_job"]["job_id"]
+                .as_str()
+                .expect("work job identity")
+                .to_string();
+            assert!(!job_id.is_empty());
+            assert_eq!(persisted.metadata["runtime"]["revolutions"], 1);
+            assert_eq!(
+                std::fs::read(marker.path()).expect("provider marker").len(),
+                1
+            );
+            let effect = homeboy_core::control_plane::effect_status(&canonical, &request.effect_id)
+                .expect("effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Succeeded
+            );
+        });
+    }
+
+    #[test]
+    fn loop_stop_persists_off_before_unavailable_work_failure() {
+        with_isolated_home(|_| {
+            super::register();
+            let mut record =
+                create_controller("loop/unavailable", "repair", "v1").expect("created");
+            record.metadata = json!({ "work_job": { "job_id": "missing-active-job" } });
+            write_controller(&record).expect("work identity");
+
+            let error = stop_loop(&record.loop_id, "stop unavailable work")
+                .expect_err("unavailable cancellation must fail");
+            assert!(error.message.contains("could not be observed"));
+            let persisted = crate::agent_task_loop_controller::load_controller(&record.loop_id)
+                .expect("persisted controller");
+            assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], false);
+            let effect = homeboy_core::control_plane::effect_status(
+                &control_plane_run_id(&record.loop_id).expect("canonical id"),
+                &homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    control_plane_run_id(&record.loop_id).expect("canonical id"),
+                    record.updated_at
+                )),
+            )
+            .expect("failed effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn loop_stop_cancels_active_work_through_the_real_daemon_boundary() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let loop_id = "loop-active-stop";
+            let mut record = create_controller(loop_id, "repair", "v1").expect("created");
+            let submission = crate::agent_task_service::loop_work_job_execution_submission(
+                loop_id,
+                &record.updated_at,
+                json!({}),
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+            )
+            .expect("build loop work submission");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let server = std::thread::spawn(move || {
+                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                    .expect("serve bounded daemon")
+            });
+            let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
+                .expect("connect daemon");
+            let job = client.submit(submission).expect("submit work");
+            let job_id = job.id.to_string();
+            client.start(&job_id).expect("start work");
+            let active = client.status(&job_id).expect("active status");
+            assert!(matches!(active.status.as_str(), "queued" | "running"));
+            record.metadata["work_job"] = json!({
+                "schema": "homeboy/agent-task-loop-work-ref/v1",
+                "job_id": job_id,
+                "state": "running",
+            });
+            write_controller(&record).expect("persist work identity");
+
+            let (stopped, acknowledgement) =
+                stop_loop(loop_id, "active stop").expect("stop active loop");
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::Succeeded
+            );
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            for _ in 0..5 {
+                let _ = client.status(&job_id);
+            }
+            server.join().expect("join daemon");
+        });
+    }
+
+    #[test]
+    fn loop_stop_cancels_active_work_through_http_action_boundary() {
+        with_isolated_home(|_| {
+            super::register();
+            crate::agent_task_service::register_work_job_driver();
+            crate::agent_task_service::register_loop_work_job_handler();
+            let loop_id = "loop-active-http-stop";
+            let mut record = create_controller(loop_id, "repair", "v1").expect("created");
+            let submission = crate::agent_task_service::loop_work_job_execution_submission(
+                loop_id,
+                &record.updated_at,
+                json!({}),
+                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
+            )
+            .expect("build loop work submission");
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let server = std::thread::spawn(move || {
+                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                    .expect("serve bounded daemon")
+            });
+            let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
+                .expect("connect daemon");
+            let job = client.submit(submission).expect("submit work");
+            let job_id = job.id.to_string();
+            client.start(&job_id).expect("start work");
+            let _ = client.status(&job_id).expect("active status");
+            record.metadata["work_job"] = json!({
+                "schema": "homeboy/agent-task-loop-work-ref/v1",
+                "job_id": job_id,
+                "state": "running",
+            });
+            write_controller(&record).expect("persist work identity");
+            let canonical = control_plane_run_id(loop_id).expect("canonical id");
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("loop-stop:{}:{}", canonical, record.updated_at),
+                actor: "homeboy-agent-task-loop".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "active HTTP stop" }),
+                },
+                confirmed: true,
+            };
+            let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Post,
+                path: format!("/v1/control-plane/runs/{canonical}/actions"),
+                body: Some(serde_json::to_value(request).expect("action request")),
+            })
+            .expect("HTTP stop action");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body["resource"]["outcome"], "succeeded");
+            for _ in 0..5 {
+                let _ = client.status(&job_id);
+            }
+            server.join().expect("join daemon");
+        });
+    }
+
+    #[test]
+    fn loop_runtime_stop_marker_is_owned_by_the_loop_service() {
+        let mut metadata = json!({ "runtime": { "revolutions": 2 } });
+        stamp_loop_runtime_metadata(&mut metadata, false, Some(3), false).expect("marker");
+        assert_eq!(metadata["runtime"]["on"], false);
+        assert_eq!(metadata["runtime"]["revolutions"], 2);
+        assert_eq!(metadata["runtime"]["revolution_limit"], 3);
+    }
+
+    #[test]
+    fn loop_stop_uses_canonical_action_ack_and_replays_without_effect() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop/action", "repair", "v1").expect("created");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+
+            let direct_before = homeboy_core::control_plane::run(&canonical).expect("direct read");
+            assert_eq!(direct_before.run, canonical);
+
+            let (stopped, first_ack) = stop_loop(&record.loop_id, "test stop").expect("stop");
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            assert_eq!(first_ack.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(first_ack.result.data["work"], serde_json::Value::Null);
+
+            let mut resumed = stopped.clone();
+            stamp_loop_runtime_metadata(&mut resumed.metadata, true, None, true).expect("resume");
+            resumed.updated_at = chrono::Utc::now().to_rfc3339();
+            write_controller(&resumed).expect("persist new generation");
+            let (replayed, second_ack) =
+                stop_loop(&record.loop_id, "test stop").expect("second stop");
+            assert_eq!(loop_runtime_metadata(&replayed.metadata)["on"], false);
+            assert_eq!(second_ack.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(second_ack.result.data["work"], serde_json::Value::Null);
+
+            let store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("store");
+            let observation = store.open_observation_readonly().expect("observation");
+            let exact = observation
+                .control_plane_resource_projection_exact(
+                    crate::agent_task_loop_controller::LOOP_CONTROL_PLANE_RESOURCE_TYPE,
+                    canonical.as_str(),
+                )
+                .expect("exact projection")
+                .expect("exact projection exists");
+            assert!(exact.aliases.is_empty());
+
+            let effect = homeboy_core::control_plane::effect_status(
+                &canonical,
+                &homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+            )
+            .expect("effect status");
+            assert_eq!(
+                effect.state,
+                homeboy_control_plane_contract::ControlPlaneEffectExecutionState::Succeeded
+            );
+
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: format!("/v1/control-plane/runs/{canonical}"),
+                body: None,
+            })
+            .expect("in-process HTTP read");
+            assert_eq!(http.status, 200);
+            assert_eq!(http.body["resource"]["run"], canonical.to_string());
+
+            let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
+                    .to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(format!(
+                    "loop-stop:{}:{}",
+                    canonical, record.updated_at
+                )),
+                action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
+                idempotency_key: format!("loop-stop:{}:{}", canonical, record.updated_at),
+                actor: "homeboy-agent-task-loop".to_string(),
+                expected_updated_at: Some(record.updated_at.clone()),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
+                        .to_string(),
+                    data: json!({ "reason": "test stop" }),
+                },
+                confirmed: true,
+            };
+            let http_action =
+                homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                    method: homeboy_core::http_api::HttpMethod::Post,
+                    path: format!("/v1/control-plane/runs/{canonical}/actions"),
+                    body: Some(serde_json::to_value(&request).expect("action request")),
+                })
+                .expect("in-process HTTP action");
+            assert_eq!(http_action.status, 200);
+            assert_eq!(http_action.body["resource"]["outcome"], "succeeded");
+
+            let mut stale = request;
+            stale.effect_id =
+                homeboy_control_plane_contract::EffectId("loop-stale-precondition".to_string());
+            stale.idempotency_key = "loop-stale-precondition".to_string();
+            let stale_error = homeboy_core::control_plane::execute_action(&canonical, &stale)
+                .expect_err("stale stop must not be admitted");
+            assert_eq!(
+                stale_error.class,
+                homeboy_control_plane_contract::ControlPlaneErrorClass::InvalidArgument
+            );
+        });
+    }
+
+    #[test]
+    fn loop_resume_uses_canonical_ack_for_revolution_limit() {
+        with_isolated_home(|_| {
+            super::register();
+            let mut record =
+                create_controller("loop/resume-limit", "repair", "v1").expect("created");
+            stamp_loop_runtime_metadata(&mut record.metadata, true, Some(1), true)
+                .expect("runtime");
+            write_controller(&record).expect("persist runtime");
+            let acknowledgement =
+                resume_loop(&record.loop_id, Some(1), json!({ "backend": "fixture" }))
+                    .expect("resume acknowledgement");
+            assert_eq!(
+                acknowledgement.action,
+                homeboy_control_plane_contract::ControlPlaneAction::Resume
+            );
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            assert_eq!(
+                acknowledgement.result.data["stopped_reason"],
+                "revolution_limit_reached"
+            );
+            let replay = resume_loop(&record.loop_id, Some(1), json!({ "backend": "fixture" }))
+                .expect("replayed resume acknowledgement");
+            assert_eq!(replay, acknowledgement);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -5704,7 +8029,6 @@ mod tests {
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
     use homeboy_core::test_support::with_isolated_home;
     use serde_json::{json, Value};
-    use std::cell::Cell;
     use std::collections::BTreeMap;
 
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
@@ -7628,97 +9952,6 @@ mod tests {
                     .map(|event| event.kind.as_str())
                     .collect::<Vec<_>>(),
                 vec!["action.accepted", "run.cancelled", "action.succeeded"]
-            );
-            assert_eq!(
-                service.execute_action(&run, &request).expect("replay"),
-                recovered
-            );
-        });
-    }
-
-    #[test]
-    fn interrupted_ambiguous_resume_terminalizes_without_redispatch() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
-            crate::agent_task_lifecycle::submit_plan_in_store(
-                &store,
-                &AgentTaskPlan::new("interrupted-resume", Vec::new()),
-                Some(AGENT_TASK_RUN),
-            )
-            .expect("queued record");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:interrupted-resume-1".to_string()),
-                action: ControlPlaneAction::Resume,
-                idempotency_key: "interrupted-resume-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
-                confirmed: false,
-            };
-            let effect_count = Cell::new(0);
-            let _operation_key = interrupt_action_after_effect(&service, &run, &request, || {
-                effect_count.set(effect_count.get() + 1);
-            });
-            let accepted_at = store
-                .open_observation_initialized()
-                .expect("observation")
-                .control_plane_effect_status(&request.effect_id)
-                .expect("effect status")
-                .expect("effect")
-                .intent
-                .accepted_at;
-            for index in 0..100 {
-                let mut filler = event_append_request();
-                filler.idempotency_key = format!("interrupted-resume-filler-{index}");
-                filler.kind = "run.progress".to_string();
-                super::append_event_in_store(&store, &run, &filler).expect("retention filler");
-            }
-            assert!(service
-                .events(&run, None)
-                .expect("compacted events")
-                .events
-                .iter()
-                .all(|event| event.kind != "action.accepted"));
-
-            let recovered = service
-                .execute_action_with_delegates(
-                    &run,
-                    &request,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| {
-                        effect_count.set(effect_count.get() + 1);
-                        panic!("resume delegate must not run")
-                    },
-                    |_, _| panic!("promote delegate must not run"),
-                )
-                .expect("terminal interrupted resume acknowledgement");
-            assert_eq!(effect_count.get(), 1);
-            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Failed);
-            assert_eq!(recovered.accepted_at, accepted_at);
-            assert!(recovered
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("no second execution")));
-            assert_eq!(
-                service
-                    .effect_status(&run, &request.effect_id)
-                    .expect("effect status")
-                    .state,
-                ControlPlaneEffectExecutionState::Failed
-            );
-            assert_eq!(
-                service
-                    .events(&run, None)
-                    .expect("action receipts")
-                    .events
-                    .iter()
-                    .filter(|event| event.kind.starts_with("action."))
-                    .map(|event| event.kind.as_str())
-                    .collect::<Vec<_>>(),
-                vec!["action.failed"]
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),

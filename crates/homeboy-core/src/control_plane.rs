@@ -52,6 +52,15 @@ pub struct ControlPlaneActionDelegateResult {
     pub message: Option<String>,
 }
 
+/// Services owned by the process which is invoking a control-plane action.
+/// HTTP and CLI callers use the default empty context; daemon-local callers
+/// pass their already-open job service so domain delegates do not loop through
+/// the daemon's transport.
+#[derive(Clone, Default)]
+pub struct ControlPlaneInvocationContext {
+    pub daemon: Option<crate::daemon::DaemonControllerJobService>,
+}
+
 /// Executes and reconciles actions for one opaque observation run kind.
 ///
 /// Core owns action claims and acknowledgements. Implementations own only the
@@ -65,11 +74,29 @@ pub trait ControlPlaneActionDelegate: Send + Sync {
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
 
+    fn execute_with_context(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+        _context: &ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        self.execute(run, request)
+    }
+
     fn recover(
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
+
+    fn recover_with_context(
+        &self,
+        run: &RunRecord,
+        request: &ControlPlaneActionRequest,
+        _context: &ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
+        self.recover(run, request)
+    }
 }
 
 static ACTION_DELEGATES: OnceLock<
@@ -97,6 +124,30 @@ pub fn execute_delegated_action(
     reason: Option<String>,
     project: impl FnOnce() -> Result<ControlPlaneRun, ControlPlaneError>,
 ) -> Result<Option<ControlPlaneActionAcknowledgement>, ControlPlaneError> {
+    execute_delegated_action_with_context(
+        store,
+        run,
+        request,
+        resource_type,
+        resource_version,
+        eligible,
+        reason,
+        &ControlPlaneInvocationContext::default(),
+        project,
+    )
+}
+
+pub fn execute_delegated_action_with_context(
+    store: &ObservationStore,
+    run: &RunRecord,
+    request: &ControlPlaneActionRequest,
+    resource_type: &str,
+    resource_version: &str,
+    eligible: bool,
+    reason: Option<String>,
+    context: &ControlPlaneInvocationContext,
+    project: impl FnOnce() -> Result<ControlPlaneRun, ControlPlaneError>,
+) -> Result<Option<ControlPlaneActionAcknowledgement>, ControlPlaneError> {
     let delegate = ACTION_DELEGATES
         .get_or_init(|| RwLock::new(BTreeMap::new()))
         .read()
@@ -114,7 +165,7 @@ pub fn execute_delegated_action(
         resource_id: run.id.clone(),
         version: resource_version.to_string(),
         state: run.status.clone(),
-        aliases: vec![run.id.clone()],
+        aliases: Vec::new(),
         eligibility: serde_json::json!({ "action": action, "eligible": eligible }),
         provenance: serde_json::json!({ "source": "observation-run" }),
     };
@@ -201,9 +252,9 @@ pub fn execute_delegated_action(
         ),
     };
     let domain = if recovered {
-        delegate.recover(run, request)
+        delegate.recover_with_context(run, request, context)
     } else {
-        delegate.execute(run, request)
+        delegate.execute_with_context(run, request, context)
     };
     let domain = domain.unwrap_or_else(|error| ControlPlaneActionDelegateResult {
         outcome: ControlPlaneActionOutcome::Failed,
@@ -544,6 +595,15 @@ pub trait ControlPlaneProvider: Send + Sync {
         )))
     }
 
+    fn execute_action_with_context(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+        _context: &ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+        self.execute_action(requested_id, request)
+    }
+
     /// Return the durable status for one caller-owned effect identity.
     fn effect_status(
         &self,
@@ -715,8 +775,20 @@ pub fn execute_action(
     requested_id: &RunId,
     request: &ControlPlaneActionRequest,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
+    execute_action_with_context(
+        requested_id,
+        request,
+        &ControlPlaneInvocationContext::default(),
+    )
+}
+
+pub fn execute_action_with_context(
+    requested_id: &RunId,
+    request: &ControlPlaneActionRequest,
+    context: &ControlPlaneInvocationContext,
+) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
     request.validate()?;
-    with_provider(|provider| provider.execute_action(requested_id, request))
+    with_provider(|provider| provider.execute_action_with_context(requested_id, request, context))
 }
 
 /// Read the authoritative durable status of a submitted action effect.
