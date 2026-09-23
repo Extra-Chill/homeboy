@@ -620,6 +620,7 @@ pub(crate) fn exec_lab_context(
             crate::execution::provision_provider_file_secret_sources_for_runner(
                 runner,
                 &context.remote_command,
+                &context.secret_preflight_args,
                 &context
                     .secret_env_handoff
                     .secret_env_plan

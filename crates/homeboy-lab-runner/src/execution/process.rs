@@ -194,6 +194,7 @@ pub(crate) fn prepare_runner_process(
         provision_provider_file_secret_sources_for_runner(
             &runner,
             &request.command,
+            &request.command,
             &secret_env_plan.secret_env_names(),
             &request.env,
         )?;
