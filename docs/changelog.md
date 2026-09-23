@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.386.0] - 2026-09-23
+
+### Added
+- report dependency stack edges behind their newest release
+
+### Fixed
+- keep the runner user's HOME for Lab jobs; report toolchain probe failures
+
 ## [0.385.4] - 2026-09-23
 
 ### Fixed
