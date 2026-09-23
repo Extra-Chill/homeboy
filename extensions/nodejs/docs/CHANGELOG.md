@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.5] - 2026-09-23
+
+### Fixed
+- report a component's Node runtime to Homeboy
+
 ## [3.7.4] - 2026-09-08
 
 ### Fixed

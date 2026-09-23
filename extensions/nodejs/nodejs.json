@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "3.7.4",
+  "version": "3.7.5",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, audit grammar, and npm release lifecycle",
   "author": "Extra Chill",
