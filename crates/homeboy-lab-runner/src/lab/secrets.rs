@@ -683,6 +683,34 @@ fn declared_agent_task_controller_secret_env_with_providers(
     Ok(names)
 }
 
+/// Controller credential sources for provisioning runner-side credential
+/// files: every unconditionally declared source, overlaid with the sources of
+/// the route the command's plan actually selects (`provider_defaults` and
+/// `when`-scoped requirements are only visible through the plan).
+pub(crate) fn agent_task_controller_credential_sources(
+    args: &[String],
+) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    agent_task_controller_credential_sources_with_providers(args, providers.providers())
+}
+
+pub(crate) fn agent_task_controller_credential_sources_with_providers(
+    args: &[String],
+    providers: &[AgentTaskExecutorProvider],
+) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
+    let mut sources = provider_secret_sources_for_providers(providers);
+    if let Some(agent_task_index) = subcommand_index(args, "agent-task") {
+        sources.extend(
+            declared_agent_task_controller_secret_sources_with_providers(
+                args,
+                agent_task_index,
+                providers,
+            )?,
+        );
+    }
+    Ok(sources)
+}
+
 fn declared_agent_task_controller_secret_sources_with_providers(
     args: &[String],
     agent_task_index: usize,

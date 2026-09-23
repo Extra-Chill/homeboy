@@ -1020,3 +1020,57 @@ HOMEBOY_SHARED_MISSING_SECRET_TEST, HOMEBOY_OTHER_MISSING_SECRET_TEST"
         .collect();
     assert_eq!(other_task_ids, vec!["idea", "design", "build"]);
 }
+
+#[test]
+fn run_plan_credential_sources_include_the_selected_provider_default_file() {
+    let provider = fixture_provider_with_example_defaults();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "oauth-route",
+            "tasks": [{
+                "schema": "homeboy/agent-task-request/v1",
+                "task_id": "smoke",
+                "executor": {
+                    "backend": "sample-runtime",
+                    "selector": "sample-runtime.example-oauth",
+                    "config": { "provider": "example-oauth" }
+                },
+                "instructions": "Smoke."
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write plan");
+    let run_plan = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        format!("@{}", plan_path.display()),
+    ];
+
+    // Unscoped discovery cannot see route-scoped defaults; the selected route can.
+    assert!(!agent_task_controller_credential_sources_with_providers(
+        &["homeboy".to_string()],
+        std::slice::from_ref(&provider),
+    )
+    .expect("unscoped sources")
+    .contains_key("EXAMPLE_PROVIDER_ACCESS_TOKEN"));
+    let sources = agent_task_controller_credential_sources_with_providers(
+        &run_plan,
+        std::slice::from_ref(&provider),
+    )
+    .expect("run-plan sources");
+    let source = sources
+        .get("EXAMPLE_PROVIDER_ACCESS_TOKEN")
+        .expect("selected provider default source is provisionable");
+    assert_eq!(source.source, "json-file");
+    assert_eq!(
+        source.path.as_deref(),
+        Some("~/.example-provider/auth.json")
+    );
+}
