@@ -509,8 +509,10 @@ pub(crate) fn run_artifact_inventory(
 /// Select one generic publication authority for every remote target filename.
 /// Final package output supersedes preflight output. Within one phase, a
 /// previously declared canonical recovery artifact wins, followed by an
-/// explicit component `scripts.build` artifact; identical lower-precedence
-/// duplicates collapse, while differing bytes fail before commit/tag/push.
+/// explicit component `scripts.build` artifact, which also supersedes
+/// conflicting extension bytes for its declared target; identical
+/// lower-precedence duplicates collapse, while any other differing bytes fail
+/// before commit/tag/push.
 pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Result<Vec<String>> {
     if state.draft_adoption.is_some() {
         if !state.artifacts.is_empty() {
@@ -544,6 +546,8 @@ pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Resul
         let same_bytes = existing.sha256 == candidate.sha256;
         let existing_final = existing.phase == "final";
         let candidate_final = candidate.phase == "final";
+        let existing_scripts_build = existing.producer == "scripts.build";
+        let candidate_scripts_build = candidate.producer == "scripts.build";
         if same_bytes {
             if artifact_precedence(candidate) > artifact_precedence(existing) {
                 selected.insert(target, index);
@@ -563,6 +567,21 @@ pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Resul
                 target, candidate.producer, candidate.phase, existing.producer, existing.phase,
                 candidate.sha256.as_deref().unwrap_or_default(), existing.sha256.as_deref().unwrap_or_default()
             ));
+        } else if existing_scripts_build != candidate_scripts_build {
+            // `scripts.build` + build_artifact makes the component's own build
+            // the authoritative publication for that target, so an extension
+            // artifact for the same filename loses even when both are final.
+            let (authority, superseded, authority_index) = if candidate_scripts_build {
+                (candidate, existing, index)
+            } else {
+                (existing, candidate, existing_index)
+            };
+            diagnostics.push(format!(
+                "Release asset '{}' from {} ({}) is non-authoritative; component build output from {} ({}) supersedes its sha256 {} with {}",
+                target, superseded.producer, superseded.phase, authority.producer, authority.phase,
+                superseded.sha256.as_deref().unwrap_or_default(), authority.sha256.as_deref().unwrap_or_default()
+            ));
+            selected.insert(target, authority_index);
         } else {
             return Err(Error::validation_invalid_argument(
                 "release assets",
@@ -1874,6 +1893,43 @@ mod tests {
         assert_eq!(
             std::fs::read(&publications[0].source_path).expect("canonical bytes"),
             b"same"
+        );
+    }
+
+    #[test]
+    fn component_scripts_build_supersedes_conflicting_extension_bytes_for_same_target() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension_dir = temp.path().join("extension");
+        let component_dir = temp.path().join("component");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::create_dir_all(&component_dir).expect("component dir");
+        let extension = extension_dir.join("plugin.zip");
+        let component = component_dir.join("plugin.zip");
+        std::fs::write(&extension, b"extension bytes").expect("extension bytes");
+        std::fs::write(&component, b"component bytes").expect("component bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&extension, "final", "extension:wordpress"),
+                artifact(&component, "final", "scripts.build"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        let diagnostics =
+            establish_publication_authority(&mut state).expect("scripts.build authority");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("supersede"));
+        assert!(diagnostics[0].contains("extension:wordpress"));
+        assert!(diagnostics[0].contains(&sha256(&extension)));
+        assert!(diagnostics[0].contains(&sha256(&component)));
+        assert!(state.artifacts[1].publication_authority);
+        assert!(!state.artifacts[0].publication_authority);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            std::fs::read(&publications[0].source_path).expect("published bytes"),
+            b"component bytes"
         );
     }
 
