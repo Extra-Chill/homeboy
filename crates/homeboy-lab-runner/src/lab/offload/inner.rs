@@ -461,7 +461,15 @@ fn lab_runner_exec_options(
             .get("extension_runtime_home")
             .and_then(serde_json::Value::as_str)
         {
-            env.insert("HOME".to_string(), home.to_string());
+            // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
+            // hid the runner user's toolchains (rustup, cargo, npm, git config),
+            // so a runner where `cargo` works failed toolchain readiness (#14991).
+            // A caller's `HOME` never applies on the runner.
+            env.remove("HOME");
+            env.insert(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
+                format!("{}/.config/homeboy", home.trim_end_matches('/')),
+            );
         }
     }
     env.extend(lab_rig_registry_env(context.rig_registry_root.as_deref()));
@@ -565,7 +573,15 @@ pub(crate) fn exec_lab_context(
             .get("extension_runtime_home")
             .and_then(serde_json::Value::as_str)
         {
-            env.insert("HOME".to_string(), home.to_string());
+            // Root only Homeboy's own config at the job overlay. Rehoming `HOME`
+            // hid the runner user's toolchains (rustup, cargo, npm, git config),
+            // so a runner where `cargo` works failed toolchain readiness (#14991).
+            // A caller's `HOME` never applies on the runner.
+            env.remove("HOME");
+            env.insert(
+                homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV.to_string(),
+                format!("{}/.config/homeboy", home.trim_end_matches('/')),
+            );
         }
     }
     let mut secret_env_names = context
@@ -3522,9 +3538,13 @@ mod tests {
             Some(&"/runner/admitted-homeboy".to_string())
         );
         assert_eq!(
-            options.env.get("HOME"),
-            Some(&"/runner/job/home".to_string())
+            options
+                .env
+                .get(homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV),
+            Some(&"/runner/job/home/.config/homeboy".to_string())
         );
+        // The caller's HOME is dropped, and the job keeps the runner user's own HOME.
+        assert_eq!(options.env.get("HOME"), None);
         assert_eq!(
             options.command,
             vec!["/runner/admitted-homeboy".to_string(), "bench".to_string()]
