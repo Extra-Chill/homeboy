@@ -2396,7 +2396,12 @@ fn retryable_cook_attempt(
         .iter()
         .filter(|recipe_attempt| recipe_attempt.attempt == attempt.saturating_add(1))
     {
-        if !agent_task_lifecycle::run_record_exists_in_store(
+        // This function runs under resource-projection building (eligibility is
+        // projected with every record read), so every durable read here must be
+        // non-initializing. An initializing open re-enters historical Cook
+        // index import, which is what started this projection, and recurses
+        // until the stack overflows (#14914).
+        if !agent_task_lifecycle::run_record_exists_readonly_in_store(
             lifecycle_store,
             &recipe_attempt.run_id,
         )? {
@@ -2411,8 +2416,10 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
-        let mut record =
-            agent_task_lifecycle::exact_record_in_store(lifecycle_store, &recipe_attempt.run_id)?;
+        let mut record = agent_task_lifecycle::exact_record_bounded_in_store(
+            lifecycle_store,
+            &recipe_attempt.run_id,
+        )?;
         let mut owned_replacement = materialized_attempt_seen
             && record.metadata["cook_id"] == cook_id
             && record.metadata["cook_attempt"] == recipe_attempt.attempt;
@@ -2422,7 +2429,7 @@ fn retryable_cook_attempt(
         {
             for _ in 0..100 {
                 std::thread::sleep(Duration::from_millis(10));
-                record = agent_task_lifecycle::exact_record_in_store(
+                record = agent_task_lifecycle::exact_record_bounded_in_store(
                     lifecycle_store,
                     &recipe_attempt.run_id,
                 )?;
@@ -2670,8 +2677,11 @@ pub(crate) enum RetryProjectionAdmission {
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    // Eligibility is part of resource projection. Reading through the ordinary
-    // lifecycle accessor can backfill that same projection and recurse here.
+    // Eligibility is part of resource projection. Every durable read below must
+    // stay non-initializing: reading through an ordinary lifecycle accessor can
+    // backfill that same projection — or re-enter historical Cook index import,
+    // which is the migration running while this projection is built — and
+    // recurse here until the stack overflows (#14914).
     let source = lifecycle_store.read_record_bounded(run_id)?;
     if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;

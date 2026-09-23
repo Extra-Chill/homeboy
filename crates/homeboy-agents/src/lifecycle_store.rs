@@ -31,6 +31,20 @@ pub struct AgentTaskLifecycleStore {
     roots: paths::PathRoots,
 }
 
+/// Clears [`import_historical_cook_indexes`]'s same-thread re-entrancy flag on
+/// every exit path, including the `?` returns inside the import loop.
+struct ImportReentrancyGuard;
+
+impl Drop for ImportReentrancyGuard {
+    fn drop(&mut self) {
+        IMPORT_IN_PROGRESS.with(|flag| flag.set(false));
+    }
+}
+
+thread_local! {
+    static IMPORT_IN_PROGRESS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl AgentTaskLifecycleStore {
     pub fn new(roots: paths::PathRoots) -> Self {
         Self { roots }
@@ -238,7 +252,30 @@ impl AgentTaskLifecycleStore {
     /// Index files are imported before this lifecycle store serves actions or
     /// mutable reads; conflicting aliases fail closed instead of selecting a
     /// filesystem winner. Subsequent reads use only the SQLite projection.
+    ///
+    /// Import projects eligibility for every record it imports, and projection
+    /// must never re-open an initializing lifecycle store: this migration is
+    /// what such an open runs, so re-entry cannot reach a base case and each
+    /// cycle opens another SQLite connection until the stack overflows
+    /// (#14914). Same-thread re-entry is that defect's signature, so it fails
+    /// loudly here instead of overflowing; concurrent imports on other threads
+    /// remain ordinary idempotent upserts.
     fn import_historical_cook_indexes(&self, observation: &ObservationStore) -> Result<()> {
+        let already_importing = IMPORT_IN_PROGRESS.with(|flag| {
+            if flag.get() {
+                return true;
+            }
+            flag.set(true);
+            false
+        });
+        if already_importing {
+            return Err(Error::internal_unexpected(
+                "historical Cook index import re-entered while building a resource projection; \
+                 a projection-time read opened the initializing lifecycle store (#14914)"
+                    .to_string(),
+            ));
+        }
+        let _guard = ImportReentrancyGuard;
         let root = self.data_root().join("agent-task-cooks");
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
