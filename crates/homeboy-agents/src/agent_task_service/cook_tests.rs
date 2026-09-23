@@ -22324,8 +22324,12 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             confirmed: true,
         };
         let requested = homeboy_control_plane_contract::RunId::new("batch-9525").unwrap();
-        let acknowledgement = homeboy_core::control_plane::execute_action(&requested, &request)
-            .expect("resume action harvests terminal children");
+        let acknowledgement = homeboy_core::control_plane::execute_action(
+            &requested,
+            &request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+        .expect("resume action harvests terminal children");
         assert_eq!(
             acknowledgement.outcome,
             homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,
@@ -22368,9 +22372,32 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
 
         // The second action is an outbox replay and returns the stored receipt;
         // no Cook service or provider executor is entered again.
-        let replay = homeboy_core::control_plane::execute_action(&requested, &request)
-            .expect("resume action replay");
+        let replay = homeboy_core::control_plane::execute_action(
+            &requested,
+            &request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+        .expect("resume action replay");
         assert_eq!(replay, acknowledgement);
+
+        // An interrupted resume that never terminalized recovers from the
+        // receipts the real harvest wrote, without dispatching the provider.
+        let recovered =
+            crate::orchestration::FanoutBatchActionDelegate::recover_resume_from_child_finalizations(
+                "batch-9525",
+            )
+            .expect("recover from real child finalization receipts");
+        assert_eq!(
+            recovered.outcome,
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded
+        );
+        let recovered: crate::orchestration::FanoutBatchResumeActionResult =
+            serde_json::from_value(recovered.result.data).expect("typed recovered result");
+        assert_eq!(recovered.succeeded, 3);
+        assert!(recovered
+            .cooks
+            .iter()
+            .all(|cell| cell.terminal && cell.exit_code == 0));
     });
 }
 
@@ -22538,8 +22565,12 @@ fn canonical_fanout_resume_uses_caller_environment_and_config_not_daemon_ambient
             confirmed: true,
         };
         let requested = homeboy_control_plane_contract::RunId::new(cook_id).expect("run id");
-        let acknowledgement = homeboy_core::control_plane::execute_action(&requested, &request)
-            .expect("canonical resume action");
+        let acknowledgement = homeboy_core::control_plane::execute_action(
+            &requested,
+            &request,
+            &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+        )
+        .expect("canonical resume action");
         assert_eq!(
             acknowledgement.outcome,
             homeboy_control_plane_contract::ControlPlaneActionOutcome::Succeeded,

@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,10 +23,6 @@ use homeboy::agents::agent_task_timeout::{
     current_cook_deadline, with_current_cook_deadline, CookDeadline,
 };
 use homeboy::agents::agent_tasks::batch;
-use homeboy::agents::agent_tasks::dependency_actions::{
-    execute_resolved_dependency_actions, DependencyAction, DependencyActionExecutor,
-    DependencyResolution,
-};
 use homeboy::agents::agent_tasks::dependency_graph::{
     dependency_graph_readiness, AgentTaskDependencyNode,
 };

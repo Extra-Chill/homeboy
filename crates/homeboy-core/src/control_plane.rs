@@ -72,31 +72,15 @@ pub trait ControlPlaneActionDelegate: Send + Sync {
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
+        context: &ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
-
-    fn execute_with_context(
-        &self,
-        run: &RunRecord,
-        request: &ControlPlaneActionRequest,
-        _context: &ControlPlaneInvocationContext,
-    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-        self.execute(run, request)
-    }
 
     fn recover(
         &self,
         run: &RunRecord,
         request: &ControlPlaneActionRequest,
+        context: &ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError>;
-
-    fn recover_with_context(
-        &self,
-        run: &RunRecord,
-        request: &ControlPlaneActionRequest,
-        _context: &ControlPlaneInvocationContext,
-    ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-        self.recover(run, request)
-    }
 }
 
 static ACTION_DELEGATES: OnceLock<
@@ -115,29 +99,6 @@ pub fn register_control_plane_action_delegate(delegate: Arc<dyn ControlPlaneActi
 /// Execute a registered domain action through the transactional effect outbox.
 /// `None` means no delegate owns this run kind.
 pub fn execute_delegated_action(
-    store: &ObservationStore,
-    run: &RunRecord,
-    request: &ControlPlaneActionRequest,
-    resource_type: &str,
-    resource_version: &str,
-    eligible: bool,
-    reason: Option<String>,
-    project: impl FnOnce() -> Result<ControlPlaneRun, ControlPlaneError>,
-) -> Result<Option<ControlPlaneActionAcknowledgement>, ControlPlaneError> {
-    execute_delegated_action_with_context(
-        store,
-        run,
-        request,
-        resource_type,
-        resource_version,
-        eligible,
-        reason,
-        &ControlPlaneInvocationContext::default(),
-        project,
-    )
-}
-
-pub fn execute_delegated_action_with_context(
     store: &ObservationStore,
     run: &RunRecord,
     request: &ControlPlaneActionRequest,
@@ -252,9 +213,9 @@ pub fn execute_delegated_action_with_context(
         ),
     };
     let domain = if recovered {
-        delegate.recover_with_context(run, request, context)
+        delegate.recover(run, request, context)
     } else {
-        delegate.execute_with_context(run, request, context)
+        delegate.execute(run, request, context)
     };
     let domain = domain.unwrap_or_else(|error| ControlPlaneActionDelegateResult {
         outcome: ControlPlaneActionOutcome::Failed,
@@ -589,19 +550,11 @@ pub trait ControlPlaneProvider: Send + Sync {
         &self,
         requested_id: &RunId,
         _request: &ControlPlaneActionRequest,
+        _context: &ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
             "control-plane run not found: {requested_id}"
         )))
-    }
-
-    fn execute_action_with_context(
-        &self,
-        requested_id: &RunId,
-        request: &ControlPlaneActionRequest,
-        _context: &ControlPlaneInvocationContext,
-    ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
-        self.execute_action(requested_id, request)
     }
 
     /// Return the durable status for one caller-owned effect identity.
@@ -774,21 +727,10 @@ pub fn review(
 pub fn execute_action(
     requested_id: &RunId,
     request: &ControlPlaneActionRequest,
-) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
-    execute_action_with_context(
-        requested_id,
-        request,
-        &ControlPlaneInvocationContext::default(),
-    )
-}
-
-pub fn execute_action_with_context(
-    requested_id: &RunId,
-    request: &ControlPlaneActionRequest,
     context: &ControlPlaneInvocationContext,
 ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
     request.validate()?;
-    with_provider(|provider| provider.execute_action_with_context(requested_id, request, context))
+    with_provider(|provider| provider.execute_action(requested_id, request, context))
 }
 
 /// Read the authoritative durable status of a submitted action effect.
@@ -807,7 +749,8 @@ mod tests {
     use super::{
         append_delegated_action_event, execute_delegated_action,
         register_control_plane_action_delegate, ControlPlaneActionDelegate,
-        ControlPlaneActionDelegateResult, ControlPlaneProvider, NoopProvider,
+        ControlPlaneActionDelegateResult, ControlPlaneInvocationContext, ControlPlaneProvider,
+        NoopProvider,
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -829,6 +772,7 @@ mod tests {
             &self,
             _run: &crate::observation::RunRecord,
             _request: &ControlPlaneActionRequest,
+            _context: &ControlPlaneInvocationContext,
         ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
             EXECUTIONS.fetch_add(1, Ordering::SeqCst);
             Ok(ControlPlaneActionDelegateResult {
@@ -842,6 +786,7 @@ mod tests {
             &self,
             _run: &crate::observation::RunRecord,
             _request: &ControlPlaneActionRequest,
+            _context: &ControlPlaneInvocationContext,
         ) -> Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
             RECOVERIES.fetch_add(1, Ordering::SeqCst);
             Ok(ControlPlaneActionDelegateResult {
@@ -938,6 +883,7 @@ mod tests {
             &run.started_at,
             true,
             None,
+            &ControlPlaneInvocationContext::default(),
             || Err(ControlPlaneError::unavailable("projection unavailable")),
         )
         .expect_err("projection failure remains recoverable");
@@ -955,6 +901,7 @@ mod tests {
             &run.started_at,
             true,
             None,
+            &ControlPlaneInvocationContext::default(),
             || Ok(ControlPlaneRun::new(RunId::new(&run.id).unwrap())),
         )
         .unwrap()

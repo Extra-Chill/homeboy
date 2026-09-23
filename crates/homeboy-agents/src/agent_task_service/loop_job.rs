@@ -353,14 +353,7 @@ fn write_loop_dispatch_receipt(loop_id: &str, generation: &str, state: &str) -> 
             record
                 .next_actions
                 .iter()
-                .find(|action| {
-                    matches!(
-                        action.status,
-                        crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                            | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-                    )
-                })
+                .find(|action| action.status.is_open())
                 .map(|action| action.action_id.clone())
         })
         .or_else(|| {
@@ -380,14 +373,10 @@ fn write_loop_dispatch_receipt(loop_id: &str, generation: &str, state: &str) -> 
 
 fn write_loop_dispatch_completion_receipt(loop_id: &str, generation: &str) -> Result<()> {
     let record = agent_task_loop_controller::load_controller(loop_id)?;
-    let pending = record.next_actions.iter().any(|action| {
-        matches!(
-            action.status,
-            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-        )
-    });
+    let pending = record
+        .next_actions
+        .iter()
+        .any(|action| action.status.is_open());
     write_loop_dispatch_receipt(
         loop_id,
         generation,
@@ -406,14 +395,10 @@ enum ResumeDispatchDecision {
 
 fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDispatchDecision> {
     let record = agent_task_loop_controller::load_controller(loop_id)?;
-    let has_pending_action = record.next_actions.iter().any(|action| {
-        matches!(
-            action.status,
-            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-        )
-    });
+    let has_pending_action = record
+        .next_actions
+        .iter()
+        .any(|action| action.status.is_open());
     let receipt = record.metadata.get("loop_dispatch_receipt");
     let receipt_matches_generation = receipt.is_some_and(|receipt| {
         receipt.get("schema").and_then(Value::as_str)
@@ -453,14 +438,7 @@ fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDi
         return Ok(ResumeDispatchDecision::SafeContinuation);
     }
     if receipt_state == Some("pre_dispatch")
-        && receipt_action.is_some_and(|action| {
-            matches!(
-                action.status,
-                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                    | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-            )
-        })
+        && receipt_action.is_some_and(|action| action.status.is_open())
     {
         return Ok(ResumeDispatchDecision::SafeContinuation);
     }
@@ -501,17 +479,15 @@ fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDi
         };
         let exact_lineage = lineage.get("loop_id").and_then(Value::as_str) == Some(loop_id)
             && lineage.get("generation").and_then(Value::as_str) == Some(generation)
-            && lineage.get("action_id").and_then(Value::as_str).is_some_and(|action_id| {
-                record.next_actions.iter().any(|action| {
-                    action.action_id == action_id
-                        && matches!(
-                            action.status,
-                            crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
-                                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running
-                                | crate::agent_task_loop_controller::AgentTaskLoopActionStatus::WaitingForRunner
-                        )
-                })
-            });
+            && lineage
+                .get("action_id")
+                .and_then(Value::as_str)
+                .is_some_and(|action_id| {
+                    record
+                        .next_actions
+                        .iter()
+                        .any(|action| action.action_id == action_id && action.status.is_open())
+                });
         exact_lineage
             && store.read_record(run_id).is_ok_and(|run| {
                 run.state == crate::agent_task_lifecycle::AgentTaskRunState::Running

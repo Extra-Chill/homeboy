@@ -1209,8 +1209,13 @@ fn control_plane_action_response(
             })
         })
         .and_then(|request| {
-            control_plane_run_id(run_id)
-                .and_then(|run_id| crate::control_plane::execute_action(&run_id, &request))
+            control_plane_run_id(run_id).and_then(|run_id| {
+                crate::control_plane::execute_action(
+                    &run_id,
+                    &request,
+                    &crate::control_plane::ControlPlaneInvocationContext::default(),
+                )
+            })
         });
     match result {
         Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),

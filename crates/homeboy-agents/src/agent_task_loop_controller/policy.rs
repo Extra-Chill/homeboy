@@ -260,6 +260,13 @@ pub enum AgentTaskLoopActionStatus {
     BlockedLocalFallbackDenied,
 }
 
+impl AgentTaskLoopActionStatus {
+    /// Whether the action has not settled: its dispatch may still be in flight.
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Pending | Self::Running | Self::WaitingForRunner)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentTaskPrOwnershipStatusUpdate {
     pub pr_number: Option<u64>,

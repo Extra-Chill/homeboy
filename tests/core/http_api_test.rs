@@ -773,6 +773,7 @@ impl ControlPlaneProvider for FixtureControlPlaneProvider {
         &self,
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
+        _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         if requested_id.as_str() != CONTROL_PLANE_FIXTURE_RUN {
             return Err(ControlPlaneError::not_found("fixture run not found"));
