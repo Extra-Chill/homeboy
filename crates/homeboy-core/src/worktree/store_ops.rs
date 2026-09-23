@@ -531,7 +531,7 @@ fn create_with_store_unlocked(
 ) -> Result<WorktreeCreateOutput> {
     let target = component::resolve_target(TargetSpec {
         component_id: Some(&options.component_id),
-        path_override: None,
+        path_override: options.source_path.as_deref(),
         project: None,
         capability: None,
         allow_synthetic: true,

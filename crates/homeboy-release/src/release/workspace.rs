@@ -64,6 +64,7 @@ impl ReleaseWorkspace {
             repo: component.id.clone(),
             base: source_sha.clone(),
             head: branch.clone(),
+            source_path: Some(component.local_path.clone()),
         };
 
         // Publish recovery authority before creating the native checkout.
@@ -92,6 +93,7 @@ impl ReleaseWorkspace {
             run_id: Some(owner_run_ref.clone()),
             cleanup_policy: Some(CleanupPolicy::RemoveWhenSafe),
             require_handoff_freshness: false,
+            source_path: Some(component.local_path.clone()),
         })?;
         let handle = created.record.id;
         let path = created.record.worktree_path;
@@ -282,6 +284,7 @@ pub(super) fn reconcile_pending(
                 run_id: Some(record.owner_run_ref.clone()),
                 cleanup_policy: Some(CleanupPolicy::RemoveWhenSafe),
                 require_handoff_freshness: false,
+                source_path: intent.source_path,
             })?
             .record
         }
@@ -411,6 +414,12 @@ struct NativeProvisionIntent {
     repo: String,
     base: String,
     head: String,
+    /// Source checkout the component resolved from. Recovery resolves the
+    /// component from this path, so it does not depend on a local registry
+    /// or on the recovering process's current directory. Optional so records
+    /// written before it existed still deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
 }
 
 fn native_provision_intent_value(intent: &NativeProvisionIntent) -> serde_json::Value {
@@ -1021,6 +1030,7 @@ mod tests {
                         repo: component.id.clone(),
                         base: source_sha,
                         head: branch.to_string(),
+                        source_path: Some(component.local_path.clone()),
                     })
                     .expect("intent"),
                 ))

@@ -7273,6 +7273,7 @@ mod tests {
                 run_id: Some(plan.cooks[0].run_id()),
                 cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
                 require_handoff_freshness: false,
+                source_path: None,
             })
             .expect("native destination");
             let report = agent_task_service::AgentTaskCookBatchReport {
@@ -7370,6 +7371,7 @@ mod tests {
                     run_id: Some(run_id.clone()),
                     cleanup_policy: Some(homeboy::core::worktree::CleanupPolicy::RemoveWhenSafe),
                     require_handoff_freshness: false,
+                    source_path: None,
                 })
                 .expect("materialize destination worktree");
             std::fs::write(
