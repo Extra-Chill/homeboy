@@ -25,7 +25,7 @@ pub const DAEMON_START: &str = "daemon_start";
 pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
 /// Reconcile durable jobs that outlived the lease that owned them.
 pub const DAEMON_RECONCILE_LEASELESS_ORPHANS: &str = "daemon_reconcile_leaseless_orphans";
-/// Reconcile an exact PID-less job set after a proven unexpected daemon exit.
+/// Reconcile an exact PID-less job set after an operator-authorized daemon loss.
 pub const DAEMON_RECONCILE_DEAD_LEASE_ORPHANS: &str = "daemon_reconcile_dead_lease_orphans";
 /// Preview/review unleased foreground candidates after a lease retirement.
 pub const DAEMON_RECONCILE_UNLEASED_CANDIDATES: &str = "daemon_reconcile_unleased_candidates";
@@ -210,12 +210,12 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
-    // A dead lease is not enough to authorize adoption when an active job has
-    // no authoritative terminal evidence or persisted child identity. The
-    // freshness report cannot see that per-job distinction, so apply the same
-    // evidence predicate here that orphan adoption enforces in the store.
+    // A recorded live child is never eligible for either automatic adoption or
+    // operator-attested PID-less recovery. The freshness report cannot see that
+    // per-job distinction, so apply the same evidence predicate here that the
+    // store enforces during apply.
     if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead)
-        && dead_lease_has_ambiguous_jobs(status)
+        && dead_lease_has_live_jobs(status)
     {
         let blockers = status
             .active_job_recovery_evidence
@@ -243,8 +243,11 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     let requires_exact_dead_lease_recovery = freshness.stale_reason_code
         == Some(super::DaemonStaleReasonCode::PidDead)
         && status.active_job_recovery_evidence.iter().any(|evidence| {
-            evidence.disposition
-                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+            matches!(
+                evidence.disposition,
+                crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+            )
         });
     if !freshness.repair_plan.is_empty() && !requires_exact_dead_lease_recovery {
         let reason = match freshness.stale_reason_code {
@@ -301,8 +304,13 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
                     action,
                 )],
                 reason: format!(
-                    "lease `{lease_id}` is gone and {} durable job(s) have no recorded child identity; the exact job set is named from the report, but workload absence is unverifiable in process",
-                    job_ids.len()
+                    "lease `{lease_id}` is gone and {} durable job(s) have no recorded child identity ({}); the exact job set is named from the report, but workload absence is unverifiable in process",
+                    job_ids.len(),
+                    job_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
                 required_confirmations,
                 executable: true,
@@ -352,13 +360,9 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     }
 }
 
-fn dead_lease_has_ambiguous_jobs(status: &DaemonStatus) -> bool {
+fn dead_lease_has_live_jobs(status: &DaemonStatus) -> bool {
     status.active_job_recovery_evidence.iter().any(|evidence| {
-        matches!(
-            evidence.disposition,
-            crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
-                | crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
-        )
+        evidence.disposition == crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
     })
 }
 
@@ -681,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_lease_pidless_jobs_do_not_advertise_rejected_adoption() {
+    fn dead_lease_pidless_jobs_advertise_exact_attested_recovery() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
             vec![DaemonRepairStep::executable(
@@ -699,13 +703,16 @@ mod tests {
 
         let plan = plan_recovery(&status);
 
-        assert!(!plan.executable);
-        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+        assert!(plan.executable);
+        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
         assert!(plan.reason.contains(&job_id.to_string()), "{}", plan.reason);
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|step| step.code == DAEMON_ADOPT_ORPHAN));
+        assert_eq!(
+            plan.required_confirmations,
+            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()]
+        );
+        assert!(plan.steps[0]
+            .command
+            .contains("--confirm-workload-processes-absent"));
     }
 
     #[test]

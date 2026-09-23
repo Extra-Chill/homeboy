@@ -336,7 +336,12 @@ struct CgroupMemoryFiles {
 impl CgroupMemoryCollector {
     #[cfg(target_os = "linux")]
     fn start(pid: u32) -> Self {
-        let mut files = cgroup_v2_directory_for_pid(pid).map(open_cgroup_memory_files);
+        // A signal-killed child can disappear before its cgroup membership can
+        // be read. Subprocesses inherit the runner's cgroup, so retain that
+        // parent path as a fallback while preferring the child-specific path.
+        let directory = cgroup_v2_directory_for_pid(pid)
+            .or_else(|| cgroup_v2_directory_for_pid(std::process::id()));
+        let mut files = directory.map(open_cgroup_memory_files);
         let before = files.as_mut().map(read_cgroup_memory_snapshot);
         Self { files, before }
     }

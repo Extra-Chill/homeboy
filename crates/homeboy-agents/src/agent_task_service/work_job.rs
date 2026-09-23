@@ -108,6 +108,9 @@ pub(crate) enum WorkJobStep {
 pub(crate) trait WorkJobHandler: Send + Sync {
     fn work_type(&self) -> &'static str;
     fn version(&self) -> u32;
+    fn linked_durable_run_id(&self, _request: &Value) -> Option<String> {
+        None
+    }
     fn public_request(&self, request: &Value) -> Result<Value>;
     fn public_progress(&self, progress: &Value) -> Result<Value>;
     fn public_result(&self, result: &Value) -> Result<Value>;
@@ -211,6 +214,14 @@ impl ControllerJobDriver for WorkJobDriver {
 
     fn version(&self) -> u32 {
         WORK_JOB_VERSION
+    }
+
+    fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
+        let request = parse_request(request.clone()).ok()?;
+        handler(&request.work_type, request.work_version)
+            .ok()?
+            .linked_durable_run_id(&request.request)
+            .filter(|run_id| !run_id.trim().is_empty())
     }
 
     fn public_request(&self, request: &Value) -> Result<Value> {

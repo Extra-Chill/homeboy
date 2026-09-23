@@ -896,25 +896,39 @@ pub fn process_group_is_running(pgid: i32) -> bool {
 }
 
 /// Capture the process group created for an isolated child before exposing it
-/// as running. Unix isolation requires the child to lead its own group.
+/// as running. Unix isolation requires the child to lead its own group. On
+/// non-Linux Unix, the caller's isolation setup already established that group
+/// before spawn, so this remains reliable even if a short-lived child exits
+/// before its PID can be queried.
 pub fn isolated_process_group_id(pid: u32) -> std::result::Result<Option<u32>, String> {
     #[cfg(unix)]
     {
         if pid == 0 || pid > i32::MAX as u32 {
             return Err(format!("invalid isolated child PID {pid}"));
         }
+        // `ControllerChildGuard` establishes `setpgid(0, 0)` in the child
+        // before it can execute workload code. On non-Linux Unix a short-lived
+        // child may exit before `getpgid` runs, but its isolated group ID is
+        // still the child PID by construction.
+        #[cfg(not(target_os = "linux"))]
+        return Ok(Some(pid));
+
+        #[cfg(target_os = "linux")]
         let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        #[cfg(target_os = "linux")]
         if pgid < 0 {
             return Err(format!(
                 "read isolated child process group {pid}: {}",
                 std::io::Error::last_os_error()
             ));
         }
+        #[cfg(target_os = "linux")]
         if pgid as u32 != pid {
             return Err(format!(
                 "child {pid} is not the leader of its isolated process group ({pgid})"
             ));
         }
+        #[cfg(target_os = "linux")]
         Ok(Some(pgid as u32))
     }
 
@@ -922,6 +936,16 @@ pub fn isolated_process_group_id(pid: u32) -> std::result::Result<Option<u32>, S
     {
         let _ = pid;
         Ok(None)
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "linux")))]
+mod tests {
+    use super::isolated_process_group_id;
+
+    #[test]
+    fn isolated_group_identity_does_not_require_a_live_child() {
+        assert_eq!(isolated_process_group_id(1), Ok(Some(1)));
     }
 }
 

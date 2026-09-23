@@ -249,6 +249,26 @@ impl JobStore {
                     None,
                 ));
             }
+            if let Some(run_id) = stored_job_durable_run_id(stored) {
+                if matches!(
+                    super::super::agent_task_terminal_recovery::linked_durable_run_state(
+                        &run_id
+                    ),
+                    Some(
+                        super::super::types::DaemonLinkedDurableRunState::Active
+                            | super::super::types::DaemonLinkedDurableRunState::Unresolved
+                    )
+                ) {
+                    return Err(Error::validation_invalid_argument(
+                        "job_id",
+                        format!(
+                            "job `{job_id}` links to durable run `{run_id}` without authoritative terminal evidence; refusing operator no-PID recovery"
+                        ),
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
+            }
         }
         let now = timestamp_ms();
         for job_id in &expected {

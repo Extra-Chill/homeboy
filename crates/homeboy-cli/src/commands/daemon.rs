@@ -983,7 +983,11 @@ where
 
     if dry_run {
         output.blocked_on = Some("recovery preview was not executed".to_string());
-        output.next_command = "homeboy daemon recover --yes".to_string();
+        output.next_command = if output.plan.required_confirmations.is_empty() {
+            "homeboy daemon recover --yes".to_string()
+        } else {
+            rendered_plan(&output.plan)
+        };
         return Ok((DaemonOutput::Recover(output), 1));
     }
 
@@ -1879,7 +1883,7 @@ mod tests {
 
         let mut status = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::LeaseCorrupt),
+            Some(daemon::DaemonStaleReasonCode::PidDead),
             Vec::new(),
         );
         status.active_job_recovery_evidence = vec![pidless_job_evidence(Uuid::nil())];

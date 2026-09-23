@@ -102,15 +102,19 @@ fn broker_wire_error(value: Value, status_code: Option<u16>, path: &str) -> Erro
 
 fn broker_transport_error(action: &str, err: reqwest::Error) -> Error {
     let mut error = Error::internal_unexpected(format!("{action}: {err}"));
-    error.details["request_timeout"] = json!(err.is_timeout());
+    error.details["request_timeout"] = json!(request_error_is_timeout(&err));
     error
 }
 
 fn broker_response_error(err: reqwest::Error) -> Error {
     let mut error =
         Error::internal_json(err.to_string(), Some("parse broker response".to_string()));
-    error.details["request_timeout"] = json!(err.is_timeout());
+    error.details["request_timeout"] = json!(request_error_is_timeout(&err));
     error
+}
+
+fn request_error_is_timeout(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.to_string().to_ascii_lowercase().contains("timed out")
 }
 
 #[cfg(test)]
