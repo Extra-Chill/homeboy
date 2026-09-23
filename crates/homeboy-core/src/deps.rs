@@ -12,9 +12,11 @@ mod dependency_graph;
 pub(crate) mod provider;
 
 pub use dependency_graph::{
-    stack_apply, stack_apply_plan, stack_plan, stack_plan_from_components, stack_status,
-    DependencyStackApplyResult, DependencyStackApplyStep, DependencyStackCommandResult,
-    DependencyStackEdgeStatus, DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
+    stack_apply, stack_apply_plan, stack_outdated, stack_outdated_for_component, stack_plan,
+    stack_plan_from_components, stack_status, DependencyStackApplyResult, DependencyStackApplyStep,
+    DependencyStackCommandResult, DependencyStackEdgeOutdatedState,
+    DependencyStackEdgeOutdatedStatus, DependencyStackEdgeStatus, DependencyStackOutdatedStatus,
+    DependencyStackPlan, DependencyStackPlanStep, DependencyStackStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1164,6 +1166,32 @@ fn rebuild_component(component: &Component, path: &Path) -> Result<DependencyCom
 
 pub fn stack_status_value() -> Result<serde_json::Value> {
     serialize_dependency_output(stack_status()?, "serialize deps stack status")
+}
+
+/// Serialize [`stack_outdated`] together with its gate exit status so the CLI
+/// resolves the release and the exit code in one pass.
+///
+/// A non-zero gate status carries a declared `failure` object naming the
+/// behind/unresolvable edges, so the command envelope reports the gate cause
+/// instead of an unnamed non-zero exit.
+pub fn stack_outdated_value_with_exit_code(
+    component: Option<&str>,
+) -> Result<(serde_json::Value, i32)> {
+    let status = stack_outdated(component)?;
+    let exit_code = status.exit_code();
+    let mut value = serialize_dependency_output(&status, "serialize deps stack outdated")?;
+    if exit_code != 0 {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "failure".to_string(),
+                serde_json::json!({
+                    "code": "deps_stack_outdated.gate_failed",
+                    "message": status.gate_failure_message(),
+                }),
+            );
+        }
+    }
+    Ok((value, exit_code))
 }
 
 pub fn stack_plan_value(upstream: &str) -> Result<serde_json::Value> {
