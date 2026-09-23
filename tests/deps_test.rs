@@ -197,6 +197,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 rebuild: false,
                 post_update: vec!["composer build".to_string()],
                 test: vec!["homeboy review test --path . --extension sample-runtime".to_string()],
+                source: None,
             }],
         ),
         stack_component(
@@ -210,6 +211,7 @@ fn stack_plan_walks_declared_downstream_edges_in_order() {
                 rebuild: false,
                 post_update: Vec::new(),
                 test: vec!["homeboy review test --path . --extension sample-runtime".to_string()],
+                source: None,
             }],
         ),
     ];
@@ -250,6 +252,7 @@ fn stack_plan_compatibility_fields_are_serialized_from_homeboy_plan() {
                 rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
+                source: None,
             }],
         ),
         stack_component("downstream", "/repo/downstream", Vec::new()),
@@ -339,6 +342,7 @@ fn stack_plan_keeps_explicit_edge_config_when_provider_edge_matches() {
         rebuild: false,
         post_update: vec!["fixture-provider build".to_string()],
         test: vec!["fixture-provider test".to_string()],
+        source: None,
     };
     let components = vec![
         script_stack_component(
@@ -395,6 +399,7 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
                 rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
+                source: None,
             }],
         ),
         stack_component(
@@ -408,6 +413,7 @@ fn stack_plan_dedupes_cycles_by_edge_identity() {
                 rebuild: false,
                 post_update: Vec::new(),
                 test: Vec::new(),
+                source: None,
             }],
         ),
     ];
@@ -621,4 +627,356 @@ fn update_with_constraint_changes_manifest_and_lock_for_local_path_package() {
             "--no-interaction",
         ]
     );
+}
+
+// --- deps stack outdated ----------------------------------------------------
+
+/// Run git against a real fixture repository with a hermetic identity: an
+/// isolated HOME and an empty GIT_CONFIG_GLOBAL.
+fn git_fixture(dir: &std::path::Path, args: &[&str]) {
+    let home = dir.join("git-home");
+    let global_config = dir.join("git-config-global");
+    fs::create_dir_all(&home).unwrap();
+    if !global_config.exists() {
+        fs::write(&global_config, "").unwrap();
+    }
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", &global_config)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A real git repository playing the upstream. Tags are what the remote
+/// release resolution answers against, so the fixture is an actual repository
+/// with actual tags, not a mock.
+fn upstream_repo_with_tags(path: &std::path::Path, tags: &[&str]) {
+    fs::create_dir_all(path).unwrap();
+    git_fixture(path, &["init", "-q", "-b", "main"]);
+    write_file(&path.join("README.md"), "fixture upstream\n");
+    git_fixture(path, &["add", "."]);
+    git_fixture(
+        path,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "initial",
+        ],
+    );
+    for tag in tags {
+        git_fixture(path, &["tag", tag]);
+    }
+}
+
+fn outdated_edge(
+    package: &str,
+    source: Option<homeboy::core::component::DependencyStackEdgeSource>,
+) -> DependencyStackEdge {
+    DependencyStackEdge {
+        upstream: "upstream".to_string(),
+        downstream: "downstream".to_string(),
+        package: package.to_string(),
+        update: None,
+        rebuild: false,
+        post_update: Vec::new(),
+        test: Vec::new(),
+        source,
+    }
+}
+
+/// A downstream whose locked versions come through the existing dependency
+/// provider path: a neutral `homeboy-deps.json` manifest provider, the same
+/// product-agnostic provider surface the stack verbs already read.
+fn outdated_downstream(
+    path: &std::path::Path,
+    locked: &[(&str, &str)],
+    edges: Vec<DependencyStackEdge>,
+) -> Component {
+    fs::create_dir_all(path).unwrap();
+    let packages = locked
+        .iter()
+        .map(|(name, version)| {
+            format!(
+                r#"{{"name":"{name}","manifest_section":"adapter-dependencies","constraint":"{version}","locked_version":"{version}"}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    write_file(
+        &path.join("homeboy-deps.json"),
+        &format!(r#"{{"provider":"fixture-outdated-adapter","packages":[{packages}]}}"#),
+    );
+    stack_component("downstream", &path.display().to_string(), edges)
+}
+
+fn edge_by_package<'a>(
+    status: &'a deps::DependencyStackOutdatedStatus,
+    package: &str,
+) -> &'a deps::DependencyStackEdgeOutdatedStatus {
+    status
+        .edges
+        .iter()
+        .find(|edge| edge.package == package)
+        .unwrap_or_else(|| panic!("no edge reported for package {package}"))
+}
+
+#[test]
+fn stack_outdated_reports_behind_current_v_prefixed_and_unresolvable_against_real_tags() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.17.0", "transformer-v0.18.0"]);
+
+    let downstream_path = dir.path().join("downstream");
+    let repo = upstream.display().to_string();
+    let source = |prefix: &str| {
+        Some(homeboy::core::component::DependencyStackEdgeSource {
+            repo: repo.clone(),
+            prefix: prefix.to_string(),
+        })
+    };
+    let component = outdated_downstream(
+        &downstream_path,
+        &[
+            ("fixture/behind", "0.17.0"),
+            ("fixture/current", "0.18.0"),
+            ("fixture/v-prefixed", "v0.18.0"),
+            ("fixture/unresolvable", "0.18.0"),
+        ],
+        vec![
+            outdated_edge("fixture/behind", source("transformer")),
+            outdated_edge("fixture/current", source("transformer")),
+            outdated_edge("fixture/v-prefixed", source("transformer")),
+            outdated_edge("fixture/unresolvable", source("no-such-prefix")),
+        ],
+    );
+
+    let status = deps::stack_outdated_for_component(&component, &downstream_path).unwrap();
+
+    assert_eq!(status.edge_count, 4);
+
+    let behind = edge_by_package(&status, "fixture/behind");
+    assert_eq!(behind.state, deps::DependencyStackEdgeOutdatedState::Behind);
+    assert_eq!(behind.locked_version.as_deref(), Some("0.17.0"));
+    assert_eq!(behind.newest_version.as_deref(), Some("0.18.0"));
+    assert_eq!(behind.newest_tag.as_deref(), Some("transformer-v0.18.0"));
+
+    assert_eq!(
+        edge_by_package(&status, "fixture/current").state,
+        deps::DependencyStackEdgeOutdatedState::Current
+    );
+
+    // A lock recording `v0.18.0` for a `0.18.0` release is the same version.
+    let v_prefixed = edge_by_package(&status, "fixture/v-prefixed");
+    assert_eq!(v_prefixed.locked_version.as_deref(), Some("v0.18.0"));
+    assert_eq!(
+        v_prefixed.state,
+        deps::DependencyStackEdgeOutdatedState::Current
+    );
+
+    let unresolvable = edge_by_package(&status, "fixture/unresolvable");
+    assert_eq!(
+        unresolvable.state,
+        deps::DependencyStackEdgeOutdatedState::Unresolvable
+    );
+    assert!(
+        unresolvable
+            .unresolvable_reason
+            .as_deref()
+            .unwrap()
+            .contains("no release tags matching prefix 'no-such-prefix'"),
+        "unexpected reason: {:?}",
+        unresolvable.unresolvable_reason
+    );
+
+    assert_eq!(status.behind_count, 1);
+    assert_eq!(status.current_count, 2);
+    assert_eq!(status.unresolvable_count, 1);
+    assert_eq!(status.exit_code(), 1, "a behind edge gates with exit 1");
+}
+
+#[test]
+fn stack_outdated_exit_code_distinguishes_all_current_from_unresolvable() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.18.0"]);
+    let repo = upstream.display().to_string();
+    let downstream_path = dir.path().join("downstream");
+
+    // Every edge current -> exit 0.
+    let all_current = outdated_downstream(
+        &dir.path().join("downstream-all-current"),
+        &[("fixture/current", "0.18.0")],
+        vec![outdated_edge(
+            "fixture/current",
+            Some(homeboy::core::component::DependencyStackEdgeSource {
+                repo: repo.clone(),
+                prefix: "transformer".to_string(),
+            }),
+        )],
+    );
+    let status = deps::stack_outdated_for_component(
+        &all_current,
+        &dir.path().join("downstream-all-current"),
+    )
+    .unwrap();
+    assert_eq!(status.behind_count, 0);
+    assert_eq!(status.unresolvable_count, 0);
+    assert_eq!(status.exit_code(), 0);
+
+    // An edge without a remote source cannot be checked: unresolvable, never
+    // current, and the run exits 2 because nothing is behind but the gate
+    // cannot claim all-current.
+    let sourceless = outdated_downstream(
+        &downstream_path,
+        &[("fixture/current", "0.18.0")],
+        vec![
+            outdated_edge(
+                "fixture/current",
+                Some(homeboy::core::component::DependencyStackEdgeSource {
+                    repo: repo.clone(),
+                    prefix: "transformer".to_string(),
+                }),
+            ),
+            outdated_edge("fixture/untracked", None),
+        ],
+    );
+    let status = deps::stack_outdated_for_component(&sourceless, &downstream_path).unwrap();
+
+    let unresolvable = edge_by_package(&status, "fixture/untracked");
+    assert_eq!(
+        unresolvable.state,
+        deps::DependencyStackEdgeOutdatedState::Unresolvable
+    );
+    assert!(
+        unresolvable
+            .unresolvable_reason
+            .as_deref()
+            .unwrap()
+            .contains("declares no remote source"),
+        "unexpected reason: {:?}",
+        unresolvable.unresolvable_reason
+    );
+    assert_eq!(status.behind_count, 0);
+    assert_eq!(status.unresolvable_count, 1);
+    assert_eq!(status.exit_code(), 2);
+}
+
+#[test]
+fn stack_outdated_marks_untracked_packages_unresolvable_not_current() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.18.0"]);
+    let downstream_path = dir.path().join("downstream");
+
+    // The provider reports a lock for fixture/current but nothing for
+    // fixture/unknown, and fixture/nonsemver records a non-semver lock.
+    let component = outdated_downstream(
+        &downstream_path,
+        &[
+            ("fixture/current", "0.18.0"),
+            ("fixture/nonsemver", "dev-main"),
+        ],
+        vec![
+            outdated_edge(
+                "fixture/unknown",
+                Some(homeboy::core::component::DependencyStackEdgeSource {
+                    repo: upstream.display().to_string(),
+                    prefix: "transformer".to_string(),
+                }),
+            ),
+            outdated_edge(
+                "fixture/nonsemver",
+                Some(homeboy::core::component::DependencyStackEdgeSource {
+                    repo: upstream.display().to_string(),
+                    prefix: "transformer".to_string(),
+                }),
+            ),
+        ],
+    );
+
+    let status = deps::stack_outdated_for_component(&component, &downstream_path).unwrap();
+
+    let unknown = edge_by_package(&status, "fixture/unknown");
+    assert_eq!(
+        unknown.state,
+        deps::DependencyStackEdgeOutdatedState::Unresolvable
+    );
+    assert!(
+        unknown
+            .unresolvable_reason
+            .as_deref()
+            .unwrap()
+            .contains("no dependency provider reports locked version"),
+        "unexpected reason: {:?}",
+        unknown.unresolvable_reason
+    );
+
+    let nonsemver = edge_by_package(&status, "fixture/nonsemver");
+    assert_eq!(
+        nonsemver.state,
+        deps::DependencyStackEdgeOutdatedState::Unresolvable
+    );
+    assert!(
+        nonsemver
+            .unresolvable_reason
+            .as_deref()
+            .unwrap()
+            .contains("not a comparable semver"),
+        "unexpected reason: {:?}",
+        nonsemver.unresolvable_reason
+    );
+    assert_eq!(status.exit_code(), 2);
+}
+
+#[test]
+fn stack_outdated_dedupes_and_skips_edges_declared_for_other_downstreams() {
+    let dir = tempdir().unwrap();
+    let upstream = dir.path().join("upstream");
+    upstream_repo_with_tags(&upstream, &["transformer-v0.18.0"]);
+    let downstream_path = dir.path().join("downstream");
+    let repo = upstream.display().to_string();
+
+    let mut component = outdated_downstream(
+        &downstream_path,
+        &[("fixture/current", "0.18.0")],
+        vec![
+            outdated_edge(
+                "fixture/current",
+                Some(homeboy::core::component::DependencyStackEdgeSource {
+                    repo: repo.clone(),
+                    prefix: "transformer".to_string(),
+                }),
+            ),
+            outdated_edge(
+                "fixture/current",
+                Some(homeboy::core::component::DependencyStackEdgeSource {
+                    repo: repo.clone(),
+                    prefix: "transformer".to_string(),
+                }),
+            ),
+        ],
+    );
+    // Push-model declaration for a different downstream: not this component's
+    // lock to check, so the consumer-facing verb skips it.
+    let mut foreign = outdated_edge("fixture/current", None);
+    foreign.downstream = "other-downstream".to_string();
+    component.dependency_stack.push(foreign);
+
+    let status = deps::stack_outdated_for_component(&component, &downstream_path).unwrap();
+
+    assert_eq!(status.edge_count, 1);
+    assert_eq!(status.exit_code(), 0);
 }

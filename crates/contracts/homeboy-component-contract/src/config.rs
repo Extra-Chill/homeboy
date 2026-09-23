@@ -204,6 +204,25 @@ pub struct DependencyStackEdge {
     pub post_update: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test: Vec<String>,
+    /// Remote release source for this edge's upstream.
+    ///
+    /// Declaring a source lets a downstream resolve its upstream's newest
+    /// release without the upstream being registered locally, using the same
+    /// tag resolution as `homeboy release resolve`. Edges without a source
+    /// keep resolving through the local component registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DependencyStackEdgeSource>,
+}
+
+/// Remote release source declared on a [`DependencyStackEdge`].
+///
+/// `repo` is a remote Git repository and `prefix` a namespaced tag namespace:
+/// the newest `refs/tags/<prefix>-v<semver>` tag names the upstream's newest
+/// release.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct DependencyStackEdgeSource {
+    pub repo: String,
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

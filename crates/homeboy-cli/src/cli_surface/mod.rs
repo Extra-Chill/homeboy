@@ -363,6 +363,15 @@ enum DepsStackCommand {
         #[arg(long)]
         rebuild: bool,
     },
+    /// Report declared edges against each source's newest release
+    ///
+    /// Exit status gates on the result: 0 when every edge is current, 1 when
+    /// at least one edge is behind, 2 when at least one edge is unresolvable
+    /// and none are behind. An unresolvable edge never reads as current.
+    Outdated {
+        /// Component ID. When omitted, auto-detected from CWD.
+        component: Option<String>,
+    },
 }
 
 impl DepsArgs {
@@ -427,6 +436,13 @@ impl DepsArgs {
                         rebuild,
                     )?;
                     Ok((output, 0))
+                }
+                DepsStackCommand::Outdated { component } => {
+                    let (output, exit_code) =
+                        homeboy::core::deps::stack_outdated_value_with_exit_code(
+                            component.as_deref(),
+                        )?;
+                    Ok((output, exit_code))
                 }
             },
         }
