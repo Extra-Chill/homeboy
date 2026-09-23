@@ -94,8 +94,19 @@ if [ -n "${HOMEBOY_CONFIG_DIR_INPUT}" ]; then
     exit 1
   fi
 
-  PROJECT_IDS="$(find "${CONFIG_ROOT}/projects" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort | paste -sd ' ' -)"
-  SERVER_IDS="$(find "${CONFIG_ROOT}/servers" -mindepth 1 -maxdepth 1 -type f -name '*.json' -printf '%f\n' 2>/dev/null | sed 's/\.json$//' | sort | paste -sd ' ' -)"
+  entry_names() {
+    root=$1
+    kind=$2
+    pattern=${3:-}
+    if [ -n "${pattern}" ]; then
+      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -name "${pattern}" -exec basename {} \;
+    else
+      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -exec basename {} \;
+    fi
+  }
+
+  PROJECT_IDS="$(entry_names "${CONFIG_ROOT}/projects" d | sort | paste -sd ' ' -)"
+  SERVER_IDS="$(entry_names "${CONFIG_ROOT}/servers" f '*.json' | sed 's/\.json$//' | sort | paste -sd ' ' -)"
 
   echo "HOMEBOY_CONFIG_ROOT=${CONFIG_ROOT}" >> "${GITHUB_ENV}"
   echo "homeboy-config-root=${CONFIG_ROOT}" >> "${GITHUB_OUTPUT}"
