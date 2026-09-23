@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.384.1] - 2026-09-23
+
+### Fixed
+- admit local-runnable review gates instead of blanket-rejecting review test
+- provision credential files for the plan-selected provider route
+- accept suffixed issue URLs and unmaterialized worktree handles
+
 ## [0.384.0] - 2026-09-23
 
 ### Added
