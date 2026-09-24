@@ -205,7 +205,8 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
     inventory_ids = [item.get("id") for item in tests if isinstance(item, dict)]
     if (
         len(inventory_ids) != len(tests)
-        or not inventory_ids
+        # An empty inventory is valid: a changed-scope run can correctly select
+        # zero tests (Extra-Chill/homeboy#15022). It yields an empty failure set.
         or any(not isinstance(value, str) or not value for value in inventory_ids + failed_ids)
         or len(set(inventory_ids)) != len(inventory_ids)
         or len(set(failed_ids)) != len(failed_ids)

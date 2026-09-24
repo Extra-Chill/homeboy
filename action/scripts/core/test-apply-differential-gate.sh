@@ -272,14 +272,18 @@ write_outcome_fixture() {
     fi
   done
   local fp stem
-  fp="$(compute_inventory_fingerprint "${command}" "${all_ids[@]}")"
+  if [ "${#all_ids[@]}" -gt 0 ]; then
+    fp="$(compute_inventory_fingerprint "${command}" "${all_ids[@]}")"
+  else
+    fp="$(compute_inventory_fingerprint "${command}")"
+  fi
   stem="$(printf '%s' "${command}" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
   jq -cn --arg command "${command}" --arg fp "${fp}" \
     --argjson failed "$(printf '%s\n' "${failed_ids[@]:-}" | jq -R 'select(length > 0)' | jq -sc .)" \
     '{schema:"homeboy/test-outcomes/v1",command:$command,runner:"nextest",runner_fingerprint:("a"*64),workspace_fingerprint:("b"*64),execution_fingerprint:("c"*64),inventory_fingerprint:$fp,failed_test_ids:$failed}' \
     > "${dir}/${stem}.test-outcomes.json"
   jq -cn --arg command "${command}" --arg fp "${fp}" \
-    --argjson tests "$(printf '%s\n' "${all_ids[@]}" | jq -R '{id:.}' | jq -sc .)" \
+    --argjson tests "$(printf '%s\n' "${all_ids[@]:-}" | jq -R 'select(length > 0) | {id:.}' | jq -sc .)" \
     '{schema:"homeboy/test-inventory/v1",command:$command,runner:"nextest",runner_fingerprint:("a"*64),workspace_fingerprint:("b"*64),execution_fingerprint:("c"*64),inventory_fingerprint:$fp,tests:$tests}' \
     > "${dir}/${stem}.test-inventory.json"
 }
@@ -298,6 +302,7 @@ case "${message}" in
   *"id_a"*"id_b"*) printf 'PASS: the rejection names the introduced test identities\n' ;;
   *) printf 'FAIL: rejection message did not name introduced identities\n%s\n' "${message}"; exit 1 ;;
 esac
+
 
 # One identity passed on retry (flaky, excluded); one never did (stays introduced).
 jq -cn '{schema:"homeboy/test-retry/v1",command:"review test",runner:"nextest",attempted:["id_a","id_b"],flaky:["id_a"],still_failing:["id_b"],max_retries:2}' \
@@ -341,5 +346,22 @@ rm -rf "${current_dir}" "${base_dir}"
 mkdir -p "${current_dir}" "${base_dir}"
 emitted="$(python3 "${APPLY_GATE}" --emit-introduced 'review test' "${current_dir}" "${base_dir}")"
 assert_equals '{"introduced":[],"runner":null}' "${emitted}" "--emit-introduced reports nothing without comparable evidence"
+
+# --- A valid empty inventory is complete evidence (Extra-Chill/homeboy#15022) --
+# A changed-scope run that correctly selects zero tests writes an empty
+# inventory and no failures; it must read as complete, not invalid.
+rm -rf "${current_dir}" "${base_dir}"
+mkdir -p "${current_dir}" "${base_dir}"
+write_outcome_fixture "${current_dir}" 'review test' --
+write_outcome_fixture "${base_dir}" 'review test' --
+empty_evidence="$(python3 - "${SCRIPT_DIR}/apply-differential-gate.py" "${current_dir}" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("gate", sys.argv[1])
+gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+evidence, inventory, failed = gate.test_outcomes("review test", sys.argv[2])
+print(f"{evidence}|{sorted(inventory or [])}|{sorted(failed or [])}")
+PY
+)"
+assert_equals 'complete|[]|[]' "${empty_evidence}" "an empty but well-formed inventory is complete evidence with no failures"
 
 printf 'All differential gate checks passed.\n'
