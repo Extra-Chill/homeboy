@@ -991,6 +991,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "homeboy#15011: homeboy.json's entire audit section (including \
+this declaration) was deliberately deleted by 006ef8aa8e (\"make self-audit \
+advisory\", #14010) and never restored"]
     fn homeboy_config_declares_homeboy_run_marker() {
         // homeboy.json lives at the repository root; this crate builds two levels
         // down (crates/homeboy-core), so resolve it relative to the manifest dir

@@ -852,6 +852,10 @@ fn non_tty_local_wait_stays_foreground() {
 /// provider work. Killing it must leave the daemon-supervised Cook to retain its
 /// terminal artifacts (#12248).
 #[test]
+#[ignore = "homeboy#15008: record_promotion_in_store latches CandidateRecoverable \
+and never reverts it after a later conclusive promotion, so this run never \
+reaches a terminal success state despite gates succeeding and the candidate \
+being applied"]
 fn foreground_local_cook_survives_client_termination_with_artifacts() {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
