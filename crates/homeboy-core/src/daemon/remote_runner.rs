@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use super::{daemon_endpoint_response, error_response, HttpResponse};
 use crate::api_jobs::{
-    JobArtifactMetadata, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    JobArtifactMetadata, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest,
+    RemoteRunnerJobResult,
 };
 use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
@@ -13,9 +14,11 @@ use homeboy_runner_contract::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
     RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
-    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RUNNER_API_CLAIM_REQUEST_SCHEMA,
+    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RunnerApiWatchRequest, RunnerApiWatchResponse,
+    RunnerApiWatchTerminalOutcome, RunnerApiWatchedEvent, RUNNER_API_CLAIM_REQUEST_SCHEMA,
     RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
     RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
+    RUNNER_API_WATCH_REQUEST_SCHEMA, RUNNER_API_WATCH_RESPONSE_SCHEMA,
 };
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
@@ -247,6 +250,10 @@ pub(in crate::daemon) fn route(
                 Err(err) => auth_or_bad_request(err),
             }
         }
+        ("POST", "/runner/jobs/watch") => match watch(body, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.watch", body),
+            Err(err) => auth_or_bad_request(err),
+        },
         ("GET", path) if path.starts_with("/runner/jobs/") => lookup(path, job_store, auth),
         ("POST", path) if path.starts_with("/runner/jobs/") => update(path, body, job_store, auth),
         _ => error_response(
@@ -256,7 +263,7 @@ pub(in crate::daemon) fn route(
                 "unknown remote runner broker path",
                 Some(path.to_string()),
                 Some(vec![
-                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
+                    "Use /runner/jobs, /runner/jobs/reconcile, /runner/jobs/claim, /runner/jobs/watch, /runner/jobs/<job-id>/events, /runner/jobs/<job-id>/finish, /runner/jobs/<job-id>/heartbeat, /runner/jobs/<job-id>/consume, /runner/jobs/<job-id>/cancel, or GET /runner/jobs/<job-id>/artifacts/<artifact-id>."
                         .to_string(),
                     "Use /runner/sessions to register reverse runner sessions.".to_string(),
                 ]),
@@ -829,6 +836,161 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         "command": "api.runner.jobs.claim",
         "claim": claim,
     }))
+}
+
+/// The versioned Runner API v1 `watch` operation: resume one job's durable
+/// event log from the client's last-read sequence number (#13881 step 1).
+///
+/// Operation-level conditions (unknown job, a runner without standing on the
+/// job, an unsupported API version) are typed `RunnerApiOperationFailure`
+/// values in the versioned response; authentication remains an HTTP concern
+/// and still produces `401` through `auth_or_bad_request`.
+fn watch(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
+    let request: RunnerApiWatchRequest = parse_body(body, "Runner API watch request")?;
+    if request.schema != RUNNER_API_WATCH_REQUEST_SCHEMA {
+        return Ok(watch_failure_response(
+            &request,
+            RunnerApiOperationFailureCode::InvalidRequestSchema,
+            format!(
+                "unsupported Runner API watch request schema: {}",
+                request.schema
+            ),
+        ));
+    }
+    if request.api_version != RUNNER_API_V1 {
+        return Ok(watch_failure_response(
+            &request,
+            RunnerApiOperationFailureCode::UnsupportedApiVersion,
+            format!(
+                "unsupported Runner API watch version: {}",
+                request.api_version.major
+            ),
+        ));
+    }
+    // Authenticate before revealing whether the broker holds this job, with
+    // the same Work-then-Submit reader scope the neighbouring job reads use:
+    // workers observe their own jobs and controllers observe jobs they submit.
+    let grant = match auth.authorize(BrokerScope::Work, None) {
+        Ok(grant) => grant,
+        // Controllers need to observe jobs they submit, but that must not give
+        // their Submit credential any unrelated worker privileges.
+        Err(_) => auth.authorize(BrokerScope::Submit, None)?,
+    };
+    let Ok(job_id) = Uuid::parse_str(&request.job_id) else {
+        return Ok(watch_failure_response(
+            &request,
+            RunnerApiOperationFailureCode::JobNotFound,
+            format!("remote runner job not found: {}", request.job_id),
+        ));
+    };
+    let Ok(job) = job_store.get(job_id) else {
+        return Ok(watch_failure_response(
+            &request,
+            RunnerApiOperationFailureCode::JobNotFound,
+            format!("remote runner job not found: {job_id}"),
+        ));
+    };
+    // A runner-bound credential owns through its paired id; an unbound
+    // credential (open loopback, trusted local) owns through the runner id the
+    // request names. Keep the same ownership rule as the job reads.
+    let watching_runner = grant
+        .filter(|grant| !grant.runner_id.is_empty())
+        .map(|grant| grant.runner_id)
+        .unwrap_or_else(|| request.runner_id.clone());
+    if job
+        .target_runner_id
+        .as_deref()
+        .is_some_and(|target| target != watching_runner)
+    {
+        return Ok(watch_failure_response(
+            &request,
+            RunnerApiOperationFailureCode::RunnerNotAuthorized,
+            format!("remote runner job is not owned by runner {watching_runner}"),
+        ));
+    }
+
+    // Exclusive lower bound: only events with `sequence > after_sequence` are
+    // returned, ascending, so a resume sees every later event exactly once.
+    let mut later_events = job_store
+        .events(job_id)?
+        .into_iter()
+        .filter(|event| event.sequence > request.after_sequence)
+        .collect::<Vec<_>>();
+    later_events.sort_by_key(|event| event.sequence);
+    let later_event_count = later_events.len();
+    let page = match request.limit {
+        Some(limit) => {
+            let keep = (limit as usize).min(later_events.len());
+            later_events.truncate(keep);
+            later_events
+        }
+        None => later_events,
+    };
+    let next_sequence = page
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or(request.after_sequence);
+    // A terminal job is reported terminal only on the page that reaches the
+    // end of its log, so a client that stops watching at `terminal: true`
+    // never misses events left behind a `limit`.
+    let page_reaches_end = page.len() == later_event_count;
+    let terminal = job.status.is_terminal() && page_reaches_end;
+    let terminal_outcome = match job.status {
+        _ if !terminal => None,
+        JobStatus::Succeeded => Some(RunnerApiWatchTerminalOutcome::Succeeded),
+        JobStatus::Failed => Some(RunnerApiWatchTerminalOutcome::Failed),
+        JobStatus::Cancelled => Some(RunnerApiWatchTerminalOutcome::Cancelled),
+        JobStatus::Queued | JobStatus::Running => None,
+    };
+    Ok(json!({
+        "response": RunnerApiWatchResponse {
+            schema: RUNNER_API_WATCH_RESPONSE_SCHEMA.to_string(),
+            api_version: RUNNER_API_V1,
+            job_id: request.job_id.clone(),
+            events: page
+                .into_iter()
+                .map(|event| RunnerApiWatchedEvent {
+                    sequence: event.sequence,
+                    kind: serde_json::to_value(event.kind)
+                        .expect("serialize job event kind")
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    timestamp_ms: event.timestamp_ms,
+                    message: event.message,
+                    data: event.data,
+                })
+                .collect(),
+            next_sequence,
+            terminal,
+            terminal_outcome,
+            failure: None,
+        }
+    }))
+}
+
+/// The failure value of the watch operation: the versioned response envelope
+/// with an empty event page and the typed operation failure carried in-band.
+fn watch_failure_response(
+    request: &RunnerApiWatchRequest,
+    code: RunnerApiOperationFailureCode,
+    message: impl Into<String>,
+) -> Value {
+    json!({
+        "response": RunnerApiWatchResponse {
+            schema: RUNNER_API_WATCH_RESPONSE_SCHEMA.to_string(),
+            api_version: request.api_version,
+            job_id: request.job_id.clone(),
+            events: Vec::new(),
+            next_sequence: request.after_sequence,
+            terminal: false,
+            terminal_outcome: None,
+            failure: Some(RunnerApiOperationFailure {
+                code,
+                message: message.into(),
+            }),
+        }
+    })
 }
 
 fn update(
@@ -2625,5 +2787,466 @@ mod auth_tests {
         );
         assert_eq!(submit.status_code, 401);
         assert_eq!(submit.body["error"], "broker.auth_denied");
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use crate::broker_auth::BrokerScope;
+    use crate::test_support::HomeGuard;
+    use homeboy_runner_contract::{RunnerApiWatchCapability, RUNNER_API_WATCH_CAPABILITY};
+    use std::collections::BTreeSet;
+
+    /// Build a network-style (enforcing, non-loopback) auth context carrying
+    /// `token`, mirroring the helper in `auth_tests`.
+    fn enforcing_auth(token: Option<&str>) -> BrokerAuthContext {
+        BrokerAuthContext {
+            token: token.map(str::to_string),
+            loopback_bind: false,
+            trusted_local: false,
+        }
+    }
+
+    /// Pair a runner credential with `scope`, returning the one-time token.
+    fn pair(id: &str, runner_id: &str, scope: BrokerScope) -> String {
+        let mut store = BrokerAuthStore::load().expect("load store");
+        let scopes: BTreeSet<BrokerScope> = std::iter::once(scope).collect();
+        let minted = store.pair(id, runner_id, scopes).expect("pair");
+        store.save().expect("save store");
+        minted.token
+    }
+
+    fn submitted_job_id(store: &JobStore, runner_id: &str) -> String {
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(json!({
+                "runner_id": runner_id,
+                "command": ["homeboy", "test"],
+                "cwd": "/tmp/x"
+            })),
+            store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(submit.status_code, 200, "submit body: {}", submit.body);
+        submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string()
+    }
+
+    fn append(store: &JobStore, job_id: &str, kind: JobEventKind, message: &str) -> u64 {
+        store
+            .append_event(
+                Uuid::parse_str(job_id).expect("valid job id"),
+                kind,
+                Some(message.to_string()),
+                None,
+            )
+            .expect("append event")
+            .sequence
+    }
+
+    fn watch_body(runner_id: &str, job_id: &str, after_sequence: u64) -> Value {
+        json!({
+            "schema": RUNNER_API_WATCH_REQUEST_SCHEMA,
+            "api_version": { "major": 1 },
+            "runner_id": runner_id,
+            "job_id": job_id,
+            "after_sequence": after_sequence,
+        })
+    }
+
+    fn watch_route(store: &JobStore, body: Value) -> HttpResponse {
+        route(
+            "POST",
+            "/runner/jobs/watch",
+            Some(body),
+            store,
+            &BrokerAuthContext::trusted_local(),
+        )
+    }
+
+    /// The versioned operation response unwrapped from the endpoint envelope.
+    fn watched(response: &HttpResponse) -> &Value {
+        &response.body["body"]["response"]
+    }
+
+    fn returned_sequences(response: &HttpResponse) -> Vec<u64> {
+        watched(response)
+            .get("events")
+            .and_then(Value::as_array)
+            .map(|events| {
+                events
+                    .iter()
+                    .map(|event| event["sequence"].as_u64().expect("event sequence"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn store_log_sequences(store: &JobStore, job_id: &str) -> Vec<u64> {
+        store
+            .events(Uuid::parse_str(job_id).expect("valid job id"))
+            .expect("job events")
+            .into_iter()
+            .map(|event| event.sequence)
+            .collect()
+    }
+
+    #[test]
+    fn watch_from_zero_returns_every_event_in_order() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        let appended = [
+            append(&store, &job_id, JobEventKind::Progress, "compile"),
+            append(&store, &job_id, JobEventKind::Stdout, "link"),
+            append(&store, &job_id, JobEventKind::Progress, "package"),
+        ];
+
+        let response = watch_route(&store, watch_body("homeboy-lab", &job_id, 0));
+        assert_eq!(response.status_code, 200, "watch body: {}", response.body);
+        assert!(watched(&response).get("failure").is_none());
+        // Every event in the log, ascending, no duplicates, and the page ends
+        // at the last appended sequence.
+        assert_eq!(
+            returned_sequences(&response),
+            store_log_sequences(&store, &job_id)
+        );
+        let events = watched(&response)["events"].as_array().expect("events");
+        let progress_messages: Vec<&str> = events
+            .iter()
+            .filter(|event| event["kind"] == "progress")
+            .filter_map(|event| event["message"].as_str())
+            .collect();
+        assert_eq!(progress_messages, vec!["compile", "package"]);
+        assert_eq!(
+            watched(&response)["next_sequence"].as_u64(),
+            appended.last().copied()
+        );
+        assert_eq!(watched(&response)["terminal"], false);
+    }
+
+    #[test]
+    fn watch_resume_picks_up_only_events_after_the_last_read_sequence() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        let first = append(&store, &job_id, JobEventKind::Progress, "one");
+        let second = append(&store, &job_id, JobEventKind::Progress, "two");
+        let third = append(&store, &job_id, JobEventKind::Progress, "three");
+
+        // From the middle of the log: only the strictly later events.
+        let page = watch_route(&store, watch_body("homeboy-lab", &job_id, first));
+        assert_eq!(returned_sequences(&page), vec![second, third]);
+
+        // Caught up: nothing new, and the cursor holds at the request bound.
+        let caught_up = watch_route(&store, watch_body("homeboy-lab", &job_id, third));
+        assert!(returned_sequences(&caught_up).is_empty());
+        assert_eq!(watched(&caught_up)["next_sequence"].as_u64(), Some(third));
+        assert_eq!(watched(&caught_up)["terminal"], false);
+
+        // The next appended event is exactly the next watch's payload.
+        let fourth = append(&store, &job_id, JobEventKind::Stdout, "four");
+        let next = watch_route(&store, watch_body("homeboy-lab", &job_id, third));
+        assert_eq!(returned_sequences(&next), vec![fourth]);
+        assert_eq!(
+            next.body["body"]["response"]["events"][0]["message"],
+            "four"
+        );
+        assert_eq!(watched(&next)["next_sequence"].as_u64(), Some(fourth));
+    }
+
+    #[test]
+    fn watch_resume_after_dropped_connection_delivers_every_event_exactly_once() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        append(&store, &job_id, JobEventKind::Progress, "early");
+
+        // The controller reads part of the log and then loses everything but
+        // its last-read `next_sequence`.
+        let first_read = watch_route(&store, watch_body("homeboy-lab", &job_id, 0));
+        let resume_from = watched(&first_read)["next_sequence"]
+            .as_u64()
+            .expect("next_sequence");
+
+        // More work happens and the job finishes through the broker surface.
+        append(&store, &job_id, JobEventKind::Progress, "late");
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let finish = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/finish"),
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": { "exit_code": 0 }
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
+
+        // One watch from the retained cursor delivers every later event, and
+        // the two reads tile the whole log without overlap or omission.
+        let resumed = watch_route(&store, watch_body("homeboy-lab", &job_id, resume_from));
+        assert_eq!(resumed.status_code, 200, "resumed body: {}", resumed.body);
+        let first_sequences = returned_sequences(&first_read);
+        let resumed_sequences = returned_sequences(&resumed);
+        let full_log = store_log_sequences(&store, &job_id);
+        let mut combined = first_sequences.clone();
+        combined.extend(resumed_sequences.iter().copied());
+        let mut sorted = combined.clone();
+        sorted.sort();
+        assert_eq!(sorted, full_log);
+        assert!(!first_sequences
+            .iter()
+            .any(|sequence| resumed_sequences.contains(sequence)));
+        assert_eq!(watched(&resumed)["terminal"], true);
+        assert_eq!(watched(&resumed)["terminal_outcome"], "succeeded");
+    }
+
+    #[test]
+    fn watch_limit_pages_the_log_without_gaps_or_duplicates() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        for index in 0..5 {
+            append(
+                &store,
+                &job_id,
+                JobEventKind::Progress,
+                &format!("event-{index}"),
+            );
+        }
+
+        let mut cursor = 0;
+        let mut seen: Vec<u64> = Vec::new();
+        loop {
+            let mut body = watch_body("homeboy-lab", &job_id, cursor);
+            body["limit"] = json!(2);
+            let response = watch_route(&store, body);
+            assert_eq!(response.status_code, 200, "page body: {}", response.body);
+            let page = returned_sequences(&response);
+            assert!(page.len() <= 2, "limit must cap the page: {page:?}");
+            if page.is_empty() {
+                break;
+            }
+            assert_eq!(
+                watched(&response)["next_sequence"].as_u64(),
+                page.last().copied()
+            );
+            seen.extend(page);
+            cursor = seen
+                .last()
+                .copied()
+                .expect("a non-empty page advances the cursor");
+        }
+        let full_log = store_log_sequences(&store, &job_id);
+        assert_eq!(seen, full_log);
+        assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn watch_reports_terminal_only_on_the_page_that_reaches_the_end_of_the_log() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        for index in 0..4 {
+            append(
+                &store,
+                &job_id,
+                JobEventKind::Progress,
+                &format!("event-{index}"),
+            );
+        }
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(claim.status_code, 200, "claim body: {}", claim.body);
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let finish = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/finish"),
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": { "exit_code": 0 }
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
+
+        // Page a finished job and stop at the first `terminal: true`, as a
+        // client following the resume rule would. It must still see the
+        // whole log.
+        let mut cursor = 0;
+        let mut seen: Vec<u64> = Vec::new();
+        loop {
+            let mut body = watch_body("homeboy-lab", &job_id, cursor);
+            body["limit"] = json!(2);
+            let response = watch_route(&store, body);
+            assert_eq!(response.status_code, 200, "page body: {}", response.body);
+            let page = returned_sequences(&response);
+            seen.extend(page.iter().copied());
+            if watched(&response)["terminal"] == true {
+                assert_eq!(watched(&response)["terminal_outcome"], "succeeded");
+                break;
+            }
+            assert!(
+                watched(&response)["terminal_outcome"].is_null(),
+                "a page short of the log end carries no terminal outcome"
+            );
+            assert!(
+                !page.is_empty(),
+                "a non-terminal page of a finished job advances"
+            );
+            cursor = *page.last().expect("non-empty page");
+        }
+        assert_eq!(seen, store_log_sequences(&store, &job_id));
+    }
+
+    #[test]
+    fn watch_returns_typed_failures_for_unknown_job_unauthorized_runner_and_version() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "homeboy-lab");
+        append(&store, &job_id, JobEventKind::Progress, "one");
+
+        let unknown = watch_route(
+            &store,
+            watch_body("homeboy-lab", &Uuid::new_v4().to_string(), 0),
+        );
+        assert_eq!(unknown.status_code, 200, "unknown body: {}", unknown.body);
+        assert_eq!(
+            watched(&unknown)["failure"]["code"],
+            serde_json::to_value(RunnerApiOperationFailureCode::JobNotFound)
+                .expect("failure code JSON")
+        );
+        assert!(returned_sequences(&unknown).is_empty());
+        assert_eq!(watched(&unknown)["terminal"], false);
+
+        let unauthorized = watch_route(&store, watch_body("some-other-runner", &job_id, 0));
+        assert_eq!(
+            unauthorized.status_code, 200,
+            "unauthorized body: {}",
+            unauthorized.body
+        );
+        assert_eq!(
+            watched(&unauthorized)["failure"]["code"],
+            serde_json::to_value(RunnerApiOperationFailureCode::RunnerNotAuthorized)
+                .expect("failure code JSON")
+        );
+
+        let mut unsupported = watch_body("homeboy-lab", &job_id, 0);
+        unsupported["api_version"] = json!({ "major": 2 });
+        let unsupported = watch_route(&store, unsupported);
+        assert_eq!(
+            unsupported.status_code, 200,
+            "unsupported body: {}",
+            unsupported.body
+        );
+        assert_eq!(
+            watched(&unsupported)["failure"]["code"],
+            serde_json::to_value(RunnerApiOperationFailureCode::UnsupportedApiVersion)
+                .expect("failure code JSON")
+        );
+    }
+
+    #[test]
+    fn watch_requires_authentication_before_revealing_a_job() {
+        let _home = HomeGuard::new();
+        pair("cred-1", "homeboy-lab", BrokerScope::Work);
+        let store = JobStore::default();
+        let response = route(
+            "POST",
+            "/runner/jobs/watch",
+            Some(watch_body("homeboy-lab", &Uuid::new_v4().to_string(), 0)),
+            &store,
+            &enforcing_auth(None),
+        );
+        assert_eq!(response.status_code, 401);
+        assert_eq!(response.body["error"], "broker.auth_denied");
+    }
+
+    #[test]
+    fn watch_admits_the_owning_runner_and_rejects_a_foreign_runner_token() {
+        let _home = HomeGuard::new();
+        let owner_token = pair("owner-cred", "runner-a", BrokerScope::Work);
+        let foreign_token = pair("foreign-cred", "runner-b", BrokerScope::Work);
+        let store = JobStore::default();
+        let job_id = submitted_job_id(&store, "runner-a");
+        append(&store, &job_id, JobEventKind::Progress, "one");
+
+        let foreign = route(
+            "POST",
+            "/runner/jobs/watch",
+            Some(watch_body("runner-a", &job_id, 0)),
+            &store,
+            &enforcing_auth(Some(&foreign_token)),
+        );
+        assert_eq!(foreign.status_code, 200, "foreign body: {}", foreign.body);
+        assert_eq!(
+            watched(&foreign)["failure"]["code"],
+            serde_json::to_value(RunnerApiOperationFailureCode::RunnerNotAuthorized)
+                .expect("failure code JSON")
+        );
+
+        let owner = route(
+            "POST",
+            "/runner/jobs/watch",
+            Some(watch_body("runner-a", &job_id, 0)),
+            &store,
+            &enforcing_auth(Some(&owner_token)),
+        );
+        assert_eq!(owner.status_code, 200, "owner body: {}", owner.body);
+        assert!(watched(&owner).get("failure").is_none());
+        assert_eq!(
+            returned_sequences(&owner),
+            store_log_sequences(&store, &job_id)
+        );
+    }
+
+    #[test]
+    fn the_daemon_capabilities_response_advertises_the_watch_operation() {
+        let response =
+            crate::daemon::route_with_body("GET", "/capabilities", None, &JobStore::default());
+        assert_eq!(
+            response.status_code, 200,
+            "capabilities body: {}",
+            response.body
+        );
+        let capabilities = response.body["body"]["capabilities"]
+            .as_array()
+            .expect("capabilities list");
+        let advertised = capabilities
+            .iter()
+            .find(|capability| capability["capability"] == RUNNER_API_WATCH_CAPABILITY)
+            .expect("watch capability advertised");
+        assert_eq!(
+            advertised,
+            &serde_json::to_value(RunnerApiWatchCapability::current()).expect("capability JSON")
+        );
     }
 }

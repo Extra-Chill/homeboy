@@ -385,9 +385,12 @@ fn command_readiness_surfaces_incomplete_cache_repair() {
 
 #[test]
 fn remote_executor_probe_shell_returns_promptly_after_success() {
+    // A 30s probe timeout with a 10s bound proves the shell returns on
+    // success instead of waiting out its watchdog, with headroom for a
+    // loaded test host. A 1s timeout against a 1s bound failed under load.
     let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
         &shell_entrypoint("exit 0"),
-        1,
+        30,
     );
     let started = Instant::now();
     let output = Command::new("sh")
@@ -397,7 +400,11 @@ fn remote_executor_probe_shell_returns_promptly_after_success() {
         .expect("run successful runner shell probe");
 
     assert!(output.status.success());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "successful probe waited for its watchdog: {elapsed:?}"
+    );
 }
 
 #[test]

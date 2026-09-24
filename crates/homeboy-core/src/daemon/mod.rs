@@ -2266,6 +2266,9 @@ where
                 "capabilities": [
                     crate::workspace_claim::WorkspaceClaimProtocol::current(),
                     crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
+                    // The Runner API v1 operations the broker serves negotiate
+                    // through this list too (#13881).
+                    homeboy_runner_contract::RunnerApiWatchCapability::current(),
                 ],
             }),
         ),
