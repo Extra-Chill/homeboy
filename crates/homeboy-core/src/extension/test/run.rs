@@ -366,6 +366,58 @@ fn execution_fingerprint(
     )
 }
 
+/// Build the runtime evidence for an *honest* `--changed-since` selection
+/// that deterministically resolved to zero tests -- i.e. one where
+/// `source_changes_without_tests` is also empty, so nothing production/test
+/// relevant changed without a covering test decision.
+///
+/// Zero selected is itself the measurement in that case: the selector ran
+/// its full decision and there was nothing relevant to route to a runner.
+/// That is a different fact from "a runtime plan could not be produced" --
+/// an execution that never got that far -- which is what
+/// `TestRuntimeEvidence::InvalidEvidence` exists to name (#15022). Reporting
+/// an empty `Complete` evidence keeps this result in the same per-test
+/// outcome/inventory shape every other passing `--changed-since` result
+/// uses, instead of a one-off `invalid_evidence` that every downstream
+/// consumer has to special-case.
+///
+/// This must never be reached for a zero selection where
+/// `source_changes_without_tests` is non-empty (the `is_broken_instrument`
+/// case, #8340/#10685) -- that remains a hard failure, unchanged, because a
+/// zero next to impacted-but-uncovered source is not a decided, safe
+/// outcome.
+///
+/// The fingerprints below are not toolchain/workspace measurements -- no
+/// tests ran, so there is nothing to fingerprint that way. They are a
+/// deterministic hash of the selection decision itself (component id,
+/// changed-since ref), so the same no-op decision reproduces the same
+/// evidence on every rerun without shelling out to hash a workspace that was
+/// never going to be exercised.
+fn empty_changed_scope_evidence(component_id: &str, changed_since: &str) -> TestRuntimeEvidence {
+    let runner = "changed-scope-selector".to_string();
+    let runner_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!("homeboy/empty-changed-scope/runner\0{runner}").as_bytes(),
+    );
+    let workspace_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!("homeboy/empty-changed-scope/workspace\0{component_id}\0{changed_since}")
+            .as_bytes(),
+    );
+    let execution_fingerprint = homeboy_engine_primitives::content_hash::sha256_hex(
+        format!(
+            "homeboy/empty-changed-scope/execution\0{runner_fingerprint}\0{workspace_fingerprint}"
+        )
+        .as_bytes(),
+    );
+    TestRuntimeEvidence::Complete {
+        runner,
+        runner_fingerprint,
+        workspace_fingerprint,
+        execution_fingerprint,
+        tests: Vec::new(),
+        failed_test_ids: Vec::new(),
+    }
+}
+
 /// Resolve the optional changed-scope selection cap.
 ///
 /// The value is read from the process environment (what a workflow step `env:`
@@ -1347,6 +1399,14 @@ fn run_main_test_workflow_inner(
             // reached that conclusion on its own, three months before #10685
             // named it; the two agree exactly, which is the main reason this
             // predicate is worth sharing.
+            //
+            // This hard fail is deliberately preserved (#15022): the fix there
+            // is only for the *honest* zero below -- a scope that resolved to
+            // zero with an empty `source_changes_without_tests` population,
+            // e.g. a docs/workflow/config-only change. A zero selection next
+            // to a non-empty population is still a broken instrument, not a
+            // decided, safe outcome, and stays a hard failure with the same
+            // evidence and findings as before.
             let scope_measurement = Measurement::units(scope.selected_files.len() as u64)
                 .against_population(scope.source_changes_without_tests.len() as u64);
             if scope_measurement.assess().is_broken_instrument() {
@@ -1441,9 +1501,18 @@ fn run_main_test_workflow_inner(
                 });
             }
 
-            // No source-relevant change: a genuine no-test scope
-            // (documentation/config only) may pass.
-            let hints = Some(vec![
+            // No source-relevant change: a genuine, honest no-test scope
+            // (documentation/config/workflow-only) is a decided, reproducible
+            // outcome -- not a case where "an exact runtime plan was [never]
+            // available". That phrase, and `TestRuntimeEvidence::InvalidEvidence`
+            // generally, names a run that stopped *before* it could decide
+            // anything: a missing adapter inventory, a killed child, a
+            // malformed shard manifest. A `--changed-since` scope that
+            // resolved cleanly to zero, with nothing impacted left uncovered,
+            // is the opposite of that, so it is reported as a valid, passing,
+            // empty result: an empty inventory and no failed test IDs, exactly
+            // the shape every other passing Test run produces (#15022).
+            let hints = vec![
                 format!(
                     "No impacted tests found for --changed-since {changed_ref} (no production or test source changed)"
                 ),
@@ -1451,7 +1520,7 @@ fn run_main_test_workflow_inner(
                     "Run full suite if needed: homeboy review test {}",
                     args.component_id
                 ),
-            ]);
+            ];
 
             return Ok(TestRunWorkflowResult {
                 status: "passed".to_string(),
@@ -1461,9 +1530,10 @@ fn run_main_test_workflow_inner(
                 test_counts: None,
                 test_inventory: None,
                 test_inventory_rejection: None,
-                test_runtime_evidence: Some(TestRuntimeEvidence::InvalidEvidence {
-                    reason: "no Test phase executed for the selected change scope".to_string(),
-                }),
+                test_runtime_evidence: Some(empty_changed_scope_evidence(
+                    &args.component_id,
+                    changed_ref,
+                )),
                 test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
@@ -1471,7 +1541,7 @@ fn run_main_test_workflow_inner(
                 baseline_comparison: None,
                 analysis: None,
                 autofix: None,
-                hints,
+                hints: Some(hints),
                 test_scope: Some(scope.clone()),
                 summary: if args.json_summary {
                     Some(build_test_summary(None, None, 0))
@@ -4435,6 +4505,11 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
         });
     }
 
+    /// A `--changed-since` scope that touches only documentation/config
+    /// (nothing `source_changes_without_tests` would flag) selects zero
+    /// tests, and that is an honest, decided outcome: valid, passing,
+    /// empty evidence, and the extension runner is never invoked.
+    /// Extra-Chill/homeboy#15022.
     #[cfg(unix)]
     #[test]
     fn non_inventory_mode_keeps_the_empty_changed_scope_fast_path() {
@@ -4482,6 +4557,101 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             assert!(
                 !marker.exists(),
                 "normal zero scope must not invoke the runner"
+            );
+            match result.test_runtime_evidence {
+                Some(TestRuntimeEvidence::Complete {
+                    ref tests,
+                    ref failed_test_ids,
+                    ..
+                }) => {
+                    assert!(tests.is_empty());
+                    assert!(failed_test_ids.is_empty());
+                }
+                other => panic!("expected a valid, empty Complete evidence, got {other:?}"),
+            }
+            let scope = result.test_scope.expect("scope preserved");
+            assert!(scope.source_changes_without_tests.is_empty());
+        });
+    }
+
+    /// A `--changed-since` scope that touches only a test-harness config file
+    /// (e.g. `.github/workflows/ci.yml`) still selects zero tests, but
+    /// `source_changes_without_tests` is non-empty for it -- the selector's
+    /// mapping never covers harness files, so this is the `is_broken_instrument`
+    /// case, not the honest-zero case #15022 fixed. It must remain a hard
+    /// failure with the original `invalid_evidence` reason and findings, and
+    /// must not invoke the extension runner.
+    #[cfg(unix)]
+    #[test]
+    fn non_inventory_mode_zero_selection_for_a_harness_only_change_still_fails_closed() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source workspace");
+            let marker = source.path().join("runner-ran");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/zero-scope-harness-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension directory");
+            std::fs::write(
+                extension_dir.join("zero-scope-harness-fixture.json"),
+                r#"{"name":"Zero scope harness fixture","version":"1.0.0","test":{"extension_script":"test.sh"}}"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                extension_dir.join("test.sh"),
+                "#!/bin/sh\ntouch \"$HOMEBOY_COMPONENT_PATH/runner-ran\"\n",
+            )
+            .expect("runner script");
+            let component = Component {
+                id: "zero-scope-harness".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "zero-scope-harness-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let mut args = fixture_workflow_args(&component);
+            args.changed_since = Some("base".to_string());
+            args.precomputed_changed_files = Some(vec![".github/workflows/ci.yml".to_string()]);
+
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                args,
+                &RunDir::create().expect("run directory"),
+            )
+            .expect("harness-only zero selection is a decided result, closed by policy");
+
+            assert_eq!(result.status, "failed");
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.runner_exit_code, None);
+            assert!(
+                !marker.exists(),
+                "a fail-closed zero selection must not invoke the runner"
+            );
+            assert!(matches!(
+                result.test_runtime_evidence,
+                Some(TestRuntimeEvidence::InvalidEvidence { ref reason })
+                    if reason == "test execution stopped before an exact runtime plan was available"
+            ));
+            let findings = result.findings.expect("harness finding");
+            assert_eq!(findings.len(), 1);
+            assert_eq!(
+                findings[0].rule.as_deref(),
+                Some("changed_scope_zero_tests_for_harness_change")
+            );
+            assert_eq!(findings[0].severity.as_deref(), Some("error"));
+            let hints = result.hints.expect("harness hint retained");
+            assert!(
+                hints
+                    .iter()
+                    .any(|hint| hint.contains("harness") || hint.contains("full suite")),
+                "hints still name the harness-config change: {hints:?}"
+            );
+            let scope = result.test_scope.expect("scope preserved");
+            assert_eq!(
+                scope.source_changes_without_tests,
+                vec![".github/workflows/ci.yml".to_string()]
             );
         });
     }
@@ -4637,6 +4807,15 @@ Path(os.environ["HOMEBOY_TEST_INVENTORY_FILE"]).write_text(json.dumps(inventory)
             let scope = result.test_scope.expect("full selection preserved");
             assert_eq!(scope.selected_files, changed_files);
             assert_eq!(scope.selected_count, 5);
+
+            // A genuine pre-selection failure -- the runtime plan the cap
+            // guard refused to build -- still reports `invalid_evidence`,
+            // unlike a selection that decided on zero (#15022).
+            assert!(matches!(
+                result.test_runtime_evidence,
+                Some(TestRuntimeEvidence::InvalidEvidence { ref reason })
+                    if reason == "test execution stopped before an exact runtime plan was available"
+            ));
         });
     }
 

@@ -49,11 +49,14 @@ fn create_lab_local_runner() -> HomeGuard {
     home
 }
 
-/// Poll until the job is terminal. Returns as soon as it is; the 30s bound
-/// only absorbs a loaded test host, where a real child can take seconds to
-/// spawn and report.
 fn wait_for_job(store: &JobStore, job_id: &str) -> Job {
     let id = uuid::Uuid::parse_str(job_id).expect("uuid");
+    // 100 * 20ms = 2s was tight for jobs that also compute a patch/diff
+    // artifact after the command exits (e.g. `capture_patch: true`), and
+    // under host scheduling contention this poll loop can give up while the
+    // job is still genuinely `Running` rather than stuck (homeboy#14984).
+    // 1500 * 20ms = 30s holds under concurrent-process stress without slowing
+    // the common case, since the loop returns as soon as the job is terminal.
     for _ in 0..1500 {
         let job = store.get(id).expect("job");
         if matches!(

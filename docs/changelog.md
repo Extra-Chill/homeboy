@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.388.2] - 2026-09-24
+
+### Changed
+- pin homeboy-action with empty-inventory acceptance
+
+### Fixed
+- fix and verify the last 7 red tests on main
+
+## [0.388.1] - 2026-09-24
+
+### Changed
+- pin homeboy-action with the retry-checkout subdirectory fix
+- fix and quarantine core/agents red tests (homeboy#14984)
+
+### Fixed
+- a changed-scope run that selects zero tests is valid evidence
+
 ## [0.388.0] - 2026-09-24
 
 ### Added

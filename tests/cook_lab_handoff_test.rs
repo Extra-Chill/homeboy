@@ -1094,28 +1094,39 @@ fn attached_nonlocal_cook_observes_terminal_execution() {
     )
     .expect("disable host-capacity admission for fixture worktree");
     let mut cook = context.controller_runtime_command(TestBinary::HomeboyFixture);
-    cook.env("GITHUB_ACTIONS", "true").args([
-        "agent-task",
-        "cook",
-        "--wait",
-        "--run-id",
-        "attached-cook-terminal",
-        "--repo",
-        component_id,
-        "--backend",
-        "fixture",
-        "--prompt",
-        "complete while attached",
-        "--cwd",
-        task_worktree.to_str().expect("task worktree path"),
-        "--to-worktree",
-        task_worktree.to_str().expect("task worktree path"),
-        "--verify",
-        "true",
-        "--max-attempts",
-        "1",
-        "--no-finalize",
-    ]);
+    // The resource policy's local-admission gate reads real host load average
+    // by default. This host runs other real ambient work (this is a shared
+    // VPS, not a clean CI runner), so under sustained load the gate classifies
+    // the machine as "warm" and never falls back to local execution — the
+    // attached Cook stays `queued`/`blocked_runner_unavailable` until the
+    // hermetic subprocess budget kills it (homeboy#14984). Pin a quiet load
+    // reading the same way `no_runner_lab_or_local_cook_reaches_local_execution`
+    // already does, so this test's outcome depends on Cook's own admission
+    // logic instead of on how busy the host happens to be right now.
+    cook.env("GITHUB_ACTIONS", "true")
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
+        .args([
+            "agent-task",
+            "cook",
+            "--wait",
+            "--run-id",
+            "attached-cook-terminal",
+            "--repo",
+            component_id,
+            "--backend",
+            "fixture",
+            "--prompt",
+            "complete while attached",
+            "--cwd",
+            task_worktree.to_str().expect("task worktree path"),
+            "--to-worktree",
+            task_worktree.to_str().expect("task worktree path"),
+            "--verify",
+            "true",
+            "--max-attempts",
+            "1",
+            "--no-finalize",
+        ]);
     let output = bounded_output(cook);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

@@ -1373,6 +1373,27 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
         let cook_id = "cook-readiness-rearm";
         let source_run_id = "cook-readiness-rearm-attempt-1";
         let (root, source) = recoverable_runner_worktree();
+        // `recoverable_runner_worktree` repoints `origin` to a github.com-shaped
+        // URL for a destination-identity check that only applies to the CLI's
+        // `--repo`-driven provisioning path (`validate_pending_cook_repository_identity`
+        // is a no-op since 77cd349952, and `cook_repository_identity_component_id`
+        // only matters when a plan carries `cook_repository_identity` metadata,
+        // which this explicit-cwd plan never sets). This test drives Cook
+        // directly through `CookRequest`, not the CLI's `--repo` resolution, so
+        // it does not need the github.com-shaped identity, but it does need
+        // `origin` to actually resolve: both preflight and promotion each run a
+        // real `git ls-remote`/`fetch origin` to validate the declared `main`
+        // base, and a github.com-shaped URL would send that at real GitHub
+        // instead of this fixture. Point `origin` back at the fixture's own
+        // bare repo so those git operations stay local and hermetic.
+        let bare_remote_path = root.path().join("origin.git");
+        let repointed = Command::new("git")
+            .args(["remote", "set-url", "origin"])
+            .arg(&bare_remote_path)
+            .current_dir(&source)
+            .status()
+            .expect("repoint fixture remote to the local bare repo");
+        assert!(repointed.success());
         let patch = root.path().join("candidate.patch");
         std::fs::write(
             &patch,
