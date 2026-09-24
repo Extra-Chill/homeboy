@@ -26,6 +26,9 @@ const OPENCODE_UNSUPPORTED_PROBE_PATTERN = /\b(?:unknown|unrecognized|invalid) (
 const OPENCODE_READINESS_AGENT = 'homeboy-readiness';
 const OPENCODE_READINESS_PROMPT = 'Reply with exactly READY. Do not access files, run commands, or make changes.';
 const OPENCODE_SECRET_ENV_NAME_PATTERN = /(?:token|secret|api[_-]?key|credential|auth|access|refresh|expires)/i;
+// Capacity-only results must never be reused as live-inference verdicts, so
+// their identity and cache key carry the request mode.
+const OPENCODE_CAPACITY_MODE_IDENTITY = { mode: 'capacity' };
 
 function openCodeRuntimeReadiness(request = {}, options = {}) {
 	const config = objectValue(request.effective_config);
@@ -102,9 +105,12 @@ function openCodeRuntimeReadiness(request = {}, options = {}) {
  * Readiness plus plan capacity: looks up the selected provider's usage
  * windows first so an exhausted plan is reported as `capacity` with its reset
  * time, and a healthy one carries its remaining capacity. Capacity lookups are
- * best-effort; a failed lookup never changes the readiness verdict.
+ * best-effort; a failed lookup never changes the readiness verdict. A request
+ * with `mode: "capacity"` is answered from that lookup alone, without
+ * spawning OpenCode; any other or missing mode runs the full probe path.
  */
 async function openCodeProviderReadiness(request = {}, options = {}) {
+	if (request.mode === 'capacity') return openCodeCapacityReadiness(request, options);
 	const selected = selectedProviderModel(objectValue(request.effective_config) || {});
 	const lookup = selected.error || !selected.provider
 		? null
@@ -115,10 +121,64 @@ async function openCodeProviderReadiness(request = {}, options = {}) {
 			now: options.now,
 		});
 	const result = openCodeRuntimeReadiness(request, { ...options, capacityExhausted: Boolean(lookup?.exhausted) });
+	return attachCapacity(result, lookup);
+}
+
+/**
+ * Capacity-only readiness: reports the selected provider pool's plan usage
+ * without spawning OpenCode or proving live inference, so core can gate
+ * routes on capacity alone. Only the request contract and route are validated;
+ * the executable, auth store listing, model catalog, and model probe are
+ * skipped, and the verdict comes from the capacity lookup.
+ */
+async function openCodeCapacityReadiness(request = {}, options = {}) {
+	const config = objectValue(request.effective_config);
+	const env = objectValue(options.env || process.env);
+	const selected = selectedProviderModel(config || {});
+	const identity = {
+		runtime_id: 'opencode',
+		provider_id: 'opencode.agent-task-executor',
+		executable: '',
+		version: '',
+		provider: selected.provider,
+		model: selected.model,
+		credential_identity: credentialIdentity(env, resolveOpenCodeAuthPlan(config || {}, { env })),
+	};
+	if (request.schema !== READINESS_REQUEST_SCHEMA || !config) {
+		return verdict('configuration_failure', identity, 'Provide a resolved effective_config using the provider readiness request contract.', false, 'invalid_readiness_request', OPENCODE_CAPACITY_MODE_IDENTITY);
+	}
+	if (selected.error) {
+		return verdict('configuration_failure', identity, selected.error, false, 'invalid_provider_model', OPENCODE_CAPACITY_MODE_IDENTITY);
+	}
+	const lookup = await openCodeProviderCapacity(selected.provider, {
+		env,
+		fetch: options.fetch,
+		fs: options.capacityFs,
+		now: options.now,
+	});
+	const outcome = !lookup
+		? { classification: 'ready', remediation: 'The selected provider publishes no plan usage endpoint; run the full readiness probe for a live-inference verdict.', retryable: false, reason: 'capacity_not_published' }
+		: lookup.exhausted
+			? { classification: 'capacity', remediation: 'Wait for the provider plan usage window to reset, then retry.', retryable: true, reason: 'provider_capacity_exhausted' }
+			: lookup.diagnostic
+				? { classification: 'ready', remediation: 'Provider plan capacity could not be measured; run the full readiness probe for a live-inference verdict.', retryable: false, reason: 'capacity_unmeasured' }
+				: { classification: 'ready', remediation: 'Provider pool capacity remains; run the full readiness probe for a live-inference verdict.', retryable: false, reason: 'capacity_available' };
+	const result = verdict(outcome.classification, identity, outcome.remediation, outcome.retryable, outcome.reason, OPENCODE_CAPACITY_MODE_IDENTITY);
+	return attachCapacity(result, lookup);
+}
+
+/**
+ * Homeboy's readiness contract carries the per-account breakdown as
+ * `capacity.accounts`, the pool's stable `scope` beside the route summary
+ * fields, and a best-effort `capacity_diagnostic` when the lookup degraded.
+ */
+function attachCapacity(result, lookup) {
 	if (lookup?.accounts) {
-		// Homeboy's readiness contract carries the per-account breakdown as
-		// `capacity.accounts`; the route summary fields sit beside it.
-		result.capacity = { ...(lookup.capacity || {}), accounts: lookup.accounts };
+		result.capacity = {
+			...(lookup.scope ? { scope: lookup.scope } : {}),
+			...(lookup.capacity || {}),
+			accounts: lookup.accounts,
+		};
 	}
 	if (lookup?.diagnostic) result.capacity_diagnostic = lookup.diagnostic;
 	return result;
@@ -280,7 +340,7 @@ function listedModel(output, provider, model) {
 	return String(output).split(/\r?\n/).some((line) => line.trim() === `${provider}/${model}`);
 }
 
-function verdict(classification, identity, remediation, retryable, reason) {
+function verdict(classification, identity, remediation, retryable, reason, extraIdentity = null) {
 	const cacheIdentity = {
 		runtime_id: identity.runtime_id,
 		provider_id: identity.provider_id,
@@ -289,6 +349,7 @@ function verdict(classification, identity, remediation, retryable, reason) {
 		provider: identity.provider || '',
 		model: identity.model || '',
 		credential_identity: identity.credential_identity || '',
+		...(extraIdentity && typeof extraIdentity === 'object' ? extraIdentity : {}),
 	};
 	const cacheKey = `runtime-readiness:${crypto.createHash('sha256').update(JSON.stringify(cacheIdentity)).digest('hex')}`;
 	return {

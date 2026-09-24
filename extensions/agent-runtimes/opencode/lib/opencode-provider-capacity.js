@@ -51,11 +51,12 @@ const ZAI_WINDOW_UNITS = { 3: 'hour', 4: 'day', 5: 'month', 6: 'week' };
  * capacity. Without a pool, the single `auth.json` entry is the account.
  *
  * Resolves to null when the provider publishes no usage endpoint or has no
- * stored credential. Otherwise resolves to `{ accounts, capacity?, exhausted,
- * diagnostic? }`: `accounts` reports each account's state, and `capacity`
- * matches Homeboy's readiness `capacity` contract for the pool (percent
- * remaining on the best available account, or the earliest reset when every
- * account is exhausted).
+ * stored credential. Otherwise resolves to `{ scope, accounts, capacity?,
+ * exhausted, diagnostic? }`: `scope` is the stable, non-secret pool id shared
+ * by every route on the provider (`opencode:<provider>`), `accounts` reports
+ * each account's state, and `capacity` matches Homeboy's readiness `capacity`
+ * contract for the pool (percent remaining on the best available account, or
+ * the earliest reset when every account is exhausted).
  */
 async function openCodeProviderCapacity(provider, options = {}) {
 	const source = CAPACITY_PROVIDERS[provider];
@@ -141,7 +142,7 @@ async function accountUsage(source, provider, account, options) {
 
 function summarizePool(provider, accounts) {
 	const measured = accounts.filter((account) => account.state === 'available' || account.state === 'exhausted');
-	const result = { accounts, exhausted: false };
+	const result = { scope: capacityScope(provider), accounts, exhausted: false };
 	if (!measured.length) {
 		result.diagnostic = `${provider} usage could not be read for any of ${accounts.length} connected account(s)`;
 		return result;
@@ -168,6 +169,10 @@ function capacityObject(remaining, resetAt) {
 	const capacity = { remaining, limit: 100, unit: 'percent' };
 	if (resetAt) capacity.reset_at = resetAt;
 	return capacity;
+}
+
+function capacityScope(provider) {
+	return `opencode:${provider}`;
 }
 
 function anthropicWindows(body) {

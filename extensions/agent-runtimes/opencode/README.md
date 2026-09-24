@@ -82,12 +82,37 @@ contract:
   `{ remaining, limit: 100, unit: "percent", reset_at }` for the pool, taken
   from the available account with the most capacity left. When every account
   is exhausted, it is `remaining: 0` with the earliest reset.
+- **Pool scope:** whenever `capacity` is emitted it carries
+  `capacity.scope` as `opencode:<provider>` (for example `opencode:anthropic`):
+  a stable, non-secret id for the account pool the route draws from. Routes on
+  the same provider share the scope regardless of model, so Homeboy core can
+  show routes that share a pool once.
 - **Exhausted routes:** a route is classified as `capacity`, and skips the
   model probe, only when every account in its pool was measured as exhausted.
 - Other providers leave `capacity` out, and Homeboy reads a missing field as
   unknown.
 - A failed lookup adds `capacity_diagnostic` and leaves the readiness verdict
   unchanged.
+
+### Capacity-only mode
+
+A readiness request with `mode: "capacity"` is answered from the plan usage
+lookup alone and spawns no OpenCode process — no `--version`, `auth list`,
+`models`, or `run` probes, and no OpenCode executable is required. The result
+keeps the standard readiness shape:
+
+- Pool measured with remaining capacity: `ready` with reason
+  `capacity_available`.
+- Every account exhausted: `capacity`, retryable, with reason
+  `provider_capacity_exhausted`.
+- No published usage endpoint: `ready` with reason `capacity_not_published`.
+- Nothing could be measured: `ready` with reason `capacity_unmeasured` plus
+  `capacity_diagnostic`.
+
+`capacity` and `capacity_diagnostic` are attached exactly as in the full path,
+including the pool scope. The identity and cache key include the mode, so a
+capacity-only result is never reused as a live-inference verdict. Any other or
+missing `mode` keeps the full probe path.
 
 Provider rate-limit or quota rejections from the model probe are also
 classified as `capacity`. That is the vocabulary Homeboy core recognizes;

@@ -73,6 +73,7 @@ async function singleAccountTests() {
 	assert.equal(anthropicCalls[0].init.headers.Authorization, 'Bearer anthropic-access-secret');
 	assert.equal(anthropicCalls[0].init.headers['anthropic-beta'], 'oauth-2025-04-20');
 	assert.deepEqual(anthropic.capacity, { remaining: 96, limit: 100, unit: 'percent', reset_at: '2026-09-24T15:50:00.400Z' });
+	assert.equal(anthropic.scope, 'opencode:anthropic');
 	assert.equal(anthropic.accounts[0].account, 'anthropic');
 	assert.deepEqual(anthropic.accounts[0].windows.map((window) => window.name), ['five_hour', 'seven_day']);
 	assert.equal(anthropic.exhausted, false);
@@ -164,6 +165,7 @@ async function poolTests() {
 	]);
 	assert.equal(pool.accounts[1].reset_at, '2026-09-25T03:00:00.000Z');
 	assert.equal(pool.exhausted, false);
+	assert.equal(pool.scope, 'opencode:anthropic');
 	assert.deepEqual(pool.capacity, { remaining: 96, limit: 100, unit: 'percent', reset_at: '2026-09-24T15:50:00.400Z' });
 
 	// Both Codex plans spent: the pool is exhausted until the earliest reset.
@@ -178,6 +180,7 @@ async function poolTests() {
 	});
 	assert.deepEqual(codexCalls.map((call) => call.init.headers['ChatGPT-Account-Id']), ['acct-1', 'acct-2']);
 	assert.equal(codex.exhausted, true);
+	assert.equal(codex.scope, 'opencode:openai');
 	assert.deepEqual(codex.accounts.map((account) => [account.account, account.reset_at]), [
 		['one@example.com', '2026-09-27T15:26:10.000Z'],
 		['two@example.com', '2026-09-28T23:29:35.000Z'],
@@ -218,6 +221,7 @@ async function readinessIntegration() {
 	assert.equal(exhausted.ready, false);
 	assert.equal(exhausted.classification, 'capacity');
 	assert.equal(exhausted.reason, 'provider_capacity_exhausted');
+	assert.equal(exhausted.capacity.scope, 'opencode:openai');
 	assert.equal(exhausted.capacity.reset_at, '2026-09-28T23:29:35.000Z');
 	assert.equal(exhausted.capacity.accounts.length, 1);
 	assert.equal(exhausted.capacity.accounts[0].state, 'exhausted');
@@ -228,23 +232,128 @@ async function readinessIntegration() {
 	commands.length = 0;
 	const ready = await openCodeProviderReadiness(request, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
 	assert.equal(ready.classification, 'ready');
+	assert.equal(ready.capacity.scope, 'opencode:openai');
 	const { accounts: readyAccounts, ...readySummary } = ready.capacity;
-	assert.deepEqual(readySummary, { remaining: 88, limit: 100, unit: 'percent', reset_at: '2026-09-28T23:29:35.000Z' });
+	assert.deepEqual(readySummary, { scope: 'opencode:openai', remaining: 88, limit: 100, unit: 'percent', reset_at: '2026-09-28T23:29:35.000Z' });
 	assert.deepEqual(readyAccounts.map((account) => [account.state, account.remaining]), [['available', 88]]);
 	assert.ok(commands.some((args) => args.includes('run')));
 
 	// Failed lookup: readiness is unchanged and the diagnostic is attached.
 	const degraded = await openCodeProviderReadiness(request, { env, now: NOW, spawnSync, fetch: fetchReturning({}, 503) });
 	assert.equal(degraded.classification, 'ready');
-	assert.deepEqual(Object.keys(degraded.capacity), ['accounts'], 'no route summary when no account was measured');
+	assert.deepEqual(Object.keys(degraded.capacity), ['scope', 'accounts'], 'no route summary when no account was measured');
+	assert.equal(degraded.capacity.scope, 'opencode:openai');
 	assert.equal(degraded.capacity.accounts[0].state, 'lookup_failed');
 	assert.match(degraded.capacity_diagnostic, /could not be read/);
+}
+
+async function capacityOnlyReadiness() {
+	const env = singleAccountEnv;
+	// A capacity-only lookup never needs the OpenCode binary: point runtime_bin
+	// at a path that does not exist to prove no executable resolution happens.
+	const request = {
+		schema: 'homeboy/agent-task-provider-readiness-request/v1',
+		effective_config: { runtime_bin: path.join(env.HOME, 'missing-opencode-bin'), model: 'openai/gpt-5.6-terra' },
+	};
+	let spawns = 0;
+	const spawnSync = () => {
+		spawns += 1;
+		return { status: 0, stdout: '', stderr: '' };
+	};
+
+	// Healthy pool: ready from the usage lookup alone, with pool scope attached.
+	const ready = await openCodeProviderReadiness({ ...request, mode: 'capacity' }, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(ready.ready, true);
+	assert.equal(ready.classification, 'ready');
+	assert.equal(ready.reason, 'capacity_available');
+	assert.equal(ready.retryable, false);
+	assert.equal(ready.identity.mode, 'capacity');
+	assert.equal(ready.capacity.scope, 'opencode:openai');
+	assert.equal(ready.capacity.remaining, 88);
+	assert.equal(ready.capacity.accounts.length, 1);
+	assert.equal(spawns, 0, 'capacity-only readiness spawns no OpenCode process');
+
+	// Exhausted pool: capacity verdict with the reset time, still without a probe.
+	const exhausted = await openCodeProviderReadiness({ ...request, mode: 'capacity' }, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_exhausted) });
+	assert.equal(exhausted.ready, false);
+	assert.equal(exhausted.classification, 'capacity');
+	assert.equal(exhausted.reason, 'provider_capacity_exhausted');
+	assert.equal(exhausted.retryable, true);
+	assert.equal(exhausted.capacity.scope, 'opencode:openai');
+	assert.equal(exhausted.capacity.reset_at, '2026-09-28T23:29:35.000Z');
+	assert.equal(spawns, 0);
+
+	// No published usage endpoint (or no credential): ready with capacity omitted.
+	const unpublished = await openCodeProviderReadiness({
+		schema: 'homeboy/agent-task-provider-readiness-request/v1',
+		effective_config: { runtime_bin: request.effective_config.runtime_bin, model: 'opencode-go/kimi-k2.7-code' },
+		mode: 'capacity',
+	}, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(unpublished.ready, true);
+	assert.equal(unpublished.classification, 'ready');
+	assert.equal(unpublished.reason, 'capacity_not_published');
+	assert.equal(unpublished.capacity, undefined);
+	assert.equal(unpublished.capacity_diagnostic, undefined);
+	assert.equal(spawns, 0);
+
+	// Nothing could be measured: ready with accounts-only capacity and a diagnostic.
+	const degraded = await openCodeProviderReadiness({ ...request, mode: 'capacity' }, { env, now: NOW, spawnSync, fetch: fetchReturning({}, 503) });
+	assert.equal(degraded.ready, true);
+	assert.equal(degraded.classification, 'ready');
+	assert.equal(degraded.reason, 'capacity_unmeasured');
+	assert.deepEqual(Object.keys(degraded.capacity), ['scope', 'accounts']);
+	assert.equal(degraded.capacity.accounts[0].state, 'lookup_failed');
+	assert.match(degraded.capacity_diagnostic, /could not be read/);
+	assert.equal(spawns, 0);
+
+	// Routes on the same provider share the pool scope regardless of model.
+	const otherModel = await openCodeProviderReadiness({
+		schema: request.schema,
+		effective_config: { ...request.effective_config, model: 'openai/gpt-5.6-terra-fast' },
+		mode: 'capacity',
+	}, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(otherModel.capacity.scope, 'opencode:openai');
+	assert.equal(ready.capacity.scope, otherModel.capacity.scope);
+
+	// Invalid requests keep their configuration verdicts, mode-scoped, without probes.
+	const invalidSchema = await openCodeProviderReadiness({ mode: 'capacity', effective_config: request.effective_config }, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(invalidSchema.classification, 'configuration_failure');
+	assert.equal(invalidSchema.reason, 'invalid_readiness_request');
+	assert.equal(invalidSchema.identity.mode, 'capacity');
+	const invalidRoute = await openCodeProviderReadiness({ ...request, mode: 'capacity', effective_config: { model: 'not-a-route' } }, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(invalidRoute.classification, 'configuration_failure');
+	assert.equal(invalidRoute.reason, 'invalid_provider_model');
+	assert.equal(invalidRoute.identity.mode, 'capacity');
+	assert.equal(spawns, 0);
+
+	// The capacity-only cache key never collides with a live-inference verdict.
+	const executable = path.join(env.HOME, 'opencode-bin');
+	fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+	const liveRequest = { schema: request.schema, effective_config: { ...request.effective_config, runtime_bin: executable } };
+	const probeCommands = [];
+	const probeSpawnSync = (command, args) => {
+		probeCommands.push(args);
+		if (args.includes('--version')) return { status: 0, stdout: '1.0.0\n', stderr: '' };
+		if (args.includes('auth')) return { status: 0, stdout: 'OpenAI oauth\n', stderr: '' };
+		if (args.includes('models')) return { status: 0, stdout: 'openai/gpt-5.6-terra\n', stderr: '' };
+		return { status: 0, stdout: '{"type":"text","text":"READY"}\n', stderr: '' };
+	};
+	const full = await openCodeProviderReadiness(liveRequest, { env, now: NOW, spawnSync: probeSpawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(full.classification, 'ready');
+	assert.equal(full.reason, 'model_execution_ready');
+	assert.equal(full.identity.mode, undefined);
+	assert.notEqual(full.cache_key, ready.cache_key, 'capacity-only results are never reused as live-inference verdicts');
+	assert.ok(probeCommands.some((args) => args.includes('run')), 'a missing or other mode keeps the full probe path');
+	const otherMode = await openCodeProviderReadiness({ ...liveRequest, mode: 'probe' }, { env, now: NOW, spawnSync: probeSpawnSync, fetch: fetchReturning(fixtures.openai_available) });
+	assert.equal(otherMode.reason, 'model_execution_ready');
+	assert.equal(probeCommands.filter((args) => args.includes('--version')).length, 2);
 }
 
 (async () => {
 	await singleAccountTests();
 	await poolTests();
 	await readinessIntegration();
+	await capacityOnlyReadiness();
 	console.log('opencode provider capacity tests passed');
 })().catch((error) => {
 	console.error(error);
