@@ -2642,6 +2642,26 @@ pub struct ProviderReadinessInvocationCapacity {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_at: Option<String>,
+    /// Per-account breakdown when one route rotates across several connected
+    /// accounts (for example a pool of subscription plans). The route-level
+    /// fields above summarize the pool; each entry here reports one account.
+    #[serde(default)]
+    pub accounts: Vec<ProviderReadinessInvocationAccountCapacity>,
+}
+
+/// One connected account behind a route. `account` is a provider-chosen,
+/// non-secret label; `state` is provider vocabulary (for example
+/// `available`, `exhausted`, `credential_expired`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProviderReadinessInvocationAccountCapacity {
+    #[serde(default)]
+    pub account: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub remaining: Option<Value>,
+    #[serde(default)]
+    pub reset_at: Option<String>,
 }
 
 pub fn run_provider_readiness_invocation(
