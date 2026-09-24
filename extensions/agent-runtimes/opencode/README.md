@@ -69,7 +69,7 @@ contract:
   beside `auth.json`, and rotate between them. When a pool exists, every
   account in it is checked. Without a pool, the single `auth.json` entry is
   checked.
-- **Per-account results:** `capacity_accounts` reports each account as
+- **Per-account results:** `capacity.accounts` reports each account as
   `available`, `exhausted`, `credential_expired`, `credential_rejected`, or
   `lookup_failed`, along with its windows and reset time. Expired access tokens
   are reported and never refreshed, because the plugin that owns them rotates

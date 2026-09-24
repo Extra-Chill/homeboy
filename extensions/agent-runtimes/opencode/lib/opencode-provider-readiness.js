@@ -115,8 +115,11 @@ async function openCodeProviderReadiness(request = {}, options = {}) {
 			now: options.now,
 		});
 	const result = openCodeRuntimeReadiness(request, { ...options, capacityExhausted: Boolean(lookup?.exhausted) });
-	if (lookup?.capacity) result.capacity = lookup.capacity;
-	if (lookup?.accounts) result.capacity_accounts = lookup.accounts;
+	if (lookup?.accounts) {
+		// Homeboy's readiness contract carries the per-account breakdown as
+		// `capacity.accounts`; the route summary fields sit beside it.
+		result.capacity = { ...(lookup.capacity || {}), accounts: lookup.accounts };
+	}
 	if (lookup?.diagnostic) result.capacity_diagnostic = lookup.diagnostic;
 	return result;
 }

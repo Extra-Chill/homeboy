@@ -202,7 +202,8 @@ async function readinessIntegration() {
 	assert.equal(exhausted.classification, 'capacity');
 	assert.equal(exhausted.reason, 'provider_capacity_exhausted');
 	assert.equal(exhausted.capacity.reset_at, '2026-09-28T23:29:35.000Z');
-	assert.equal(exhausted.capacity_accounts.length, 1);
+	assert.equal(exhausted.capacity.accounts.length, 1);
+	assert.equal(exhausted.capacity.accounts[0].state, 'exhausted');
 	assert.ok(!commands.some((args) => args.includes('run')));
 	assert.ok(!JSON.stringify(exhausted).includes('openai-access-secret'));
 
@@ -210,13 +211,16 @@ async function readinessIntegration() {
 	commands.length = 0;
 	const ready = await openCodeProviderReadiness(request, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
 	assert.equal(ready.classification, 'ready');
-	assert.deepEqual(ready.capacity, { remaining: 88, limit: 100, unit: 'percent', reset_at: '2026-09-28T23:29:35.000Z' });
+	const { accounts: readyAccounts, ...readySummary } = ready.capacity;
+	assert.deepEqual(readySummary, { remaining: 88, limit: 100, unit: 'percent', reset_at: '2026-09-28T23:29:35.000Z' });
+	assert.deepEqual(readyAccounts.map((account) => [account.state, account.remaining]), [['available', 88]]);
 	assert.ok(commands.some((args) => args.includes('run')));
 
 	// Failed lookup: readiness is unchanged and the diagnostic is attached.
 	const degraded = await openCodeProviderReadiness(request, { env, now: NOW, spawnSync, fetch: fetchReturning({}, 503) });
 	assert.equal(degraded.classification, 'ready');
-	assert.equal(degraded.capacity, undefined);
+	assert.deepEqual(Object.keys(degraded.capacity), ['accounts'], 'no route summary when no account was measured');
+	assert.equal(degraded.capacity.accounts[0].state, 'lookup_failed');
 	assert.match(degraded.capacity_diagnostic, /could not be read/);
 }
 
