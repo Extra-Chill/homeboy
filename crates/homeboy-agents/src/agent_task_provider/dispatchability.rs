@@ -611,13 +611,26 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         )
     } else if state == "capacity_exhausted" {
         let detail = runtime.reason.as_deref().unwrap_or(reason);
-        match runtime_evidence
-            .as_ref()
-            .and_then(|evidence| evidence.capacity.reset_at())
-        {
+        let capacity = runtime_evidence.as_ref().map(|evidence| &evidence.capacity);
+        let mut message = match capacity.and_then(|capacity| capacity.reset_at()) {
             Some(reset_at) => format!("capacity_exhausted: {detail} (resets at {reset_at})"),
             None => format!("capacity_exhausted: {detail}"),
+        };
+        // A route that rotates across accounts is only exhausted when every
+        // account is; name each one's reset so operators see the whole pool.
+        let accounts = capacity
+            .map(|capacity| capacity.accounts())
+            .unwrap_or_default()
+            .iter()
+            .map(|account| match account.reset_at.as_deref() {
+                Some(reset_at) => format!("{} {} until {reset_at}", account.account, account.state),
+                None => format!("{} {}", account.account, account.state),
+            })
+            .collect::<Vec<_>>();
+        if !accounts.is_empty() {
+            message.push_str(&format!("; accounts: {}", accounts.join(", ")));
         }
+        message
     } else {
         reason.to_string()
     };
@@ -2501,6 +2514,48 @@ mod tests {
             }
         );
         assert!(evidence.capacity.is_exhausted());
+    }
+
+    /// An exhausted account pool names every account's reset in the
+    /// human-facing reason, not only the route's earliest reset.
+    #[test]
+    fn an_exhausted_account_pool_names_each_account_reset() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("readiness.js");
+        let count = root.path().join("count");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'wait',reason:'provider_capacity_exhausted',cache_key:'k',identity:{},capacity:{remaining:0,limit:100,unit:'percent',reset_at:'2026-09-27T15:26:09Z',accounts:[{account:'one@example.com',state:'exhausted',remaining:0,reset_at:'2026-09-27T15:26:09Z'},{account:'two@example.com',state:'exhausted',remaining:0,reset_at:'2026-09-28T23:29:35Z'}]}}));",
+        )
+        .expect("readiness script");
+        let catalog = catalog(provider(&script, &count));
+        let mut cache = ProviderRuntimeReadinessCache::default();
+
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "test",
+            None,
+            None,
+            &json!({}),
+            true,
+            &mut cache,
+        );
+
+        assert_eq!(verdict.state, "capacity_exhausted");
+        assert!(
+            verdict.reason.contains(
+                "accounts: one@example.com exhausted until 2026-09-27T15:26:09+00:00, two@example.com exhausted until 2026-09-28T23:29:35+00:00"
+            ),
+            "{}",
+            verdict.reason
+        );
+        let evidence = verdict
+            .readiness
+            .live_inference
+            .evidence
+            .as_ref()
+            .expect("live probe ran");
+        assert_eq!(evidence.capacity.accounts().len(), 2);
     }
 
     /// #14858 acceptance: unknown capacity. A provider that declares a
