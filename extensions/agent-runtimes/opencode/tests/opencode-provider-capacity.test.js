@@ -11,6 +11,15 @@ const fixtures = require('./fixtures/provider-capacity.json');
 const NOW = Date.parse('2026-09-24T12:00:00Z');
 const FUTURE = NOW + 3_600_000;
 
+// A minimal JWT-shaped access token so xai account ids can be read from the
+// payload the way the real CLI tokens carry them.
+const jwt = (payload) => [
+	Buffer.from('{"alg":"RS256","typ":"JWT"}').toString('base64url'),
+	Buffer.from(JSON.stringify(payload)).toString('base64url'),
+	'signature',
+].join('.');
+const XAI_ACCESS = jwt({ sub: 'user-9', principal_id: 'principal-123' });
+
 function dataHome(authStore, pools = {}) {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-opencode-capacity-'));
 	fs.mkdirSync(path.join(root, 'opencode'), { recursive: true });
@@ -26,6 +35,7 @@ const singleAccountEnv = dataHome({
 	openai: { type: 'oauth', access: 'openai-access-secret', refresh: 'r', expires: FUTURE },
 	'zai-coding-plan': { type: 'api', key: 'zai-key-secret' },
 	'opencode-go': { type: 'api', key: 'go-key-secret' },
+	xai: { type: 'oauth', access: XAI_ACCESS, refresh: 'r', expires: FUTURE },
 });
 
 const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile';
@@ -101,7 +111,7 @@ async function singleAccountTests() {
 	// Providers without a usage endpoint, or without a credential, report nothing.
 	let called = false;
 	const noCall = async () => { called = true; };
-	assert.equal(await openCodeProviderCapacity('opencode-go', options(noCall)), null);
+	assert.equal(await openCodeProviderCapacity('google', options(noCall)), null);
 	assert.equal(await openCodeProviderCapacity('anthropic', { env: { HOME: '/nonexistent' }, fetch: noCall, now: NOW }), null);
 	assert.equal(called, false);
 
@@ -126,6 +136,67 @@ async function singleAccountTests() {
 	assert.equal(unrecognized.accounts[0].state, 'lookup_failed');
 }
 
+async function opencodeGoAndXaiTests() {
+	const env = singleAccountEnv;
+	const options = (fetch) => ({ env, fetch, now: NOW });
+
+	// opencode-go: the auth-store API key goes out as a Bearer header; the
+	// rate-limited monthly window exhausts the account at its own reset.
+	const goCalls = [];
+	const go = await openCodeProviderCapacity('opencode-go', options(fetchReturning(fixtures.opencode_go, 200, goCalls)));
+	assert.equal(goCalls[0].url, 'https://opencode.ai/zen/go/v1/usage');
+	assert.equal(goCalls[0].init.headers.Authorization, 'Bearer go-key-secret');
+	assert.equal(go.scope, 'opencode:opencode-go');
+	assert.deepEqual(go.accounts[0].windows.map((window) => [window.name, window.used_percent, window.reset_at]), [
+		['rolling', 0, '2026-09-25T03:58:42.116Z'],
+		['weekly', 0, '2026-09-28T00:00:00.000Z'],
+		['monthly', 100, '2026-10-08T00:46:00.000Z'],
+	]);
+	assert.equal(go.accounts[0].state, 'exhausted');
+	assert.deepEqual(go.capacity, { remaining: 0, limit: 100, unit: 'percent', reset_at: '2026-10-08T00:46:00.000Z' });
+
+	// A rate-limited window is exhausted even when its percent is below 100.
+	const goLimited = await openCodeProviderCapacity('opencode-go', options(fetchReturning(fixtures.opencode_go_rate_limited_below_full)));
+	assert.equal(goLimited.accounts[0].windows[1].name, 'monthly');
+	assert.equal(goLimited.accounts[0].windows[1].exhausted, true);
+	assert.equal(goLimited.exhausted, true);
+	assert.equal(goLimited.capacity.remaining, 0);
+
+	// xai: the billing endpoint names the account from the access token's JWT
+	// payload, and the token itself never leaks into the report.
+	const xaiCalls = [];
+	const xai = await openCodeProviderCapacity('xai', options(fetchReturning(fixtures.xai, 200, xaiCalls)));
+	assert.equal(xaiCalls[0].url, 'https://cli-chat-proxy.grok.com/v1/billing?format=credits');
+	assert.equal(xaiCalls[0].init.headers.Authorization, `Bearer ${XAI_ACCESS}`);
+	assert.equal(xaiCalls[0].init.headers['X-XAI-Token-Auth'], 'xai-grok-cli');
+	assert.equal(xaiCalls[0].init.headers['x-userid'], 'principal-123');
+	assert.deepEqual(xai.accounts[0].windows, [
+		{ name: 'credits_weekly', used_percent: 0, reset_at: '2026-10-01T21:08:53.920Z', exhausted: false },
+	]);
+	assert.deepEqual(xai.capacity, { remaining: 100, limit: 100, unit: 'percent', reset_at: '2026-10-01T21:08:53.920Z' });
+
+	// Without creditUsagePercent the used/limit ratio is the percent.
+	const ratio = await openCodeProviderCapacity('xai', options(fetchReturning(fixtures.xai_ratio)));
+	assert.equal(ratio.accounts[0].windows[0].used_percent, 84);
+	assert.deepEqual(ratio.capacity, { remaining: 16, limit: 100, unit: 'percent', reset_at: '2026-10-01T21:08:53.920Z' });
+
+	// A present usage percent wins and is clamped; without a current period the
+	// window falls back to the `credits` name and the billing period end.
+	const over = await openCodeProviderCapacity('xai', options(fetchReturning(fixtures.xai_usage_percent_over)));
+	assert.equal(over.accounts[0].windows[0].name, 'credits');
+	assert.equal(over.accounts[0].windows[0].used_percent, 100);
+	assert.equal(over.accounts[0].windows[0].exhausted, true);
+	assert.equal(over.capacity.reset_at, '2026-09-30T00:00:00.000Z');
+
+	// A billing response without config reports no recognized windows.
+	const noConfig = await openCodeProviderCapacity('xai', options(fetchReturning({ unexpected: true })));
+	assert.equal(noConfig.accounts[0].state, 'lookup_failed');
+
+	const reported = JSON.stringify([go, goLimited, xai, ratio, over, noConfig]);
+	assert.ok(!reported.includes('go-key-secret'));
+	assert.ok(!reported.includes(XAI_ACCESS));
+}
+
 async function poolTests() {
 	const oauth = (access, extra = {}) => ({ type: 'oauth', access, refresh: `${access}-refresh`, expires: FUTURE, ...extra });
 	const weeklySpent = (resetsAt) => ({ five_hour: { utilization: 0, resets_at: null }, seven_day: { utilization: 100, resets_at: resetsAt } });
@@ -142,6 +213,10 @@ async function poolTests() {
 		openai: [
 			oauth('codex-1', { email: 'one@example.com', accountId: 'acct-1' }),
 			oauth('codex-2', { email: 'two@example.com', accountId: 'acct-2' }),
+		],
+		xai: [
+			{ type: 'oauth', access: jwt({ principal_id: 'pool-principal' }), refresh: 'pool-refresh', expires: FUTURE },
+			oauth('grok-acct', { email: 'grok@example.com', accountId: 'acct-77' }),
 		],
 	});
 	const calls = [];
@@ -187,6 +262,21 @@ async function poolTests() {
 	]);
 	assert.deepEqual(codex.capacity, { remaining: 0, limit: 100, unit: 'percent', reset_at: '2026-09-27T15:26:10.000Z' });
 
+	// Pooled Grok logins: the x-userid header prefers the stored accountId and
+	// falls back to the access token's JWT payload; labels keep the pool shape.
+	const grokCalls = [];
+	const grok = await openCodeProviderCapacity('xai', {
+		env,
+		now: NOW,
+		fetch: fetchByCredential({ 'grok-acct': [200, fixtures.xai], [jwt({ principal_id: 'pool-principal' })]: [200, fixtures.xai] }, grokCalls),
+	});
+	assert.deepEqual(grokCalls.map((call) => call.init.headers['x-userid']), ['pool-principal', 'acct-77']);
+	assert.deepEqual(grok.accounts.map((account) => [account.account, account.state]), [
+		['xai#0', 'available'],
+		['grok@example.com', 'available'],
+	]);
+	assert.deepEqual(grok.capacity, { remaining: 100, limit: 100, unit: 'percent', reset_at: '2026-10-01T21:08:53.920Z' });
+
 	// An unmeasurable account keeps an otherwise spent pool from being declared exhausted.
 	const partial = await openCodeProviderCapacity('openai', {
 		env,
@@ -196,7 +286,7 @@ async function poolTests() {
 	assert.equal(partial.exhausted, false);
 	assert.equal(partial.capacity.remaining, 0);
 	assert.match(partial.diagnostic, /1 of 2 openai account/);
-	assert.ok(!JSON.stringify([pool, codex, partial]).match(/codex-1|plan-a|refresh/));
+	assert.ok(!JSON.stringify([pool, codex, partial, grok]).match(/codex-1|plan-a|refresh|pool-principal/));
 }
 
 async function readinessIntegration() {
@@ -286,7 +376,7 @@ async function capacityOnlyReadiness() {
 	// No published usage endpoint (or no credential): ready with capacity omitted.
 	const unpublished = await openCodeProviderReadiness({
 		schema: 'homeboy/agent-task-provider-readiness-request/v1',
-		effective_config: { runtime_bin: request.effective_config.runtime_bin, model: 'opencode-go/kimi-k2.7-code' },
+		effective_config: { runtime_bin: request.effective_config.runtime_bin, model: 'google/gemini-3.1-pro' },
 		mode: 'capacity',
 	}, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.openai_available) });
 	assert.equal(unpublished.ready, true);
@@ -294,6 +384,21 @@ async function capacityOnlyReadiness() {
 	assert.equal(unpublished.reason, 'capacity_not_published');
 	assert.equal(unpublished.capacity, undefined);
 	assert.equal(unpublished.capacity_diagnostic, undefined);
+	assert.equal(spawns, 0);
+
+	// An exhausted opencode-go plan: capacity verdict from the usage endpoint
+	// alone, still without spawning OpenCode.
+	const goExhausted = await openCodeProviderReadiness({
+		schema: 'homeboy/agent-task-provider-readiness-request/v1',
+		effective_config: { runtime_bin: request.effective_config.runtime_bin, model: 'opencode-go/kimi-k2.7-code' },
+		mode: 'capacity',
+	}, { env, now: NOW, spawnSync, fetch: fetchReturning(fixtures.opencode_go) });
+	assert.equal(goExhausted.ready, false);
+	assert.equal(goExhausted.classification, 'capacity');
+	assert.equal(goExhausted.reason, 'provider_capacity_exhausted');
+	assert.equal(goExhausted.retryable, true);
+	assert.equal(goExhausted.capacity.scope, 'opencode:opencode-go');
+	assert.equal(goExhausted.capacity.reset_at, '2026-10-08T00:46:00.000Z');
 	assert.equal(spawns, 0);
 
 	// Nothing could be measured: ready with accounts-only capacity and a diagnostic.
@@ -351,6 +456,7 @@ async function capacityOnlyReadiness() {
 
 (async () => {
 	await singleAccountTests();
+	await opencodeGoAndXaiTests();
 	await poolTests();
 	await readinessIntegration();
 	await capacityOnlyReadiness();

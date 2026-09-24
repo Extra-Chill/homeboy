@@ -36,10 +36,24 @@ const CAPACITY_PROVIDERS = {
 		headers: (account) => ({ Authorization: account.credential }),
 		windows: zaiWindows,
 	},
+	// OpenCode Zen stores this provider as an API key in the auth store.
+	'opencode-go': {
+		url: 'https://opencode.ai/zen/go/v1/usage',
+		headers: (account) => ({ Authorization: `Bearer ${account.credential}` }),
+		windows: opencodeGoWindows,
+	},
+	// Grok Build's billing endpoint backs the xai plan (see xai-org/grok-build
+	// crates/codegen/xai-grok-shell/src/extensions/billing.rs).
+	xai: {
+		url: 'https://cli-chat-proxy.grok.com/v1/billing?format=credits',
+		headers: xaiHeaders,
+		windows: xaiWindows,
+	},
 };
 
 const ANTHROPIC_WINDOWS = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'seven_day_oauth_apps'];
 const ZAI_WINDOW_UNITS = { 3: 'hour', 4: 'day', 5: 'month', 6: 'week' };
+const OPENCODE_GO_WINDOWS = ['rolling', 'weekly', 'monthly'];
 
 /**
  * Look up plan capacity for one OpenCode provider across every connected
@@ -208,6 +222,65 @@ function zaiWindows(body) {
 			limit.percentage,
 			isoTime(limit.nextResetTime),
 		));
+}
+
+function opencodeGoWindows(body) {
+	return OPENCODE_GO_WINDOWS
+		.filter((name) => body?.usage?.[name] && typeof body.usage[name] === 'object')
+		.map((name) => {
+			const window = body.usage[name];
+			const mapped = percentWindow(name, finiteNumber(window.percent) ? window.percent : 0, isoTime(window.resetsAt));
+			// A rate-limited window is spent even when its percent has not
+			// caught up to 100 yet.
+			if (window.status === 'rate-limited') mapped.exhausted = true;
+			return mapped;
+		});
+}
+
+function xaiHeaders(account) {
+	const headers = {
+		Authorization: `Bearer ${account.credential}`,
+		'X-XAI-Token-Auth': 'xai-grok-cli',
+	};
+	const userId = xaiUserId(account);
+	if (userId) headers['x-userid'] = userId;
+	return headers;
+}
+
+// The billing endpoint wants the account id: pooled entries store it as
+// accountId, and a single store login carries it as principal_id inside the
+// access token's JWT payload. The token itself is never logged or reported.
+function xaiUserId(account) {
+	if (account.accountId) return account.accountId;
+	try {
+		const payload = JSON.parse(Buffer.from(account.credential.split('.')[1], 'base64url').toString('utf8'));
+		return typeof payload?.principal_id === 'string' && payload.principal_id ? payload.principal_id : null;
+	} catch {
+		return null;
+	}
+}
+
+function xaiWindows(body) {
+	const config = body?.config;
+	if (!config || typeof config !== 'object') return [];
+	const period = config.currentPeriod && typeof config.currentPeriod === 'object' ? config.currentPeriod : {};
+	return [percentWindow(
+		period.type === 'USAGE_PERIOD_TYPE_WEEKLY' ? 'credits_weekly' : 'credits',
+		xaiUsedPercent(config),
+		isoTime(period.end || config.billingPeriodEnd),
+	)];
+}
+
+// Mirrors Grok Build's credit_balance_from_config: a present usage percent
+// wins, then the used/limit ratio. Proto JSON omits zero values, so anything
+// else reads as 0% used.
+function xaiUsedPercent(config) {
+	if (finiteNumber(config.creditUsagePercent)) return config.creditUsagePercent;
+	const limit = config.monthlyLimit?.val;
+	if (finiteNumber(limit) && limit > 0) {
+		return (finiteNumber(config.used?.val) ? config.used.val : 0) / limit * 100;
+	}
+	return 0;
 }
 
 function percentWindow(name, usedPercent, resetAt) {

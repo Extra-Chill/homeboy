@@ -63,6 +63,8 @@ contract:
 | `anthropic` (OAuth) | `api.anthropic.com/api/oauth/usage` | 5-hour, 7-day, and model-scoped 7-day |
 | `openai` (OAuth) | `chatgpt.com/backend-api/wham/usage` | primary and secondary rate-limit windows |
 | `zai-coding-plan` | `api.z.ai/api/monitor/usage/quota/limit` | token windows |
+| `opencode-go` (API key) | `opencode.ai/zen/go/v1/usage` | rolling, weekly, and monthly usage windows |
+| `xai` (OAuth) | `cli-chat-proxy.grok.com/v1/billing?format=credits` | credits window for the billing period |
 
 - **Account pools:** multi-account OpenCode plugins (for example Kimaki's) keep
   a pool of OAuth accounts per provider in `<provider>-oauth-accounts.json`,
