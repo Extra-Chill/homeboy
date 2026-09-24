@@ -72,7 +72,7 @@ jobs:
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
-      action-ref: f1805406709252e4ab25f983b3c72cdba113f2cf
+      action-ref: b7b208f70c5a3c41b1189f7cbc6d474c8466dbcf
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
