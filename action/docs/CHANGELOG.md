@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.7] - 2026-09-24
+
+### Fixed
+- accept an empty, well-formed test inventory as complete evidence (homeboy#15022)
+
 ## [2.20.6] - 2026-09-24
 
 ### Fixed
