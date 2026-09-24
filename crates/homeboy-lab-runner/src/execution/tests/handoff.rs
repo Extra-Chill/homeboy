@@ -734,7 +734,11 @@ fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
         )
         .expect("zero-wait direct daemon cancellation result");
 
-        assert_eq!(exit_code, 1);
+        assert_eq!(
+            exit_code, 1,
+            "stdout: {}\nstderr: {}",
+            output.stdout, output.stderr
+        );
         assert!(!output.is_in_flight());
         let job_id = output.job_id.as_deref().expect("accepted job id");
         assert_eq!(
@@ -1156,21 +1160,32 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
                 .any(|summary| { summary["job_id"] == job_id && summary["runner_id"] == "lab" }),
             "accepted daemon child must be visible through the typed runner projection"
         );
-        let events = fetch_daemon_events(&client, &daemon_url, &job_id)
-            .expect("live daemon events while workload is blocked");
-        let progress = events
-            .iter()
-            .filter_map(|event| {
-                (event.kind == JobEventKind::Progress)
-                    .then(|| event.data.as_ref())
-                    .flatten()
-            })
-            .find(|data| {
-                data.pointer("/metadata/promotion/schema")
-                    .and_then(Value::as_str)
-                    == Some("homeboy/promotion-progress-frame/v1")
-            })
-            .expect("promotion progress is forwarded before process completion");
+        // The child writes the frame to stdout before `started`, but the
+        // daemon ingests stdout asynchronously. The workload stays blocked on
+        // `release`, so polling still proves the frame arrives before process
+        // completion.
+        let mut progress = None;
+        for _ in 0..1500 {
+            let events = fetch_daemon_events(&client, &daemon_url, &job_id)
+                .expect("live daemon events while workload is blocked");
+            progress = events
+                .iter()
+                .filter_map(|event| {
+                    (event.kind == JobEventKind::Progress)
+                        .then(|| event.data.clone())
+                        .flatten()
+                })
+                .find(|data| {
+                    data.pointer("/metadata/promotion/schema")
+                        .and_then(Value::as_str)
+                        == Some("homeboy/promotion-progress-frame/v1")
+                });
+            if progress.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let progress = progress.expect("promotion progress is forwarded before process completion");
         assert_eq!(progress["phase"], "promotion");
         assert_eq!(
             progress["metadata"]["promotion"]["message"],

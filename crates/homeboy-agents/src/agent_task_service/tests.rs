@@ -2931,7 +2931,7 @@ fn discovery_rejects_zero_limit_to_preserve_pagination_progress() {
 fn discovery_998_record_history_and_active_pages_do_not_repeat_or_lose_records() {
     with_isolated_home(|_| {
         for index in 0..998 {
-            agent_task_lifecycle::submit_plan(
+            agent_task_lifecycle::seed_queued_run_for_tests(
                 &discovery_plan(),
                 Some(&format!("run-page-{index:04}")),
             )

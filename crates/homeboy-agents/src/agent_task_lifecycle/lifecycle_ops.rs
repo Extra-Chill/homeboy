@@ -2949,6 +2949,25 @@ where
     )
 }
 
+/// Seed a queued run record for tests that exercise discovery over many runs.
+///
+/// Persists the same record, plan, and index entries as [`submit_plan`] but
+/// skips controller-runtime admission, which costs tens of milliseconds per
+/// run and is irrelevant to discovery. Fixtures that submit a thousand runs
+/// otherwise spend a minute in admission and exceed CI test deadlines.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seed_queued_run_for_tests(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    submit_plan_with_runtime_admission_in_store_without_runtime(
+        &lifecycle_store,
+        plan,
+        requested_run_id,
+    )
+}
+
 fn submit_plan_with_runtime_admission_in_store_without_runtime(
     lifecycle_store: &AgentTaskLifecycleStore,
     plan: &AgentTaskPlan,

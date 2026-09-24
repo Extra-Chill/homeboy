@@ -64,7 +64,10 @@ fn detached_placeholder_is_discoverable_while_runtime_admission_is_locked() {
             result
         });
 
-        let completed_while_locked = completed_rx.recv_timeout(Duration::from_millis(250));
+        // The admission lock stays held for this whole wait, so a persistence
+        // path that blocked on it could never complete. The generous bound
+        // only absorbs scheduler load; it does not weaken that proof.
+        let completed_while_locked = completed_rx.recv_timeout(Duration::from_secs(30));
         assert!(
             completed_while_locked.is_ok(),
             "placeholder persistence waited on runtime admission: {completed_while_locked:?}"

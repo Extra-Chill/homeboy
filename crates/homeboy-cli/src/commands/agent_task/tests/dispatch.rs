@@ -3206,7 +3206,7 @@ fn list_latest_selects_the_newest_complete_filtered_match_or_an_empty_result() {
             .expect("persist newer matching run");
 
         for index in 0..1001 {
-            agent_task_lifecycle::submit_plan(
+            agent_task_lifecycle::seed_queued_run_for_tests(
                 &test_plan(),
                 Some(&format!("run-unmatched-{index:04}")),
             )

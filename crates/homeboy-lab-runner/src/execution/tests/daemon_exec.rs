@@ -49,9 +49,12 @@ fn create_lab_local_runner() -> HomeGuard {
     home
 }
 
+/// Poll until the job is terminal. Returns as soon as it is; the 30s bound
+/// only absorbs a loaded test host, where a real child can take seconds to
+/// spawn and report.
 fn wait_for_job(store: &JobStore, job_id: &str) -> Job {
     let id = uuid::Uuid::parse_str(job_id).expect("uuid");
-    for _ in 0..100 {
+    for _ in 0..1500 {
         let job = store.get(id).expect("job");
         if matches!(
             job.status,
@@ -219,10 +222,15 @@ fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields()
     register_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
-    let payload = direct_submission(
-        vec!["sh", "-c", "sleep 1; printf typed"],
-        "typed-daemon-run",
+    // Hold the first execution open until the retry has been answered, so the
+    // retry deterministically observes an active execution under any load.
+    let gate = tempfile::tempdir().expect("gate root");
+    let gate_path = gate.path().join("release");
+    let script = format!(
+        "while [ ! -e '{}' ]; do sleep 0.05; done; printf typed",
+        gate_path.display()
     );
+    let payload = direct_submission(vec!["sh", "-c", &script], "typed-daemon-run");
 
     for field in [
         "runner_id",
@@ -246,6 +254,7 @@ fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields()
     assert_eq!(retry.status_code, 200);
     assert_eq!(retry.body["body"]["job"]["id"], job_id);
     assert_eq!(retry.body["body"]["idempotent_resubmission"], true);
+    std::fs::write(&gate_path, "").expect("release the first execution");
     assert_eq!(wait_for_job(&store, &job_id).status, JobStatus::Succeeded);
 }
 
@@ -449,16 +458,19 @@ fn direct_staging_retains_the_original_cancel_endpoint_and_reaps_the_child() {
     let store = JobStore::default();
     let accepted = stage_request(&store, "/runner/staging/direct", &envelope);
     let id = staged_job_id(&accepted);
-    for _ in 0..100 {
-        if pid_path.exists() {
+    // The shell creates the file before `printf` writes the PID, so wait for
+    // parseable content rather than mere existence.
+    let mut pid = None;
+    for _ in 0..1500 {
+        pid = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|content| content.parse::<i32>().ok());
+        if pid.is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let pid = std::fs::read_to_string(&pid_path)
-        .expect("child started")
-        .parse::<i32>()
-        .unwrap();
+    let pid = pid.expect("child started and recorded its PID");
     let cancelled = route_with_body("POST", &format!("/runner/jobs/{id}/cancel"), None, &store);
     assert_eq!(cancelled.status_code, 200, "{}", cancelled.body);
     assert_eq!(wait_for_job(&store, &id).status, JobStatus::Cancelled);
@@ -501,9 +513,9 @@ fn daemon_exec_does_not_require_runner_config_on_daemon_host() {
         .expect("job id")
         .to_string();
     let job = wait_for_job(&store, &job_id);
-    assert_eq!(job.status, JobStatus::Succeeded);
-
     let events = store.events(job.id).expect("events");
+    assert_eq!(job.status, JobStatus::Succeeded, "job events: {events:#?}");
+
     assert!(events.iter().any(|event| {
         event
             .data
