@@ -377,6 +377,9 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                 cache,
                 deadline_unix_ms,
                 generated_fanout_context,
+                // Live dispatchability never probes in capacity mode; the two
+                // verdicts are distinct cache identities by design (#15024).
+                None,
             ) {
                 Ok(verdict) => {
                     let remediation = (!verdict.remediation.trim().is_empty())
@@ -1001,6 +1004,7 @@ pub fn provider_runtime_readiness_cache_identity_for_plan(
         &config,
         &credential_env,
         task.metadata["provider_readiness_generated_fanout_context"] == true,
+        None,
     )
 }
 
@@ -2465,6 +2469,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                scope: None,
                 accounts: Vec::new(),
             }
         );
@@ -2519,6 +2524,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some("2026-08-27T12:37:03+00:00".to_string()),
                 reason: "5-hour usage limit reached".to_string(),
+                scope: None,
                 accounts: Vec::new(),
             }
         );

@@ -70,6 +70,11 @@ pub enum AgentTaskProviderCapacityReadiness {
         unit: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reset_at: Option<String>,
+        /// Provider-chosen identity of the account pool behind this capacity,
+        /// when the provider supplies one (#15024). Routes reporting the same
+        /// non-empty scope share one pool and are grouped by consumers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         accounts: Vec<AgentTaskProviderCapacityAccount>,
     },
@@ -82,6 +87,9 @@ pub enum AgentTaskProviderCapacityReadiness {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reset_at: Option<String>,
         reason: String,
+        /// Pool identity, same contract as on `Known` (#15024).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         accounts: Vec<AgentTaskProviderCapacityAccount>,
     },
@@ -104,6 +112,11 @@ pub struct AgentTaskProviderCapacityAccount {
 /// readiness evidence.
 const MAX_CAPACITY_ACCOUNTS: usize = 64;
 
+/// Upper bound on a provider-supplied capacity `scope` label (#15024). The
+/// scope is grouping evidence, not free text, so a provider that stuffs a
+/// transcript into it cannot flood readiness payloads or downstream panels.
+const MAX_CAPACITY_SCOPE_LEN: usize = 256;
+
 impl Default for AgentTaskProviderCapacityReadiness {
     fn default() -> Self {
         Self::Unknown {
@@ -123,6 +136,18 @@ impl AgentTaskProviderCapacityReadiness {
         match self {
             Self::Known { accounts, .. } | Self::Exhausted { accounts, .. } => accounts,
             Self::Unknown { .. } => &[],
+        }
+    }
+
+    /// The provider-chosen account-pool identity this evidence carries, when
+    /// any (#15024). `Unknown` evidence never carries one: a scope without
+    /// published capacity is grouping information about nothing.
+    pub fn scope(&self) -> Option<&str> {
+        match self {
+            Self::Known { scope, .. } | Self::Exhausted { scope, .. } => {
+                scope.as_deref().filter(|scope| !scope.trim().is_empty())
+            }
+            Self::Unknown { .. } => None,
         }
     }
 
@@ -158,6 +183,11 @@ pub fn capacity_readiness_from_probe_result(
             .as_ref()
             .and_then(|capacity| capacity.reset_at.as_deref()),
     );
+    let scope = verdict
+        .capacity
+        .as_ref()
+        .and_then(|capacity| capacity.scope.as_deref())
+        .and_then(capacity_scope);
     let accounts = verdict
         .capacity
         .as_ref()
@@ -172,6 +202,7 @@ pub fn capacity_readiness_from_probe_result(
         return AgentTaskProviderCapacityReadiness::Exhausted {
             reset_at,
             reason,
+            scope,
             accounts,
         };
     }
@@ -182,6 +213,7 @@ pub fn capacity_readiness_from_probe_result(
                 limit: capacity.limit.clone(),
                 unit: capacity.unit.clone(),
                 reset_at,
+                scope,
                 accounts,
             }
         }
@@ -189,6 +221,25 @@ pub fn capacity_readiness_from_probe_result(
             "the provider's readiness invocation does not report capacity",
         ),
     }
+}
+
+/// Normalize one provider-supplied scope label: trim, redact, and bound its
+/// length. An empty (or whitespace) label carries no grouping information and
+/// degrades to `None` rather than grouping unrelated routes.
+fn capacity_scope(scope: &str) -> Option<String> {
+    let trimmed = scope.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut redacted = homeboy_core::redaction::redact_string(trimmed);
+    if redacted.len() > MAX_CAPACITY_SCOPE_LEN {
+        let mut end = MAX_CAPACITY_SCOPE_LEN;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        redacted.truncate(end);
+    }
+    Some(redacted)
 }
 
 // Round-trip through `DateTime` only to validate the provider's string is
@@ -271,6 +322,7 @@ pub fn capacity_readiness_from_outcome(
     Some(AgentTaskProviderCapacityReadiness::Exhausted {
         reset_at,
         reason,
+        scope: None,
         accounts: Vec::new(),
     })
 }
@@ -310,6 +362,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                scope: None,
                 accounts: Vec::new(),
             }),
         ));
@@ -320,6 +373,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                scope: None,
                 accounts: Vec::new(),
             }
         );
@@ -337,6 +391,7 @@ mod tests {
                 limit: None,
                 unit: None,
                 reset_at: Some("2026-08-27T12:37:03Z".to_string()),
+                scope: None,
                 accounts: Vec::new(),
             }),
         ));
@@ -349,6 +404,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some(expected_reset_at.to_rfc3339()),
                 reason: "5-hour usage limit reached".to_string(),
+                scope: None,
                 accounts: Vec::new(),
             }
         );
@@ -369,6 +425,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: None,
                 reason: "no quota left".to_string(),
+                scope: None,
                 accounts: Vec::new(),
             }
         );
@@ -401,6 +458,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("percent".to_string()),
                 reset_at: Some("2026-09-24T15:50:00Z".to_string()),
+                scope: Some("claude-plans".to_string()),
                 accounts: vec![
                     account(
                         "plan-a@example.com",
@@ -446,6 +504,47 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(readiness.scope(), Some("claude-plans"));
+    }
+
+    #[test]
+    fn a_blank_scope_is_not_grouping_evidence() {
+        let readiness = capacity_readiness_from_probe_result(&verdict(
+            true,
+            "ready",
+            "",
+            Some(ProviderReadinessInvocationCapacity {
+                remaining: Some(Value::from(1)),
+                scope: Some("   ".to_string()),
+                ..Default::default()
+            }),
+        ));
+        assert!(matches!(
+            readiness,
+            AgentTaskProviderCapacityReadiness::Known { scope: None, .. }
+        ));
+        assert_eq!(readiness.scope(), None);
+    }
+
+    #[test]
+    fn a_scope_label_is_redacted_and_bounded() {
+        let long_scope = format!(
+            "{}{}",
+            "s".repeat(MAX_CAPACITY_SCOPE_LEN + 32),
+            "secret-token"
+        );
+        let readiness = capacity_readiness_from_probe_result(&verdict(
+            false,
+            "capacity",
+            "every pooled plan is spent",
+            Some(ProviderReadinessInvocationCapacity {
+                scope: Some(long_scope),
+                ..Default::default()
+            }),
+        ));
+        let scope = readiness.scope().expect("non-empty scope survives");
+        assert!(scope.len() <= MAX_CAPACITY_SCOPE_LEN, "{scope}");
+        assert!(!scope.contains("secret-token"));
     }
 
     #[test]
@@ -491,6 +590,7 @@ mod tests {
                 "limit": 100,
                 "unit": "percent",
                 "reset_at": "2026-09-27T15:26:09Z",
+                "scope": "pooled-plans",
                 "accounts": [
                     { "account": "one@example.com", "state": "exhausted", "remaining": 0, "reset_at": "2026-09-27T15:26:09Z", "windows": [] },
                     { "account": "two@example.com", "state": "exhausted", "remaining": 0, "reset_at": "2026-09-28T23:29:35Z" }
@@ -500,6 +600,7 @@ mod tests {
         .expect("readiness result deserializes");
         let readiness = capacity_readiness_from_probe_result(&verdict);
         assert!(readiness.is_exhausted());
+        assert_eq!(readiness.scope(), Some("pooled-plans"));
         assert_eq!(
             readiness
                 .accounts()
@@ -554,6 +655,7 @@ mod tests {
                 limit: None,
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                scope: None,
                 accounts: Vec::new(),
             }),
         ));
@@ -628,6 +730,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some(reset_at.to_rfc3339()),
                 reason: "the provider reported its account capacity as exhausted".to_string(),
+                scope: None,
                 accounts: Vec::new(),
             }
         );
@@ -659,6 +762,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: None,
                 reason: "the provider reported its account capacity as exhausted".to_string(),
+                scope: None,
                 accounts: Vec::new(),
             }
         );
