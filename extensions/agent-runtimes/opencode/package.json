@@ -30,7 +30,8 @@
     "test:opencode-external-storage-native-integration": "node tests/opencode-external-storage-native-integration.test.js",
     "test:opencode-external-storage-maintenance-state": "node tests/opencode-external-storage-maintenance-state.test.js",
     "test:opencode-external-storage-homeboy-planner": "node tests/opencode-external-storage-homeboy-planner.test.js",
-    "test:opencode-runtime-readiness": "node tests/opencode-runtime-readiness.test.js"
+    "test:opencode-runtime-readiness": "node tests/opencode-runtime-readiness.test.js",
+    "test:opencode-provider-capacity": "node tests/opencode-provider-capacity.test.js"
   },
   "engines": {
     "node": ">=18.12.0"

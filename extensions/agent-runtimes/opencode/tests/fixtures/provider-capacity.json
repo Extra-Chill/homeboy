@@ -1,0 +1,48 @@
+{
+  "anthropic": {
+    "five_hour": { "utilization": 4.0, "resets_at": "2026-09-24T15:50:00.400779+00:00", "limit_dollars": null, "used_dollars": null, "remaining_dollars": null, "locked_reason": null },
+    "seven_day": { "utilization": 1.0, "resets_at": "2026-09-27T18:00:00.400800+00:00", "limit_dollars": null, "used_dollars": null, "remaining_dollars": null, "locked_reason": null },
+    "seven_day_oauth_apps": null,
+    "seven_day_opus": null,
+    "seven_day_sonnet": null,
+    "extra_usage": { "is_enabled": false }
+  },
+  "openai_exhausted": {
+    "plan_type": "pro",
+    "rate_limit": {
+      "allowed": false,
+      "limit_reached": true,
+      "primary_window": { "used_percent": 100, "limit_window_seconds": 604800, "reset_after_seconds": 388391, "reset_at": 1790638175 },
+      "secondary_window": null
+    }
+  },
+  "openai_blocked_below_full": {
+    "rate_limit": {
+      "allowed": false,
+      "limit_reached": true,
+      "primary_window": { "used_percent": 97, "limit_window_seconds": 18000, "reset_at": 1790638175 },
+      "secondary_window": { "used_percent": 40, "limit_window_seconds": 604800, "reset_at": 1790900000 }
+    }
+  },
+  "openai_available": {
+    "rate_limit": {
+      "allowed": true,
+      "limit_reached": false,
+      "primary_window": { "used_percent": 12, "limit_window_seconds": 604800, "reset_at": 1790638175 },
+      "secondary_window": null
+    }
+  },
+  "zai": {
+    "code": 200,
+    "msg": "Operation successful",
+    "data": {
+      "limits": [
+        { "type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 0 },
+        { "type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 58, "nextResetTime": 1790647215973 },
+        { "type": "TIME_LIMIT", "unit": 5, "number": 1, "usage": 1000, "currentValue": 0, "remaining": 1000, "percentage": 0, "nextResetTime": 1790560815998 }
+      ],
+      "level": "pro"
+    },
+    "success": true
+  }
+}

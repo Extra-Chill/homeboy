@@ -195,6 +195,7 @@ module.exports = {
 	OPENCODE_AUTH_STORE_PATH,
 	OPENCODE_STORE_SECRET_ENV_NAME_PATTERN,
 	authMetadata,
+	authStorePath,
 	openCodeStoreSecretEnv,
 	openCodeStoreSecretEnvSources,
 	resolveOpenCodeAuthPlan,

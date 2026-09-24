@@ -153,7 +153,7 @@ try {
 	assert.equal(accountBlocked.classification, 'provider_account_blocked');
 	assert.equal(accountBlocked.reason, 'provider_account_blocked');
 	const quota = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.quota)) });
-	assert.equal(quota.classification, 'provider_quota');
+	assert.equal(quota.classification, 'capacity');
 	assert.equal(quota.retryable, true);
 	const providerAuth = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses(fixtures.auth)) });
 	assert.equal(providerAuth.classification, 'auth_failure');
@@ -175,7 +175,7 @@ try {
 	// captured before the timeout still carries the provider verdict.
 	const retryLog = 'level=ERROR message="stream error" providerID=openai error.error="AI_APICallError: The usage limit has been reached"\n';
 	const interruptedQuota = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: retryLog })) });
-	assert.equal(interruptedQuota.classification, 'provider_quota');
+	assert.equal(interruptedQuota.classification, 'capacity');
 	assert.equal(interruptedQuota.reason, 'provider_quota_or_rate_limit');
 	assert.equal(interruptedQuota.retryable, true);
 	const interruptedSilent = openCodeRuntimeReadiness(request(), { env: env(), spawnSync: probe(readyResponses({ error: { code: 'ETIMEDOUT' }, signal: 'SIGTERM', status: null, stdout: '', stderr: '' })) });

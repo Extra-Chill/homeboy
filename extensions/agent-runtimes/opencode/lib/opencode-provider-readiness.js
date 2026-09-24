@@ -12,6 +12,7 @@ const {
 	resolveExecutable,
 } = require('../../lib/cli-runtime-readiness');
 const { resolveOpenCodeAuthPlan, selectedOpenCodeRoute } = require('./opencode-auth-plan');
+const { openCodeProviderCapacity } = require('./opencode-provider-capacity');
 
 const OPENCODE_READINESS_TIMEOUT_MS = 15_000;
 const OPENCODE_READINESS_MAX_TIMEOUT_MS = 30_000;
@@ -83,6 +84,11 @@ function openCodeRuntimeReadiness(request = {}, options = {}) {
 	if (!listedModel(modelsResult.stdout, selected.provider, selected.model)) {
 		return verdict('configuration_failure', versionIdentity, `Configure a model that OpenCode exposes for provider ${selected.provider}, then retry.`, false, 'model_not_available');
 	}
+	if (options.capacityExhausted) {
+		// The plan usage endpoint already proved the account is out of capacity;
+		// skip the inference probe instead of spending a request to rediscover it.
+		return verdict('capacity', versionIdentity, 'Wait for the provider plan usage window to reset, then retry.', true, 'provider_capacity_exhausted');
+	}
 	const providerResult = runModelProbe(probe, executable, commandArgs(config, env, options), selected, env, config, options);
 	if (providerResult.isolationError) {
 		return verdict('indeterminate', versionIdentity, 'OpenCode could not create an isolated workspace for the provider readiness probe.', true, 'model_probe_isolation_unavailable');
@@ -90,6 +96,29 @@ function openCodeRuntimeReadiness(request = {}, options = {}) {
 	const providerFailure = probeFailure(providerResult, versionIdentity, 'model_execution');
 	if (providerFailure) return providerFailure;
 	return verdict('ready', versionIdentity, `OpenCode provider ${selected.provider}/${selected.model} accepted the bounded readiness request.`, false, 'model_execution_ready');
+}
+
+/**
+ * Readiness plus plan capacity: looks up the selected provider's usage
+ * windows first so an exhausted plan is reported as `capacity` with its reset
+ * time, and a healthy one carries its remaining capacity. Capacity lookups are
+ * best-effort; a failed lookup never changes the readiness verdict.
+ */
+async function openCodeProviderReadiness(request = {}, options = {}) {
+	const selected = selectedProviderModel(objectValue(request.effective_config) || {});
+	const lookup = selected.error || !selected.provider
+		? null
+		: await openCodeProviderCapacity(selected.provider, {
+			env: objectValue(options.env || process.env),
+			fetch: options.fetch,
+			fs: options.capacityFs,
+			now: options.now,
+		});
+	const result = openCodeRuntimeReadiness(request, { ...options, capacityExhausted: Boolean(lookup?.exhausted) });
+	if (lookup?.capacity) result.capacity = lookup.capacity;
+	if (lookup?.accounts) result.capacity_accounts = lookup.accounts;
+	if (lookup?.diagnostic) result.capacity_diagnostic = lookup.diagnostic;
+	return result;
 }
 
 function selectedProviderModel(config = {}) {
@@ -182,7 +211,7 @@ function probeFailure(result, identity, probeName) {
 			return verdict('provider_account_blocked', identity, 'Restore provider account access or billing for the selected model, then retry.', false, 'provider_account_blocked');
 		}
 		if (OPENCODE_QUOTA_PATTERN.test(output)) {
-			return verdict('provider_quota', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
+			return verdict('capacity', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
 		}
 		if (OPENCODE_AUTH_FAILURE_PATTERN.test(output)) {
 			return verdict('auth_failure', identity, 'Refresh the provider-owned OpenCode credentials, then retry.', false, 'authentication_rejected');
@@ -210,7 +239,7 @@ function interruptedProviderVerdict(output, identity, probeName) {
 		return verdict('provider_account_blocked', identity, 'Restore provider account access or billing for the selected model, then retry.', false, 'provider_account_blocked');
 	}
 	if (OPENCODE_QUOTA_PATTERN.test(output)) {
-		return verdict('provider_quota', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
+		return verdict('capacity', identity, 'Wait for the provider quota or rate limit to reset, then retry.', true, 'provider_quota_or_rate_limit');
 	}
 	return null;
 }
@@ -337,5 +366,6 @@ module.exports = {
 	OPENCODE_READINESS_MAX_OUTPUT_BYTES,
 	OPENCODE_READINESS_TIMEOUT_MS,
 	OPENCODE_READINESS_MAX_TIMEOUT_MS,
+	openCodeProviderReadiness,
 	openCodeRuntimeReadiness,
 };
