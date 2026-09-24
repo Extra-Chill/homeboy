@@ -1056,6 +1056,65 @@ mod tests {
         assert_eq!(outcomes["failed_test_ids"], json!([]));
     }
 
+    /// A `--changed-since` selection that decided on zero tests still
+    /// produces a valid, `homeboy/test-outcomes/v1` / `homeboy/test-inventory/v1`
+    /// pair -- an empty `tests: []` inventory and `failed_test_ids: []`, not
+    /// an `invalid_evidence` sidecar. Extra-Chill/homeboy#15022.
+    #[test]
+    fn review_test_output_writes_valid_empty_sidecars_for_a_zero_test_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result_path = dir.path().join("review-test.json");
+        let empty_result = json!({
+            "passed": true,
+            "status": "passed",
+            "test_runtime_evidence": {
+                "status": "complete",
+                "runner": "changed-scope-selector",
+                "runner_fingerprint": "a".repeat(64),
+                "workspace_fingerprint": "b".repeat(64),
+                "execution_fingerprint": "c".repeat(64),
+                "tests": [],
+                "failed_test_ids": [],
+            }
+        });
+        let run = CommandRun::from_stdout_result(Ok(empty_result), 0)
+            .with_identity(&CommandIdentity::with_operation("review", "test"));
+
+        assert!(write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(result_path.to_str().unwrap()),
+        ));
+
+        let inventory: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("review-test.test-inventory.json")).unwrap(),
+        )
+        .unwrap();
+        let outcomes: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("review-test.test-outcomes.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(inventory["schema"], "homeboy/test-inventory/v1");
+        assert_eq!(outcomes["schema"], "homeboy/test-outcomes/v1");
+        assert_eq!(inventory["command"], "review test");
+        assert_eq!(outcomes["command"], "review test");
+        assert_eq!(inventory["tests"], json!([]));
+        assert_eq!(outcomes["failed_test_ids"], json!([]));
+        assert_eq!(
+            outcomes["inventory_fingerprint"],
+            inventory["inventory_fingerprint"]
+        );
+        assert!(
+            inventory.get("invalid_evidence").is_none(),
+            "a decided zero selection is not invalid evidence: {inventory}"
+        );
+        assert!(
+            outcomes.get("invalid_evidence").is_none(),
+            "a decided zero selection is not invalid evidence: {outcomes}"
+        );
+    }
+
     #[test]
     fn paired_runtime_sidecar_failure_removes_partial_pair_and_fails_command_closed() {
         let dir = tempfile::tempdir().expect("tempdir");
