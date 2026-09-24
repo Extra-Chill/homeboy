@@ -16,6 +16,12 @@ const CAPACITY_PROVIDERS = {
 		url: 'https://api.anthropic.com/api/oauth/usage',
 		headers: (account) => ({ Authorization: `Bearer ${account.credential}`, 'anthropic-beta': 'oauth-2025-04-20' }),
 		windows: anthropicWindows,
+		// Pooled OAuth accounts often carry no stored email; the profile names
+		// the account so operators know which login to act on.
+		profile: {
+			url: 'https://api.anthropic.com/api/oauth/profile',
+			email: (body) => body?.account?.email_address || body?.account?.email,
+		},
 	},
 	openai: {
 		url: 'https://chatgpt.com/backend-api/wham/usage',
@@ -63,11 +69,35 @@ async function openCodeProviderCapacity(provider, options = {}) {
 }
 
 async function accountCapacity(source, provider, account, now, options) {
-	const base = { account: account.label };
 	if (account.expires && account.expires <= now) {
 		// Refreshing would rotate a token another tool owns; report it instead.
-		return { ...base, state: 'credential_expired' };
+		return { account: account.label, state: 'credential_expired' };
 	}
+	const [label, usage] = await Promise.all([
+		accountLabel(source, account, options),
+		accountUsage(source, provider, account, options),
+	]);
+	return { account: label, ...usage };
+}
+
+async function accountLabel(source, account, options) {
+	if (account.named || !source.profile) return account.label;
+	try {
+		const response = await (options.fetch || globalThis.fetch)(source.profile.url, {
+			method: 'GET',
+			headers: { Accept: 'application/json', ...source.headers(account) },
+			signal: AbortSignal.timeout(options.timeoutMs || OPENCODE_CAPACITY_TIMEOUT_MS),
+		});
+		if (!response.ok) return account.label;
+		const email = source.profile.email(await response.json());
+		return typeof email === 'string' && email.trim() ? email.trim() : account.label;
+	} catch {
+		return account.label;
+	}
+}
+
+async function accountUsage(source, provider, account, options) {
+	const base = {};
 	const fetchImpl = options.fetch || globalThis.fetch;
 	let body;
 	try {
@@ -195,7 +225,7 @@ function providerAccounts(provider, env, fileSystem) {
 	const storePath = authStorePath(env);
 	const pool = readJson(path.join(path.dirname(storePath), `${provider}-oauth-accounts.json`), fileSystem);
 	const pooled = (Array.isArray(pool?.accounts) ? pool.accounts : [])
-		.map((entry, index) => oauthAccount(entry, entry?.email || `${provider}#${index}`))
+		.map((entry, index) => oauthAccount(entry, entry?.email || `${provider}#${index}`, Boolean(entry?.email)))
 		.filter(Boolean);
 	if (pooled.length) return pooled;
 
@@ -212,11 +242,12 @@ function providerAccounts(provider, env, fileSystem) {
 		: [];
 }
 
-function oauthAccount(entry, label) {
+function oauthAccount(entry, label, named = false) {
 	if (entry?.type !== 'oauth' || typeof entry.access !== 'string' || !entry.access) return null;
 	const expires = Number(entry.expires);
 	return {
 		label: String(label),
+		named,
 		credential: entry.access,
 		...(typeof entry.accountId === 'string' && entry.accountId ? { accountId: entry.accountId } : {}),
 		...(Number.isFinite(expires) && expires > 0 ? { expires } : {}),

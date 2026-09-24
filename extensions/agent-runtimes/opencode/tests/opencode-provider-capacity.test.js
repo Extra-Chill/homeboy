@@ -28,9 +28,24 @@ const singleAccountEnv = dataHome({
 	'opencode-go': { type: 'api', key: 'go-key-secret' },
 });
 
+const PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile';
+
+// Profile lookups answer from `profiles` (keyed by credential) and are kept
+// out of `calls`, which records usage requests only.
+function profileResponse(url, init, profiles) {
+	if (url !== PROFILE_URL) return null;
+	const credential = String(init.headers.Authorization).replace(/^Bearer /, '');
+	const email = profiles[credential];
+	return email
+		? { ok: true, status: 200, json: async () => ({ account: { email_address: email } }) }
+		: { ok: false, status: 404, json: async () => ({}) };
+}
+
 // Responds per credential so pooled accounts can carry different usage.
-function fetchByCredential(responses, calls = []) {
+function fetchByCredential(responses, calls = [], profiles = {}) {
 	return async (url, init) => {
+		const profile = profileResponse(url, init, profiles);
+		if (profile) return profile;
 		calls.push({ url, init });
 		const credential = String(init.headers.Authorization).replace(/^Bearer /, '');
 		const [status, body] = responses[credential] || [500, {}];
@@ -40,6 +55,8 @@ function fetchByCredential(responses, calls = []) {
 
 function fetchReturning(body, status = 200, calls = []) {
 	return async (url, init) => {
+		const profile = profileResponse(url, init, {});
+		if (profile) return profile;
 		calls.push({ url, init });
 		return { ok: status >= 200 && status < 300, status, json: async () => body };
 	};
@@ -135,13 +152,13 @@ async function poolTests() {
 			'plan-b': [200, weeklySpent('2026-09-29T01:00:00Z')],
 			'plan-c': [200, weeklySpent('2026-09-29T16:00:00Z')],
 			active: [200, fixtures.anthropic],
-		}, calls),
+		}, calls, { 'plan-b': 'plan-b@example.com', stale: 'never-looked-up@example.com' }),
 	});
 	assert.equal(calls.length, 4, 'expired pooled credentials are reported without a request');
 	assert.deepEqual(pool.accounts.map((account) => [account.account, account.state]), [
 		['old@example.com', 'credential_expired'],
 		['anthropic#1', 'exhausted'],
-		['anthropic#2', 'exhausted'],
+		['plan-b@example.com', 'exhausted'],
 		['anthropic#3', 'exhausted'],
 		['anthropic#4', 'available'],
 	]);

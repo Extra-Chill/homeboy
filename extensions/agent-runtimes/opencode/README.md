@@ -71,7 +71,11 @@ contract:
   checked.
 - **Per-account results:** `capacity.accounts` reports each account as
   `available`, `exhausted`, `credential_expired`, `credential_rejected`, or
-  `lookup_failed`, along with its windows and reset time. Expired access tokens
+  `lookup_failed`, along with its windows and reset time. Each account is
+  labeled by its stored email. For Anthropic accounts stored without an email,
+  the label comes from the OAuth profile endpoint
+  (`api.anthropic.com/api/oauth/profile`), so an operator knows which login to
+  sign in to, for example to use a banked reset. Expired access tokens
   are reported and never refreshed, because the plugin that owns them rotates
   them.
 - **Route capacity:** `capacity` is
