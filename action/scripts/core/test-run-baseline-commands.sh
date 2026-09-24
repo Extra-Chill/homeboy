@@ -185,3 +185,91 @@ run_expecting_baseline candidate-timeout '{"review test":"timeout"}'
 run_expecting_baseline candidate-other-command '{"review lint":"pass"}'
 run_expecting_baseline candidate-absent ''
 printf 'PASS: failing, timed-out, unrecorded and absent candidate results all run their baseline\n'
+
+# Extra-Chill/homeboy-action#507: when the candidate escalated a command to
+# the full suite because Homeboy reported
+# `changed_scope_zero_tests_for_harness_change`, the baseline run for that
+# same command must also drop --changed-since. A scoped baseline diffed
+# against itself would trivially select zero tests, and comparing the
+# candidate's full-suite evidence against that empty baseline would blame
+# the PR for any pre-existing failure.
+mkdir -p "${TMP_DIR}/bin-argv-capture"
+cat > "${TMP_DIR}/bin-argv-capture/homeboy" <<'SH'
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+output=""
+args=("$@")
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+mkdir -p "$(dirname "${output}")"
+printf '%s\n' "${args[*]}" >> "${ARGV_CAPTURE_FILE}"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}"
+SH
+chmod +x "${TMP_DIR}/bin-argv-capture/homeboy"
+
+argv_capture_file="${TMP_DIR}/argv-capture.log"
+: > "${argv_capture_file}"
+PATH="${TMP_DIR}/bin-argv-capture:${PATH}" \
+GITHUB_ACTION_PATH="${ROOT_DIR}" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_ENV="${TMP_DIR}/github-env-harness-retry" \
+COMMANDS='review test' \
+COMPONENT_NAME='fixture' \
+BASELINE_COMMANDS='auto' \
+CANDIDATE_RESULTS='{"review test":"fail"}' \
+HOMEBOY_DIFFERENTIAL_GATING=true \
+SCOPE_CONTEXT=pr \
+SCOPE_MODE=changed \
+SCOPE_BASE_REF=main \
+HOMEBOY_HARNESS_FULL_SUITE_RETRY_COMMANDS='review test' \
+RUN_GROUP_PREFIX='baseline test' \
+ARGV_CAPTURE_FILE="${argv_capture_file}" \
+bash "${RUNNER}" >"${TMP_DIR}/harness-retry.log" 2>&1
+
+if grep -q -- '--changed-since' "${argv_capture_file}"; then
+  printf 'FAIL: baseline for a harness-escalated command must not pass --changed-since\n'
+  cat "${TMP_DIR}/harness-retry.log"
+  cat "${argv_capture_file}"
+  exit 1
+fi
+if ! grep -q 'candidate escalated to the full suite for a test-harness config change' "${TMP_DIR}/harness-retry.log"; then
+  printf 'FAIL: baseline does not announce the fairness-matched unscoped rerun\n'
+  cat "${TMP_DIR}/harness-retry.log"
+  exit 1
+fi
+printf 'PASS: baseline for a harness-escalated command drops --changed-since to match the candidate\n'
+
+# A command the candidate did NOT escalate stays scoped as usual.
+argv_capture_file_unescalated="${TMP_DIR}/argv-capture-unescalated.log"
+: > "${argv_capture_file_unescalated}"
+PATH="${TMP_DIR}/bin-argv-capture:${PATH}" \
+GITHUB_ACTION_PATH="${ROOT_DIR}" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_ENV="${TMP_DIR}/github-env-not-escalated" \
+COMMANDS='review test' \
+COMPONENT_NAME='fixture' \
+BASELINE_COMMANDS='auto' \
+CANDIDATE_RESULTS='{"review test":"fail"}' \
+HOMEBOY_DIFFERENTIAL_GATING=true \
+SCOPE_CONTEXT=pr \
+SCOPE_MODE=changed \
+SCOPE_BASE_REF=main \
+HOMEBOY_HARNESS_FULL_SUITE_RETRY_COMMANDS='review lint' \
+RUN_GROUP_PREFIX='baseline test' \
+ARGV_CAPTURE_FILE="${argv_capture_file_unescalated}" \
+bash "${RUNNER}" >"${TMP_DIR}/not-escalated.log" 2>&1
+
+if ! grep -q -- '--changed-since main' "${argv_capture_file_unescalated}"; then
+  printf 'FAIL: baseline for a non-escalated command must stay scoped to --changed-since\n'
+  cat "${TMP_DIR}/not-escalated.log"
+  cat "${argv_capture_file_unescalated}"
+  exit 1
+fi
+printf 'PASS: baseline for a non-escalated command keeps its changed-scope selection\n'

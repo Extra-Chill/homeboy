@@ -100,7 +100,20 @@ for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
       "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.test-inventory.json" \
       "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.test-outcomes.json"
   fi
-  FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
+  # If the candidate escalated this command to the full suite because
+  # Homeboy's changed-scope selection reported
+  # `changed_scope_zero_tests_for_harness_change` (a test-harness config file
+  # changed and zero tests were selected), compare it against an equally
+  # unscoped baseline: a scoped baseline diffed against itself would trivially
+  # select zero tests too, and blindly comparing the candidate's full-suite
+  # evidence against that empty baseline would misattribute any pre-existing
+  # failure as introduced by this PR. See Extra-Chill/homeboy-action#507.
+  if comma_list_contains "${HOMEBOY_HARNESS_FULL_SUITE_RETRY_COMMANDS:-}" "${CMD}"; then
+    echo "::notice::baseline homeboy ${CMD}: candidate escalated to the full suite for a test-harness config change; running the baseline unscoped too for a fair comparison."
+    FULL_CMD="$(SCOPE_MODE=full SCOPE_BASE_REF= build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
+  else
+    FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
+  fi
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

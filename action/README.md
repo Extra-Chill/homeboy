@@ -953,6 +953,8 @@ Use changed scope for a command only when the installed Homeboy CLI and extensio
 
 The action does **not** probe for or emulate missing CLI features. If the installed Homeboy version does not support a requested scoped command, that is a Homeboy CLI compatibility problem to fix in Homeboy itself.
 
+When a PR changes a test-harness config file (`.github/workflows/**`, `homeboy.json`, phpunit/jest/vitest/playwright configs), Homeboy's changed-scope Test phase selects zero tests and fails closed with finding `changed_scope_zero_tests_for_harness_change` — a zero-test run cannot prove the harness itself still works. The action detects that finding on Homeboy's own structured output and re-runs the Test phase without `--changed-since` (the full suite), passing when it is green. A source-only PR is unaffected and keeps using changed-scope selection. If differential gating is also enabled and the candidate still fails after that retry, the baseline comparison for that same command drops its scope too, so a pre-existing failure at the base ref isn't blamed on the PR.
+
 ### Differential gating
 
 Set `differential-gating: 'true'` to make PR `review audit` and `review test` checks compare against the pull request base SHA instead of failing solely because the current branch has existing debt:

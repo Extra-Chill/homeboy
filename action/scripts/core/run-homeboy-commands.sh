@@ -19,6 +19,12 @@ WORKSPACE="$(resolve_workspace)"
 RESULTS='{}'
 OVERALL_EXIT=0
 GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy}"
+# Commands re-run without --changed-since because Homeboy's changed-scope
+# selection reported `changed_scope_zero_tests_for_harness_change` for them.
+# Read by run-baseline-commands.sh so a baseline comparison against a
+# harness-escalated candidate is scoped the same way. See
+# Extra-Chill/homeboy-action#507.
+FULL_SUITE_RETRY_COMMANDS=()
 
 HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"
@@ -105,6 +111,56 @@ for CMD in "${CMD_ARRAY[@]}"; do
     echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
   fi
 
+  # Homeboy fails a changed-scope Test phase closed when the scope selected
+  # zero tests but a test-harness config file changed (finding
+  # `changed_scope_zero_tests_for_harness_change`): a harness change is the
+  # one change a zero-test run cannot evidence. The fail-closed hint is to
+  # run the full suite so the harness change is actually exercised. Detect
+  # that finding on Homeboy's own structured output and do exactly that,
+  # rather than re-implementing the harness path rules here (Extra-Chill/
+  # homeboy#15021, #15026; Extra-Chill/homeboy-action#507).
+  if [ "${CMD_EXIT}" -ne 0 ] && [ "${STRUCTURED_OUTPUT}" = true ] \
+    && [ "$(quality_base_command "${CMD}")" = "test" ] \
+    && [ "${SCOPE_MODE:-full}" = "changed" ] && [ -n "${SCOPE_BASE_REF:-}" ] \
+    && command_result_has_harness_zero_test_finding "${OUTPUT_JSON}"; then
+    echo "::notice::homeboy ${CMD}: changed-scope selected zero tests because a test-harness config file changed (finding: changed_scope_zero_tests_for_harness_change). Re-running the full suite without --changed-since so the harness change is exercised."
+
+    FULL_CMD="$(SCOPE_MODE=full SCOPE_BASE_REF= build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
+    FULL_SUITE_RETRY_COMMANDS+=("${CMD}")
+
+    rm -f "${CI_RESULT_JSON}"
+    rm -f \
+      "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.test-inventory.json" \
+      "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.test-outcomes.json"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Re-running (full suite, harness change): ${FULL_CMD}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    echo "::group::${GROUP_PREFIX} ${CMD} (full-suite retry)"
+    set +e
+    bash "${GITHUB_ACTION_PATH}/scripts/core/phase-progress.sh" run command_execution -- \
+      bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
+        --log-file "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
+        "homeboy ${CMD} (full-suite retry)" bash -c "${FULL_CMD}"
+    CMD_EXIT=$?
+    cat "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
+    set -e
+    echo "::endgroup::"
+
+    STRUCTURED_OUTPUT=true
+    if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; then
+      STRUCTURED_OUTPUT=false
+      echo "::error::HOMEBOY_CI_RESULTS_DIR must remain a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
+    elif [ -L "${CI_RESULT_JSON}" ] || { [ -e "${CI_RESULT_JSON}" ] && [ ! -f "${CI_RESULT_JSON}" ]; } || [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+      STRUCTURED_OUTPUT=false
+      rm -f "${CI_RESULT_JSON}"
+      echo "::error::homeboy ${CMD} (full-suite retry) did not write valid structured output to ${OUTPUT_JSON}"
+    fi
+  fi
+
   if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "pass"}')
@@ -122,6 +178,11 @@ for CMD in "${CMD_ARRAY[@]}"; do
     OVERALL_EXIT=1
   fi
 done
+
+if [ "${#FULL_SUITE_RETRY_COMMANDS[@]}" -gt 0 ]; then
+  RETRY_COMMANDS_JOINED="$(IFS=','; printf '%s' "${FULL_SUITE_RETRY_COMMANDS[*]}")"
+  echo "HOMEBOY_HARNESS_FULL_SUITE_RETRY_COMMANDS=${RETRY_COMMANDS_JOINED}" >> "${GITHUB_ENV}"
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

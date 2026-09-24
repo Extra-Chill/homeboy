@@ -290,6 +290,40 @@ valid_command_result_output() {
     ' "${output_file}" >/dev/null 2>&1
 }
 
+# A `review test` (or legacy `test`) result whose Homeboy-emitted findings
+# include `changed_scope_zero_tests_for_harness_change` means the
+# changed-scope selection picked zero tests because a test-harness config
+# file changed (`.github/workflows/**`, `homeboy.json`, phpunit/jest/vitest/
+# playwright configs -- see Extra-Chill/homeboy
+# crates/homeboy-core/src/extension/test/drift.rs `is_test_harness_config_path`).
+# A harness change is the one change a zero-test run cannot evidence, so
+# Homeboy fails closed instead of silently passing. This asks Homeboy for
+# that verdict via its own structured output rather than re-implementing its
+# path rules here. See Extra-Chill/homeboy-action#507.
+command_result_has_harness_zero_test_finding() {
+  local output_file="$1"
+  [ -s "${output_file}" ] || return 1
+  jq -e '
+    (if (has("success") and (.data | type) == "object") then .data else . end)
+    | (.findings // [])
+    | any(.rule == "changed_scope_zero_tests_for_harness_change")
+  ' "${output_file}" >/dev/null 2>&1
+}
+
+# True when `needle` appears, whitespace-trimmed, as an element of
+# `haystack` -- a comma-separated command list in the same format
+# RESOLVED_COMMANDS/COMMANDS use.
+comma_list_contains() {
+  local haystack="$1" needle="$2" item
+  [ -n "${haystack}" ] || return 1
+  local items=()
+  IFS=',' read -ra items <<< "${haystack}"
+  for item in "${items[@]}"; do
+    [ "$(printf '%s' "${item}" | xargs)" = "${needle}" ] && return 0
+  done
+  return 1
+}
+
 # Observations retain terminal errors when a command fails before it can write
 # its command-result envelope. Keep diagnostics single-line and redact common
 # credential forms before sending them to GitHub logs or summaries.
