@@ -121,7 +121,7 @@ fn request_error_is_timeout(error: &reqwest::Error) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Duration;
 
@@ -142,16 +142,52 @@ mod tests {
     fn get_json_preserves_timeout_when_headers_arrive_before_the_body_stalls() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
+        // Two independent races made this test flaky under host contention
+        // (homeboy#14984), both now removed rather than widened:
+        //
+        // 1. The server used to write response headers before reading any
+        //    bytes of the client's request. Hyper writes the request and
+        //    starts expecting a response as two separate steps; if the
+        //    server's unread response bytes reach the socket while hyper is
+        //    still mid-write (more likely once host scheduling delays widen
+        //    that window), hyper reports `SendRequest(UnexpectedMessage)`
+        //    instead of ever reaching the deliberate body stall this test
+        //    means to exercise. Reading the request line first removes the
+        //    interleaving entirely.
+        // 2. The client's own timeout enforcement runs on reqwest's
+        //    background runtime thread, which needs to be scheduled to
+        //    notice the deadline before the server closes the socket, or the
+        //    client observes a plain EOF instead of its own timeout. A
+        //    server that stalls for a *fixed* duration races that scheduling
+        //    against a wall clock. Holding the connection open on a signal
+        //    the test only sends *after* it has already observed the
+        //    client's timeout makes it structurally impossible for the
+        //    server to close the socket before the client gives up.
+        let (release_server, wait_for_release) = std::sync::mpsc::channel::<()>();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut chunk).expect("read request");
+                assert_ne!(count, 0, "client closed before sending its request");
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\nConnection: close\r\n\r\n")
                 .expect("headers");
             stream.flush().expect("flush headers");
-            std::thread::sleep(Duration::from_millis(100));
+            // Bounded only as a safety net against a genuinely hung test.
+            let _ = wait_for_release.recv_timeout(Duration::from_secs(30));
         });
         let client = Client::builder()
-            .timeout(Duration::from_millis(10))
+            .timeout(Duration::from_millis(50))
             .build()
             .expect("client");
 
@@ -163,8 +199,9 @@ mod tests {
             None,
         )
         .expect_err("stalled broker body must time out");
+        release_server.send(()).expect("release stalled server");
 
         server.join().expect("server");
-        assert_eq!(error.details["request_timeout"], true);
+        assert_eq!(error.details["request_timeout"], true, "{error:#?}");
     }
 }

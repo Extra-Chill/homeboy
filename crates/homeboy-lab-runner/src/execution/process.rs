@@ -1032,16 +1032,29 @@ mod tests {
         }));
 
         options.apply = true;
-        let protected = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
+        let _protected = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
             .expect("active cleanup apply");
-        assert_eq!(protected.removed_count, 0);
+        // `HOMEBOY_RUNTIME_TMPDIR` is a process-wide environment variable, and
+        // `execute_runner_process`/`execute_runner_process_until_cancelled_with_progress`
+        // (production entry points exercised by many other tests in this
+        // crate) allocate their own `RuntimeTempOwner` by reading it fresh on
+        // every call, with no awareness of this test's `home_env_guard()`.
+        // When one of those unrelated tests runs on another thread while this
+        // guard is held, its managed temp dir lands inside `root` too, and it
+        // is free to be created and dropped within this test's own window,
+        // inflating `removed_count` (homeboy#14984). Assert on this test's
+        // own entries by path/existence, which is immune to that noise,
+        // rather than on the process-wide aggregate count.
         assert!(path.exists());
         assert!(unknown.exists());
 
         drop(owner);
         let terminal = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
             .expect("terminal cleanup apply");
-        assert_eq!(terminal.removed_count, 1);
+        assert!(
+            terminal.removed_count >= 1,
+            "expected at least this test's own managed directory to be removed: {terminal:#?}"
+        );
         assert!(!path.exists());
         assert!(unknown.exists());
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
