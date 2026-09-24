@@ -1115,15 +1115,12 @@ fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
     let inferred = connected_default_lab_runner();
     for args in [
         ["homeboy", "agent-task", "providers"].as_slice(),
+        // 5e6897ff16 "refactor(agent-task): return canonical status
+        // resource" removed the separate `--full` toggle: `status` always
+        // returns the canonical resource now, so there is no longer a
+        // distinct compact/full variant whose routing needs separate
+        // coverage here.
         ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
-        [
-            "homeboy",
-            "agent-task",
-            "status",
-            OWNER_LOCAL_RUN_ID,
-            "--full",
-        ]
-        .as_slice(),
         ["homeboy", "agent-task", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
         ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
         ["homeboy", "agent-task", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),

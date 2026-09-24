@@ -16,12 +16,21 @@ thread_local! {
 
 #[test]
 fn upgrade_reporting_and_reconciliation_omit_unverified_persisted_refresh_refs() {
+    // #14508 "expose pinned configured-daemon recovery" gates
+    // `safe_recovery_commands` on the candidate `--ref` matching the
+    // configured `job_command_binary_build_identity`; that ref is itself
+    // derived from this same field, so a clean immutable commit here is
+    // always self-consistent and never omitted. A dirty marker is the
+    // reachable way to keep this fixture unverified through the public
+    // constructor (see the identical reasoning on
+    // `homeboy_provenance_suppresses_an_unverified_persisted_refresh_command`
+    // in homeboy-cli's refresh_plan.rs).
     let warning = RunnerStaleDaemonWarning::new(
         "lab",
         "0.264.0".to_string(),
         "0.265.0".to_string(),
         Some("homeboy 0.264.0+aaaaaaaa".to_string()),
-        Some("homeboy 0.265.0+bbbbbbbb".to_string()),
+        Some("homeboy 0.265.0+bbbbbbbb-dirty".to_string()),
     );
 
     let report = runner_stale_daemon(&ssh_runner("lab", None), &|_| {

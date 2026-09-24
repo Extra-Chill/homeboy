@@ -169,6 +169,15 @@ fn tracked_exceptions(path: &Path, tree: &str) -> Result<Vec<(String, String)>> 
 pub fn collect_operator_policy_evidence(
     path: &Path,
 ) -> Result<Option<RepositoryIntegrityEvidence>> {
+    // A path that does not exist on disk cannot be a Git repository. This is
+    // "not a repo" (`Ok(None)`), the same answer as any other non-repo path,
+    // not a `git` invocation failure worth propagating: spawning `git` with a
+    // missing `current_dir` fails at the OS level before git itself ever
+    // runs, and every other repository-integrity question here is only asked
+    // once this same path is already known to exist.
+    if !path.exists() {
+        return Ok(None);
+    }
     let Some(common_dir) = git_common_dir(path)? else {
         return Ok(None);
     };

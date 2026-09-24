@@ -209,7 +209,12 @@ fn subtree_cli_publishes_from_nested_component_and_previews_without_mutation() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let root = tempfile::tempdir().expect("source repository");
         let remote = tempfile::tempdir().expect("destination repository");
-        git(remote.path(), &["init", "--bare", "-q"]);
+        // Pin the bare remote's default branch explicitly: subtree publish
+        // only ever creates/updates `refs/heads/main`, so if the host's
+        // ambient `init.defaultBranch` differs (e.g. `master`), HEAD is left
+        // pointing at a ref that never receives a commit and the final
+        // `git clone` below silently checks out an empty tree.
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.email", "test@example.com"]);
         git(root.path(), &["config", "user.name", "Test"]);

@@ -1716,12 +1716,17 @@ mod daemon_repair_step_tests {
 
     #[test]
     fn stale_daemon_recovery_uses_only_an_exact_safe_typed_action() {
+        // #14508 "expose pinned configured-daemon recovery" validates a
+        // candidate `--ref` as an immutable build commit (7-64 hex chars via
+        // `is_immutable_build_commit`); the short placeholder `new` fails
+        // that shape and is silently dropped, which the fixture is not
+        // exercising here.
         let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
             "homeboy 0.218.0".to_string(),
             "homeboy 0.219.0".to_string(),
-            Some("homeboy 0.218.0+new".to_string()),
-            Some("homeboy 0.219.0+new".to_string()),
+            Some("homeboy 0.218.0+abcdef12".to_string()),
+            Some("homeboy 0.219.0+abcdef12".to_string()),
         );
         let report = status_report("homeboy-lab", None, Some(warning));
 
@@ -1732,7 +1737,7 @@ mod daemon_repair_step_tests {
                 .iter()
                 .map(|step| step.command.clone())
                 .collect::<Vec<_>>(),
-            ["homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"]
+            ["homeboy runner refresh-homeboy homeboy-lab --ref abcdef12 --reconnect"]
         );
         assert!(steps
             .iter()
@@ -1793,7 +1798,7 @@ mod daemon_repair_step_tests {
         freshness.recovery_evidence =
             Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable);
         freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
-        let report = status_report(
+        let mut report = status_report(
             "homeboy-lab",
             Some(freshness),
             Some(RunnerStaleDaemonWarning::new(
@@ -1804,6 +1809,11 @@ mod daemon_repair_step_tests {
                 Some("homeboy 0.219.0+new".to_string()),
             )),
         );
+        // #14941 "reject incomplete connected runner status" made a missing
+        // session the first, highest-priority not-ready reason. This test
+        // targets the ownership-evidence branch below that check, so it
+        // needs a real connected session to reach it.
+        report.session = Some(crate::test_support::direct_ssh_session("lease-terminal"));
 
         let reason = connected_runner_not_ready_reason("homeboy-lab", &report)
             .expect("terminal ownership blocks preparation");

@@ -1177,13 +1177,21 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
     let Some(result) = homeboy::core::parsed_command_preflight::captured_result() else {
         return indeterminate_preview_admission();
     };
-    let requested = match replay_args.iter().enumerate().find_map(|(index, arg)| {
-        arg.strip_prefix("--placement=").or_else(|| {
-            (arg == "--placement")
-                .then(|| replay_args.get(index + 1).map(String::as_str))
-                .flatten()
-        })
-    }) {
+    // Only flags before the bare separator are Homeboy's own. Reading a
+    // forwarded `--placement` as Homeboy's own would misclassify placement
+    // admission for the forwarded command instead of the cook invocation
+    // (#11577).
+    let owned_replay_args = crate::command_capability::homeboy_owned_args(replay_args);
+    let requested = match owned_replay_args
+        .iter()
+        .enumerate()
+        .find_map(|(index, arg)| {
+            arg.strip_prefix("--placement=").or_else(|| {
+                (arg == "--placement")
+                    .then(|| owned_replay_args.get(index + 1).map(String::as_str))
+                    .flatten()
+            })
+        }) {
         Some("local") => homeboy_lab_runner_contract::Placement::Local,
         Some("lab") => homeboy_lab_runner_contract::Placement::Lab,
         Some("lab-or-local") => homeboy_lab_runner_contract::Placement::LabOrLocal,
@@ -1236,11 +1244,18 @@ fn preview_local_placement_admission(replay_args: &[String]) -> Value {
 
 fn local_preview_replay(replay_args: &[String]) -> String {
     let mut args = replay_args.to_vec();
-    if let Some(index) = args.iter().position(|arg| arg == "--placement") {
-        if index + 1 < args.len() {
+    // Only flags before the bare separator are Homeboy's own. Rewriting a
+    // forwarded `--placement` would corrupt the argument the forwarded
+    // command was asked to receive (#11577).
+    let owned = crate::command_capability::homeboy_owned_args(&args).len();
+    if let Some(index) = args[..owned].iter().position(|arg| arg == "--placement") {
+        if index + 1 < owned {
             args[index + 1] = "local".to_string();
         }
-    } else if let Some(index) = args.iter().position(|arg| arg.starts_with("--placement=")) {
+    } else if let Some(index) = args[..owned]
+        .iter()
+        .position(|arg| arg.starts_with("--placement="))
+    {
         args[index] = "--placement=local".to_string();
     } else {
         args.insert(1, "--placement".to_string());

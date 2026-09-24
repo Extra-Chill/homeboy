@@ -3581,11 +3581,19 @@ mod tests {
             let output = providers_with_catalog(providers_args(), catalog.clone())
                 .expect("output")
                 .0;
-            assert_eq!(output["operator_summary"]["state"], "ready");
+            // Structural routing and live inference answer different
+            // questions (see AgentTaskProviderDispatchability). Neither
+            // fixture provider declares a readiness_invocation and
+            // --validate-readiness was not requested, so the verdict is
+            // structurally dispatchable without a live-validated "ready".
+            assert_eq!(
+                output["operator_summary"]["state"],
+                "structurally_dispatchable"
+            );
             assert_eq!(
                 render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
                 Some(
-                    "Agent task providers\nStatus: ready\nProviders shown: 2\nNext: homeboy agent-task providers --backend configured --selector configured.provider --validate-readiness".to_string()
+                    "Agent task providers\nStatus: structurally_dispatchable\nProviders shown: 2\nNext: homeboy agent-task providers --backend configured --selector configured.provider --validate-readiness".to_string()
                 )
             );
             assert_eq!(
@@ -3829,6 +3837,13 @@ mod tests {
         });
     }
 
+    /// An explicitly-named, not-dispatchable `--backend` fails fast here (the
+    /// same behavior `providers_reports_capacity_exhaustion_distinctly_with_its_reset_instant`
+    /// covers for `capacity_exhausted`, and #14858's acceptance note documents
+    /// as already applying to `account_unavailable`/`credentials_unusable`).
+    /// The structural/live distinction still rides in the error's structured
+    /// `tried` detail, so it remains observable even though the command
+    /// itself does not return a success envelope.
     #[test]
     fn providers_reports_account_block_as_structural_not_live_readiness() {
         crate::test_support::with_isolated_home(|_| {
@@ -3849,23 +3864,27 @@ mod tests {
             args.model = Some("blocked-model".to_string());
             args.validate_readiness = true;
 
-            let (output, status) = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect("account-blocked provider report");
+            let error = providers_with_catalog(args, provider_catalog(vec![provider]))
+                .expect_err("an explicitly-named account-blocked backend fails fast");
 
-            assert_eq!(status, 0);
-            assert_eq!(output["dispatchability"]["state"], "account_unavailable");
-            assert_eq!(
-                output["readiness_validation"]["structural_dispatchability"]["ready"],
-                true
+            assert!(
+                error.message.contains("account_unavailable"),
+                "{}",
+                error.message
             );
-            assert_eq!(
-                output["readiness_validation"]["live_dispatch"],
-                "unavailable"
+            let verdict = error.details["tried"][0]
+                .as_str()
+                .expect("structured verdict detail");
+            assert!(verdict.contains("\"state\":\"account_unavailable\""));
+            assert!(
+                verdict.contains(
+                    "\"structural_dispatchability\":{\"state\":\"ready\",\"ready\":true"
+                ),
+                "structural dispatchability must still read ready even though live use is blocked: {verdict}"
             );
-            assert_eq!(output["readiness_validation"]["validated"], false);
-            assert_eq!(
-                output["readiness_validation"]["live_inference"]["evidence"]["classification"],
-                "account"
+            assert!(
+                verdict.contains("\"classification\":\"account\""),
+                "{verdict}"
             );
         });
     }

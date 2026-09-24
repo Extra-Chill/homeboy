@@ -1051,7 +1051,9 @@ fn path_setting_workspace_ref_missing_adopted_path_fails_locally() {
             .expect_err("missing adopted workspace path should fail");
 
         assert_eq!(err.details["field"], "workspace_ref");
-        assert!(err.message.contains("points at a missing directory"));
+        assert!(err
+            .message
+            .contains("resolved to a missing controller path"));
     });
 }
 
