@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.5] - 2026-09-24
+
+### Fixed
+- retry apparent PR-introduced test failures before blaming the PR
+
 ## [2.20.4] - 2026-09-23
 
 ### Fixed
