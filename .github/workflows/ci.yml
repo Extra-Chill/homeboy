@@ -66,7 +66,7 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@f5562f1726381c9e9d438611319bbcdb8cc1c806
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@050f4982efbfedb8531def6558d1ef790ded3bac
     with:
       commands: review test
       args: --skip-lint
