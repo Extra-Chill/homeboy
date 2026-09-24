@@ -189,8 +189,9 @@ pub mod dispatch_service {
         preflight_dispatch_provider_secrets, validate_single_cook_prompt_source,
     };
     pub use super::super::agent_task_dispatch_service::{
-        build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,
-        preflight_dispatch_provider_admission, require_model_override_acknowledgement,
+        build_controller_dispatch_plan, configured_rotation_policy,
+        controller_resolved_execution_policy, dispatch, preflight_dispatch_provider_admission,
+        require_model_override_acknowledgement,
         require_model_override_acknowledgement_with_catalog,
         resolve_cook_initial_provider_route_with_catalog, resolve_dispatch_request,
         resolve_dispatch_request_with_default, resolve_dispatch_request_with_default_and_catalog,
@@ -340,9 +341,10 @@ pub mod provider {
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
-        evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
-        preflight_provider_credentials_for_backend, preflight_provider_dispatchability_with_config,
-        provider_credential_readiness, AgentTaskProviderDispatchability,
+        evaluate_provider_capacity_with_config, evaluate_provider_dispatchability,
+        evaluate_provider_dispatchability_with_config, preflight_provider_credentials_for_backend,
+        preflight_provider_dispatchability_with_config, provider_credential_readiness,
+        AgentTaskProviderDispatchability,
     };
     pub use crate::agent_task_provider::{
         probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,

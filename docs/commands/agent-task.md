@@ -1113,6 +1113,43 @@ This is the terminal/daemon-owned review surface for fleet cooking. Kimaki or an
 other chat UI should submit, poll, render, and call these commands rather than
 owning scheduling, state, artifacts, reconciliation, or promotion.
 
+## Provider Capacity
+
+`agent-task capacity` reports live plan capacity for every configured route:
+`agent_task.default_backend` plus each `agent_task.rotation` entry. A bare
+default route is skipped when the rotation already names models on its
+backend. Narrow the walk with `--backend`, `--model`, or `--selector`.
+
+```bash
+homeboy agent-task capacity
+```
+
+Each route's readiness invocation runs with `mode: "capacity"`. Runtimes that
+support this mode answer from provider usage lookups only, so the command
+spends no inference. The OpenCode runtime supports it. For runtimes that don't,
+the command reports only what the capacity result contains.
+
+- Routes run in parallel, each with a bounded timeout. A route that fails is
+  reported as `unknown` with its diagnostic, and the other routes still
+  return.
+- Routes that report the same `capacity.scope` share one account pool, so they
+  appear as a single entry that lists all of their models.
+- The result schema is `homeboy/agent-task-capacity/v1`:
+  - `generated_at`
+  - `routes[]`, each with `backend`, `selector`, `models[]`, `scope`, and
+    `capacity`. `capacity` carries `state`, `remaining`, `limit`, `unit`,
+    `reset_at`, and per-account `accounts[]`.
+  - `next_reset`: the soonest reset among exhausted accounts.
+- The summary prints one block per pool and one line per account:
+
+```
+anthropic (4 plans): 75% remaining
+  chris.huber@a8c.com    available  75%  resets 2026-09-25T00:40:00Z
+  chubes@chubes.net      exhausted  resets 2026-09-29T16:00:00Z
+openai (2 plans): exhausted until 2026-09-27T15:26:10Z
+xai/grok-4.7: capacity not published
+```
+
 ## Provider Contracts
 
 `agent-task providers` returns `capability_contract` with Homeboy-owned schema ids

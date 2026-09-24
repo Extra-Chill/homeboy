@@ -42,6 +42,16 @@ const WORKSPACE_PROGRESS_CHECK_INTERVAL_FLOOR_MS: u64 = 200;
 const WORKSPACE_PROGRESS_CHECK_INTERVAL_CEIL_MS: u64 = 5_000;
 pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
     "homeboy/agent-task-provider-readiness-result/v1";
+/// Optional `mode` value a readiness request can carry (#15024). `capacity`
+/// asks the runtime for its capacity evidence only — usage/profile reads — and
+/// to skip the bounded model execution a live-inference probe would spend.
+/// Support is a runtime opt-in (OpenCode implements it via homeboy-extensions);
+/// a runtime that ignores the field still answers, but Homeboy then reports
+/// only whatever `capacity` object that answer happens to contain, so an
+/// ignoring runtime can never pass its normal inference probe off as capacity
+/// evidence. Existing callers send no mode and keep the unchanged request
+/// shape.
+pub const PROVIDER_READINESS_CAPACITY_MODE: &str = "capacity";
 const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 const PROVIDER_READINESS_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const PROVIDER_READINESS_IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -2647,6 +2657,14 @@ pub struct ProviderReadinessInvocationCapacity {
     /// fields above summarize the pool; each entry here reports one account.
     #[serde(default)]
     pub accounts: Vec<ProviderReadinessInvocationAccountCapacity>,
+    /// Optional, provider-chosen identity of the account pool behind this
+    /// capacity (#15024). Routes that report the same non-empty scope share
+    /// one pool (for example several model routes over the same four
+    /// subscription plans), so consumers group them instead of listing the
+    /// pool once per route. Redacted and length-bounded like every other
+    /// provider-supplied string before it is stored.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// One connected account behind a route. `account` is a provider-chosen,
@@ -2681,6 +2699,7 @@ pub(crate) fn run_provider_readiness_invocation_with_env(
         effective_config,
         credential_env,
         PROVIDER_READINESS_TIMEOUT,
+        None,
     )
 }
 
@@ -2689,6 +2708,7 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
     effective_config: &Value,
     credential_env: &[(String, String)],
     timeout: Duration,
+    mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult, String> {
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         return Ok(ProviderReadinessInvocationResult {
@@ -2707,6 +2727,7 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
         effective_config,
         credential_env,
         timeout.min(Duration::from_millis(invocation.timeout_ms)),
+        mode,
     )
 }
 
@@ -2715,6 +2736,7 @@ fn run_provider_readiness_invocation_with_timeout(
     effective_config: &Value,
     credential_env: &[(String, String)],
     timeout: Duration,
+    mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult, String> {
     let started = Instant::now();
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
@@ -2726,13 +2748,20 @@ fn run_provider_readiness_invocation_with_timeout(
             provider.id
         ));
     };
-    let input = serde_json::to_vec(&json!({
+    // Capacity mode is additive on the request contract: existing callers keep
+    // sending no mode, so a runtime cannot tell this request apart from any
+    // pre-#15024 readiness probe except by the new field's presence.
+    let mut request = json!({
         "schema": "homeboy/agent-task-provider-readiness-request/v1",
         "provider_id": provider.id,
         "backend": provider.backend,
         "effective_config": effective_config,
-    }))
-    .map_err(|error| format!("failed to encode provider readiness request: {error}"))?;
+    });
+    if let Some(mode) = mode {
+        request["mode"] = Value::String(mode.to_string());
+    }
+    let input = serde_json::to_vec(&request)
+        .map_err(|error| format!("failed to encode provider readiness request: {error}"))?;
 
     let mut command = Command::new(program);
     command
@@ -2983,6 +3012,9 @@ fn redact_readiness_credentials(
             if let Some(reset_at) = capacity.reset_at.as_mut() {
                 *reset_at = reset_at.replace(credential, "[REDACTED]");
             }
+            if let Some(scope) = capacity.scope.as_mut() {
+                *scope = scope.replace(credential, "[REDACTED]");
+            }
         }
         for (credential, hashed) in &credentials {
             if let Some(remaining) = capacity.remaining.as_mut() {
@@ -3023,7 +3055,17 @@ pub(crate) fn run_provider_readiness_invocation_with_test_timeout(
     effective_config: &Value,
     timeout: Duration,
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout)
+    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, None)
+}
+
+#[cfg(test)]
+pub(crate) fn run_provider_readiness_invocation_with_test_timeout_and_mode(
+    provider: &AgentTaskExecutorProvider,
+    effective_config: &Value,
+    timeout: Duration,
+    mode: Option<&str>,
+) -> Result<ProviderReadinessInvocationResult, String> {
+    run_provider_readiness_invocation_with_timeout(provider, effective_config, &[], timeout, mode)
 }
 
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
@@ -3727,6 +3769,7 @@ mod readiness_process_tests {
             &Value::Null,
             &[],
             Duration::from_secs(5),
+            None,
         )
         .expect_err("oversized readiness output is rejected");
 
@@ -3751,6 +3794,7 @@ mod readiness_process_tests {
             &Value::Null,
             &[],
             Duration::from_secs(5),
+            None,
         )
         .expect("readiness result returns after descendant cleanup");
 
@@ -3778,6 +3822,7 @@ mod readiness_process_tests {
             &config,
             &[],
             Duration::from_secs(5),
+            None,
         )
         .expect_err("closed readiness stdin fails");
 
@@ -3806,6 +3851,7 @@ mod readiness_process_tests {
             &Value::Null,
             &[],
             Duration::from_millis(100),
+            None,
         )
         .expect_err("readiness invocation times out");
 

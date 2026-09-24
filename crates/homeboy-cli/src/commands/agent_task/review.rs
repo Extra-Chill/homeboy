@@ -2536,7 +2536,7 @@ fn resolve_provider_route(
     )
 }
 
-fn effective_provider_catalog_config() -> homeboy::core::Result<Value> {
+pub(crate) fn effective_provider_catalog_config() -> homeboy::core::Result<Value> {
     homeboy::agents::agent_task_config_materialization::materialize_provider_config_refs(
         Value::Object(
             homeboy::core::defaults::load_config()

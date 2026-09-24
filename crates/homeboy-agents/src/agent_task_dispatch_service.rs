@@ -691,7 +691,11 @@ pub fn resolve_cook_initial_provider_route_with_catalog(
     Ok(route)
 }
 
-fn configured_rotation_policy() -> Option<AgentTaskProviderRotationPolicy> {
+/// The configured global rotation policy (`agent_task.rotation`), as the
+/// dispatch path reads it. Shared readers (for example the `agent-task
+/// capacity` rotation walk) must use this rather than re-parsing the config
+/// value, so every consumer agrees on the policy shape.
+pub fn configured_rotation_policy() -> Option<AgentTaskProviderRotationPolicy> {
     homeboy_core::defaults::load_config()
         .agent_task
         .rotation

@@ -11,6 +11,7 @@ use homeboy_core::{Error, Result};
 use super::command_runner::{
     run_provider_readiness_invocation_with_env_and_timeout,
     validate_provider_immediate_failure_patterns, ProviderReadinessInvocationResult,
+    PROVIDER_READINESS_CAPACITY_MODE,
 };
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
@@ -188,6 +189,7 @@ fn run_readiness_probe_with_gate(
     gate: &ProviderReadinessProbeGate,
     probe_deadline: Instant,
     probe_timeout_ms: u64,
+    mode: Option<&str>,
 ) -> std::result::Result<ProviderReadinessInvocationResult, String> {
     let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)?;
     let mut result = Err("provider readiness invocation did not run".to_string());
@@ -204,6 +206,7 @@ fn run_readiness_probe_with_gate(
             config,
             credential_env,
             remaining,
+            mode,
         );
         let should_retry = match &result {
             Err(_) => true,
@@ -410,6 +413,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline(
         cache,
         deadline_unix_ms,
         false,
+        None,
     )
 }
 
@@ -420,6 +424,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
     cache: &mut ProviderRuntimeReadinessCache,
     deadline_unix_ms: Option<u64>,
     generated_fanout_context: bool,
+    mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult> {
     let started = Instant::now();
     ensure_readiness_deadline("probe", deadline_unix_ms)?;
@@ -428,6 +433,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
         config,
         credential_env,
         generated_fanout_context,
+        mode,
     )?;
     ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
     let mut registered_waiter = false;
@@ -593,6 +599,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
         let shared = Arc::clone(&cache.shared);
         let probe_gate = Arc::clone(&cache.shared.probe_gate);
         let probe_request_key = request_key.clone();
+        let probe_mode = mode.map(str::to_string);
         eprintln!(
             "{}",
             json!({
@@ -618,6 +625,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                         probe_gate.as_ref(),
                         probe_deadline,
                         probe_timeout_ms,
+                        probe_mode.as_deref(),
                     )
                 }))
                 .unwrap_or_else(|_| Err("provider readiness invocation panicked".to_string()));
@@ -658,6 +666,31 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
     }
 }
 
+/// Run one route's readiness invocation in capacity-only mode (#15024): the
+/// request carries `mode: "capacity"` so a runtime that supports it returns
+/// capacity evidence without spending its bounded inference probe, and the
+/// cache identity is mode-specific so the answer can never satisfy — or be
+/// satisfied by — live-inference readiness. Failure is a normal outcome for
+/// callers: a route whose runtime lookup fails reports `unknown` capacity and
+/// must not block the other routes.
+pub(crate) fn capacity_mode_readiness_verdict_with_deadline(
+    provider: &AgentTaskExecutorProvider,
+    config: &Value,
+    credential_env: &[(String, String)],
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+) -> Result<ProviderReadinessInvocationResult> {
+    readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
+        provider,
+        config,
+        credential_env,
+        cache,
+        deadline_unix_ms,
+        false,
+        Some(PROVIDER_READINESS_CAPACITY_MODE),
+    )
+}
+
 pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
     let mut config = config.as_object().cloned().unwrap_or_default();
     if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
@@ -672,7 +705,7 @@ pub(crate) fn readiness_request_key(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
 ) -> Result<String> {
-    readiness_request_key_for_generated_fanout_context(provider, config, false)
+    readiness_request_key_for_generated_fanout_context(provider, config, false, None)
 }
 
 /// Child-specific fanout identity is orchestration metadata rather than a
@@ -707,11 +740,13 @@ pub(crate) fn readiness_cache_identity_for_generated_fanout_context(
     config: &Value,
     credential_env: &[(String, String)],
     generated_fanout_context: bool,
+    mode: Option<&str>,
 ) -> Result<String> {
     let base_key = readiness_request_key_for_generated_fanout_context(
         provider,
         config,
         generated_fanout_context,
+        mode,
     )?;
     let credential_identity = credential_env
         .iter()
@@ -726,6 +761,7 @@ fn readiness_request_key_for_generated_fanout_context(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     generated_fanout_context: bool,
+    mode: Option<&str>,
 ) -> Result<String> {
     let mut provider_config = config.as_object().cloned().unwrap_or_default();
     if generated_fanout_context {
@@ -755,13 +791,21 @@ fn readiness_request_key_for_generated_fanout_context(
             (name, value)
         })
         .collect::<Vec<_>>();
-    let value = json!({
+    // The readiness request mode belongs in the cache identity: a capacity
+    // probe and a live-inference probe of the same route are different
+    // questions, so a capacity answer must never be served to — or satisfy —
+    // a live-inference caller (#15024). Absent mode keeps legacy keys
+    // byte-identical with pre-#15024 identities.
+    let mut value = json!({
         "provider_id": provider.id,
         "runtime_path": provider.runtime_path,
         "invocation": provider.readiness_invocation,
         "effective_config": provider_config,
         "environment": environment,
     });
+    if let Some(mode) = mode {
+        value["mode"] = Value::String(mode.to_string());
+    }
     let encoded = serde_json::to_vec(&value)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     Ok(content_hash::sha256_hex(&encoded))
@@ -1029,6 +1073,7 @@ mod tests {
                     &mut cache,
                     None,
                     true,
+                    None,
                 )
                 .expect("readiness verdict")
                 .ready
@@ -1458,6 +1503,61 @@ mod tests {
         );
     }
 
+    /// #15024: a capacity-mode probe and a live-inference probe of the same
+    /// route are different questions. The mode belongs to the cache identity,
+    /// so the two probes each run once against one shared cache, neither
+    /// answer is served to the other caller, and a capacity result can never
+    /// satisfy live-inference readiness (or vice versa).
+    #[test]
+    fn capacity_mode_probes_are_a_distinct_cache_identity_from_live_inference() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let modes = root.path().join("modes.log");
+        let script = root.path().join("mode-echo.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],(request.mode||'live')+'\\n');const capacity=request.mode==='capacity'?{remaining:70,limit:100,unit:'percent',scope:'pooled'}:undefined;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared-route',identity:{},...(capacity?{capacity}:{})}));",
+        )
+        .expect("mode-echo readiness script");
+        let provider = provider(&script, &modes);
+        let mut cache = test_cache();
+        let config = json!({ "model": "pooled" });
+
+        let capacity = capacity_mode_readiness_verdict_with_deadline(
+            &provider,
+            &config,
+            &[],
+            &mut cache,
+            None,
+        )
+        .expect("capacity verdict");
+        assert_eq!(
+            capacity
+                .capacity
+                .as_ref()
+                .and_then(|capacity| capacity.scope.as_deref()),
+            Some("pooled")
+        );
+
+        let live = readiness_verdict(&provider, &config, &mut cache).expect("live verdict");
+        assert!(
+            live.capacity.is_none(),
+            "a live-inference answer must never be served from capacity-mode cache"
+        );
+
+        capacity_mode_readiness_verdict_with_deadline(&provider, &config, &[], &mut cache, None)
+            .expect("capacity answer is cached under its own identity");
+        readiness_verdict(&provider, &config, &mut cache).expect("live answer is cached");
+
+        assert_eq!(
+            std::fs::read_to_string(&modes)
+                .expect("mode log")
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["capacity", "live"],
+            "each mode probes exactly once; a capacity cache hit must not satisfy live readiness"
+        );
+    }
+
     #[test]
     fn readiness_probe_errors_are_cached_briefly() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1527,6 +1627,7 @@ mod tests {
             gate,
             Instant::now() + Duration::from_millis(2_000),
             2_000,
+            None,
         )
         .expect_err("the retry shares the first attempt's total deadline");
 
