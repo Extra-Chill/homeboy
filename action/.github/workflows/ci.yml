@@ -1188,12 +1188,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-          # This checks out into the job's default root workspace, which
-          # already holds the nested `.homeboy-action` checkout from this
-          # job's first step. actions/checkout's default `-ff` clean forces
-          # removal of nested git repositories -- it would delete
-          # `.homeboy-action` right before the Reconcile step needs it.
-          clean: false
+          # Check out into a dedicated subdirectory. Checking out into the
+          # job's root workspace (even with clean: false) replaced it and
+          # deleted the nested `.homeboy-action` checkout, so Reconcile failed
+          # with exit 127 on every differential PR (Extra-Chill/homeboy#14984).
+          path: .homeboy-retry-workspace
 
       - name: Install Rust toolchain for introduced-test retry
         if: steps.retry-checkout.outcome == 'success'
@@ -1225,7 +1224,7 @@ jobs:
           REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && 'candidate-failure' || 'false' }}
           PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
           PR_STATE: ${{ steps.final-pr-state.outputs.state }}
-          RETRY_WORKSPACE: ${{ steps.retry-checkout.outcome == 'success' && github.workspace || '' }}
+          RETRY_WORKSPACE: ${{ steps.retry-checkout.outcome == 'success' && format('{0}/.homeboy-retry-workspace', github.workspace) || '' }}
           RETRY_MAX_ATTEMPTS: ${{ inputs.retry-introduced-test-attempts }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 
