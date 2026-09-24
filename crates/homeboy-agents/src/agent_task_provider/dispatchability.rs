@@ -2443,6 +2443,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                accounts: Vec::new(),
             }
         );
     }
@@ -2496,6 +2497,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some("2026-08-27T12:37:03+00:00".to_string()),
                 reason: "5-hour usage limit reached".to_string(),
+                accounts: Vec::new(),
             }
         );
         assert!(evidence.capacity.is_exhausted());

@@ -330,6 +330,7 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Choose backend: {}", choices.join(", ")));
         }
     }
+    lines.extend(render_provider_capacity_lines(payload));
     if let Some(next_action) = summary.get("next_action").and_then(Value::as_str) {
         lines.push(format!("Next: {next_action}"));
     }
@@ -337,6 +338,86 @@ fn render_providers_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Refresh: {refresh_action}"));
     }
     Some(lines.join("\n"))
+}
+
+/// Live capacity for each provider whose readiness probe published it, with
+/// one line per pooled account so every plan's reset instant is visible.
+fn render_provider_capacity_lines(payload: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    for provider in payload
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(capacity) = provider.pointer("/dispatchability/capacity") else {
+            continue;
+        };
+        let state = capacity.get("state").and_then(Value::as_str).unwrap_or("");
+        if state != "known" && state != "exhausted" {
+            continue;
+        }
+        let label = provider
+            .get("id")
+            .or_else(|| provider.get("backend"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider");
+        let unit = capacity.get("unit").and_then(Value::as_str);
+        let headline = if state == "exhausted" {
+            "exhausted".to_string()
+        } else {
+            capacity
+                .get("remaining")
+                .map(|remaining| format!("{} remaining", capacity_amount(remaining, unit)))
+                .unwrap_or_else(|| "available".to_string())
+        };
+        lines.push(format!(
+            "Capacity {label}: {headline}{}",
+            capacity_reset_suffix(capacity)
+        ));
+        for account in capacity
+            .get("accounts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let name = account
+                .get("account")
+                .and_then(Value::as_str)
+                .unwrap_or("account");
+            let account_state = account
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let remaining = match (account_state, account.get("remaining")) {
+                ("available", Some(remaining)) => {
+                    format!(", {} remaining", capacity_amount(remaining, unit))
+                }
+                _ => String::new(),
+            };
+            lines.push(format!(
+                "  {name}: {account_state}{remaining}{}",
+                capacity_reset_suffix(account)
+            ));
+        }
+    }
+    lines
+}
+
+fn capacity_amount(remaining: &Value, unit: Option<&str>) -> String {
+    match unit {
+        Some("percent") => format!("{remaining}%"),
+        Some(unit) if !unit.is_empty() => format!("{remaining} {unit}"),
+        _ => remaining.to_string(),
+    }
+}
+
+fn capacity_reset_suffix(value: &Value) -> String {
+    value
+        .get("reset_at")
+        .and_then(Value::as_str)
+        .map(|reset_at| format!(", resets {reset_at}"))
+        .unwrap_or_default()
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {
@@ -1127,6 +1208,45 @@ mod tests {
         assert_eq!(
             summary,
             "Agent task providers\nStatus: selection_required\nProviders shown: 2\nChoose backend: alpha, zeta\nNext: homeboy agent-task providers --backend alpha --validate-readiness"
+        );
+    }
+
+    #[test]
+    fn providers_summary_lists_route_and_pooled_account_capacity() {
+        let payload = json!({
+            "providers": [
+                {
+                    "id": "opencode.agent-task-executor",
+                    "dispatchability": { "capacity": {
+                        "state": "known", "remaining": 91, "limit": 100, "unit": "percent",
+                        "reset_at": "2026-09-24T15:50:00+00:00",
+                        "accounts": [
+                            { "account": "plan-a", "state": "exhausted", "remaining": 0, "reset_at": "2026-09-25T03:00:00+00:00" },
+                            { "account": "plan-b", "state": "available", "remaining": 91, "reset_at": "2026-09-24T15:50:00+00:00" },
+                            { "account": "old-login", "state": "credential_expired" }
+                        ]
+                    } }
+                },
+                { "id": "silent", "dispatchability": { "capacity": { "state": "unknown", "reason": "not reported" } } }
+            ],
+            "operator_summary": { "state": "ready" }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Providers, &payload)
+            .expect("providers summary");
+
+        assert_eq!(
+            summary,
+            [
+                "Agent task providers",
+                "Status: ready",
+                "Providers shown: 2",
+                "Capacity opencode.agent-task-executor: 91% remaining, resets 2026-09-24T15:50:00+00:00",
+                "  plan-a: exhausted, resets 2026-09-25T03:00:00+00:00",
+                "  plan-b: available, 91% remaining, resets 2026-09-24T15:50:00+00:00",
+                "  old-login: credential_expired",
+            ]
+            .join("\n")
         );
     }
 

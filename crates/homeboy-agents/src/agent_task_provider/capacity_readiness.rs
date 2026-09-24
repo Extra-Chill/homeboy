@@ -28,7 +28,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::command_runner::ProviderReadinessInvocationResult;
+use super::command_runner::{
+    ProviderReadinessInvocationAccountCapacity, ProviderReadinessInvocationResult,
+};
 use super::usage_cap::reset_at_from_outcome;
 use crate::agent_task::{AgentTaskFailureClassification, AgentTaskOutcome};
 
@@ -68,6 +70,8 @@ pub enum AgentTaskProviderCapacityReadiness {
         unit: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reset_at: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accounts: Vec<AgentTaskProviderCapacityAccount>,
     },
     /// The connected account/route is presently out of capacity. `reset_at`
     /// is populated only when the provider (or Homeboy's own detection of
@@ -78,8 +82,27 @@ pub enum AgentTaskProviderCapacityReadiness {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reset_at: Option<String>,
         reason: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        accounts: Vec<AgentTaskProviderCapacityAccount>,
     },
 }
+
+/// Capacity of one connected account behind a route that rotates across
+/// several (for example a pool of subscription plans), so an operator can
+/// see every plan's state and reset instant, not only the route summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskProviderCapacityAccount {
+    pub account: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+}
+
+/// Upper bound on reported accounts so a misbehaving provider cannot flood
+/// readiness evidence.
+const MAX_CAPACITY_ACCOUNTS: usize = 64;
 
 impl Default for AgentTaskProviderCapacityReadiness {
     fn default() -> Self {
@@ -92,6 +115,15 @@ impl Default for AgentTaskProviderCapacityReadiness {
 impl AgentTaskProviderCapacityReadiness {
     pub fn is_exhausted(&self) -> bool {
         matches!(self, Self::Exhausted { .. })
+    }
+
+    /// Per-account breakdown, empty when the provider reports only a route
+    /// summary.
+    pub fn accounts(&self) -> &[AgentTaskProviderCapacityAccount] {
+        match self {
+            Self::Known { accounts, .. } | Self::Exhausted { accounts, .. } => accounts,
+            Self::Unknown { .. } => &[],
+        }
     }
 
     /// The reset instant, parsed, when this evidence carries one that parses
@@ -120,22 +152,28 @@ impl AgentTaskProviderCapacityReadiness {
 pub fn capacity_readiness_from_probe_result(
     verdict: &ProviderReadinessInvocationResult,
 ) -> AgentTaskProviderCapacityReadiness {
-    // Round-trip through `DateTime` only to validate the provider's string is
-    // actually a parseable RFC 3339 instant; an unparseable value is dropped
-    // rather than stored as an unusable reset time.
-    let reset_at = verdict
+    let reset_at = normalized_reset_at(
+        verdict
+            .capacity
+            .as_ref()
+            .and_then(|capacity| capacity.reset_at.as_deref()),
+    );
+    let accounts = verdict
         .capacity
         .as_ref()
-        .and_then(|capacity| capacity.reset_at.as_deref())
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc).to_rfc3339());
+        .map(|capacity| capacity_accounts(&capacity.accounts))
+        .unwrap_or_default();
     if verdict.classification.trim() == PROVIDER_READINESS_CAPACITY_CLASSIFICATION {
         let reason = if verdict.reason.trim().is_empty() {
             "the provider reported its account capacity as exhausted".to_string()
         } else {
             homeboy_core::redaction::redact_string(&verdict.reason)
         };
-        return AgentTaskProviderCapacityReadiness::Exhausted { reset_at, reason };
+        return AgentTaskProviderCapacityReadiness::Exhausted {
+            reset_at,
+            reason,
+            accounts,
+        };
     }
     match verdict.capacity.as_ref() {
         Some(capacity) if capacity.remaining.is_some() || capacity.limit.is_some() => {
@@ -144,12 +182,50 @@ pub fn capacity_readiness_from_probe_result(
                 limit: capacity.limit.clone(),
                 unit: capacity.unit.clone(),
                 reset_at,
+                accounts,
             }
         }
         _ => AgentTaskProviderCapacityReadiness::unknown(
             "the provider's readiness invocation does not report capacity",
         ),
     }
+}
+
+// Round-trip through `DateTime` only to validate the provider's string is
+// actually a parseable RFC 3339 instant; an unparseable value is dropped
+// rather than stored as an unusable reset time.
+fn normalized_reset_at(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc).to_rfc3339())
+}
+
+fn capacity_accounts(
+    accounts: &[ProviderReadinessInvocationAccountCapacity],
+) -> Vec<AgentTaskProviderCapacityAccount> {
+    accounts
+        .iter()
+        .take(MAX_CAPACITY_ACCOUNTS)
+        .enumerate()
+        .map(|(index, account)| {
+            let label = account.account.trim();
+            let state = account.state.trim();
+            AgentTaskProviderCapacityAccount {
+                account: if label.is_empty() {
+                    format!("account#{index}")
+                } else {
+                    homeboy_core::redaction::redact_string(label)
+                },
+                state: if state.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    homeboy_core::redaction::redact_string(state)
+                },
+                remaining: account.remaining.clone().filter(|value| value.is_number()),
+                reset_at: normalized_reset_at(account.reset_at.as_deref()),
+            }
+        })
+        .collect()
 }
 
 /// Capacity readiness for a route whose live probe did not run (not
@@ -192,7 +268,11 @@ pub fn capacity_readiness_from_outcome(
         .or_else(|| outcome.summary.clone())
         .filter(|reason| !reason.trim().is_empty())
         .unwrap_or_else(|| "the provider reported its account capacity as exhausted".to_string());
-    Some(AgentTaskProviderCapacityReadiness::Exhausted { reset_at, reason })
+    Some(AgentTaskProviderCapacityReadiness::Exhausted {
+        reset_at,
+        reason,
+        accounts: Vec::new(),
+    })
 }
 
 #[cfg(test)]
@@ -230,6 +310,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                accounts: Vec::new(),
             }),
         ));
         assert_eq!(
@@ -239,6 +320,7 @@ mod tests {
                 limit: Some(Value::from(100)),
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                accounts: Vec::new(),
             }
         );
         assert!(!readiness.is_exhausted());
@@ -255,6 +337,7 @@ mod tests {
                 limit: None,
                 unit: None,
                 reset_at: Some("2026-08-27T12:37:03Z".to_string()),
+                accounts: Vec::new(),
             }),
         ));
         let expected_reset_at = chrono::Utc
@@ -266,6 +349,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some(expected_reset_at.to_rfc3339()),
                 reason: "5-hour usage limit reached".to_string(),
+                accounts: Vec::new(),
             }
         );
         assert!(readiness.is_exhausted());
@@ -285,10 +369,163 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: None,
                 reason: "no quota left".to_string(),
+                accounts: Vec::new(),
             }
         );
         assert!(readiness.is_exhausted());
         assert_eq!(readiness.reset_at(), None);
+    }
+
+    fn account(
+        label: &str,
+        state: &str,
+        remaining: Option<Value>,
+        reset_at: Option<&str>,
+    ) -> ProviderReadinessInvocationAccountCapacity {
+        ProviderReadinessInvocationAccountCapacity {
+            account: label.to_string(),
+            state: state.to_string(),
+            remaining,
+            reset_at: reset_at.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pooled_accounts_are_reported_per_account_with_normalized_reset_instants() {
+        let readiness = capacity_readiness_from_probe_result(&verdict(
+            true,
+            "ready",
+            "",
+            Some(ProviderReadinessInvocationCapacity {
+                remaining: Some(Value::from(91)),
+                limit: Some(Value::from(100)),
+                unit: Some("percent".to_string()),
+                reset_at: Some("2026-09-24T15:50:00Z".to_string()),
+                accounts: vec![
+                    account(
+                        "plan-a@example.com",
+                        "exhausted",
+                        Some(Value::from(0)),
+                        Some("2026-09-25T03:00:00.307Z"),
+                    ),
+                    account(
+                        "plan-b",
+                        "available",
+                        Some(Value::from(91)),
+                        Some("2026-09-24T15:50:00Z"),
+                    ),
+                    account(
+                        "",
+                        "",
+                        Some(Value::from("not a number")),
+                        Some("not a timestamp"),
+                    ),
+                ],
+            }),
+        ));
+        assert_eq!(
+            readiness.accounts(),
+            &[
+                AgentTaskProviderCapacityAccount {
+                    account: "plan-a@example.com".to_string(),
+                    state: "exhausted".to_string(),
+                    remaining: Some(Value::from(0)),
+                    reset_at: Some("2026-09-25T03:00:00.307+00:00".to_string()),
+                },
+                AgentTaskProviderCapacityAccount {
+                    account: "plan-b".to_string(),
+                    state: "available".to_string(),
+                    remaining: Some(Value::from(91)),
+                    reset_at: Some("2026-09-24T15:50:00+00:00".to_string()),
+                },
+                AgentTaskProviderCapacityAccount {
+                    account: "account#2".to_string(),
+                    state: "unknown".to_string(),
+                    remaining: None,
+                    reset_at: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_exhausted_pool_keeps_every_account_and_bounds_the_list() {
+        let accounts = (0..100)
+            .map(|index| {
+                account(
+                    &format!("plan-{index}"),
+                    "exhausted",
+                    Some(Value::from(0)),
+                    None,
+                )
+            })
+            .collect();
+        let readiness = capacity_readiness_from_probe_result(&verdict(
+            false,
+            "capacity",
+            "every pooled plan is spent",
+            Some(ProviderReadinessInvocationCapacity {
+                remaining: Some(Value::from(0)),
+                accounts,
+                ..Default::default()
+            }),
+        ));
+        assert!(readiness.is_exhausted());
+        assert_eq!(readiness.accounts().len(), MAX_CAPACITY_ACCOUNTS);
+        let serialized = serde_json::to_value(&readiness).expect("serializes");
+        assert_eq!(serialized["accounts"][0]["account"], "plan-0");
+    }
+
+    #[test]
+    fn the_readiness_wire_format_carries_capacity_accounts() {
+        let verdict: ProviderReadinessInvocationResult = serde_json::from_value(serde_json::json!({
+            "ready": false,
+            "classification": "capacity",
+            "retryable": true,
+            "remediation": "wait",
+            "reason": "provider_capacity_exhausted",
+            "cache_key": "k",
+            "identity": {},
+            "capacity": {
+                "remaining": 0,
+                "limit": 100,
+                "unit": "percent",
+                "reset_at": "2026-09-27T15:26:09Z",
+                "accounts": [
+                    { "account": "one@example.com", "state": "exhausted", "remaining": 0, "reset_at": "2026-09-27T15:26:09Z", "windows": [] },
+                    { "account": "two@example.com", "state": "exhausted", "remaining": 0, "reset_at": "2026-09-28T23:29:35Z" }
+                ]
+            }
+        }))
+        .expect("readiness result deserializes");
+        let readiness = capacity_readiness_from_probe_result(&verdict);
+        assert!(readiness.is_exhausted());
+        assert_eq!(
+            readiness
+                .accounts()
+                .iter()
+                .map(|account| (account.account.as_str(), account.reset_at.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("one@example.com", Some("2026-09-27T15:26:09+00:00")),
+                ("two@example.com", Some("2026-09-28T23:29:35+00:00")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_route_without_accounts_omits_the_field() {
+        let readiness = capacity_readiness_from_probe_result(&verdict(
+            true,
+            "ready",
+            "",
+            Some(ProviderReadinessInvocationCapacity {
+                remaining: Some(Value::from(1)),
+                ..Default::default()
+            }),
+        ));
+        let serialized = serde_json::to_value(&readiness).expect("serializes");
+        assert!(serialized.get("accounts").is_none(), "{serialized}");
     }
 
     #[test]
@@ -317,6 +554,7 @@ mod tests {
                 limit: None,
                 unit: Some("requests".to_string()),
                 reset_at: None,
+                accounts: Vec::new(),
             }),
         ));
         assert!(matches!(
@@ -390,6 +628,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: Some(reset_at.to_rfc3339()),
                 reason: "the provider reported its account capacity as exhausted".to_string(),
+                accounts: Vec::new(),
             }
         );
         assert!(readiness.is_exhausted());
@@ -420,6 +659,7 @@ mod tests {
             AgentTaskProviderCapacityReadiness::Exhausted {
                 reset_at: None,
                 reason: "the provider reported its account capacity as exhausted".to_string(),
+                accounts: Vec::new(),
             }
         );
         assert_eq!(readiness.reset_at(), None);
