@@ -614,6 +614,24 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
 #[cfg(unix)]
 #[test]
 fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path() {
+    // This exercises the full Cook recovery -> promote CLI call chain (durable
+    // aggregate recovery, promotion source resolution, and the public
+    // `agent-task promote` parse/dispatch path) in one test. That chain is
+    // legitimately deep, not unbounded, but it needs more than libtest's
+    // default 2MiB test-thread stack in an unoptimized debug build; see the
+    // identical pattern on `cook_preview_reaches_backend_resolution_before_runtime_validation`
+    // in cli_runtime.rs.
+    std::thread::Builder::new()
+        .name("direct-cook-promotion-recovery".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path)
+        .expect("spawn direct Cook promotion recovery test")
+        .join()
+        .expect("direct Cook promotion recovery test");
+}
+
+#[cfg(unix)]
+fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path() {
     with_temp_home(|| {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
@@ -857,6 +875,13 @@ fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path
         assert_eq!(run_source, path_source);
 
         let mut reports = Vec::new();
+        // The direct `promote` CLI path preflights `--to-worktree` through
+        // Homeboy's native worktree registry (`preflight_managed_workspace`),
+        // which a bare `git worktree add` never registers. Passing the real
+        // checkout path instead of the symbolic `fixture@...` handle takes
+        // the registry-free direct-path branch that same preflight already
+        // supports.
+        let target_str = target.to_str().expect("target path");
         for source_spec in [
             candidate_run_id.to_string(),
             aggregate_path.display().to_string(),
@@ -869,7 +894,7 @@ fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path
                 "--artifact-id",
                 artifact_id,
                 "--to-worktree",
-                "fixture@selected-large-patch",
+                target_str,
                 "--provider-argv",
                 "sh",
                 "--provider-argv",
@@ -888,10 +913,15 @@ fn direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_path
                 .expect("recovered candidate remains directly promotable");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(report["status"], "dry_run");
-            assert_eq!(report["source"]["run_id"], candidate_run_id);
-            assert_eq!(report["patch_artifact"]["id"], artifact_id);
-            reports.push(report);
+            // A durable run source routes promote through the control-plane
+            // action acknowledgement wrapper (`execute_promotion_action_
+            // from_current_environment`), which nests the promotion report
+            // under `result.data` rather than returning it at the top level.
+            let promotion_report = &report["result"]["data"];
+            assert_eq!(promotion_report["status"], "dry_run");
+            assert_eq!(promotion_report["source"]["run_id"], candidate_run_id);
+            assert_eq!(promotion_report["patch_artifact"]["id"], artifact_id);
+            reports.push(promotion_report.clone());
         }
         assert_eq!(reports[0]["patch_artifact"], reports[1]["patch_artifact"]);
     });

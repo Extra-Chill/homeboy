@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_finalization_parses_component_selector_and_recovery_rejects_it() {
+    fn manual_finalization_parses_component_selector_and_recovery_accepts_it_as_fallback() {
         let help = Cli::command()
             .find_subcommand("agent-task")
             .expect("agent-task command")
@@ -395,7 +395,11 @@ mod tests {
         };
         assert_eq!(args.component.as_deref(), Some("nested-component"));
 
-        assert!(Cli::try_parse_from([
+        // #14728: --component no longer conflicts with --recover. It is a
+        // documented fallback Homeboy consults only when a pre-existing
+        // durable record carries no recorded component identity; Cook's own
+        // recorded identity otherwise wins.
+        let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
             "finalize-pr",
@@ -404,7 +408,15 @@ mod tests {
             "--component",
             "nested-component",
         ])
-        .is_err());
+        .expect("recovery with a fallback --component parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("expected finalize-pr command");
+        };
+        assert_eq!(args.recover.as_deref(), Some("cook-a"));
+        assert_eq!(args.component.as_deref(), Some("nested-component"));
     }
 
     #[test]
