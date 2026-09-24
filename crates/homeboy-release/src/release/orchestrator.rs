@@ -157,6 +157,31 @@ fn run_with_plan_inner(
     // may fast-forward HEAD and `preflight.changelog_bootstrap` may create the
     // first changelog file; changelog/version planning must observe those
     // changes instead of stale checkout state.
+    //
+    // An auto-detected bump type was resolved against the checkout BEFORE
+    // `preflight.remote_sync` ran. If remote_sync fast-forwarded HEAD, that
+    // stale bump type is a "requested" observation of an older commit range
+    // than the one `preflight.bump_policy`'s "recommended" side is about to
+    // (re)compute from the now-advanced HEAD — a false-positive underbump
+    // (#14974: a `feat:` commit that landed on the remote after auto-detection
+    // ran made the release step ask for a lower bump than it itself detected).
+    // Refresh the auto-detected bump type from the same post-remote-sync scope
+    // so both sides of that comparison observe one commit range. An explicit
+    // `--bump` is a real user request and is never refreshed away.
+    let effective_options: ReleaseOptions =
+        if options.pipeline.head || options.bump_policy.bump_type_explicit {
+            options.clone()
+        } else {
+            let release_scope =
+                super::scope::ReleaseScope::resolve(&preflight_component, component_id)?;
+            let refreshed_bump_type =
+                super::workflow::refresh_auto_bump_type(component_id, &release_scope)?;
+            let mut refreshed = options.clone();
+            refreshed.bump_type = refreshed_bump_type;
+            refreshed
+        };
+    let options = &effective_options;
+
     let release_plan = plan(component_id, options)?;
     let completed_preflights: HashSet<&'static str> =
         initial_executable_preflight_ids().iter().copied().collect();

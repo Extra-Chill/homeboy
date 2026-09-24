@@ -616,6 +616,16 @@ pub struct ReleaseBumpPolicyOptions {
     /// Require an explicit `--bump major` for stable major releases.
     #[serde(default)]
     pub(crate) require_explicit_major: bool,
+    /// The effective bump type came from an explicit `--bump` override rather
+    /// than conventional-commit auto-detection.
+    ///
+    /// Auto-detected bump types must stay reconcilable with whatever
+    /// `preflight.bump_policy` later observes as "recommended" — including
+    /// after `preflight.remote_sync` fast-forwards HEAD past the commit range
+    /// that produced them (#14974). An explicit override is a real user
+    /// request and must never be silently refreshed away.
+    #[serde(default)]
+    pub(crate) bump_type_explicit: bool,
 }
 
 impl ReleaseBumpPolicyOptions {

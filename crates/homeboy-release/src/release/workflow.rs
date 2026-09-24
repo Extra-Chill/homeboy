@@ -310,23 +310,7 @@ fn run_command_with_workspace_inner(
         let mut bump_type = auto_bump_type;
 
         // Pre-1.0 semver: breaking changes bump minor, not major.
-        // In semver, 0.x.y signals "initial development" where the public API is
-        // not stable. Breaking changes are expected and land as minor bumps.
-        // A major bump to 1.0.0 should only happen when the author explicitly
-        // decides the API is stable (via --bump major).
-        if bump_type == "major" {
-            let current_version = super::version::read_version(Some(&input.component_id))
-                .ok()
-                .and_then(|v| v.version.split('.').next().map(String::from))
-                .unwrap_or_default();
-            if current_version == "0" {
-                homeboy_core::log_status!(
-                    "release",
-                    "Pre-1.0: downgrading major → minor (breaking changes are minor bumps in 0.x)"
-                );
-                bump_type = "minor".to_string();
-            }
-        }
+        bump_type = downgrade_major_pre_1_0(&input.component_id, bump_type);
 
         if bump_type != "none" {
             homeboy_core::log_status!(
@@ -358,6 +342,7 @@ fn run_command_with_workspace_inner(
             force_lower_bump: input.force_lower_bump,
             force_empty_release: input.bump_override.is_some(),
             require_explicit_major,
+            bump_type_explicit: input.bump_override.is_some(),
         },
         preflight_placement: Default::default(),
         readiness: input.readiness.clone(),
@@ -562,6 +547,19 @@ fn run_command_with_workspace_inner(
         deploy_exit_code,
         post_release_exit,
     );
+
+    // The bump type resolved above ran BEFORE `preflight.remote_sync` — which
+    // `run_with_plan` just executed and which may have fast-forwarded HEAD
+    // past the commit range that produced it (#14974). The rebuilt plan's
+    // semver recommendation reflects whatever bump type actually drove this
+    // release (refreshed post-remote-sync when auto-detected, unchanged when
+    // explicit), so prefer it for the reported result over the pre-remote-sync
+    // value. Recovery/head releases carry no recommendation; keep the
+    // originally resolved bump type for those.
+    let bump_type = plan
+        .semver_recommendation()
+        .map(|recommendation| recommendation.requested_bump)
+        .unwrap_or(bump_type);
 
     Ok((
         ReleaseWorkspaceCommandResult {
@@ -853,6 +851,57 @@ fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>>
         }
         None => Ok(None),
     }
+}
+
+/// Pre-1.0 semver: breaking changes bump minor, not major.
+///
+/// In semver, 0.x.y signals "initial development" where the public API is not
+/// stable. Breaking changes are expected and land as minor bumps. A major
+/// bump to 1.0.0 should only happen when the author explicitly decides the
+/// API is stable (via `--bump major`).
+fn downgrade_major_pre_1_0(component_id: &str, bump_type: String) -> String {
+    if bump_type != "major" {
+        return bump_type;
+    }
+
+    let current_version = super::version::read_version(Some(component_id))
+        .ok()
+        .and_then(|v| v.version.split('.').next().map(String::from))
+        .unwrap_or_default();
+    if current_version != "0" {
+        return bump_type;
+    }
+
+    homeboy_core::log_status!(
+        "release",
+        "Pre-1.0: downgrading major → minor (breaking changes are minor bumps in 0.x)"
+    );
+    "minor".to_string()
+}
+
+/// Re-resolve the auto-detected bump type from the current release scope,
+/// applying the same pre-1.0 major→minor downgrade as the initial auto
+/// resolution at the top of `run_release`.
+///
+/// `preflight.remote_sync` may fast-forward HEAD past the commit range that
+/// produced the bump type originally baked into `ReleaseOptions` (issue
+/// #14974): the release was auto-detected as "patch" against a checkout that
+/// was later fast-forwarded to include a `feat:` commit, so the rebuilt
+/// plan's `preflight.bump_policy` step recomputed "recommended" as "minor"
+/// against a "requested" that had gone stale — an underbump false positive.
+///
+/// The fix is to keep "requested" and "recommended" observations of the same
+/// commit range: when the bump was auto-detected (not an explicit `--bump`),
+/// callers that rebuild the plan after `preflight.remote_sync` may have run
+/// must refresh the requested bump type from the same (possibly advanced)
+/// HEAD that `preflight.bump_policy`'s "recommended" side will observe.
+pub(super) fn refresh_auto_bump_type(
+    component_id: &str,
+    release_scope: &ReleaseScope,
+) -> Result<String> {
+    let (bump_type, _releasable_count) =
+        resolve_bump(release_scope)?.unwrap_or_else(|| ("none".to_string(), 0));
+    Ok(downgrade_major_pre_1_0(component_id, bump_type))
 }
 
 pub(super) fn short_sha(commit: &str) -> &str {
@@ -2568,6 +2617,107 @@ mod tests {
                 &["git", "commit", "-q", "-m", &format!("fix: change {index}")],
             );
         }
+    }
+
+    /// #14974: a `feat:` commit that lands on the remote *after* the release
+    /// checkout's local git state was last observed, but *before*
+    /// `preflight.remote_sync` fast-forwards that checkout inside
+    /// `run_with_plan_inner` (see orchestrator.rs's "Rebuild the full plan
+    /// after executable preflights" note).
+    ///
+    /// `local` clones at a point where only a `fix:` commit is visible past
+    /// the last tag — auto-detection would call that a `patch` release if it
+    /// ran right now. The remote then advances with a `feat:` commit that
+    /// `local` has not fetched. Only `preflight.remote_sync`'s fast-forward
+    /// reveals it.
+    fn setup_deferred_remote_feature_fixture(remote: &std::path::Path, local: &std::path::Path) {
+        run_in(remote, &["git", "init", "-q", "--bare", "-b", "main"]);
+
+        let seed = tempfile::tempdir().expect("seed tempdir");
+        let seed = seed.path();
+        run_in(
+            seed,
+            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
+        );
+        run_in(seed, &["git", "config", "user.email", "test@example.com"]);
+        run_in(seed, &["git", "config", "user.name", "Test"]);
+        run_in(seed, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(
+            seed.join("homeboy.json"),
+            r#"{
+                "id": "fixture",
+                "changelog_target": "CHANGELOG.md",
+                "version_targets": [
+                    { "file": "VERSION", "pattern": "^([0-9]+\\.[0-9]+\\.[0-9]+)$" }
+                ]
+            }"#,
+        )
+        .expect("write homeboy config");
+        std::fs::write(seed.join("VERSION"), "1.0.0\n").expect("write version");
+        std::fs::write(seed.join("CHANGELOG.md"), "# Changelog\n").expect("write changelog");
+        run_in(seed, &["git", "add", "."]);
+        run_in(seed, &["git", "commit", "-q", "-m", "chore: initial"]);
+        run_in(seed, &["git", "tag", "v1.0.0"]);
+        run_in(seed, &["git", "push", "-q", "origin", "main", "v1.0.0"]);
+
+        // A fix lands on the remote before the release checkout clones.
+        // Auto-detection sees only this commit if it runs before any fetch.
+        std::fs::write(seed.join("bug.txt"), "fixed\n").expect("write fix file");
+        run_in(seed, &["git", "add", "."]);
+        run_in(seed, &["git", "commit", "-q", "-m", "fix: patch bug"]);
+        run_in(seed, &["git", "push", "-q", "origin", "main"]);
+
+        // The release checkout clones here: chore + fix, nothing more.
+        run_in(
+            local,
+            &["git", "clone", "-q", &remote.to_string_lossy(), "."],
+        );
+        run_in(local, &["git", "config", "user.email", "test@example.com"]);
+        run_in(local, &["git", "config", "user.name", "Test"]);
+        run_in(local, &["git", "config", "commit.gpgsign", "false"]);
+
+        // A feature merges on the remote *after* the release checkout cloned.
+        // `local` does not know about it yet — only a fetch will reveal it.
+        std::fs::write(seed.join("feature.txt"), "added\n").expect("write feature file");
+        run_in(seed, &["git", "add", "."]);
+        run_in(seed, &["git", "commit", "-q", "-m", "feat: add widget"]);
+        run_in(seed, &["git", "push", "-q", "origin", "main"]);
+    }
+
+    /// Regression test for #14974: the release workflow's auto-detected bump
+    /// type and `preflight.bump_policy`'s freshly-detected impact must agree
+    /// even when `preflight.remote_sync` fast-forwards the checkout past a
+    /// `feat:` commit that landed after this process last read local git
+    /// state. Before the fix, auto-detection ran on the stale, pre-fetch
+    /// range (`fix:` only → `patch`) while the plan rebuild that follows
+    /// `preflight.remote_sync` measured the post-fetch range (`fix:` +
+    /// `feat:` → `minor`), and `preflight.bump_policy` failed with "Requested
+    /// patch bump is lower than detected minor impact" even though nothing
+    /// was actually wrong — the checkout was simply behind when detection
+    /// ran (run 35815709562, head 043a8c465).
+    #[test]
+    fn auto_detected_bump_observes_a_remote_feature_commit_fetched_during_preflight() {
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        let local = tempfile::tempdir().expect("local tempdir");
+        setup_deferred_remote_feature_fixture(remote.path(), local.path());
+
+        let (result, exit_code) = run_command(ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(local.path().to_string_lossy().to_string()),
+            dry_run: false,
+            git_identity: Some("Homeboy Test <homeboy@example.test>".to_string()),
+            ..Default::default()
+        })
+        .expect("auto-detected release should observe the fetched feature commit");
+
+        assert_eq!(
+            exit_code, 0,
+            "release must not fail preflight.bump_policy on a false underbump: {result:#?}"
+        );
+        assert_eq!(result.status, "released");
+        assert_eq!(result.bump_type, "minor");
+        assert_eq!(result.new_version.as_deref(), Some("1.1.0"));
+        assert_eq!(result.tag.as_deref(), Some("v1.1.0"));
     }
 }
 #[test]
