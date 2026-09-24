@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.387.0] - 2026-09-24
+
+### Added
+- read locked versions from a dependency adapter's declared lockfile
+
 ## [0.386.0] - 2026-09-23
 
 ### Added
