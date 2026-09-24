@@ -30,7 +30,7 @@ Adapters may describe:
 | `project_signals` | Files that identify a project root or optional capability. |
 | `lockfile_priority` | Ordered lockfiles for deterministic package-manager selection. |
 | `package_managers` | Selection signals, install intent, script runner commands, and dependency outputs. |
-| `package_identity` | Manifest paths for reading package name, version, and declared dependency maps. |
+| `package_identity` | Manifest paths for reading package name, version, and declared dependency maps, plus an optional `lockfile` describing where resolved versions are recorded so status reports them without installing. |
 | `helpers` | Extension-owned helper capabilities that prepare dependencies without requiring core to know their implementation. |
 
 ## Discovery

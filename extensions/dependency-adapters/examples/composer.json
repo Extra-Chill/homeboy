@@ -57,7 +57,12 @@
         "manifest": "composer.json",
         "name": "name",
         "version": "version",
-        "dependencies": ["require", "require-dev"]
+        "dependencies": ["require", "require-dev"],
+        "lockfile": {
+          "path": "composer.lock",
+          "packages": ["packages", "packages-dev"],
+          "reference": ["source.reference", "dist.reference"]
+        }
       },
       "outputs": [
         { "kind": "directory", "path": "vendor", "required": true },

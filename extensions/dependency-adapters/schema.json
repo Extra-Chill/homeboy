@@ -160,6 +160,26 @@
         "dependencies": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "lockfile": {
+          "type": "object",
+          "description": "JSON lockfile recording resolved versions, read by status without installing. `packages` names keys whose values are arrays of package entries; `name` and `version` are field names within an entry; `reference` is an ordered list of dotted fallback paths to the resolved commit.",
+          "additionalProperties": false,
+          "required": ["path", "packages"],
+          "properties": {
+            "path": { "type": "string" },
+            "packages": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
+            "name": { "type": "string", "default": "name" },
+            "version": { "type": "string", "default": "version" },
+            "reference": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
         }
       }
     },
