@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.8] - 2026-09-24
+
+### Fixed
+- run the full suite when a PR changes test-harness config
+
 ## [2.20.7] - 2026-09-24
 
 ### Fixed
