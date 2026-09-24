@@ -89,6 +89,12 @@ pub enum RunnerApiOperationFailureCode {
     InvalidRequestSchema,
     UnsupportedApiVersion,
     RunnerNotFound,
+    /// The referenced runner job does not exist (or is not a job id). Added
+    /// for the watch operation (#13881); no existing code named a missing job.
+    JobNotFound,
+    /// An authenticated runner addressed a job it does not own. Added for the
+    /// watch operation (#13881); the existing codes name lookup, not standing.
+    RunnerNotAuthorized,
     SubmissionRejected,
 }
 

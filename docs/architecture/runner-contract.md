@@ -148,6 +148,48 @@ submission-key lookup reports `accepted`, `absent`, or `expired`. Controllers
 retain the original owner lease for accepted or unresolved submissions and
 release it only after authoritative non-acceptance.
 
+## Runner API v1 `watch` operation
+
+The reverse broker serves a job's durable event log to controllers through the
+versioned Runner API `watch` operation at `POST /runner/jobs/watch`
+(`homeboy/runner-api-watch-request/v1`, `homeboy/runner-api-watch-response/v1`,
+defined in `crates/contracts/homeboy-runner-contract/src/watch.rs`). A
+controller that loses its connection mid-job does not re-read the log from the
+beginning and does not guess at what it missed: it resumes from a sequence
+number.
+
+Request: `schema`, `api_version`, `runner_id`, `job_id`, `after_sequence`, and
+optional `limit`. Response: the `job_id`, the events with
+`sequence > after_sequence` in ascending order, `next_sequence` (the highest
+returned sequence, or the request's `after_sequence` when nothing was
+returned), `terminal` (whether the job reached a terminal status), and
+`terminal_outcome` (`succeeded`, `failed`, or `cancelled`) when the job is
+terminal.
+
+The resume rule: **a client that loses its connection repeats `watch` with the
+last `next_sequence` it received and gets every later event exactly once.**
+`after_sequence` is an exclusive lower bound, so re-reading from a returned
+`next_sequence` can neither duplicate nor skip events. `limit` pages a long
+log: at most `limit` events come back per call and the next call continues
+from the returned `next_sequence`, so a client can page the whole log with no
+gaps and no duplicates.
+
+Operation-level failures are typed values in the response's `failure` field
+using the shared `RunnerApiOperationFailure` vocabulary: `job_not_found` for
+an unknown job id, `runner_not_authorized` when the authenticated runner does
+not own the job, and `unsupported_api_version` when the request names a major
+version the broker does not serve. Missing or invalid bearer credentials
+remain an HTTP-level `401`, as on every other broker route. Authorization uses
+the same reader scope as the neighbouring job reads: a Work-scoped credential
+first, falling back to Submit, with ownership bounded by the job's target
+runner id.
+
+The broker advertises the operation as the `runner-api-watch` capability
+(version 1) in `GET /capabilities`, so controllers can negotiate it before
+relying on it. Controller-side adoption — the Cook handoff consuming `watch` —
+is a later step of
+[#13881](https://github.com/Extra-Chill/homeboy/issues/13881).
+
 ## Failure context
 
 Runner exec results expose a generic `failure_context` object when the executed

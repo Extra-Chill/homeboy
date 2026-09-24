@@ -17,6 +17,7 @@ mod resource;
 pub mod secret_env_plan;
 mod session;
 mod submission;
+mod watch;
 mod workspace;
 mod workspace_authority;
 
@@ -67,6 +68,11 @@ pub use session::{
 pub use submission::{
     RunnerApiSubmitOutcome, RunnerApiSubmitRequest, RunnerApiSubmitResponse,
     RunnerCredentialDelivery, RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA,
+};
+pub use watch::{
+    RunnerApiWatchCapability, RunnerApiWatchRequest, RunnerApiWatchResponse,
+    RunnerApiWatchTerminalOutcome, RunnerApiWatchedEvent, RUNNER_API_WATCH_CAPABILITY,
+    RUNNER_API_WATCH_REQUEST_SCHEMA, RUNNER_API_WATCH_RESPONSE_SCHEMA,
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,
