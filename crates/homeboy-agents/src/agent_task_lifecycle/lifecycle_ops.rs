@@ -3171,6 +3171,18 @@ where
     // already committed to SQLite; historical Cook index import never
     // affects that lookup, so it must not run on this hot path (#14962).
     if let Ok(existing) = lifecycle_store.read_record_bounded(&run_id) {
+        // A resubmission for this exact run id always rebuilds `record` fresh
+        // above, defaulting `state` to `Queued`. That discards a `Running`
+        // existing record's state before the caller's subsequent
+        // `mark_running` call ever runs, so a controller recovering a stale
+        // child (whose owner process is gone, not one that is still working)
+        // can never observe `reclaimed_stale_running`: `mark_running_in_store`
+        // only sets it when the record it mutates is already `Running`.
+        // Preserve that state here so the reclaim it is about to record stays
+        // durable evidence instead of silently reading as a fresh start.
+        if existing.state == AgentTaskRunState::Running && !existing.owner_process_is_running() {
+            record.state = existing.state;
+        }
         let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
         let submitted_fanout = canonical_fanout_mission(&record.metadata)?;
         if existing_fanout.is_some()
