@@ -100,7 +100,7 @@ fn publish_step_result(
     expected_version: Option<&str>,
 ) -> ReleaseStepResult {
     if let Some(reason) = extension_auth_required_reason(response) {
-        return auth_required_skip_result(step_id, target, extension_id, data, reason);
+        return auth_required_failure_result(step_id, target, extension_id, data, reason);
     }
 
     if let Some(reason) = extension_blocking_publish_reason(response) {
@@ -126,7 +126,7 @@ fn publish_step_result(
         }
 
         if let Some(reason) = publish_output_auth_required_reason(response) {
-            return auth_required_skip_result(step_id, target, extension_id, data, reason);
+            return auth_required_failure_result(step_id, target, extension_id, data, reason);
         }
     }
 
@@ -163,21 +163,35 @@ fn publish_step_result(
     )
 }
 
-fn auth_required_skip_result(
+/// A publish step exists only because the component opted into registry
+/// publishing (`release.publish`) and an extension provides it. If the
+/// registry then refuses for lack of credentials, the release promised a
+/// publication it did not make, so the step fails rather than skipping.
+///
+/// Skipping here used to let a release report `succeeded` with nothing
+/// published and no warning in the operator summary (#14983). A component
+/// that does not want to publish from a given environment says so with
+/// `release.publish: false` or `--skip-publish`, never by lacking a token.
+fn auth_required_failure_result(
     step_id: &str,
     target: &str,
     extension_id: &str,
     data: Option<serde_json::Value>,
     reason: String,
 ) -> ReleaseStepResult {
-    step_skipped(
+    step_failed(
         step_id,
         step_id,
         data,
-        format!(
-            "Publish to {} via {} requires authentication: {}",
-            target, extension_id, reason
-        ),
+        Some(format!(
+            "Publish to {} via {} was not completed: {}. Configure the registry credential \
+             for this environment, or opt out explicitly with release.publish=false or \
+             --skip-publish.",
+            target,
+            extension_id,
+            reason.trim_end_matches('.')
+        )),
+        Vec::new(),
     )
 }
 
@@ -607,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_step_skips_when_extension_reports_auth_required() {
+    fn publish_step_fails_when_extension_reports_auth_required() {
         let response = serde_json::json!({
             "success": false,
             "status": "auth_required",
@@ -623,16 +637,15 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.status, ReleaseStepStatus::Skipped);
-        assert!(result
-            .warnings
-            .join("\n")
-            .contains("run the extension login command"));
-        assert!(result.error.is_none());
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        let error = result.error.expect("auth failure must carry an error");
+        assert!(error.contains("run the extension login command"));
+        assert!(error.contains("--skip-publish"));
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
-    fn publish_step_skips_when_npm_output_reports_eneedauth() {
+    fn publish_step_fails_when_npm_output_reports_eneedauth() {
         let response = serde_json::json!({
             "success": false,
             "exitCode": 1,
@@ -649,9 +662,12 @@ mod tests {
             None,
         );
 
-        assert_eq!(result.status, ReleaseStepStatus::Skipped);
-        assert!(result.warnings.join("\n").contains("ENEEDAUTH"));
-        assert!(result.error.is_none());
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(result
+            .error
+            .expect("auth failure must carry an error")
+            .contains("ENEEDAUTH"));
+        assert!(result.warnings.is_empty());
     }
 
     #[test]
