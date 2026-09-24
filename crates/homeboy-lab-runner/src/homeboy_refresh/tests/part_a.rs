@@ -1462,7 +1462,13 @@ fn materialize_failure_preserves_compiler_diagnostics_and_active_binary() {
             target_dir: Some(workspace.join("build").display().to_string()),
             reconnect: false,
             force: false,
-            allow_downgrade: false,
+            // The downgrade-ancestry preflight proves the requested ref
+            // against the controller's own build commit as an authority
+            // (`refresh_authority_commits`); this fixture's one-commit repo
+            // has no relation to this checkout's real history, so ancestry
+            // can never be proven there. This test is about surfacing a
+            // compiler failure during materialize, not downgrade safety.
+            allow_downgrade: true,
             dry_run: false,
         })
         .expect("refresh returns diagnostics for compiler failure");

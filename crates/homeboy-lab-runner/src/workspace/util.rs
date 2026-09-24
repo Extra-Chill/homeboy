@@ -327,7 +327,7 @@ fn remaining_timeout(deadline: Instant) -> Result<Duration> {
         .ok_or_else(|| workspace_preparation_timeout("workspace synchronization", Duration::ZERO))
 }
 
-fn workspace_preparation_timeout(action: &str, timeout: Duration) -> Error {
+pub(crate) fn workspace_preparation_timeout(action: &str, timeout: Duration) -> Error {
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(

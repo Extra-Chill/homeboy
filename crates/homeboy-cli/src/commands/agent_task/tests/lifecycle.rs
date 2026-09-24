@@ -439,19 +439,17 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
             compact_diagnosis["root_cause"]["class"],
             "runner.lab_transport_failure"
         );
-        for output in [&compact_diagnosis] {
+        // Both compact and full diagnosis route through the same
+        // `attach_diagnose_actionable` and carry their one remediation
+        // exclusively under `_homeboy_actionable.next_actions`; there is no
+        // separate top-level `next_action` field on either output.
+        for output in [&compact_diagnosis, &full_diagnosis] {
             let actions = output["_homeboy_actionable"]["next_actions"]
                 .as_array()
                 .expect("one actionable remediation");
             assert_eq!(actions.len(), 1);
             assert_eq!(
                 actions[0]["command"],
-                "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
-            );
-        }
-        for action in [&full_diagnosis["next_action"]] {
-            assert_eq!(
-                action["command"],
                 "homeboy runner doctor homeboy-lab --scope lab-offload --repair"
             );
         }
@@ -1278,37 +1276,28 @@ fn recoverable_runner_cook_args(source: &std::path::Path) -> AgentTaskCookArgs {
 
 fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
     let root = tempfile::tempdir().expect("fixture root");
-    let remote = root.path().join("origin.git");
+    let bare_remote_path = root.path().join("origin.git");
     let primary = root.path().join("primary");
     let source = root.path().join("worktree");
     std::fs::create_dir(&primary).expect("create primary checkout");
     let initialized = Command::new("git")
         .args(["init", "--bare"])
-        .arg(&remote)
+        .arg(&bare_remote_path)
         .status()
         .expect("create fixture remote");
     assert!(initialized.success());
     init_runtime_component_checkout(&primary);
-    let remote = Command::new("git")
+    let remote_added = Command::new("git")
         .args([
             "remote",
             "add",
             "origin",
-            remote.to_str().expect("fixture remote path"),
+            bare_remote_path.to_str().expect("fixture remote path"),
         ])
         .current_dir(&primary)
         .status()
         .expect("configure fixture remote");
-    assert!(remote.success());
-    homeboy::core::component::write_standalone_component_config(
-        &homeboy::core::component::Component {
-            id: "fixture".to_string(),
-            local_path: primary.display().to_string(),
-            remote_url: Some("https://github.com/example/fixture.git".to_string()),
-            ..Default::default()
-        },
-    )
-    .expect("register fixture primary");
+    assert!(remote_added.success());
     let pushed = Command::new("git")
         .args(["push", "-u", "origin", "main"])
         .current_dir(&primary)
@@ -1322,6 +1311,31 @@ fn recoverable_runner_worktree() -> (tempfile::TempDir, std::path::PathBuf) {
         .status()
         .expect("create fixture worktree");
     assert!(worktree.success());
+    // Cook's destination-identity check (#14728 era) requires the checkout's
+    // `origin` remote to canonicalize to the same identity as the registered
+    // component's `remote_url`, and a canonical identity needs a
+    // `host/owner/repo`-shaped URL, which a bare local filesystem path is
+    // not. Real git operations above needed the actual bare-repo path to
+    // push and add a worktree; once that is done, `origin` is repointed to
+    // the same GitHub-shaped URL the component registers below. Worktrees
+    // share the primary checkout's `.git/config`, so this is visible from
+    // `source` too.
+    let fixture_remote_url = "https://github.com/example/fixture.git";
+    let remote_repointed = Command::new("git")
+        .args(["remote", "set-url", "origin", fixture_remote_url])
+        .current_dir(&primary)
+        .status()
+        .expect("repoint fixture remote to its canonical identity");
+    assert!(remote_repointed.success());
+    homeboy::core::component::write_standalone_component_config(
+        &homeboy::core::component::Component {
+            id: "fixture".to_string(),
+            local_path: primary.display().to_string(),
+            remote_url: Some(fixture_remote_url.to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("register fixture primary");
     (root, source)
 }
 
@@ -4545,7 +4559,23 @@ fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
     );
     let gate_failure = super::super::status::execution_states_from_aggregate(
         &provider_failure,
-        &json!({ "metadata": { "latest_promotion": { "status": "gate_failed" } } }),
+        &json!({
+            "metadata": {
+                "latest_promotion": {
+                    "status": "gate_failed",
+                    // #11468 "distinguish retained candidates": a promotion
+                    // status alone is not proof the target changed, so the
+                    // gate state only reads "failed" once this full
+                    // post-apply provenance establishes target_applied.
+                    "provenance": {
+                        "post_apply": true,
+                        "candidate": {"sha": "deadbeef"}
+                    },
+                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "to_worktree": "worktree"
+                }
+            }
+        }),
     );
     assert_eq!(gate_failure["provider"][0]["state"], "failed");
     assert_eq!(gate_failure["gate"]["state"], "failed");
@@ -4568,6 +4598,14 @@ fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_fa
                     "source": {"kind": "aggregate", "task_id": "task", "run_id": "run"},
                     "to_worktree": "worktree",
                     "target": {"worktree": "worktree"},
+                    // #11468 "distinguish retained candidates": this full
+                    // post-apply provenance is what establishes
+                    // target_applied so the gate state reads its normalized
+                    // outcome instead of defaulting to "not_run".
+                    "provenance": {
+                        "post_apply": true,
+                        "candidate": {"sha": "deadbeef"}
+                    },
                     "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
                     "deterministic_gates": [{
                         "id": "gate",
@@ -5955,6 +5993,16 @@ fn ordinary_resume_keeps_aggregate_output_shape() {
         .expect("terminal aggregate");
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
             .expect("persist terminal aggregate");
+        // 256794febf "fix(actions): finalize control-plane recovery" scoped
+        // terminal resume eligibility to runs with durable runner evidence:
+        // only those can be idempotently reprojected without reopening
+        // execution. A bare local terminal record has no runner evidence and
+        // is correctly ineligible for resume.
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_id"] = json!("homeboy-lab");
+            record.metadata["runner_job_id"] = json!("homeboy-lab-job-1");
+        })
+        .expect("attach runner evidence to the terminal record");
 
         let (value, exit_code) = resume(ResumeArgs {
             run_id: run_id.to_string(),

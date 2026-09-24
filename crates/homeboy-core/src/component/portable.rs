@@ -808,6 +808,13 @@ mod tests {
         let error = component_from_portable_bytes(b"not json", Path::new("owner/repo @ v1"))
             .expect_err("invalid JSON must fail");
 
-        assert!(error.message.contains("parse homeboy.json"));
+        // `validation_invalid_json` puts the caller-supplied context in
+        // `details.context`, not in `message` (see homeboy-error).
+        let context = error
+            .details
+            .get("context")
+            .and_then(serde_json::Value::as_str)
+            .expect("error carries a context detail");
+        assert!(context.contains("parse homeboy.json"));
     }
 }

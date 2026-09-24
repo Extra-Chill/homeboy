@@ -1991,12 +1991,21 @@ fn active_job_report() -> RunnerStatusReport {
 
 fn stale_report() -> RunnerStatusReport {
     let mut report = connected_report();
+    // #14508 "expose pinned configured-daemon recovery" gates
+    // `safe_recovery_commands` on the candidate `--ref` matching the
+    // configured `job_command_binary_build_identity`; that ref is itself
+    // derived from this same field, so a clean immutable commit here is
+    // always self-consistent and never suppressed. A dirty marker is the
+    // reachable way to keep this stale/skewed fixture producing no safe
+    // recovery command through the public constructor (see the identical
+    // reasoning on `homeboy_provenance_suppresses_an_unverified_persisted_refresh_command`
+    // in refresh_plan.rs).
     report.stale_daemon = Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
         "homeboy lab",
         "0.327.7".to_string(),
         "0.327.8".to_string(),
         None,
-        Some("homeboy 0.327.8+c8a6673b6abc".to_string()),
+        Some("homeboy 0.327.8+c8a6673b6abc-dirty".to_string()),
     ));
     report
 }

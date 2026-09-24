@@ -2943,14 +2943,10 @@ fn test_registered_fixture_digest(path: &Path) -> Option<String> {
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
 fn test_candidate_or_executable_digest(path: &Path) -> Result<String> {
-    test_registered_fixture_digest(path).map_or_else(
-        || {
-            #[cfg(test)]
-            TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            executable_digest(path)
-        },
-        Ok,
-    )
+    // Route the miss through the same identity-keyed cache used for source
+    // fixtures, so a candidate that is repeatedly validated without changing
+    // on disk is rehashed once, not once per validation.
+    test_registered_fixture_digest(path).map_or_else(|| test_controller_fixture_digest(path), Ok)
 }
 
 #[cfg(all(not(unix), any(test, feature = "test-support")))]

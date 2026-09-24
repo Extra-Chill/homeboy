@@ -1571,6 +1571,9 @@ mod tests {
                 "/runner/bin/homeboy".to_string(),
                 "--placement".to_string(),
                 "local".to_string(),
+                // `lab_offload_command_prefix` always appends `--wait`; see
+                // its own tests in lab_command.rs.
+                "--wait".to_string(),
                 "bench".to_string(),
                 "--extension".to_string(),
                 "wordpress".to_string(),

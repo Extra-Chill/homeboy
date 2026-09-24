@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.388.0] - 2026-09-24
+
+### Added
+- report per-account provider capacity in readiness
+
+### Changed
+- align aggregate dispatchability test with current readiness semantics
+
+### Fixed
+- fix and quarantine red homeboy-cli/homeboy-lab-runner tests
+
 ## [0.387.1] - 2026-09-24
 
 ### Fixed

@@ -1145,12 +1145,21 @@ mod tests {
 
     #[test]
     fn homeboy_provenance_suppresses_an_unverified_persisted_refresh_command() {
+        // #14508 "expose pinned configured-daemon recovery" moved the safety
+        // gate: `safe_recovery_actions` now checks a candidate `--ref` against
+        // `job_command_binary_build_identity` (the configured target), not the
+        // active daemon, and refresh promotion validates that exact target
+        // against the runner's authoritative source checkout downstream. A
+        // dirty configured identity is unverifiable by construction —
+        // `recovery_ref` never derives an immutable ref from it — so it is
+        // the reachable way to exercise "no persisted refresh command is
+        // trustworthy here" through the public constructor.
         let warning = RunnerStaleDaemonWarning::new(
             "lab-runner",
             "0.265.0".to_string(),
             "0.265.0".to_string(),
             Some("homeboy 0.265.0+aaaaaaaa".to_string()),
-            Some("homeboy 0.265.0+bbbbbbbb".to_string()),
+            Some("homeboy 0.265.0+bbbbbbbb-dirty".to_string()),
         );
         let provenance = lab_homeboy_provenance_from_parts(
             "lab-runner",

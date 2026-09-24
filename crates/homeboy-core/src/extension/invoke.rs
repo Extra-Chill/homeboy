@@ -1362,22 +1362,55 @@ mod tests {
         // The escaped shell owns a sleeping child in its own session. Killing
         // only the leader leaves that child behind for the CI command
         // supervisor to discover after the test suite has passed.
+        //
+        // Once the leader dies, its child is orphaned and reparented to
+        // whatever ancestor is this host's subreaper — which, under a CI
+        // command supervisor (or this hermetic test binary itself, per
+        // `subtree::tests::split_timeout_terminates_the_delayed_process_group`),
+        // may never call `wait()` on a PID it does not otherwise know about.
+        // `kill(-pgid, 0)` reports a process group as present as long as any
+        // member — including an unreaped zombie — still holds that pgid, so
+        // it cannot distinguish "still running" from "killed, orphaned, and
+        // stuck waiting for a reaper that will never come". Poll process
+        // state instead, the same way `process_is_live` does for a single
+        // PID: a process group with no live (non-zombie) member has been
+        // fully torn down for this assertion's purposes, whether or not
+        // every zombie in it has since been reaped.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
-        for _ in 0..20 {
-            if !homeboy_core::process::pid_is_running(pid as u32) {
-                break;
-            }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while process_group_has_live_member(pid) && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(
             !homeboy_core::process::pid_is_running(pid as u32),
             "fixture escapee process group must be gone after cleanup"
         );
-        assert_eq!(
-            unsafe { libc::kill(-pid, 0) },
-            -1,
-            "fixture escapee process group must not retain its child"
+        assert!(
+            !process_group_has_live_member(pid),
+            "fixture escapee process group must not retain a live child"
         );
+    }
+
+    /// True when any process in `pgid` is alive and not a zombie. Mirrors
+    /// `git::subtree::tests::process_is_live`'s zombie-aware check, but at
+    /// process-group granularity: `kill(-pgid, 0)` alone cannot tell a
+    /// running group from one whose only remaining member is an unreaped
+    /// zombie orphaned onto a subreaper this test does not control.
+    #[cfg(target_os = "linux")]
+    fn process_group_has_live_member(pgid: i32) -> bool {
+        if unsafe { libc::kill(-pgid, 0) } != 0 {
+            return false;
+        }
+        std::process::Command::new("ps")
+            .args(["-o", "pid=,stat=", "-g", &pgid.to_string()])
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                    let state = line.split_whitespace().nth(1).unwrap_or("");
+                    !state.is_empty() && !state.starts_with('Z')
+                })
+            })
+            .unwrap_or(true)
     }
 
     #[cfg(target_os = "linux")]

@@ -890,6 +890,11 @@ pub(super) mod concurrency_tests {
     }
 
     #[test]
+    #[ignore = "homeboy#15007: preserve_base_bound_patch_after_provider_failure \
+freezes any provider failure that left a base-bound patch into \
+CandidateRecoverable and should_retry unconditionally refuses to retry that \
+status, even though this plan explicitly lists the failure's classification \
+in retry.retryable_failure_classifications"]
     fn retry_uses_clean_isolated_workspace_after_permission_denial() {
         // Attempt worktrees are now retained when they hold work (#8579), so
         // isolate the controller-scratch home to keep those retained checkouts

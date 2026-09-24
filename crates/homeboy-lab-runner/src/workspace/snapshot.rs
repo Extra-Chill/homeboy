@@ -9,7 +9,7 @@ use glob_match::glob_match;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
-use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
@@ -17,7 +17,7 @@ use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
     run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
-    ssh_args, ssh_client_for_runner,
+    ssh_args, ssh_client_for_runner, workspace_preparation_timeout,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
@@ -2558,10 +2558,14 @@ fn materialize_selected_snapshot(
 
 fn snapshot_selection_deadline(deadline: Option<Instant>) -> Result<()> {
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(Error::new(
-            ErrorCode::RemoteCommandTimeout,
-            "workspace snapshot staging deadline expired while materializing selected files",
-            serde_json::json!({ "stage": "snapshot_selection" }),
+        // The same "workspace sync deadline expired before runner command
+        // dispatch" classification `run_shell_command_before` uses below in
+        // this same call chain: an expired deadline here is a pre-handoff
+        // transport failure, not the generic bounded-command timeout a
+        // dispatched remote command times out with.
+        return Err(workspace_preparation_timeout(
+            "workspace snapshot staging",
+            Duration::ZERO,
         ));
     }
     Ok(())

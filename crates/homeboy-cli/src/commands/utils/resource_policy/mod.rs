@@ -1940,9 +1940,19 @@ mod tests {
                 preflight.controller_execution,
                 crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator,
             );
+            // A controller-owned promotion source still carries a declared
+            // Lab contract (`LabCommandContract::local_only`); the contract
+            // exists so its reason and hot_label remain diagnosable, but its
+            // `portability` is `LocalOnly`, not `Portable`, which is what
+            // rules out automatic Lab placement. That is
+            // `LabRouteIntent::Supported { automatic: false }`, not
+            // `Unsupported` — `Unsupported` means no Lab contract exists at
+            // all.
             assert!(matches!(
                 preflight.lab_route,
-                crate::core::parsed_command_preflight::LabRouteIntent::Unsupported
+                crate::core::parsed_command_preflight::LabRouteIntent::Supported {
+                    automatic: false
+                }
             ));
             assert!(admits_warm_runner_coordination(
                 command,

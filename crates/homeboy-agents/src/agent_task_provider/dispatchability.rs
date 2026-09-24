@@ -1958,7 +1958,14 @@ mod tests {
         assert_eq!(route_failed.state, "route_unavailable");
         assert!(!route_failed.ready);
         assert!(!route_failed.checks.route.ready);
-        assert!(route_failed.checks.credentials.ready);
+        // An unresolved route was never probed: credentials are unverified,
+        // not ready, and never reported as missing.
+        assert!(!route_failed.checks.credentials.ready);
+        assert_eq!(
+            route_failed.checks.credentials.status,
+            AgentTaskProviderCredentialStatus::Unverified
+        );
+        assert!(route_failed.checks.credentials.missing.is_empty());
 
         let model_unavailable =
             evaluate_provider_dispatchability(&catalog, "model", None, Some("unsupported"), false);
@@ -1966,8 +1973,10 @@ mod tests {
         assert!(!model_unavailable.ready);
         assert!(!model_unavailable.checks.model.ready);
 
+        // Without a live probe, a route whose every static check passes is
+        // structurally dispatchable rather than live-verified ready.
         let all_ready = evaluate_provider_dispatchability(&catalog, "ready", None, None, false);
-        assert_eq!(all_ready.state, "ready");
+        assert_eq!(all_ready.state, "structurally_dispatchable");
         assert!(all_ready.ready);
     }
 

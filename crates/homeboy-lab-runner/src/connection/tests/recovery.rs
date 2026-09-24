@@ -1396,7 +1396,7 @@ fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}}]}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}},{{"id":"daemon-recovery-state-loss","version":1}},{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
     ;;
   "daemon status")
     printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
@@ -1580,7 +1580,7 @@ fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}}]}}}}'
     ;;
   "daemon reconcile-leaseless-orphans")
       count=0
@@ -1722,7 +1722,7 @@ fn normal_start_response_loss_replays_b_without_creating_c() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
     ;;
   "daemon status")
     printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
@@ -1758,7 +1758,7 @@ esac
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
     ;;
   "daemon ensure-running")
     if [ "$3" = "--help" ]; then
