@@ -991,23 +991,35 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "homeboy#15011: homeboy.json's entire audit section (including \
-this declaration) was deliberately deleted by 006ef8aa8e (\"make self-audit \
-advisory\", #14010) and never restored"]
-    fn homeboy_config_declares_homeboy_run_marker() {
-        // homeboy.json lives at the repository root; this crate builds two levels
-        // down (crates/homeboy-core), so resolve it relative to the manifest dir
-        // rather than the (per-crate) test working directory.
-        let config_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../homeboy.json");
-        let raw = std::fs::read_to_string(&config_path).expect("homeboy config");
-        let component: homeboy_core::component::Component =
-            serde_json::from_str(&raw).expect("component config");
-        let audit = component.audit.expect("audit config");
+    fn generic_defaults_flag_homeboy_run_directories_outside_known_temp_roots() {
+        // homeboy#15011: this used to read `homeboy.json`'s `audit` section and
+        // assert it declared `/homeboy-run-`. `006ef8aa8e` ("make self-audit
+        // advisory", #14010) deleted that section and it was never restored —
+        // and it shouldn't be, because it was never actually project-specific
+        // config. `RunDir::create()` (`homeboy-core/src/engine/run_dir.rs`)
+        // names every managed run directory homeboy ever creates from
+        // `homeboy_product_identity::PRODUCT_IDENTITY.run_dir_prefix`, for
+        // every component homeboy audits, not just this repo — confirmed no
+        // component's `homeboy.json` across the network has ever declared this
+        // marker under `audit.artifact_portability`. So the fix moved the
+        // marker into `ArtifactPortabilityConfig::with_generic_defaults()`,
+        // derived from that same product-identity constant, where it applies
+        // universally without per-repo declaration.
+        let config = ArtifactPortabilityConfig::default().with_generic_defaults();
 
-        assert!(audit
-            .artifact_portability
+        assert!(config
             .non_portable_path_contains
-            .contains(&"/homeboy-run-".to_string()));
+            .iter()
+            .any(|marker| marker == "/homeboy-run-"));
+
+        // Prove it does real work: a run dir landing outside the three
+        // built-in OS temp-root prefixes (e.g. a CI runner's `$RUNNER_TEMP`,
+        // or a container with a custom TMPDIR) must still be caught by the
+        // `/homeboy-run-` marker, not just by `/tmp/`-style prefix matching.
+        assert!(!artifact_path_is_portable(
+            "/home/runner/work/_temp/homeboy-run-abc123/trace.json",
+            None,
+            &config
+        ));
     }
 }

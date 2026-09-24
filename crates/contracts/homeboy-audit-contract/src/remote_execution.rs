@@ -156,6 +156,21 @@ impl ArtifactPortabilityConfig {
                 "/var/folders/".to_string(),
             ],
         );
+        // Homeboy's own managed run directories (`RunDir::create`, see
+        // `homeboy-core/src/engine/run_dir.rs`) are named from
+        // `PRODUCT_IDENTITY.run_dir_prefix` and live under the OS temp root on
+        // every component Homeboy audits, not just this repo. That makes the
+        // marker a tool-wide generic default rather than per-repo declarative
+        // config: no component's `homeboy.json` has ever needed to declare it
+        // (confirmed empty across the network), and one no longer can since
+        // #14010 deleted homeboy's own `audit` section entirely.
+        extend_unique(
+            &mut config.non_portable_path_contains,
+            &[format!(
+                "/{}-",
+                homeboy_product_identity::PRODUCT_IDENTITY.run_dir_prefix
+            )],
+        );
         config
     }
 
