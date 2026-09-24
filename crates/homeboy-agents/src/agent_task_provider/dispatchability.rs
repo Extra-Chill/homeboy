@@ -1958,7 +1958,11 @@ mod tests {
         assert_eq!(route_failed.state, "route_unavailable");
         assert!(!route_failed.ready);
         assert!(!route_failed.checks.route.ready);
-        assert!(route_failed.checks.credentials.ready);
+        // A route that never resolved to one provider was never probed, so
+        // its credentials are unverified and not ready, even when every
+        // candidate declares none (#14298).
+        assert!(!route_failed.checks.credentials.ready);
+        assert!(!route_failed.checks.credentials.verified);
 
         let model_unavailable =
             evaluate_provider_dispatchability(&catalog, "model", None, Some("unsupported"), false);
@@ -1966,9 +1970,14 @@ mod tests {
         assert!(!model_unavailable.ready);
         assert!(!model_unavailable.checks.model.ready);
 
+        // Without a live probe the verdict is structural: every check passes,
+        // but live inference was not requested, so the state says exactly that
+        // rather than claiming full readiness (#14216).
         let all_ready = evaluate_provider_dispatchability(&catalog, "ready", None, None, false);
-        assert_eq!(all_ready.state, "ready");
+        assert_eq!(all_ready.state, "structurally_dispatchable");
         assert!(all_ready.ready);
+        assert!(all_ready.readiness.structural_dispatchability.ready);
+        assert!(!all_ready.readiness.live_inference.ready);
     }
 
     #[test]
