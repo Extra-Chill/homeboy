@@ -1373,6 +1373,25 @@ fn cook_continue_rearm_reserves_a_retryable_pre_execution_successor() {
         let cook_id = "cook-readiness-rearm";
         let source_run_id = "cook-readiness-rearm-attempt-1";
         let (root, source) = recoverable_runner_worktree();
+        // This test runs the Cook to completion, and promotion captures the
+        // declared base from `origin` over the network before its gates. The
+        // shared fixture points `origin` at a canonical GitHub URL so that
+        // destination identity checks resolve, but this test never goes
+        // through the CLI identity check. Point `origin` back at the local
+        // fixture repository here, so base capture stays hermetic instead of
+        // reaching github.com with no credentials.
+        let local_origin = root.path().join("origin.git");
+        let repointed = Command::new("git")
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                local_origin.to_str().expect("fixture remote path"),
+            ])
+            .current_dir(&source)
+            .status()
+            .expect("repoint origin to the local fixture repository");
+        assert!(repointed.success());
         let patch = root.path().join("candidate.patch");
         std::fs::write(
             &patch,

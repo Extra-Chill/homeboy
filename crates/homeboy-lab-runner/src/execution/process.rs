@@ -984,6 +984,14 @@ mod tests {
         let _guard = homeboy_core::test_support::home_env_guard();
         let root = tempfile::tempdir().expect("runtime temp root");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+        // Cleanup also drains the socket-safe invocation root, which defaults
+        // to the host-wide `/tmp/hb-<uid>` shared by every run on the machine.
+        // Give this test a private one so the sweep counts only what the test
+        // created; otherwise leftovers from unrelated runs make `removed_count`
+        // depend on host history. It lives under `/tmp` because the root has
+        // to fit the `sockaddr_un` budget.
+        let invocation_root = tempfile::tempdir_in("/tmp").expect("short invocation root");
+        std::env::set_var("HOMEBOY_INVOCATION_RUNTIME_DIR", invocation_root.path());
         let run_id = "runner-workload-1";
         let owner = runner_temp_owner(&HashMap::from([(
             "HOMEBOY_RUN_ID".to_string(),
@@ -1045,6 +1053,7 @@ mod tests {
         assert!(!path.exists());
         assert!(unknown.exists());
         std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+        std::env::remove_var("HOMEBOY_INVOCATION_RUNTIME_DIR");
     }
 
     #[cfg(unix)]
