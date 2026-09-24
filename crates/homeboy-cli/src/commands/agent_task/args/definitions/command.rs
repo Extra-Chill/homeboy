@@ -207,6 +207,18 @@ pub enum AgentTaskCommand {
     /// `--set-default` recovers a lost or empty `agent_task` config by writing
     /// a live-verified `default_backend`/`rotation` (#13634).
     Providers(ProvidersArgs),
+    /// Report live capacity and reset times for every provider route in the
+    /// configured rotation, without running provider inference.
+    ///
+    /// Walks `agent_task.default_backend` plus every `agent_task.rotation`
+    /// entry, probes each route's readiness invocation in capacity-only mode
+    /// (`mode: "capacity"`), groups routes that report the same account-pool
+    /// `scope`, and returns `homeboy/agent-task-capacity/v1` with one entry per
+    /// pool and `next_reset` naming the soonest exhausted-account reset.
+    /// Capacity support is a runtime opt-in (OpenCode implements it via
+    /// homeboy-extensions); a route whose runtime publishes no capacity is
+    /// reported as unknown with its diagnostic, never probed with inference.
+    Capacity(AgentTaskCapacityArgs),
     /// Manage markdown prompts in Homeboy-owned storage.
     ///
     /// Prompts are stored under Homeboy's data directory, not the current
@@ -701,6 +713,22 @@ pub struct ProvidersArgs {
     /// config set /agent_task/rotation <json> --json`.
     #[arg(long = "set-default")]
     pub set_default: bool,
+}
+#[derive(Args, Debug)]
+pub struct AgentTaskCapacityArgs {
+    /// Narrow the rotation walk to this executor backend.
+    #[arg(long = "backend", value_name = "BACKEND")]
+    pub backend: Option<String>,
+    /// Narrow the rotation walk to this backend-specific provider selector.
+    #[arg(
+        long = "selector",
+        visible_alias = "provider-id",
+        value_name = "PROVIDER_ID"
+    )]
+    pub selector: Option<String>,
+    /// Narrow the rotation walk to this model selection.
+    #[arg(long = "model", value_name = "MODEL")]
+    pub model: Option<String>,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {

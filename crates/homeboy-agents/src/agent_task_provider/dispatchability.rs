@@ -208,6 +208,122 @@ pub fn evaluate_provider_dispatchability_with_config(
     )
 }
 
+/// Capacity-only readiness for one route (#15024).
+///
+/// This is the per-route building block behind `homeboy agent-task capacity`:
+/// it resolves the route exactly the way dispatchability does, then runs the
+/// provider's declared readiness invocation in capacity mode (`mode:
+/// "capacity"`, a distinct cache identity that can never satisfy a
+/// live-inference probe). Capacity support is a runtime opt-in (OpenCode
+/// implements it via homeboy-extensions): a runtime that ignores the mode still
+/// answers, but this function reports only whatever `capacity` object that
+/// answer carries — never a dispatchability verdict — so an ignoring runtime
+/// cannot pass its normal inference probe off as capacity evidence.
+///
+/// Failure is a value, not an error: a route that does not resolve, fails a
+/// structural check, or whose probe fails reports `Unknown` capacity naming
+/// why, so one broken route cannot hide the others in a rotation sweep.
+pub fn evaluate_provider_capacity_with_config(
+    catalog: &AgentTaskProviderCatalog,
+    backend: &str,
+    selector: Option<&str>,
+    model: Option<&str>,
+    config: &Value,
+    cache: &mut ProviderRuntimeReadinessCache,
+    deadline_unix_ms: Option<u64>,
+) -> AgentTaskProviderCapacityReadiness {
+    let provider = match resolve_provider_for_backend(catalog.providers(), backend, selector) {
+        ProviderResolution::Resolved(provider) => provider,
+        ProviderResolution::NotFound
+        | ProviderResolution::AmbiguousExtensionAlias { .. }
+        | ProviderResolution::SelectorMismatch { .. } => {
+            return capacity_readiness_unknown(
+                "the requested backend/selector route did not resolve",
+            );
+        }
+    };
+    let supported = provider
+        .cli
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.model.as_deref())
+        .collect::<Vec<_>>();
+    if !model.is_none_or(|model| supported.is_empty() || supported.contains(&model)) {
+        return capacity_readiness_unknown(
+            "the selected model is not declared by the routed provider",
+        );
+    }
+    let credentials = provider_credential_readiness(provider);
+    if !credentials.dispatchable {
+        return capacity_readiness_unknown(
+            "required provider credentials are not configured, so capacity was not probed",
+        );
+    }
+    if provider_requires_live_auth_validation(provider) && provider.readiness_invocation.is_none() {
+        return capacity_readiness_unknown(
+            "provider-owned authentication has no declared readiness invocation",
+        );
+    }
+    if validate_provider_immediate_failure_patterns(provider).is_err() {
+        return capacity_readiness_unknown(
+            "provider immediate-failure configuration is invalid, so capacity was not probed",
+        );
+    }
+    if provider.readiness_invocation.is_none() {
+        return capacity_readiness_unknown(
+            "the provider declares no readiness invocation, so capacity cannot be observed",
+        );
+    }
+    let effective_config = effective_provider_config(config, model);
+    let declared_credential_env = match super::secrets::provider_declared_credential_env(provider) {
+        Ok(credential_env) => credential_env,
+        Err(error) => {
+            return capacity_readiness_unknown(format!(
+                "provider credentials did not resolve, so capacity was not probed: {}",
+                error.message
+            ));
+        }
+    };
+    match super::runtime_readiness::capacity_mode_readiness_verdict_with_deadline(
+        provider,
+        &effective_config,
+        &declared_credential_env,
+        cache,
+        deadline_unix_ms,
+    ) {
+        Ok(verdict) => {
+            let readiness = capacity_readiness_from_probe_result(&verdict);
+            if matches!(
+                readiness,
+                AgentTaskProviderCapacityReadiness::Unknown { .. }
+            ) && !verdict.ready
+                && !verdict.reason.trim().is_empty()
+            {
+                // The probe ran but the route rejected it (auth, account,
+                // unavailable, ...) without publishing capacity. The route's
+                // own reason is the diagnostic an operator needs; a generic
+                // "does not report capacity" would hide the actual failure.
+                let classification = verdict.classification.trim();
+                let reason = homeboy_core::redaction::redact_string(&verdict.reason);
+                return capacity_readiness_unknown(if classification.is_empty() {
+                    reason
+                } else {
+                    format!("{classification}: {reason}")
+                });
+            }
+            readiness
+        }
+        Err(error) => {
+            let timed_out = error.details["classification"] == "timeout";
+            capacity_readiness_unknown(if timed_out {
+                "the capacity probe timed out before capacity could be observed".to_string()
+            } else {
+                format!("the capacity probe failed to run: {}", error.message)
+            })
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "dispatchability preserves each route input"

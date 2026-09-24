@@ -1503,6 +1503,61 @@ mod tests {
         );
     }
 
+    /// #15024: a capacity-mode probe and a live-inference probe of the same
+    /// route are different questions. The mode belongs to the cache identity,
+    /// so the two probes each run once against one shared cache, neither
+    /// answer is served to the other caller, and a capacity result can never
+    /// satisfy live-inference readiness (or vice versa).
+    #[test]
+    fn capacity_mode_probes_are_a_distinct_cache_identity_from_live_inference() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let modes = root.path().join("modes.log");
+        let script = root.path().join("mode-echo.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],(request.mode||'live')+'\\n');const capacity=request.mode==='capacity'?{remaining:70,limit:100,unit:'percent',scope:'pooled'}:undefined;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared-route',identity:{},...(capacity?{capacity}:{})}));",
+        )
+        .expect("mode-echo readiness script");
+        let provider = provider(&script, &modes);
+        let mut cache = test_cache();
+        let config = json!({ "model": "pooled" });
+
+        let capacity = capacity_mode_readiness_verdict_with_deadline(
+            &provider,
+            &config,
+            &[],
+            &mut cache,
+            None,
+        )
+        .expect("capacity verdict");
+        assert_eq!(
+            capacity
+                .capacity
+                .as_ref()
+                .and_then(|capacity| capacity.scope.as_deref()),
+            Some("pooled")
+        );
+
+        let live = readiness_verdict(&provider, &config, &mut cache).expect("live verdict");
+        assert!(
+            live.capacity.is_none(),
+            "a live-inference answer must never be served from capacity-mode cache"
+        );
+
+        capacity_mode_readiness_verdict_with_deadline(&provider, &config, &[], &mut cache, None)
+            .expect("capacity answer is cached under its own identity");
+        readiness_verdict(&provider, &config, &mut cache).expect("live answer is cached");
+
+        assert_eq!(
+            std::fs::read_to_string(&modes)
+                .expect("mode log")
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["capacity", "live"],
+            "each mode probes exactly once; a capacity cache hit must not satisfy live readiness"
+        );
+    }
+
     #[test]
     fn readiness_probe_errors_are_cached_briefly() {
         let root = tempfile::tempdir().expect("tempdir");

@@ -13,6 +13,7 @@ use super::CmdResult;
 pub mod args;
 pub mod auth;
 pub(crate) mod candidate;
+pub mod capacity;
 pub mod contract;
 pub mod controller;
 pub(crate) mod default_branch;
@@ -30,11 +31,11 @@ pub mod tool;
 
 pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
-    AgentTaskCommand, AgentTaskControllerApplyEventArgs, AgentTaskControllerArgs,
-    AgentTaskControllerCommand, AgentTaskControllerDispatchArgs, AgentTaskControllerFromSpecArgs,
-    AgentTaskControllerInitArgs, AgentTaskControllerMarkHumanReadyArgs,
-    AgentTaskControllerMaterializeArgs, AgentTaskControllerRunArgs,
-    AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
+    AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskControllerApplyEventArgs,
+    AgentTaskControllerArgs, AgentTaskControllerCommand, AgentTaskControllerDispatchArgs,
+    AgentTaskControllerFromSpecArgs, AgentTaskControllerInitArgs,
+    AgentTaskControllerMarkHumanReadyArgs, AgentTaskControllerMaterializeArgs,
+    AgentTaskControllerRunArgs, AgentTaskControllerRunFromSpecArgs, AgentTaskControllerRunNextArgs,
     AgentTaskControllerStatusArgs, AgentTaskControllerValidateProofArgs, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutBatchStatusArgs,
     AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, AgentTaskFanoutInputArgs,
@@ -412,6 +413,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
+        AgentTaskCommand::Capacity(capacity_args) => capacity::capacity(capacity_args),
         AgentTaskCommand::Prompts(prompts_args) => prompts::prompts(prompts_args),
         AgentTaskCommand::Contract(contract_args) => contract::contract(contract_args),
         AgentTaskCommand::CompileLoop(compile_args) => loop_definition::compile_loop(compile_args),

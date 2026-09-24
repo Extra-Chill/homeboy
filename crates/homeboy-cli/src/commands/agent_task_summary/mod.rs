@@ -18,6 +18,7 @@ pub(crate) enum AgentTaskSummaryKind {
     Review,
     Controller,
     Providers,
+    Capacity,
     FanoutCookBatch,
     FanoutStatus,
 }
@@ -29,6 +30,7 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
         AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
+        AgentTaskCommand::Capacity(_) => Some(AgentTaskSummaryKind::Capacity),
         AgentTaskCommand::Fanout(args) => match &args.command {
             AgentTaskFanoutCommand::CookBatch(_) => Some(AgentTaskSummaryKind::FanoutCookBatch),
             AgentTaskFanoutCommand::Status(_) => Some(AgentTaskSummaryKind::FanoutStatus),
@@ -60,6 +62,7 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Controller => controller::render_controller_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
+        AgentTaskSummaryKind::Capacity => render_capacity_summary(payload),
         AgentTaskSummaryKind::FanoutCookBatch => render_fanout_cook_batch_summary(payload),
         AgentTaskSummaryKind::FanoutStatus => render_fanout_status_summary(payload),
     }
@@ -418,6 +421,136 @@ fn capacity_reset_suffix(value: &Value) -> String {
         .and_then(Value::as_str)
         .map(|reset_at| format!(", resets {reset_at}"))
         .unwrap_or_default()
+}
+
+/// `agent-task capacity` summary (#15024): one block per route group, one
+/// indented line per pooled account, so an operator reads every connected
+/// plan's state and reset instant at a glance. Reuses the same capacity
+/// amount/reset rendering as the `providers` summary above.
+fn render_capacity_summary(payload: &Value) -> Option<String> {
+    if payload.get("schema")?.as_str()? != "homeboy/agent-task-capacity/v1" {
+        return None;
+    }
+    let routes = payload.get("routes").and_then(Value::as_array)?;
+    if routes.is_empty() {
+        return Some("Agent task capacity: no configured provider routes".to_string());
+    }
+    let mut lines = Vec::new();
+    for route in routes {
+        let backend = capacity_route_label(route);
+        let capacity = route.get("capacity").unwrap_or(&Value::Null);
+        let accounts = capacity
+            .get("accounts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let unit = capacity.get("unit").and_then(Value::as_str);
+        let state = capacity.get("state").and_then(Value::as_str);
+        let headline = match state {
+            Some("exhausted") => match capacity_exhausted_until(capacity) {
+                Some(reset_at) => format!("exhausted until {reset_at}"),
+                None => "exhausted".to_string(),
+            },
+            Some("known") => capacity
+                .get("remaining")
+                .map(|remaining| format!("{} remaining", capacity_amount(remaining, unit)))
+                .unwrap_or_else(|| "available".to_string()),
+            _ => "capacity not published".to_string(),
+        };
+        if accounts.is_empty() {
+            // An exhausted headline already names its reset instant.
+            let suffix = if state == Some("exhausted") {
+                String::new()
+            } else {
+                capacity_reset_suffix(capacity)
+            };
+            lines.push(format!("{backend}: {headline}{suffix}"));
+        } else {
+            lines.push(format!("{backend} ({} plans): {headline}", accounts.len()));
+        }
+        for account in accounts {
+            let name = account
+                .get("account")
+                .and_then(Value::as_str)
+                .unwrap_or("account");
+            let state = account
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let mut line = format!("  {name}  {state}");
+            if state == "available" {
+                if let Some(remaining) = account.get("remaining") {
+                    line.push_str(&format!("  {}", capacity_amount(remaining, unit)));
+                }
+            }
+            if let Some(reset_at) = account.get("reset_at").and_then(Value::as_str) {
+                line.push_str(&format!("  resets {reset_at}"));
+            }
+            lines.push(line);
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+/// Name a capacity route by its account pool (`opencode:anthropic` reads as
+/// `anthropic`), else its models, else its backend, so blocks on one backend
+/// stay distinguishable.
+fn capacity_route_label(route: &Value) -> String {
+    if let Some(scope) = route
+        .pointer("/capacity/scope")
+        .or_else(|| route.get("scope"))
+        .and_then(Value::as_str)
+        .filter(|scope| !scope.trim().is_empty())
+    {
+        return scope.rsplit(':').next().unwrap_or(scope).to_string();
+    }
+    let models = route
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    if !models.is_empty() {
+        return models.join(", ");
+    }
+    route
+        .get("backend")
+        .and_then(Value::as_str)
+        .unwrap_or("route")
+        .to_string()
+}
+
+/// The soonest known reset among a capacity entry's exhausted accounts, so an
+/// exhausted pool reads as "exhausted until X" rather than a dead end. Falls
+/// back to the route-level reset instant when the accounts name none.
+fn capacity_exhausted_until(capacity: &Value) -> Option<String> {
+    let account_resets = capacity
+        .get("accounts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|account| account.get("state").and_then(Value::as_str) == Some("exhausted"))
+        .filter_map(|account| account.get("reset_at").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let soonest = if account_resets.is_empty() {
+        capacity
+            .get("reset_at")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    } else {
+        account_resets
+            .iter()
+            .filter_map(|reset_at| {
+                chrono::DateTime::parse_from_rfc3339(reset_at)
+                    .ok()
+                    .map(|instant| (instant, (*reset_at).to_string()))
+            })
+            .min_by_key(|(instant, _)| *instant)
+            .map(|(_, raw)| raw)
+    };
+    soonest.filter(|reset_at| !reset_at.trim().is_empty())
 }
 
 fn render_cook_summary(payload: &Value) -> Option<String> {

@@ -120,6 +120,10 @@ pub(super) fn agent_task_resource_behavior(
         // unscoped diagnostic read onto a runner — silently changing the scope
         // the answer describes (#9763).
         | agent_task::AgentTaskCommand::Providers(_)
+        // Capacity is the same class of controller-local provider read:
+        // bounded readiness-mode probes over the configured rotation, never
+        // provider inference (#15024).
+        | agent_task::AgentTaskCommand::Capacity(_)
         | agent_task::AgentTaskCommand::Review(_) => AgentTaskResourceBehavior::BoundedMetadataRead,
         agent_task::AgentTaskCommand::RetainedArtifacts(retained) => match &retained.command {
             // Discovery reads only the local immutable workspace receipt.
