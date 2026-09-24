@@ -722,6 +722,11 @@ mod tests {
         Some(remote_parent)
     }
 
+    // Extension updates no longer run a plain `git pull`: they fetch the
+    // configured upstream ref explicitly, then `git merge --ff-only
+    // FETCH_HEAD` (see `git::fetch_and_merge_upstream_ff_only`). Count the
+    // `fetch` invocation, which is the once-per-root operation this test
+    // verifies happens only one time for a linked monorepo.
     #[cfg(unix)]
     fn write_git_wrapper(bin_dir: &Path, pull_count_file: &Path) {
         fs::create_dir_all(bin_dir).expect("wrapper bin dir");
@@ -732,7 +737,7 @@ mod tests {
         let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_string();
         let script = format!(
             r#"#!/bin/sh
-if [ "$1" = "pull" ]; then
+if [ "$1" = "fetch" ]; then
   printf x >> '{}'
 fi
 exec '{}' "$@"
