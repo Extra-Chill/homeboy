@@ -5598,11 +5598,21 @@ fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     if record.is_stale_running() {
         return ControlPlaneRunState::Stale;
     }
-    if record
-        .metadata
-        .pointer("/latest_promotion/status")
-        .and_then(Value::as_str)
-        == Some("verification_pending")
+    // A `verification_pending` promotion must not read as `Succeeded` before
+    // verification actually confirms it (#14828) — but a record whose own
+    // durable state is still `Running` is not stale (checked above) and is
+    // exactly what live verification looks like: a gate actively heartbeating
+    // toward that same pending promotion. Downgrading that to
+    // `CandidateRecoverable` would hide an in-progress run behind a
+    // recovery-shaped status it does not need. Only override non-`Running`
+    // states, where "pending verification" is the more accurate read (e.g. a
+    // record already marked `Succeeded` whose promotion has not verified).
+    if record.state != AgentTaskRunState::Running
+        && record
+            .metadata
+            .pointer("/latest_promotion/status")
+            .and_then(Value::as_str)
+            == Some("verification_pending")
     {
         return ControlPlaneRunState::CandidateRecoverable;
     }

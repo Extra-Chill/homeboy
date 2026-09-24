@@ -449,8 +449,16 @@ where
             on_submitted(&existing)?;
             return Ok(outcome);
         }
+        // A `Running` record only blocks resubmission while its owner is
+        // actually alive. `mark_running_in_store` already treats a `Running`
+        // record whose owner process is gone as reclaimable rather than a
+        // conflict (recording `reclaimed_stale_running`); this earlier guard
+        // must agree, or a controller recovering a stale child's `run_plan`
+        // dispatch (`refresh_stale_running_child_actions` resets the action
+        // for redispatch) can never get far enough to reach that reclaim.
         if existing.state == AgentTaskRunState::Running
             && !accepted_runner_handoff_can_materialize(&existing)
+            && existing.owner_process_is_running()
         {
             return Err(Error::validation_invalid_argument(
                 "run",

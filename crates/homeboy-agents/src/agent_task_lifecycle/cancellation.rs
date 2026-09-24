@@ -5,6 +5,15 @@ const ALREADY_TERMINAL_FIELD: &str = "already_terminal";
 enum CancelResolvedOutcome {
     Cancelled(AgentTaskRunRecord),
     AlreadyTerminal(AgentTaskRunRecord),
+    /// The record was not terminal when this cancellation began, but became
+    /// terminal *during* it — a runner daemon publishing its terminal result
+    /// while cancellation was in flight. This is a race the operator's exact
+    /// cancellation request legitimately loses, not evidence the request
+    /// targeted an already-finished run; [`cancel_run_in_store`] reports it as
+    /// success and returns the now-terminal projection rather than the
+    /// `already_terminal` error reserved for a request that never had
+    /// anything left to cancel.
+    RaceWonByTerminalRunnerResult(AgentTaskRunRecord),
 }
 
 #[cfg(test)]
@@ -125,6 +134,7 @@ pub fn cancel_run_in_store(
         let record = match cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason)?
         {
             CancelResolvedOutcome::Cancelled(record) => record,
+            CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record) => record,
             CancelResolvedOutcome::AlreadyTerminal(record)
                 if resolved_run_id != requested_run_id =>
             {
@@ -758,7 +768,7 @@ fn cancel_resolved_run_in_store(
             )?;
             return Ok(
                 if record.state.is_terminal() && record.state != AgentTaskRunState::Cancelled {
-                    CancelResolvedOutcome::AlreadyTerminal(record)
+                    CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record)
                 } else {
                     CancelResolvedOutcome::Cancelled(record)
                 },

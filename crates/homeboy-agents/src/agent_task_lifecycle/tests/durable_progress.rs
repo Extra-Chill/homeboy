@@ -163,16 +163,23 @@ fn cancel_appends_terminal_provider_progress_and_resumes_from_cursor() {
     let resumed = service
         .events(&run, cursor.as_ref())
         .expect("resume after cancel");
-    assert_eq!(resumed.events.len(), 1);
+    // Cancellation now durably records its own provenance event (actor,
+    // cause, recovery action) alongside the task's terminal state transition
+    // (#14925), so resuming past the running cursor sees both.
+    assert_eq!(resumed.events.len(), 2);
     assert_eq!(resumed.events[0].kind, "task.state_changed");
     assert_eq!(resumed.events[0].data["state"], "cancelled");
     assert_eq!(resumed.events[0].sequence, 3);
+    assert_eq!(resumed.events[1].kind, "run.cancelled");
+    assert_eq!(resumed.events[1].data["state"], "cancelled");
+    assert_eq!(resumed.events[1].sequence, 4);
 
     let replayed = service
         .events(&run, cursor.as_ref())
         .expect("cursor replay");
-    assert_eq!(replayed.events.len(), 1);
+    assert_eq!(replayed.events.len(), 2);
     assert_eq!(replayed.events[0].sequence, 3);
+    assert_eq!(replayed.events[1].sequence, 4);
 }
 
 #[test]

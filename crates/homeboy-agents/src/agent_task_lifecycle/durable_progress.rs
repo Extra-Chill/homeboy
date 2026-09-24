@@ -467,20 +467,30 @@ fn gate_lifecycle_requests_for_promotion(
         .or_else(|| promotion.pointer("/source/task_id").and_then(Value::as_str))
         .unwrap_or("promotion");
     let mut requests = Vec::new();
-    requests.push(progress_request(
-        &format!("gate\0{}\0{promotion_index}\0started", record.run_id),
-        "gate.started",
-        "agent-task-gate",
-        Some(task_id),
-        None,
-        json!({
-            "state": AgentTaskState::Running,
-            "message": format!("running {} deterministic gate(s)", gates.len()),
-            "progress": { "attempt": promotion_index as u32 + 1 },
-            "promotion_index": promotion_index,
-            "gate_count": gates.len(),
-        }),
-    )?);
+    // An empty gate list has not started any gate execution — a promotion can
+    // legitimately be recorded with an empty list before its gates are known
+    // (e.g. a pending/placeholder projection) and a populated one once they
+    // run. The "started" idempotency key is fixed per (run, promotion_index)
+    // and is not meant to track content changes across rewrites, so it must
+    // not fire for a phase that never actually started; emitting it here
+    // would also collide (same key, different digest) with a later write that
+    // does have a real, non-empty gate list for the same promotion_index.
+    if !gates.is_empty() {
+        requests.push(progress_request(
+            &format!("gate\0{}\0{promotion_index}\0started", record.run_id),
+            "gate.started",
+            "agent-task-gate",
+            Some(task_id),
+            None,
+            json!({
+                "state": AgentTaskState::Running,
+                "message": format!("running {} deterministic gate(s)", gates.len()),
+                "progress": { "attempt": promotion_index as u32 + 1 },
+                "promotion_index": promotion_index,
+                "gate_count": gates.len(),
+            }),
+        )?);
+    }
     for (gate_index, gate) in gates.iter().enumerate() {
         let gate_status = gate.get("status").and_then(Value::as_str).unwrap_or("");
         let gate_passed = matches!(gate_status, "succeeded" | "passed" | "skipped");

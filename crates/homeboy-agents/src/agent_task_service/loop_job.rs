@@ -1435,6 +1435,7 @@ mod tests {
     #[test]
     fn cancellation_preserves_a_controller_that_terminalized_while_child_lives() {
         with_isolated_home(|_| {
+            register_loop_work_job_handler();
             let loop_id = "loop-cancel-racing-terminal";
             let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
                 .expect("create controller");
@@ -1472,6 +1473,7 @@ mod tests {
     #[test]
     fn idle_ticks_do_not_repeat_checkpoint_or_progress_writes() {
         with_isolated_home(|_| {
+            register_loop_work_job_handler();
             agent_task_loop_controller::create_controller("loop-idle", "repair", "v1")
                 .expect("create controller");
             let request = loop_work_job_execution_submission(
@@ -1496,15 +1498,29 @@ mod tests {
                     .expect("execute idle loop");
             });
 
+            // Reaching "idle" takes more than the two unconditional writes at
+            // job start (queued status, then the first supervising progress):
+            // the loop's first real tick still has to observe the controller
+            // and discover there is no pending action, which is itself a
+            // legitimate one-time `resume_result: None -> Some("idle")`
+            // progress write before the loop is actually settled. Wait for the
+            // event count to stop growing (rather than a fixed count) so this
+            // baseline is whatever settling genuinely takes, and the assertion
+            // below is only about ticks *after* that point.
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while harness.events().expect("read events").len() < 2 {
+            let mut initial_events = harness.events().expect("read events").len();
+            loop {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "initial events missing"
+                    "initial events did not settle"
                 );
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(50));
+                let count = harness.events().expect("read events").len();
+                if count == initial_events && count >= 2 {
+                    break;
+                }
+                initial_events = count;
             }
-            let initial_events = harness.events().expect("read initial events").len();
             std::thread::sleep(Duration::from_millis(650));
             assert_eq!(
                 harness.events().expect("read idle events").len(),
