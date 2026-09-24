@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.6] - 2026-09-24
+
+### Fixed
+- check out the retry candidate into a subdirectory so .homeboy-action survives
+
 ## [2.20.5] - 2026-09-24
 
 ### Fixed
