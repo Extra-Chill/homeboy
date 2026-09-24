@@ -39,6 +39,20 @@ command, component, action revision, CLI revision, and phase identity. Missing
 or mismatched evidence fails closed. This DAG behavior is specific to the
 reusable workflow; direct composite-action callers keep the combined behavior.
 
+Before that reconciliation blames the PR for a test failure that appears only
+on the candidate, `retry-introduced-test-failures: 'true'` (the default) gives
+it a chance to prove that failure flaky: it checks out the candidate SHA a
+second time and retries each candidate-only test identity alone, up to
+`retry-introduced-test-attempts` (default `2`) times. A test that passes
+within its retry budget is reported `flaky` in a `::warning::` and excluded
+from the verdict; a test that fails every attempt stays `introduced` and is
+named in the `::error::` that blocks the PR. This currently retries the
+`cargo-nextest` and `cargo test` runners only — Homeboy has no CLI flag to
+re-run a specific set of test identities, so the retry drives the runner
+directly. Any other runner is announced as unsupported and falls back to
+today's behavior of blaming the PR outright. See
+[Extra-Chill/homeboy#14984](https://github.com/Extra-Chill/homeboy/issues/14984).
+
 Set `test-shards` above `1` to use the generic Homeboy test inventory contract.
 The candidate Test command is then invoked with `HOMEBOY_TEST_INVENTORY_ONLY=1`;
 the selected extension writes `homeboy-test-inventory.json` with schema
@@ -452,6 +466,8 @@ Use these outputs to gate downstream jobs:
 | `regression-threshold` | No | | Bench regression threshold passed to `homeboy bench --regression-threshold` |
 | `differential-gating` | No | `false` | On PRs, compare `review audit`/`review test` counts against the base SHA and fail only when the PR is worse. Opt-in; `review lint` still gates on exit code. |
 | `baseline-commands` | No | `auto` | Commands to rerun at the PR base when `differential-gating` is true. `auto` reruns requested `review audit`/`review lint`/`review test` commands; use a comma-separated subset such as `review audit` or `none` to skip baseline reruns. |
+| `retry-introduced-test-failures` | No | `true` | Before blaming the PR for a candidate-only test failure, retry it in isolation on the candidate to rule out flakiness. Requires `differential-gating`. Currently supported for the `cargo-nextest` and `cargo test` runners only. |
+| `retry-introduced-test-attempts` | No | `2` | Retry attempts per candidate-only test identity when `retry-introduced-test-failures` is true. |
 
 Test reconciliation consumes Homeboy's `homeboy/test-outcomes/v1` and `homeboy/test-inventory/v1` sidecars named `<command-stem>.test-outcomes.json` and `<command-stem>.test-inventory.json`. The inventory carries the complete nonempty selected test-ID set; outcomes carry only the duplicate-free `failed_test_ids` observed by the adapter. Both sidecars bind the canonical Test command identity, runner, runner/workspace/execution fingerprints, and a canonical SHA-256 inventory fingerprint; configured suffixes remain part of the output stem and actual invocation. Shard aggregation validates every pair against its immutable manifest, unions exact inventory and observed failure identities, and emits a deterministic aggregate pair. Failed candidate, baseline, and shard Test phases require complete, provenance-matched evidence; unavailable evidence fails closed. This consumer contract is paired with Extra-Chill/homeboy#13371 and a homeboy-extensions adapter follow-up.
 | `observation-window` | No | `24h` | Duration window passed to best-effort `homeboy runs export --since` for the separate matrix-safe observations artifact. |

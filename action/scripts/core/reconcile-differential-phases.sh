@@ -221,6 +221,22 @@ if [ ! -f "${baseline_status}" ]; then
 fi
 fi
 
+# Before the gate finalizes an introduced-failure verdict for a test command,
+# give it a chance to discover the failure is flaky rather than PR-caused.
+# RETRY_WORKSPACE is set by the caller only when it already checked out a
+# buildable candidate tree for this purpose (ci.yml does this narrowly, for
+# test commands on differential-gated PRs); its absence is the common case
+# and leaves this a no-op, matching prior behavior exactly. A retry that
+# itself fails to run is advisory-only and must not turn into a gate failure
+# on its own -- the pre-retry verdict below still applies.
+# See Extra-Chill/homeboy#14984.
+if [ "${require_baseline}" = "true" ] && [ -n "${RETRY_WORKSPACE:-}" ] && [ "$(quality_base_command "${command}")" = "test" ]; then
+  COMMAND="${command}" CURRENT_DIR="${candidate_output}" BASE_DIR="${baseline_output}" \
+    WORKSPACE="${RETRY_WORKSPACE}" MAX_RETRIES="${RETRY_MAX_ATTEMPTS:-2}" \
+    bash "${action_root}/scripts/core/retry-introduced-test-failures.sh" \
+    || echo "::warning::Differential gate retry did not complete for ${command}; proceeding with the pre-retry verdict."
+fi
+
 if [ "${require_baseline}" = "true" ]; then
   results="$(python3 "${action_root}/scripts/core/apply-differential-gate.py" "${candidate_results}" "${candidate_output}" "${baseline_output}")"
 else

@@ -227,4 +227,119 @@ counts() { printf '{"success":false,"data":{"test_counts":{"failed":%s,"errors":
 
 base_failed_structured='{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}'
 
+# --- Retry evidence and named introduced identities (Extra-Chill/homeboy#14984) --
+#
+# A test that passes on retry (recorded in the {stem}.test-retry.json
+# sidecar written by retry-introduced-test-failures.sh) is flaky and must
+# not block. A test that fails every retry attempt stays introduced. Either
+# way the identities involved are named in the annotation, not just counted.
+
+compute_inventory_fingerprint() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+from hashlib import sha256
+
+command = sys.argv[1]
+ids = sys.argv[2:]
+canonical = {
+    "command": command,
+    "execution_fingerprint": "c" * 64,
+    "runner": "nextest",
+    "runner_fingerprint": "a" * 64,
+    "schema": "homeboy/test-inventory/v1",
+    "tests": [{"id": identity} for identity in sorted(ids)],
+    "workspace_fingerprint": "b" * 64,
+}
+print(sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest())
+PY
+}
+
+write_outcome_fixture() {
+  # write_outcome_fixture DIR COMMAND FAILED_ID... -- ALL_ID...
+  local dir="$1" command="$2"
+  shift 2
+  local failed_ids=() all_ids=() collecting_failed=true
+  for arg in "$@"; do
+    if [ "${arg}" = "--" ]; then
+      collecting_failed=false
+      continue
+    fi
+    if [ "${collecting_failed}" = true ]; then
+      failed_ids+=("${arg}")
+    else
+      all_ids+=("${arg}")
+    fi
+  done
+  local fp stem
+  fp="$(compute_inventory_fingerprint "${command}" "${all_ids[@]}")"
+  stem="$(printf '%s' "${command}" | sed -E 's/[^[:alnum:]._-]+/-/g; s/^-+//; s/-+$//')"
+  jq -cn --arg command "${command}" --arg fp "${fp}" \
+    --argjson failed "$(printf '%s\n' "${failed_ids[@]:-}" | jq -R 'select(length > 0)' | jq -sc .)" \
+    '{schema:"homeboy/test-outcomes/v1",command:$command,runner:"nextest",runner_fingerprint:("a"*64),workspace_fingerprint:("b"*64),execution_fingerprint:("c"*64),inventory_fingerprint:$fp,failed_test_ids:$failed}' \
+    > "${dir}/${stem}.test-outcomes.json"
+  jq -cn --arg command "${command}" --arg fp "${fp}" \
+    --argjson tests "$(printf '%s\n' "${all_ids[@]}" | jq -R '{id:.}' | jq -sc .)" \
+    '{schema:"homeboy/test-inventory/v1",command:$command,runner:"nextest",runner_fingerprint:("a"*64),workspace_fingerprint:("b"*64),execution_fingerprint:("c"*64),inventory_fingerprint:$fp,tests:$tests}' \
+    > "${dir}/${stem}.test-inventory.json"
+}
+
+rm -rf "${current_dir}" "${base_dir}"
+mkdir -p "${current_dir}" "${base_dir}"
+write_outcome_fixture "${current_dir}" 'review test' id_a id_b -- id_a id_b id_c
+write_outcome_fixture "${base_dir}" 'review test' id_c -- id_a id_c
+printf '{"review test":{"status":"fail","exit_code":1,"command":"homeboy review test sample --path .","structured_output":true}}\n' > "${base_dir}/baseline-status.json"
+
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"fail"}' "${result}" "introduced test failures without retry evidence remain blocking"
+
+message="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}" 2>&1 1>/dev/null)"
+case "${message}" in
+  *"id_a"*"id_b"*) printf 'PASS: the rejection names the introduced test identities\n' ;;
+  *) printf 'FAIL: rejection message did not name introduced identities\n%s\n' "${message}"; exit 1 ;;
+esac
+
+# One identity passed on retry (flaky, excluded); one never did (stays introduced).
+jq -cn '{schema:"homeboy/test-retry/v1",command:"review test",runner:"nextest",attempted:["id_a","id_b"],flaky:["id_a"],still_failing:["id_b"],max_retries:2}' \
+  > "${current_dir}/review-test.test-retry.json"
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"fail"}' "${result}" "a still-failing identity keeps blocking even when a sibling is flaky"
+
+message="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}" 2>&1 1>/dev/null)"
+case "${message}" in
+  *"flaky"*"id_a"*) printf 'PASS: the flaky identity is named in a warning\n' ;;
+  *) printf 'FAIL: flaky exclusion was not announced with the identity name\n%s\n' "${message}"; exit 1 ;;
+esac
+case "${message}" in
+  *"id_b"*) printf 'PASS: the still-blocking identity is still named in the error\n' ;;
+  *) printf 'FAIL: still-failing identity was not named after partial retry\n%s\n' "${message}"; exit 1 ;;
+esac
+
+# Every introduced identity passed on retry: nothing left to block, and the
+# pre-existing baseline_red machinery takes over exactly as it does for a
+# candidate that never had a retry sidecar at all.
+jq -cn '{schema:"homeboy/test-retry/v1",command:"review test",runner:"nextest",attempted:["id_a","id_b"],flaky:["id_a","id_b"],still_failing:[],max_retries:2}' \
+  > "${current_dir}/review-test.test-retry.json"
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"baseline_red"}' "${result}" "a fully retried-flaky introduced set is not blocking"
+
+# A retry sidecar naming a different command must be ignored, not trusted --
+# it must never manufacture a pass for identities it was not evidence for.
+jq -cn '{schema:"homeboy/test-retry/v1",command:"test",runner:"nextest",attempted:["id_a","id_b"],flaky:["id_a","id_b"],still_failing:[],max_retries:2}' \
+  > "${current_dir}/review-test.test-retry.json"
+result="$(python3 "${APPLY_GATE}" '{"review test":"fail"}' "${current_dir}" "${base_dir}")"
+assert_equals '{"review test":"fail"}' "${result}" "a retry sidecar with a mismatched command identity is ignored"
+
+# --- --emit-introduced: the retry orchestrator's own contract ---------------
+# retry-introduced-test-failures.sh calls this before it has a live
+# workspace, so it knows what to retry and which runner produced it.
+rm -f "${current_dir}/review-test.test-retry.json"
+emitted="$(python3 "${APPLY_GATE}" --emit-introduced 'review test' "${current_dir}" "${base_dir}")"
+assert_equals '{"introduced":["id_a","id_b"],"runner":"nextest"}' "${emitted}" "--emit-introduced reports the candidate-only identities and runner"
+
+rm -rf "${current_dir}" "${base_dir}"
+mkdir -p "${current_dir}" "${base_dir}"
+emitted="$(python3 "${APPLY_GATE}" --emit-introduced 'review test' "${current_dir}" "${base_dir}")"
+assert_equals '{"introduced":[],"runner":null}' "${emitted}" "--emit-introduced reports nothing without comparable evidence"
+
 printf 'All differential gate checks passed.\n'

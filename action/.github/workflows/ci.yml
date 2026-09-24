@@ -117,6 +117,14 @@ on:
         description: 'Commands to rerun at the PR base when differential-gating is true. Use auto, a comma-separated subset, or none.'
         type: string
         default: 'auto'
+      retry-introduced-test-failures:
+        description: 'Before blaming the PR for a candidate-only test failure, retry it in isolation on the candidate to rule out flakiness. Requires differential-gating. Currently supported for the cargo-nextest and cargo test runners only; other runners are announced as unsupported and blame the PR as before. Extra-Chill/homeboy#14984.'
+        type: string
+        default: 'true'
+      retry-introduced-test-attempts:
+        description: 'Retry attempts per candidate-only test identity when retry-introduced-test-failures is true.'
+        type: string
+        default: '2'
       observation-window:
         description: 'Duration window for best-effort observation export.'
         type: string
@@ -1166,6 +1174,42 @@ jobs:
         with:
           pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
           path: differential-artifacts
+
+      # Before the gate blames the PR for a candidate-only test failure, give
+      # it a real chance to prove that failure is flaky. This checkout+
+      # toolchain cost is paid only for the Test row of a differential-gated
+      # PR, and reconcile-differential-phases.sh still only spends it on an
+      # actual retry once it has confirmed there is something candidate-only
+      # to retry. See Extra-Chill/homeboy#14984.
+      - name: Checkout candidate for introduced-test retry
+        id: retry-checkout
+        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && matrix.section_key == 'test' && inputs.retry-introduced-test-failures == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          # This checks out into the job's default root workspace, which
+          # already holds the nested `.homeboy-action` checkout from this
+          # job's first step. actions/checkout's default `-ff` clean forces
+          # removal of nested git repositories -- it would delete
+          # `.homeboy-action` right before the Reconcile step needs it.
+          clean: false
+
+      - name: Install Rust toolchain for introduced-test retry
+        if: steps.retry-checkout.outcome == 'success'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      # Installed unconditionally on a rust-toolchain candidate checkout, not
+      # gated on the runner Homeboy actually used: retry-introduced-test-
+      # failures.sh checks for `cargo-nextest` on PATH itself before relying
+      # on it and falls back to plain `cargo test` (or an announced-
+      # unsupported no-op) when it is absent or unneeded.
+      - name: Install cargo-nextest for introduced-test retry
+        if: steps.retry-checkout.outcome == 'success'
+        uses: taiki-e/install-action@nextest
+
       - name: Reconcile provenance-bound phase evidence
         id: reconcile
         shell: bash
@@ -1181,6 +1225,8 @@ jobs:
           REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && 'candidate-failure' || 'false' }}
           PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
           PR_STATE: ${{ steps.final-pr-state.outputs.state }}
+          RETRY_WORKSPACE: ${{ steps.retry-checkout.outcome == 'success' && github.workspace || '' }}
+          RETRY_MAX_ATTEMPTS: ${{ inputs.retry-introduced-test-attempts }}
         run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
 
       - name: Generate GitHub App token

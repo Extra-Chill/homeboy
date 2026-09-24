@@ -389,8 +389,8 @@ grep -F "needs.reconcile-test-shards.result == 'success'" "${WORKFLOW}" >/dev/nu
 # Ordinary upstream failures still reach reconciliation, while cancellation
 # stops stale runs from admitting a new finalizer job.
 grep -F '!cancelled() && needs.plan.outputs.test-shards-enabled' "${WORKFLOW}" >/dev/null || { printf 'FAIL: sharded Test reconciliation remains cancellation-blind\n'; exit 1; }
-if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 2 ]; then
-  printf 'FAIL: Rust candidate plan/replay jobs do not all install cargo-nextest\n'; exit 1
+if [ "$(grep -c 'uses: taiki-e/install-action@nextest' "${WORKFLOW}")" -ne 3 ]; then
+  printf 'FAIL: Rust candidate plan/replay jobs, and the introduced-test-failure retry step, do not all install cargo-nextest\n'; exit 1
 fi
 if [ "$(grep -c "continue-on-error: true" "${WORKFLOW}")" -lt 6 ]; then
   printf 'FAIL: inventory planning transport is not isolated from normal Test verdict enforcement\n'; exit 1

@@ -84,6 +84,75 @@ rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"revi
 run_case 0 'baseline red is preserved as a non-regression verdict'
 grep -F '"baseline_red"' "${tmp}/output" >/dev/null || { printf 'FAIL: baseline red verdict was not published\n'; exit 1; }
 
+# --- Retry hook: RETRY_WORKSPACE gates a live retry of candidate-only test
+# failures before the gate blames the PR. Absence (every case above) is a
+# no-op; these cases exercise the hook itself. Extra-Chill/homeboy#14984.
+#
+# write_phase's fixed test identity is "stable"; the fake `cargo-nextest`
+# plugin below reads its filter argument to decide pass/fail per identity,
+# exactly like a real one would.
+retry_bin_dir="${tmp}/retry-bin"
+retry_workspace="${tmp}/retry-workspace"
+mkdir -p "${retry_bin_dir}" "${retry_workspace}"
+
+install_fake_nextest() {
+  local behavior="$1" # flaky: fails once then passes. stuck: never passes.
+  cat > "${retry_bin_dir}/cargo-nextest" <<FAKE_NEXTEST
+#!/usr/bin/env bash
+id=""
+for arg in "\$@"; do
+  case "\${arg}" in
+    test\\(=*\\)) id="\${arg#test(=}"; id="\${id%)}" ;;
+  esac
+done
+case "${behavior}" in
+  flaky)
+    state="${retry_workspace}/\${id//[:\\/]/_}.count"
+    count=0
+    [ -f "\${state}" ] && count="\$(cat "\${state}")"
+    count=\$((count + 1))
+    echo "\${count}" > "\${state}"
+    if [ "\${count}" -ge 2 ]; then
+      echo "1 tests run: 1 passed"
+      exit 0
+    fi
+    echo "1 tests run: 0 passed, 1 failed"
+    exit 100
+    ;;
+  stuck)
+    echo "1 tests run: 0 passed, 1 failed"
+    exit 100
+    ;;
+esac
+FAKE_NEXTEST
+  chmod +x "${retry_bin_dir}/cargo-nextest"
+}
+
+run_case_with_retry() {
+  local expected="$1" label="$2" behavior="$3"
+  install_fake_nextest "${behavior}"
+  rm -f "${retry_workspace}"/*.count
+  rm -f "${tmp}/output"
+  local log="${tmp}/retry-case.log"
+  set +e
+  PATH="${retry_bin_dir}:${PATH}" PHASE_ARTIFACT_ROOT="${tmp}/artifacts" REPOSITORY=example/repo CANDIDATE_SHA=candidate BASE_SHA=base COMMAND='review test' ARTIFACT_KEY=fixture-key ACTION_REVISION=action-sha RUN_ATTEMPT=2 REQUIRE_BASELINE=true PR_ACTIVE=false RETRY_WORKSPACE="${retry_workspace}" RETRY_MAX_ATTEMPTS=2 GITHUB_OUTPUT="${tmp}/output" bash "${RECONCILE}" >"${log}" 2>&1
+  local actual=$?
+  set -e
+  if [ "${actual}" -ne "${expected}" ]; then
+    printf 'FAIL: %s (expected exit %s, got %s)\n' "${label}" "${expected}" "${actual}"
+    cat "${log}"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "${label}"
+}
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_with_retry 0 'a candidate-only failure that passes on retry is not blocking' flaky
+grep -F '"baseline_red"' "${tmp}/output" >/dev/null || { printf 'FAIL: a retried-flaky candidate-only failure did not clear to baseline_red\n'; exit 1; }
+
+rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"fail"}' "${payload_one}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
+run_case_with_retry 1 'a candidate-only failure that fails every retry attempt remains blocking' stuck
+
 rm -rf "${tmp}/artifacts"; write_phase candidate candidate component cli '{"review test":"timeout"}' "${payload_pass}"; write_phase baseline base component cli '{"review test":"pass"}' "${payload_pass}"
 run_case 1 'candidate timeout remains blocking'
 

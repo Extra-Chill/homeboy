@@ -252,6 +252,36 @@ def test_evidence_defect(command: str, directory: str) -> str | None:
     return None
 
 
+RETRY_SCHEMA = "homeboy/test-retry/v1"
+
+
+def retry_evidence(command: str, directory: str) -> dict[str, Any] | None:
+    """Read the optional retry sidecar written by retry-introduced-test-failures.sh.
+
+    Absence is the common case -- most commands, and most test runs even when
+    retry is enabled, never produce one -- and means no retry was attempted.
+    Callers must fall back to the pre-retry verdict, never treat a missing or
+    malformed sidecar as "retried and still failing": that would let a
+    producer bug silently manufacture new blocking failures instead of simply
+    not helping. See Extra-Chill/homeboy#14984.
+    """
+    stem = output_stem(command)
+    payload = read_json(os.path.join(directory, f"{stem}.test-retry.json"))
+    if not isinstance(payload, dict):
+        return None
+    flaky = payload.get("flaky")
+    still_failing = payload.get("still_failing")
+    if (
+        payload.get("schema") != RETRY_SCHEMA
+        or payload.get("command") != test_evidence_command_identity(command)
+        or not isinstance(flaky, list)
+        or not isinstance(still_failing, list)
+        or any(not isinstance(value, str) or not value for value in flaky + still_failing)
+    ):
+        return None
+    return payload
+
+
 def invalid_evidence_detail(command: str, sides: list[tuple[str, str, str]]) -> str:
     """Name the invalid side(s), and why, when the producer said why."""
     described = []
@@ -286,9 +316,42 @@ def command_failed(metadata: dict[str, Any]) -> bool:
         return False
 
 
+def emit_introduced(command: str, current_dir: str, base_dir: str) -> int:
+    """Print the candidate-only failed test identities for one command.
+
+    A retry orchestrator (retry-introduced-test-failures.sh) calls this
+    before it has a live workspace to retry anything in, so it knows exactly
+    which identities are worth the cost of a checkout and a rebuild, and
+    which runner produced them. This reuses the same `test_outcomes()`
+    validation the gate itself relies on, rather than re-deriving it in
+    shell. See Extra-Chill/homeboy#14984.
+    """
+    current_evidence, _current_inventory, current_failed = test_outcomes(command, current_dir)
+    base_evidence, _base_inventory, base_failed = test_outcomes(command, base_dir)
+    if current_evidence != "complete" or base_evidence != "complete" or current_failed is None or base_failed is None:
+        print(json.dumps({"introduced": [], "runner": None}, separators=(",", ":")))
+        return 0
+
+    runner: str | None = None
+    payload = read_json(os.path.join(current_dir, f"{output_stem(command)}.test-outcomes.json"))
+    if isinstance(payload, dict) and isinstance(payload.get("runner"), str):
+        runner = payload["runner"]
+
+    introduced = sorted(current_failed - base_failed)
+    print(json.dumps({"introduced": introduced, "runner": runner}, separators=(",", ":")))
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) == 5 and sys.argv[1] == "--emit-introduced":
+        return emit_introduced(sys.argv[2], sys.argv[3], sys.argv[4])
+
     if len(sys.argv) != 4:
-        print("usage: apply-differential-gate.py RESULTS_JSON CURRENT_DIR BASE_DIR", file=sys.stderr)
+        print(
+            "usage: apply-differential-gate.py RESULTS_JSON CURRENT_DIR BASE_DIR\n"
+            "       apply-differential-gate.py --emit-introduced COMMAND CURRENT_DIR BASE_DIR",
+            file=sys.stderr,
+        )
         return 2
 
     results = json.loads(sys.argv[1] or "{}")
@@ -373,9 +436,29 @@ def main() -> int:
             candidate_only_inventory = current_inventory - base_inventory
             baseline_only_inventory = base_inventory - current_inventory
             introduced = current_failed - base_failed
+
+            # Before blaming the PR for these, honor evidence that they were
+            # retried in isolation and passed. A test present in `flaky` but
+            # not in `introduced` (already excluded by the baseline, or by a
+            # producer that retried something out of scope) changes nothing
+            # here -- only confirmed candidate-only identities are eligible
+            # for exclusion. See Extra-Chill/homeboy#14984.
+            retry = retry_evidence(command, current_dir)
+            if retry is not None:
+                flaky = set(retry.get("flaky", [])) & introduced
+                if flaky:
+                    introduced = introduced - flaky
+                    print(
+                        f"::warning::Differential gate marked {len(flaky)} candidate-only failed "
+                        f"test identity(s) for {command} flaky: passed on retry and excluded from "
+                        f"introduced-failure attribution: {', '.join(sorted(flaky))}.",
+                        file=sys.stderr,
+                    )
+
             if introduced:
                 print(
-                    f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only failed test identity(s).",
+                    f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only "
+                    f"failed test identity(s): {', '.join(sorted(introduced))}.",
                     file=sys.stderr,
                 )
                 continue
