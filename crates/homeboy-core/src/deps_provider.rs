@@ -702,6 +702,11 @@ impl InstalledDependencyAdapter {
             return Ok(Vec::new());
         };
         let value = read_adapter_json(&self.project_path.join(&identity.manifest))?;
+        let locked = identity
+            .lockfile
+            .as_ref()
+            .map(|lockfile| read_adapter_lockfile(&self.project_path, lockfile))
+            .unwrap_or_default();
         let mut packages = Vec::new();
         for section in &identity.dependencies {
             let Some(dependencies) = value.get(section).and_then(serde_json::Value::as_object)
@@ -709,12 +714,15 @@ impl InstalledDependencyAdapter {
                 continue;
             };
             packages.extend(dependencies.iter().filter_map(|(name, constraint)| {
-                constraint.as_str().map(|constraint| DependencyPackage {
-                    name: name.clone(),
-                    manifest_section: Some(section.clone()),
-                    constraint: Some(constraint.to_string()),
-                    locked_version: None,
-                    locked_reference: None,
+                constraint.as_str().map(|constraint| {
+                    let lock = locked.get(name);
+                    DependencyPackage {
+                        name: name.clone(),
+                        manifest_section: Some(section.clone()),
+                        constraint: Some(constraint.to_string()),
+                        locked_version: lock.and_then(|lock| lock.version.clone()),
+                        locked_reference: lock.and_then(|lock| lock.reference.clone()),
+                    }
                 })
             }));
         }
@@ -873,6 +881,91 @@ struct AdapterPackageIdentity {
     manifest: PathBuf,
     name: String,
     dependencies: Vec<String>,
+    /// Where the package manager records resolved versions, so status can
+    /// report what is locked without installing anything.
+    #[serde(default)]
+    lockfile: Option<AdapterLockfile>,
+}
+
+/// A JSON lockfile described declaratively, so core reads any package
+/// manager's lock without knowing its format.
+///
+/// `packages` lists JSON keys whose values are arrays of package entries; each
+/// entry carries its name, version, and optionally a resolved reference at the
+/// given field paths. A dotted path (`source.reference`) descends into objects,
+/// and `reference` lists fallbacks tried in order.
+#[derive(Debug, Clone, Deserialize)]
+struct AdapterLockfile {
+    path: PathBuf,
+    packages: Vec<String>,
+    #[serde(default = "default_lock_name_field")]
+    name: String,
+    #[serde(default = "default_lock_version_field")]
+    version: String,
+    #[serde(default)]
+    reference: Vec<String>,
+}
+
+fn default_lock_name_field() -> String {
+    "name".to_string()
+}
+
+fn default_lock_version_field() -> String {
+    "version".to_string()
+}
+
+/// A resolved package read from an adapter lockfile.
+struct AdapterLockedPackage {
+    version: Option<String>,
+    reference: Option<String>,
+}
+
+fn json_field<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    path.split('.')
+        .try_fold(value, |current, key| current.get(key))
+}
+
+fn json_string_field(value: &serde_json::Value, path: &str) -> Option<String> {
+    json_field(value, path)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Read resolved versions from a declared lockfile. A missing or unreadable
+/// lock yields no entries rather than an error: status still reports declared
+/// constraints, and a caller comparing versions sees the package as unlocked
+/// instead of the whole status failing.
+fn read_adapter_lockfile(
+    project_path: &Path,
+    lockfile: &AdapterLockfile,
+) -> std::collections::HashMap<String, AdapterLockedPackage> {
+    let mut locked = std::collections::HashMap::new();
+    let Ok(raw) = fs::read_to_string(project_path.join(&lockfile.path)) else {
+        return locked;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return locked;
+    };
+    for key in &lockfile.packages {
+        let Some(entries) = value.get(key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(name) = json_string_field(entry, &lockfile.name) else {
+                continue;
+            };
+            let version = json_string_field(entry, &lockfile.version);
+            let reference = lockfile
+                .reference
+                .iter()
+                .find_map(|path| json_string_field(entry, path));
+            locked
+                .entry(name)
+                .or_insert(AdapterLockedPackage { version, reference });
+        }
+    }
+    locked
 }
 
 fn read_adapter_json(path: &Path) -> Result<serde_json::Value> {

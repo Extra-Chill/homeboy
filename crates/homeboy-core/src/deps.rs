@@ -1462,6 +1462,121 @@ mod tests {
         });
     }
 
+    /// An installed dependency adapter outranks an extension's deps script, so
+    /// in CI — where adapters are installed — locked versions have to come
+    /// from the adapter. An adapter that declares its lockfile reports them
+    /// without installing anything; one that does not, reports none.
+    #[test]
+    fn adapter_status_reports_locked_versions_from_its_declared_lockfile() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            std::fs::create_dir_all(root.join("examples")).expect("adapter directory");
+            std::fs::write(
+                root.join("index.json"),
+                r#"{
+                    "schema":"homeboy-extension/dependency-adapter-index/v1",
+                    "manifests":[{"id":"composer-package-manager","ecosystem":"php","path":"examples/composer.json"}]
+                }"#,
+            )
+            .expect("adapter index");
+            std::fs::write(
+                root.join("examples/composer.json"),
+                r#"{
+                    "schema":"homeboy-extension/dependency-adapter-manifest/v1",
+                    "id":"composer-package-manager",
+                    "version":1,
+                    "ecosystem":"php",
+                    "project_signals":{"root_files":["composer.json"]},
+                    "package_managers":[{
+                        "id":"composer",
+                        "selection":{"priority":1,"default":true},
+                        "commands":{"install":{"command":"composer install"}},
+                        "package_identity":{
+                            "manifest":"composer.json",
+                            "name":"name",
+                            "dependencies":["require","require-dev"],
+                            "lockfile":{
+                                "path":"composer.lock",
+                                "packages":["packages","packages-dev"],
+                                "reference":["source.reference","dist.reference"]
+                            }
+                        },
+                        "outputs":[{"path":"vendor","kind":"directory"}]
+                    }]
+                }"#,
+            )
+            .expect("composer adapter");
+
+            let project = tempfile::tempdir().expect("project");
+            std::fs::write(
+                project.path().join("composer.json"),
+                r#"{
+                    "name":"acme/app",
+                    "require":{"php":">=8.2","acme/registry":"0.18.0","acme/archive":"0.3.0"},
+                    "require-dev":{"acme/dev-tool":"^1.0"}
+                }"#,
+            )
+            .expect("composer.json");
+            std::fs::write(
+                project.path().join("composer.lock"),
+                r#"{
+                    "packages":[
+                        {"name":"acme/registry","version":"v0.18.0","source":{"reference":"0fb5ab77"}},
+                        {"name":"acme/archive","version":"0.3.0","dist":{"reference":"42849ace"}}
+                    ],
+                    "packages-dev":[
+                        {"name":"acme/dev-tool","version":"1.4.2","source":{"reference":"153d0531"}}
+                    ]
+                }"#,
+            )
+            .expect("composer.lock");
+
+            let path = project.path().display().to_string();
+            let locked = status(None, Some(&path), None).expect("adapter status");
+            assert_eq!(locked.package_manager, "composer");
+            let by_name = |name: &str| {
+                locked
+                    .packages
+                    .iter()
+                    .find(|package| package.name == name)
+                    .unwrap_or_else(|| panic!("missing {name}"))
+                    .clone()
+            };
+
+            let registry = by_name("acme/registry");
+            assert_eq!(registry.locked_version.as_deref(), Some("v0.18.0"));
+            assert_eq!(registry.locked_reference.as_deref(), Some("0fb5ab77"));
+            let archive = by_name("acme/archive");
+            assert_eq!(archive.locked_version.as_deref(), Some("0.3.0"));
+            assert_eq!(
+                archive.locked_reference.as_deref(),
+                Some("42849ace"),
+                "dist reference is the fallback when there is no source"
+            );
+            assert_eq!(
+                by_name("acme/dev-tool").locked_version.as_deref(),
+                Some("1.4.2")
+            );
+            assert_eq!(
+                by_name("php").locked_version,
+                None,
+                "a platform requirement is never locked"
+            );
+
+            std::fs::remove_file(project.path().join("composer.lock")).expect("drop lock");
+            let unlocked = status(None, Some(&path), None).expect("status without a lock");
+            assert!(
+                unlocked
+                    .packages
+                    .iter()
+                    .all(|package| package.locked_version.is_none()),
+                "no lockfile means nothing is reported as locked"
+            );
+        });
+    }
+
     #[test]
     fn adapter_hydration_skips_explicitly_dependency_free_project() {
         crate::test_support::with_isolated_home(|home| {
