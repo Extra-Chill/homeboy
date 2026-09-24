@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.387.1] - 2026-09-24
+
+### Fixed
+- fail a declared registry publish that cannot authenticate
+
 ## [0.387.0] - 2026-09-24
 
 ### Added
