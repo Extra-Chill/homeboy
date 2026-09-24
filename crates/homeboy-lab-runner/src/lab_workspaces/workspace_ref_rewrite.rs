@@ -185,11 +185,33 @@ pub(super) fn maybe_resolve_workspace_ref(
             )
         })?;
     let (workspace_path, source_kind, provenance) = match ownership {
-        WorkspaceRefRecord::Task(record) => (
-            PathBuf::from(record.worktree_path),
-            "task_worktree".to_string(),
-            None,
-        ),
+        WorkspaceRefRecord::Task(record) => {
+            // A removed record's worktree path can still be present on disk
+            // (store_ops.rs tracks `removed_path_present` as a real,
+            // recognized condition); the record's own state, not path
+            // existence, is what makes it resolvable. A removed handle is
+            // not a known workspace handle to this caller, so it fails the
+            // same way an absent one does rather than with a distinct
+            // "removed" message.
+            if record.state != homeboy_core::worktree::TaskWorktreeState::Active {
+                return Err(Error::validation_invalid_argument(
+                    "workspace_ref",
+                    format!(
+                        "Lab offload workspace ref `{value}` does not match a known workspace handle"
+                    ),
+                    Some(value.to_string()),
+                    Some(vec![
+                        "Create a Homeboy task worktree or adopt an existing path with `homeboy worktree adopt <handle> <path>`."
+                            .to_string(),
+                    ]),
+                ));
+            }
+            (
+                PathBuf::from(record.worktree_path),
+                "task_worktree".to_string(),
+                None,
+            )
+        }
         WorkspaceRefRecord::Adopted(record) => (
             PathBuf::from(record.path),
             "adopted_workspace".to_string(),
