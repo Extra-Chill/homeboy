@@ -5,27 +5,45 @@ struct SidebarView: View {
     @EnvironmentObject var authManager: AuthManager
     @ObservedObject private var extensionManager = ExtensionManager.shared
     @ObservedObject private var config = ConfigurationManager.shared
-    
+
     var body: some View {
         VStack(spacing: 0) {
-            // Site Switcher Header
-            ProjectSwitcherView()
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-            
-            Divider()
-            
             List(selection: $selectedItem) {
-                // Core Tools Section
+                // Global orchestration workspace - always available, no
+                // project required.
                 Section {
-                    ForEach(coreTools, id: \.self) { tool in
-                        Label(tool.rawValue, systemImage: tool.icon)
-                            .tag(NavigationItem.coreTool(tool))
+                    Label("Activity", systemImage: "waveform.path.ecg")
+                        .tag(NavigationItem.activity)
+                    Label("Missions", systemImage: "point.3.connected.trianglepath.dotted")
+                        .tag(NavigationItem.missions)
+                    Label("Capacity", systemImage: "gauge.with.dots.needle.50percent")
+                        .tag(NavigationItem.capacity)
+                    Label("Runners", systemImage: "server.rack")
+                        .tag(NavigationItem.runners)
+                } header: {
+                    Text("Orchestration")
+                }
+
+                // Projects Section - project switcher plus every tool gated
+                // on the active project, exactly as before.
+                Section {
+                    ProjectSwitcherView()
+                        .padding(.vertical, 4)
+
+                    if coreTools.isEmpty {
+                        Label("No project tools available", systemImage: "folder.badge.plus")
+                            .foregroundColor(.secondary)
+                            .font(.callout)
+                    } else {
+                        ForEach(coreTools, id: \.self) { tool in
+                            Label(tool.rawValue, systemImage: tool.icon)
+                                .tag(NavigationItem.coreTool(tool))
+                        }
                     }
                 } header: {
-                    Text("Tools")
+                    Text("Projects")
                 } footer: {
-                    Text("Built-in server and deployment tools")
+                    Text("Built-in server and deployment tools for the active project")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -128,15 +146,21 @@ struct SidebarView: View {
     private func ensureSelectionIsVisible() {
         switch selectedItem {
         case .coreTool(let tool):
+            // A project switch can make the currently selected project tool
+            // unavailable. Fall back to the global Activity workspace rather
+            // than forcing a project tool, since orchestration never depends
+            // on a project.
             if !coreTools.contains(tool), tool != .settings {
-                selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+                selectedItem = .activity
             }
         case .extensionItem(let id):
             if !extensionManager.extensions.contains(where: { $0.id == id }) {
-                selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+                selectedItem = .activity
             }
+        case .activity, .missions, .capacity, .runners:
+            break
         case nil:
-            selectedItem = coreTools.first.map(NavigationItem.coreTool) ?? .coreTool(.settings)
+            selectedItem = .activity
         }
     }
     

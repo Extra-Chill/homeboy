@@ -1,0 +1,39 @@
+{
+  "data": {
+    "body": {
+      "ok": true,
+      "resource": {
+        "has_more": true,
+        "missions": [
+          {
+            "created_at": "2026-09-25T02:02:34.769776+00:00",
+            "mission": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7",
+            "run_count": 1,
+            "schema": "homeboy/control-plane-mission/v1",
+            "updated_at": "2026-09-25T02:37:45.804486+00:00"
+          },
+          {
+            "created_at": "2026-09-25T00:13:30.127408+00:00",
+            "mission": "agent-task-79cdf130-cce3-4586-8424-841789aaef42",
+            "run_count": 1,
+            "schema": "homeboy/control-plane-mission/v1",
+            "updated_at": "2026-09-25T00:23:38.435750+00:00"
+          },
+          {
+            "created_at": "2026-09-25T00:13:22.476629+00:00",
+            "mission": "agent-task-b8697b3a-d156-407e-a099-e687fee69b09",
+            "run_count": 1,
+            "schema": "homeboy/control-plane-mission/v1",
+            "updated_at": "2026-09-25T00:15:07.414253+00:00"
+          }
+        ],
+        "next_cursor": "eyJzY2hlbWEiOiJob21lYm95L2NvbnRyb2wtcGxhbmUtbWlzc2lvbi1jdXJzb3IvdjEiLCJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yNVQwMDoxMzoyMi40NzY2MjkrMDA6MDAiLCJtaXNzaW9uX2lkIjoiYWdlbnQtdGFzay1iODY5N2IzYS1kMTU2LTQwN2UtYTA5OS1lNjg3ZmVlNjliMDkifQ",
+        "schema": "homeboy/control-plane-mission-page/v1"
+      },
+      "schema": "homeboy/control-plane-result/v1"
+    },
+    "endpoint": "control_plane.missions.list",
+    "status": 200
+  },
+  "success": true
+}

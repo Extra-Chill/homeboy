@@ -1,14 +1,21 @@
 import Combine
 import SwiftUI
 
-/// Navigation items: core tools are static, extensions are dynamic
+/// Navigation items: global orchestration domains and core tools are static,
+/// extensions are dynamic. The app opens to the global shell (Activity)
+/// without requiring an active project; only the `.coreTool` project tools
+/// are gated on one.
 enum NavigationItem: Hashable {
+    case activity
+    case missions
+    case capacity
+    case runners
     case coreTool(CoreTool)
     case extensionItem(String) // Extension ID
 }
 
-/// Built-in core tools (not extensions)
-/// Order: Deployer, File Editor, Log Viewer are universal.
+/// Built-in project tools (not extensions), reachable under the sidebar's
+/// Projects section. Order: Deployer, File Editor, Log Viewer are universal.
 /// Database Browser is shown if project type supports it.
 /// Settings is shown in a separate section.
 enum CoreTool: String, CaseIterable, Identifiable {
@@ -16,7 +23,6 @@ enum CoreTool: String, CaseIterable, Identifiable {
     case deployer = "Deployer"
     case bench = "Bench"
     case lab = "Lab"
-    case agentTasks = "Agent Tasks"
     case runHistory = "Run History"
     case release = "Release"
     case rigs = "Rigs"
@@ -37,7 +43,6 @@ enum CoreTool: String, CaseIterable, Identifiable {
         case .deployer: return "arrow.up.to.line"
         case .bench: return "speedometer"
         case .lab: return "desktopcomputer.and.arrow.down"
-        case .agentTasks: return "point.3.connected.trianglepath.dotted"
         case .runHistory: return "clock.arrow.circlepath"
         case .release: return "tag"
         case .rigs: return "shippingbox.and.arrow.backward"
@@ -63,7 +68,7 @@ enum CoreTool: String, CaseIterable, Identifiable {
             return true
         case .settings:
             return true
-        case .deployer, .bench, .lab, .agentTasks, .runHistory, .release, .rigs, .stackManager, .git, .quality:
+        case .deployer, .bench, .lab, .runHistory, .release, .rigs, .stackManager, .git, .quality:
             return hasComponents
         case .remoteFileEditor, .remoteLogViewer:
             return hasRemoteTarget
@@ -79,31 +84,19 @@ struct ContentView: View {
     @EnvironmentObject var authManager: AuthManager
     @ObservedObject private var configManager = ConfigurationManager.shared
     @ObservedObject private var extensionManager = ExtensionManager.shared
-    @State private var selectedItem: NavigationItem? = .coreTool(.deployer)
-    
+    @StateObject private var missionStore = MissionStore()
+    @StateObject private var navigationState = AppNavigationState()
+
+    private var selectedItem: NavigationItem? { navigationState.selectedItem }
+
     var body: some View {
-        Group {
-            if configManager.activeProject != nil {
-                NavigationSplitView {
-                    SidebarView(selectedItem: $selectedItem)
-                } detail: {
-                    detailView
-                }
-            } else {
-                ContentUnavailableView(
-                    configManager.needsProjectCreation ? "No Homeboy Projects" : "Loading Homeboy Project",
-                    systemImage: configManager.needsProjectCreation ? "folder.badge.plus" : "hourglass",
-                    description: Text(
-                        configManager.needsProjectCreation
-                            ? "Create a project to start using Homeboy Desktop."
-                            : "Reading project configuration from the Homeboy CLI."
-                    )
-                )
-            }
+        NavigationSplitView {
+            SidebarView(selectedItem: $navigationState.selectedItem)
+        } detail: {
+            detailView
         }
-        .sheet(isPresented: $configManager.needsProjectCreation) {
-            CreateProjectSheet(isFirstProject: true)
-        }
+        .environmentObject(missionStore)
+        .environmentObject(navigationState)
         .onChange(of: configManager.activeProject?.id) { _, _ in
             ensureSelectedItemIsAvailable()
         }
@@ -111,13 +104,15 @@ struct ContentView: View {
 
     private func ensureSelectedItemIsAvailable() {
         guard case .coreTool(let tool) = selectedItem,
+              tool != .settings,
               !tool.isAvailable(for: configManager.activeProject) else {
             return
         }
 
-        selectedItem = CoreTool.allCases.first { $0 != .settings && $0.isAvailable(for: configManager.activeProject) }
-            .map(NavigationItem.coreTool)
-            ?? .coreTool(.settings)
+        // Fall back to the global Activity workspace rather than forcing a
+        // project tool selection: orchestration domains never require a
+        // project, so losing project-tool availability is not a dead end.
+        navigationState.selectedItem = .activity
     }
     
     /// Views are kept mounted in a ZStack to preserve state (including running processes)
@@ -125,46 +120,60 @@ struct ContentView: View {
     @ViewBuilder
     private var detailView: some View {
         ZStack {
-            // Core tools - kept mounted to preserve state
-            CommandBrowserView()
-                .opacity(selectedItem == .coreTool(.commandBrowser) ? 1 : 0)
-            DeployerView()
-                .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
-            BenchView()
-                .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
-            HomeboyLabView()
-                .opacity(selectedItem == .coreTool(.lab) ? 1 : 0)
-            AgentTasksView()
-                .opacity(selectedItem == .coreTool(.agentTasks) ? 1 : 0)
-            RunHistoryView()
-                .opacity(selectedItem == .coreTool(.runHistory) ? 1 : 0)
-            ReleaseWorkflowView()
-                .opacity(selectedItem == .coreTool(.release) ? 1 : 0)
-            RigsView()
-                .opacity(selectedItem == .coreTool(.rigs) ? 1 : 0)
-            StackManagerView()
-                .opacity(selectedItem == .coreTool(.stackManager) ? 1 : 0)
-            GitOperationsView()
-                .opacity(selectedItem == .coreTool(.git) ? 1 : 0)
-            QualityView()
-                .opacity(selectedItem == .coreTool(.quality) ? 1 : 0)
-            DatabaseBrowserView()
-                .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
-            RemoteLogViewerView()
-                .opacity(selectedItem == .coreTool(.remoteLogViewer) ? 1 : 0)
-            RemoteFileEditorView()
-                .opacity(selectedItem == .coreTool(.remoteFileEditor) ? 1 : 0)
-            APIAuthWorkspaceView()
-                .opacity(selectedItem == .coreTool(.apiAuth) ? 1 : 0)
+            // Global orchestration workspace - no project required.
+            ActivityView()
+                .opacity(selectedItem == .activity ? 1 : 0)
+            MissionsView()
+                .opacity(selectedItem == .missions ? 1 : 0)
+            CapacityView()
+                .opacity(selectedItem == .capacity ? 1 : 0)
+            RunnersView()
+                .opacity(selectedItem == .runners ? 1 : 0)
+
+            // Project tools - kept mounted to preserve state, gated on the
+            // active project exactly as before.
+            if configManager.activeProject != nil {
+                CommandBrowserView()
+                    .opacity(selectedItem == .coreTool(.commandBrowser) ? 1 : 0)
+                DeployerView()
+                    .opacity(selectedItem == .coreTool(.deployer) ? 1 : 0)
+                BenchView()
+                    .opacity(selectedItem == .coreTool(.bench) ? 1 : 0)
+                HomeboyLabView()
+                    .opacity(selectedItem == .coreTool(.lab) ? 1 : 0)
+                RunHistoryView()
+                    .opacity(selectedItem == .coreTool(.runHistory) ? 1 : 0)
+                ReleaseWorkflowView()
+                    .opacity(selectedItem == .coreTool(.release) ? 1 : 0)
+                RigsView()
+                    .opacity(selectedItem == .coreTool(.rigs) ? 1 : 0)
+                StackManagerView()
+                    .opacity(selectedItem == .coreTool(.stackManager) ? 1 : 0)
+                GitOperationsView()
+                    .opacity(selectedItem == .coreTool(.git) ? 1 : 0)
+                QualityView()
+                    .opacity(selectedItem == .coreTool(.quality) ? 1 : 0)
+                DatabaseBrowserView()
+                    .opacity(selectedItem == .coreTool(.databaseBrowser) ? 1 : 0)
+                RemoteLogViewerView()
+                    .opacity(selectedItem == .coreTool(.remoteLogViewer) ? 1 : 0)
+                RemoteFileEditorView()
+                    .opacity(selectedItem == .coreTool(.remoteFileEditor) ? 1 : 0)
+                APIAuthWorkspaceView()
+                    .opacity(selectedItem == .coreTool(.apiAuth) ? 1 : 0)
+
+                // Dynamic extensions
+                ForEach(extensionManager.extensions) { ext in
+                    ExtensionContainerView(extensionId: ext.id)
+                        .opacity(selectedItem == .extensionItem(ext.id) ? 1 : 0)
+                }
+            } else if isProjectScopedSelection {
+                ProjectsEmptyStateView()
+            }
+
             SettingsView()
                 .opacity(selectedItem == .coreTool(.settings) ? 1 : 0)
-            
-        // Dynamic extensions
-        ForEach(extensionManager.extensions) { ext in
-            ExtensionContainerView(extensionId: ext.id)
-                .opacity(selectedItem == .extensionItem(ext.id) ? 1 : 0)
-        }
-            
+
             // Empty state
             if selectedItem == nil {
                 ContentUnavailableView(
@@ -173,6 +182,43 @@ struct ContentView: View {
                     description: Text("Choose a tool or extension from the sidebar")
                 )
             }
+        }
+    }
+
+    /// True when the current selection is a project tool (or extension) that
+    /// needs an active project. Settings and the global orchestration
+    /// domains are always reachable.
+    private var isProjectScopedSelection: Bool {
+        switch selectedItem {
+        case .coreTool(let tool):
+            return tool != .settings
+        case .extensionItem:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// Shown under Projects when no project is configured yet. Replaces the
+/// previous whole-app blocker: the global orchestration domains (Activity,
+/// Missions, Capacity, Runners) remain usable while this is on screen.
+struct ProjectsEmptyStateView: View {
+    @State private var showCreateProject = false
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("No Homeboy Projects", systemImage: "folder.badge.plus")
+        } description: {
+            Text("Create a project to use Deployer, Bench, Release, and the other project tools. Activity, Missions, Capacity, and Runners work without one.")
+        } actions: {
+            Button("Create Project") {
+                showCreateProject = true
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .sheet(isPresented: $showCreateProject) {
+            CreateProjectSheet(isFirstProject: false)
         }
     }
 }
