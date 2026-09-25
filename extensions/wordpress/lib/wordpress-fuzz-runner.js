@@ -27,6 +27,11 @@ const {
 	requiredWpCodeboxContractsForFuzzPlan,
 } = require('./wordpress-fuzz-command-manifest');
 const { createCodeboxClient } = require('./codebox-client');
+const {
+	LAYOUT_SWEEP_WORKLOAD_SCHEMA,
+	buildLayoutSweepFuzzCampaign,
+	runWordPressLayoutSweepWorkload,
+} = require('./wordpress-layout-sweep-workload');
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
 const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
@@ -61,6 +66,80 @@ async function runWordPressFuzzRunnerResult(options = {}) {
 	const context = buildWordPressFuzzRunnerContext(options);
 	const codeboxResult = promoteCollectedWorkloadFuzzReport(await resolveCodeboxResult(context, options), context.env.artifactRoot);
 	return buildWordPressFuzzRunnerSummary({ ...context, codeboxResult });
+}
+
+/**
+ * Select the runner path for a `HOMEBOY_FUZZ_WORKLOAD_PATH` declaration:
+ * layout-sweep declarations run through `runLayoutSweepFuzzRunnerResult`;
+ * every other workload keeps running through `runWordPressFuzzRunnerResult`
+ * exactly as before.
+ * @param {Object} options Runner options (forwarded to whichever path is selected).
+ * @return {Promise<Object>} `homeboy/wordpress-fuzz-runner-result/v1` result.
+ */
+async function dispatchWordPressFuzzRunnerResult(options = {}) {
+	const env = options.env || readWordPressFuzzRunnerEnv();
+	const workload = options.workload || readJsonFile(requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH'));
+	if (isLayoutSweepWorkloadDeclaration(workload)) {
+		return runLayoutSweepFuzzRunnerResult({ ...options, env, workload });
+	}
+	return runWordPressFuzzRunnerResult({ ...options, env, workload });
+}
+
+function isLayoutSweepWorkloadDeclaration(workload) {
+	return Boolean(objectOrUndefined(workload) && workload.schema === LAYOUT_SWEEP_WORKLOAD_SCHEMA);
+}
+
+/**
+ * Run a `homeboy/wordpress-layout-sweep-workload/v1` declaration through WP
+ * Codebox and map the result to a Homeboy fuzz campaign.
+ *
+ * This reuses `runWordPressLayoutSweepWorkload()` (the layout-sweep module's
+ * own recipe-build + Codebox-run + artifact-read adapter, on the same
+ * Codebox client path `runWpCodeboxFuzzSuite` uses) and
+ * `buildLayoutSweepFuzzCampaign()` for the campaign mapping; the caller
+ * (`fuzz-runner.cjs`) persists the result with the same
+ * `writeHomeboyFuzzResultsFile()` / `writeHomeboyFuzzArtifactFiles()` writers
+ * every other workload uses.
+ * @param {Object} options Runner options; `options.workload` is the layout-sweep declaration.
+ * @return {Promise<Object>} `homeboy/wordpress-fuzz-runner-result/v1` result.
+ */
+async function runLayoutSweepFuzzRunnerResult(options = {}) {
+	const env = options.env || readWordPressFuzzRunnerEnv();
+	const declaration = options.workload || readJsonFile(requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH'));
+	const runId = requiredString(env.runId || declaration.id, 'HOMEBOY_FUZZ_RUN_ID');
+	const artifactsDirectory = requiredString(env.artifactRoot, 'HOMEBOY_FUZZ_ARTIFACTS_DIR');
+
+	const runLayoutSweepWorkload = options.runLayoutSweepWorkload || runWordPressLayoutSweepWorkload;
+	const run = await runLayoutSweepWorkload({
+		declaration,
+		artifactsDirectory,
+		wpCodeboxBin: options.wpCodeboxBin || env.wpCodeboxBin,
+		bin: options.bin,
+		cwd: options.cwd,
+		recipeFile: options.recipeFile,
+		outputFile: options.outputFile,
+		recipeRunArgs: options.recipeRunArgs,
+	});
+
+	const homeboyFuzzCampaign = buildLayoutSweepFuzzCampaign({
+		id: runId,
+		declaration: run.declaration,
+		summary: run.summary,
+	});
+	const succeeded = homeboyFuzzCampaign.findings.every((finding) => finding.status === 'suppressed');
+
+	return stripUndefined({
+		schema: WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
+		status: succeeded ? 'succeeded' : 'failed',
+		succeeded,
+		run_id: runId,
+		workload_id: env.workloadId || declaration.id,
+		wp_codebox_result: stripUndefined({
+			result_schema: run.summary?.schema,
+			status: run.summary?.status,
+		}),
+		homeboy_fuzz_campaign: homeboyFuzzCampaign,
+	});
 }
 
 function promoteCollectedWorkloadFuzzReport(codeboxResult = {}, artifactRoot) {
@@ -1218,6 +1297,9 @@ module.exports = {
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	buildWordPressFuzzRunnerResult,
 	runWordPressFuzzRunnerResult,
+	dispatchWordPressFuzzRunnerResult,
+	runLayoutSweepFuzzRunnerResult,
+	isLayoutSweepWorkloadDeclaration,
 	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 	readWordPressFuzzRunnerEnv,

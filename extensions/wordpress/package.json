@@ -80,7 +80,8 @@
     "./wp-codebox-fuzz-run": "./lib/wp-codebox-fuzz-run.js",
     "./wordpress-fuzz-runner": "./lib/wordpress-fuzz-runner.js",
     "./wordpress-fuzz-runtime-task": "./lib/wordpress-fuzz-runtime-task.js",
-    "./wordpress-fuzz-runtime-workload-operations": "./lib/wordpress-fuzz-runtime-workload-operations.js"
+    "./wordpress-fuzz-runtime-workload-operations": "./lib/wordpress-fuzz-runtime-workload-operations.js",
+    "./wordpress-layout-sweep-workload": "./lib/wordpress-layout-sweep-workload.js"
   },
   "scripts": {
     "lint:js": "eslint",
@@ -202,6 +203,8 @@
     "test:wordpress-fuzz-runtime-workload-operations": "node tests/wordpress-fuzz-runtime-workload-operations-smoke.js",
     "test:wordpress-fuzz-runner-codebox-contract": "node tests/wordpress-fuzz-runner-codebox-contract-canary.js",
     "test:wordpress-fuzz-nested-report-promotion": "node tests/wordpress-fuzz-nested-report-promotion-smoke.js",
+    "test:wordpress-fuzz-runner-layout-sweep-dispatch": "node tests/wordpress-fuzz-runner-layout-sweep-dispatch-smoke.js",
+    "test:wordpress-layout-sweep-workload": "node tests/wordpress-layout-sweep-workload-smoke.js",
     "test:wordpress-public-export-boundary": "node tests/wordpress-public-export-boundary.test.js",
     "test:wordpress-manifest-settings": "node tests/wordpress-manifest-settings-smoke.js",
     "test:replay-envelope": "node tests/replay-envelope-smoke.js",

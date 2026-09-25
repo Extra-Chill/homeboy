@@ -14,8 +14,8 @@ const { spawn } = require('node:child_process');
  */
 const {
 	buildWordPressFuzzRunnerResult,
+	dispatchWordPressFuzzRunnerResult,
 	readWordPressFuzzRunnerEnv,
-	runWordPressFuzzRunnerResult,
 	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 } = require('../../lib/wordpress-fuzz-runner');
@@ -94,7 +94,7 @@ async function buildRunnerResult(env) {
 		return buildWordPressFuzzRunnerResult({ env });
 	}
 
-	return runWordPressFuzzRunnerResult({ env });
+	return dispatchWordPressFuzzRunnerResult({ env });
 }
 
 async function discoverRuntimeContractManifest(command, env = process.env) {

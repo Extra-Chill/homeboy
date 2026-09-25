@@ -1023,6 +1023,115 @@ export default async function () {
 }
 ```
 
+## WordPress Layout-Sweep Fuzz Workloads
+
+`wordpress/lib/wordpress-layout-sweep-workload.js` runs the Codebox
+`wordpress.layout-sweep` command as a `homeboy fuzz` workload kind, following
+the same shape as the visual parity workload above: a declaration builds a
+request, a run adapter is the only place that invokes Codebox, and a result
+mapper normalizes the response into `homeboy/fuzz-finding/v1` entries. It
+targets the `wordpress.layout-sweep` contract documented in
+Automattic/wp-codebox#2530 (inputs, scenarios, finding kinds, the
+`wp-codebox/layout-sweep/v1` summary, and
+`files/browser/layout-sweep/{summary,findings}.json`); when that contract
+changes, only `buildLayoutSweepCodeboxArgs()` needs to change.
+
+`wordpress/scripts/fuzz/fuzz-runner.cjs` dispatches to this module whenever
+the `HOMEBOY_FUZZ_WORKLOAD_PATH` declaration's `schema` is
+`homeboy/wordpress-layout-sweep-workload/v1`: it builds the recipe, runs it
+through the same Codebox client path every other workload uses, reads
+`files/browser/layout-sweep/summary.json`, and persists the mapped campaign
+through the runner's existing results and artifact writers. `homeboy fuzz
+<component>` runs a declared layout-sweep workload the same way it runs any
+other declared workload.
+
+A declaration is the only product-specific surface: a preview target (a URL,
+or a Codebox recipe that boots a build with demo content), container and item
+selectors, a width range, a profile, a seed, scenarios, and accepted
+findings. Everything else — request building, result mapping, and compare
+support — is generic. Unknown declaration fields are rejected clearly instead
+of being silently ignored.
+
+The minimal consumer declaration below targets a Canvas-style block: its
+containers are `.wp-block-tabor-canvas` and its items are the grid children
+`:scope > .canvas__grid > .canvas__item`. Nothing else in this module knows
+about Canvas; the selectors and accepted findings are the only
+product-specific inputs.
+
+```js
+const {
+  normalizeLayoutSweepWorkloadDeclaration,
+  runWordPressLayoutSweepWorkload,
+} = require('homeboy-extension-wordpress/wordpress-layout-sweep-workload');
+
+const declaration = normalizeLayoutSweepWorkloadDeclaration({
+  id: 'canvas-preview',
+  preview: {
+    url: '/?pagename=canvas-preview',
+    recipe: {
+      // Canvas requires WordPress 7.1. The setup script activates the plugin and
+      // publishes the demo content as the `canvas-preview` page.
+      runtime: { backend: 'wordpress-playground', wp: '7.1' },
+      inputs: {
+        mounts: [
+          { source: './build/canvas', target: '/wordpress/wp-content/plugins/canvas', mode: 'readonly' },
+          { source: './fixture', target: '/wordpress/wp-content/canvas-fixture', mode: 'readonly' },
+        ],
+      },
+      workflow: {
+        steps: [
+          { command: 'wordpress.run-php', args: ['code-file=./fixture/setup.php'] },
+        ],
+      },
+    },
+  },
+  containerSelector: '.wp-block-tabor-canvas',
+  itemSelector: ':scope > .canvas__grid > .canvas__item',
+  // Canvas announces its breakpoint band on each container.
+  modeProperty: '--canvas-viewport',
+  profile: 'quick',
+  seed: 7,
+  scenarios: ['sweep', 'history', 'storm', 'heights'],
+  // Container labels are `#<index> <id or first class>`, as reported by the sweep.
+  accepted: [{ kind: 'jump', container: '#1 alignfull', item: null }],
+});
+
+const result = await runWordPressLayoutSweepWorkload({
+  declaration,
+  artifactsDirectory: './artifacts/layout-sweep',
+});
+
+// result.findings: homeboy/fuzz-finding/v1 entries, identity = kind + container + item.
+// result.observations: report-only drag perf observations; they never gate findings.
+```
+
+Each grouped layout finding in the `wp-codebox/layout-sweep/v1` summary maps
+to a `homeboy/fuzz-finding/v1` entry whose identity is `kind` + `container` +
+`item`. Evidence carries the width range, worst magnitude, scenarios, count,
+and sample; replay metadata carries the seed, profile, and args needed to
+reproduce it. Groups the declaration accepted map to status `suppressed`
+instead of being dropped. `error` findings are mapped like any other finding
+kind. The `drag` perf block is the one exception: `mapLayoutSweepPerfToObservations()`
+turns it into report-only observations (`report_only: true`, `gates: false`)
+that never fail a campaign.
+
+```js
+const { buildLayoutSweepFuzzCampaign } = require('homeboy-extension-wordpress/wordpress-layout-sweep-workload');
+
+const trunkCampaign = buildLayoutSweepFuzzCampaign({ id: 'canvas-grid-trunk', declaration, summary: trunkSummary });
+const prCampaign = buildLayoutSweepFuzzCampaign({ id: 'canvas-grid-pr', declaration, summary: prSummary });
+```
+
+`buildLayoutSweepFuzzCampaign()` wraps a mapped result in a minimal
+`homeboy/fuzz-campaign/v1` envelope so two campaigns from the same workload —
+a trunk envelope and a PR envelope — are directly comparable. Each finding's
+`fingerprint` is derived only from its `kind` + `container` + `item` identity,
+not from its evidence, so `homeboy fuzz compare` classifies findings as new,
+resolved, or unchanged even when the width range, worst magnitude, or count
+of an unchanged finding shifts between runs. Regression comparison is
+`homeboy fuzz compare`'s job, not this module's; this module's only
+responsibility toward that comparison is handing it a stable `fingerprint`.
+
 ## Block Theme Quality Probe
 
 Playground scenario graders can call a generic PHP-first WordPress quality probe
