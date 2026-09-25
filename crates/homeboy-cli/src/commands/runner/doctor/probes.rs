@@ -784,7 +784,7 @@ pub(super) fn provider_executor_resolution_remote_shell_with_timeout(
     // Keep the remote SSH command bounded even if an executor ignores the
     // dry-load flag and waits for input. Stdin is closed and stderr is captured.
     format!(
-        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (trap 'kill \"$sleeper\" 2>/dev/null; wait \"$sleeper\" 2>/dev/null; exit' TERM; sleep {timeout_seconds} & sleeper=$!; wait \"$sleeper\"; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; kill \"$killer\" 2>/dev/null; wait \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
+        "{runtime_root}; tmp=$(mktemp 2>/dev/null || printf '/tmp/homeboy-provider-probe-$$'); ({invocation}) </dev/null >/dev/null 2>\"$tmp\" & pid=$!; (trap 'kill \"$sleeper\" 2>/dev/null; wait \"$sleeper\" 2>/dev/null; exit' TERM; sleep {timeout_seconds} & sleeper=$!; wait \"$sleeper\"; kill \"$pid\" 2>/dev/null) & killer=$!; wait \"$pid\"; rc=$?; pkill -P \"$killer\" 2>/dev/null; kill -9 \"$killer\" 2>/dev/null; wait \"$killer\" 2>/dev/null; cat \"$tmp\" >&2; rm -f \"$tmp\"; exit \"$rc\""
     )
 }
 

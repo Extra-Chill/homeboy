@@ -809,6 +809,8 @@ impl RunnerStatusReport {
     /// configured job binary for admission.
     pub fn daemon_compatible_for_admission(&self) -> bool {
         self.admission_blocking_stale_daemon().is_none()
+            && (self.stale_daemon.is_some()
+                || !crate::lab::offload::metadata::session_reported_version_blocks_admission(self))
     }
 
     /// The admission freshness fence shared by placement and dispatch.
@@ -1063,6 +1065,18 @@ impl RunnerStatusReport {
                 // terminal blocker rather than prescribing a read-only loop.
                 return None;
             }
+        }
+        if let Some(warning) = self.admission_blocking_stale_daemon() {
+            if let Some(action) = warning.safe_recovery_actions().into_iter().next() {
+                return Some(action);
+            }
+        }
+        if self.stale_daemon.is_none()
+            && crate::lab::offload::metadata::session_reported_version_blocks_admission(self)
+        {
+            return Some(crate::daemon_repair::refresh_homeboy_action(
+                &self.runner_id,
+            ));
         }
         if let Some(warning) = &self.stale_daemon {
             warning.safe_recovery_actions().into_iter().next()
@@ -1330,6 +1344,67 @@ mod status_serialization_tests {
             termination_evidence: None,
             repair_plan: Vec::new(),
         }
+    }
+
+    fn session_reporting_version(version: &str) -> RunnerSession {
+        RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::Reverse,
+            role: RunnerSessionRole::Runner,
+            server_id: None,
+            controller_id: Some("controller".to_string()),
+            broker_url: Some("http://broker.invalid".to_string()),
+            remote_daemon_address: None,
+            local_port: None,
+            local_url: None,
+            tunnel_pid: None,
+            tunnel_process_start_identity: None,
+            proxy_forward: None,
+            remote_daemon_pid: Some(42),
+            remote_daemon_lease_id: Some("lease".to_string()),
+            homeboy_version: version.to_string(),
+            homeboy_build_identity: Some(format!("homeboy {version}+0123456789ab")),
+            connected_at: "2026-09-24T00:00:00Z".to_string(),
+            worker_identity: Some("worker".to_string()),
+            worker_pid: Some(43),
+            last_seen_at: Some("2026-09-24T00:00:01Z".to_string()),
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    fn minor_skewed_version() -> String {
+        let controller = homeboy_product_identity::product_version();
+        let mut parts = controller.split('.');
+        let major = parts.next().expect("major");
+        let minor = parts
+            .next()
+            .and_then(|part| part.parse::<u64>().ok())
+            .expect("minor");
+        format!("{major}.{}.0", minor.wrapping_add(1))
+    }
+
+    #[test]
+    fn reported_runner_version_skew_blocks_cook_admission_with_refresh() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
+        report.session = Some(session_reporting_version(&minor_skewed_version()));
+
+        let summary = report.admission_summary(0);
+
+        assert!(
+            !summary.daemon_compatible,
+            "controller/runner minor skew must fence admission"
+        );
+        assert!(
+            !summary.accepting_jobs,
+            "cooks must not dispatch onto a skewed runner"
+        );
+        let action = summary.next_action.expect("typed refresh blocker");
+        assert!(
+            action.contains("runner refresh-homeboy homeboy-lab"),
+            "{action}"
+        );
     }
 
     #[test]

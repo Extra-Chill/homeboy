@@ -22,6 +22,21 @@ pub(super) struct MirroredJobEvidence {
     pub(super) artifacts: Vec<JobArtifactMetadata>,
 }
 
+fn note_refresh_subphases(events: &[JobEvent]) {
+    for event in events {
+        if event.kind != homeboy_core::api_jobs::JobEventKind::Progress {
+            continue;
+        }
+        crate::homeboy_refresh::note_refresh_progress_phase(
+            event
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(serde_json::Value::as_str),
+        );
+    }
+}
+
 /// The controller either observed a terminal remote command or intentionally
 /// detached after persisting its accepted in-flight job. This boundary prevents
 /// a local wait expiry from being represented as a remote command failure.
@@ -256,6 +271,7 @@ where
         job = poll(&job)?;
         observed_terminal_daemon_job = job.status.is_terminal();
         if let Ok(events) = events(&job) {
+            note_refresh_subphases(&events);
             let events =
                 redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names);
             record_and_report_promotion_progress_frames(

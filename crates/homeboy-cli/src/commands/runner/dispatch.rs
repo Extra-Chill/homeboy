@@ -6,7 +6,7 @@ use homeboy::runner::runners::{
 use serde_json::Value;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
@@ -700,6 +700,25 @@ struct RefreshProgress {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+fn refresh_progress_payload(
+    requested_mode: &str,
+    heartbeat: bool,
+    started: Instant,
+) -> serde_json::Value {
+    let live = runner::refresh_live_progress();
+    serde_json::json!({
+        "phase": "refresh",
+        "sub_phase": live.as_ref().map(|progress| progress.sub_phase.as_str()).unwrap_or(match requested_mode {
+            "select" => "verify",
+            _ => "fetch",
+        }),
+        "elapsed_seconds": live.map(|progress| progress.elapsed_seconds).unwrap_or_else(|| started.elapsed().as_secs()),
+        "requested_mode": requested_mode,
+        "state": "running",
+        "heartbeat": heartbeat,
+    })
+}
+
 impl RefreshProgress {
     fn admit(
         runner_id: &str,
@@ -710,6 +729,8 @@ impl RefreshProgress {
             runner::HomeboyBinaryRefreshMode::Materialize => "materialize",
             runner::HomeboyBinaryRefreshMode::Select { .. } => "select",
         };
+        let started = Instant::now();
+        let admission_progress = refresh_progress_payload(requested_mode, false, started);
         let run = store.start_run(
             NewRunRecord::builder("runner_refresh_homeboy")
                 .component_id(runner_id)
@@ -717,12 +738,7 @@ impl RefreshProgress {
                 .current_homeboy_version()
                 .metadata(serde_json::json!({
                     "dry_run": options.dry_run,
-                    "progress": {
-                        "phase": "refresh",
-                        "requested_mode": requested_mode,
-                        "state": "running",
-                        "heartbeat": true
-                    }
+                    "progress": admission_progress,
                 }))
                 .build(),
         )?;
@@ -744,22 +760,16 @@ impl RefreshProgress {
             let Ok(store) = ObservationStore::open_initialized() else {
                 continue;
             };
+            let mut progress = refresh_progress_payload(&heartbeat_mode, true, started);
+            progress["run_id"] = serde_json::Value::String(heartbeat_run_id.clone());
+            eprintln!("HOMEBOY_REFRESH_PROGRESS {progress}");
             let _ = store.update_running_run_metadata(
                 &heartbeat_run_id,
                 serde_json::json!({
                     "dry_run": heartbeat_dry_run,
-                    "progress": {
-                        "phase": "refresh",
-                        "requested_mode": heartbeat_mode.as_str(),
-                        "state": "running",
-                        "heartbeat": true
-                    }
+                    "progress": progress,
                 }),
             );
-            eprintln!(
-                    "HOMEBOY_REFRESH_PROGRESS {{\"run_id\":\"{}\",\"phase\":\"refresh\",\"requested_mode\":\"{}\",\"state\":\"running\",\"heartbeat\":true}}",
-                    heartbeat_run_id, heartbeat_mode
-                );
         });
 
         Ok(Self {
@@ -1043,6 +1053,49 @@ mod tests {
                     "providers": []
                 })
             );
+        });
+    }
+
+    #[test]
+    fn refresh_heartbeat_reports_sub_phase_and_elapsed() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let progress = RefreshProgress::admit(
+                "lab",
+                &runner::HomeboyBinaryRefreshOptions {
+                    runner_id: "lab".to_string(),
+                    mode: runner::HomeboyBinaryRefreshMode::Materialize,
+                    source: None,
+                    git_ref: None,
+                    target_dir: None,
+                    reconnect: false,
+                    force: false,
+                    allow_downgrade: false,
+                    dry_run: true,
+                },
+            )
+            .expect("admit refresh progress");
+            thread::sleep(Duration::from_millis(1200));
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let run = store
+                .latest_run(homeboy::core::observation::RunListFilter {
+                    kind: Some("runner_refresh_homeboy".to_string()),
+                    limit: Some(1),
+                    ..homeboy::core::observation::RunListFilter::default()
+                })
+                .expect("list refresh runs")
+                .expect("refresh run");
+            let heartbeat = &run.metadata_json["progress"];
+            assert_eq!(heartbeat["phase"], "refresh");
+            assert_eq!(heartbeat["heartbeat"], serde_json::Value::Bool(true));
+            assert!(
+                matches!(
+                    heartbeat["sub_phase"].as_str(),
+                    Some("fetch" | "build" | "install" | "verify")
+                ),
+                "{heartbeat}"
+            );
+            assert!(heartbeat["elapsed_seconds"].is_number(), "{heartbeat}");
+            drop(progress);
         });
     }
 
