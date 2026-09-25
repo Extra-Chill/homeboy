@@ -380,6 +380,7 @@ mod tests {
                     cwd: None,
                     status_note: None,
                     artifact_index: None,
+                    sub_runs: Vec::new(),
                 },
                 artifact_count: 3,
                 scenario_id: None,

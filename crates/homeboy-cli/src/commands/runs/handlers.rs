@@ -4,7 +4,7 @@
 //! runner-job composition that back `runs list/show/resume-plan/artifacts` and
 //! the `runs artifact` retrieval/cleanup subcommands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -87,6 +87,14 @@ pub fn list_runs(
         (deduped.canonical, deduped.hidden_mirrors)
     };
 
+    // Nest Cook attempts and lab-hydration children under the Cook id the
+    // operator was given, unless they asked for every underlying row.
+    let (run_records, cook_children) = if args.include_mirrors {
+        (run_records, HashMap::new())
+    } else {
+        group_cook_sub_runs(run_records)
+    };
+
     // Apply the caller's limit to the canonical, post-filter set.
     let limit = args.limit.max(0) as usize;
     let run_records = run_records.into_iter().take(limit).collect::<Vec<_>>();
@@ -103,6 +111,11 @@ pub fn list_runs(
     );
 
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
+    for run in &mut runs {
+        if let Some(children) = cook_children.get(&run.id) {
+            run.sub_runs = run_summaries_with_artifact_indexes(&store, children.clone())?;
+        }
+    }
     runs.extend(active_runner_jobs.runs);
     let runner_enrichment = active_runner_jobs.state;
 
@@ -124,6 +137,64 @@ pub fn list_runs(
         }),
         0,
     ))
+}
+
+/// Nest attempt and lab-hydration rows under the Cook id that owns them.
+///
+/// Children are identified by the Cook attempt / hydration id shape, or by a
+/// parent pointer already stored on the row. Rows whose owner is not in this
+/// page stay top-level.
+fn group_cook_sub_runs(runs: Vec<RunRecord>) -> (Vec<RunRecord>, HashMap<String, Vec<RunRecord>>) {
+    let ids = runs
+        .iter()
+        .map(|run| run.id.clone())
+        .collect::<HashSet<_>>();
+    let mut children: HashMap<String, Vec<RunRecord>> = HashMap::new();
+    let mut canonical = Vec::new();
+    for run in runs {
+        if let Some(owner) = cook_sub_run_owner(&run, &ids) {
+            children.entry(owner).or_default().push(run);
+        } else {
+            canonical.push(run);
+        }
+    }
+    (canonical, children)
+}
+
+fn cook_sub_run_owner(run: &RunRecord, ids: &HashSet<String>) -> Option<String> {
+    for pointer in [
+        "/parent_run_id",
+        "/cook_id",
+        "/lab/explicit_run_id",
+        "/runner_execution_record/local_run_id",
+        "/runner_execution_record/mirror_run_id",
+        "/agent_task_run/metadata/cook_id",
+    ] {
+        if let Some(parent) = run.metadata_json.pointer(pointer).and_then(Value::as_str) {
+            if let Some(owner) = cook_owner_in_page(parent, ids) {
+                if owner != run.id {
+                    return Some(owner);
+                }
+            }
+        }
+    }
+    cook_owner_in_page(&run.id, ids).filter(|owner| owner != &run.id)
+}
+
+fn cook_owner_in_page(id: &str, ids: &HashSet<String>) -> Option<String> {
+    let base = id.split("-lab-hydration-").next().unwrap_or(id);
+    if let Some((owner, _)) = base.split_once("-attempt-") {
+        if !owner.is_empty() && ids.contains(owner) {
+            return Some(owner.to_string());
+        }
+    }
+    if id.contains("-lab-hydration-") && ids.contains(base) && base != id {
+        return Some(base.to_string());
+    }
+    if ids.contains(id) {
+        return Some(id.to_string());
+    }
+    None
 }
 
 fn list_active_runs(args: RunsListArgs) -> CmdResult<RunsOutput> {
@@ -707,6 +778,7 @@ fn active_runner_job_run_summary_if_durable(
         cwd: summary.cwd,
         status_note: Some(summary.status_note),
         artifact_index: None,
+        sub_runs: Vec::new(),
     })
 }
 
@@ -1576,6 +1648,7 @@ pub(crate) fn run_summary(run: RunRecord) -> RunSummary {
         cwd: run.cwd,
         status_note,
         artifact_index: None,
+        sub_runs: Vec::new(),
     }
 }
 

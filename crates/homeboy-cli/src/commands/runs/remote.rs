@@ -245,6 +245,7 @@ fn active_runner_job_run_summary_if_durable(
         cwd: summary.cwd,
         status_note: Some(summary.status_note),
         artifact_index: None,
+        sub_runs: Vec::new(),
     })
 }
 
@@ -482,6 +483,7 @@ mod tests {
             cwd: None,
             status_note: None,
             artifact_index: None,
+            sub_runs: Vec::new(),
         }];
         let jobs = vec![
             RunSummary {
@@ -497,6 +499,7 @@ mod tests {
                 cwd: None,
                 status_note: Some("active runner job".to_string()),
                 artifact_index: None,
+                sub_runs: Vec::new(),
             },
             RunSummary {
                 id: "runner-job-job-2".to_string(),
@@ -511,6 +514,7 @@ mod tests {
                 cwd: Some("/srv/homeboy".to_string()),
                 status_note: Some("active runner job".to_string()),
                 artifact_index: None,
+                sub_runs: Vec::new(),
             },
         ];
 
@@ -537,6 +541,7 @@ mod tests {
             cwd: None,
             status_note: None,
             artifact_index: None,
+            sub_runs: Vec::new(),
         }];
         let jobs = vec![RunSummary {
             id: "runner-job-job-2".to_string(),
@@ -551,6 +556,7 @@ mod tests {
             cwd: Some("/srv/homeboy".to_string()),
             status_note: Some("active runner job".to_string()),
             artifact_index: None,
+            sub_runs: Vec::new(),
         }];
 
         append_missing_run_summaries(&mut runs, jobs, 1);
@@ -614,6 +620,7 @@ mod tests {
             cwd: None,
             status_note: None,
             artifact_index: None,
+            sub_runs: Vec::new(),
         }
     }
 
