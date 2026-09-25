@@ -2199,10 +2199,14 @@ fn runs_list_groups_cook_sub_runs_under_the_cook() {
 
         let store = ObservationStore::open_initialized().expect("store");
         let hydration_id = format!("{attempt_id}-lab-hydration-0");
-        let mut hydration = dead_owned_run(&hydration_id);
-        hydration.started_at = "2099-01-01T00:00:00Z".to_string();
-        hydration.kind = "runner-exec".to_string();
-        store.import_run(&hydration).expect("hydration child");
+        homeboy::agents::agent_task_lifecycle::record_runner_exec_job_identity(
+            &hydration_id,
+            "lab",
+            "hydration-job",
+            "/tmp/workspace",
+            &["npm".to_string(), "ci".to_string()],
+        )
+        .expect("hydration child");
 
         let bare_id = "11111111-2222-3333-4444-555555555555";
         let mut bare = dead_owned_run(bare_id);
