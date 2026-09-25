@@ -54,3 +54,34 @@ active-job count, and `admitting` or `draining` state. A failed candidate startu
 is removed without changing the prior owner; repeating a refresh for the active
 generation is idempotent. Older single-generation records remain valid as one
 admitting generation.
+
+## Runner-Owned Service
+
+A runner can own its daemon as a systemd user unit (#13881 step 3). The
+controller then never starts, replaces, rotates, or retires the remote daemon.
+
+`homeboy runner service install <runner-id>` requires an idle runner. It:
+
+1. Writes `~/.config/systemd/user/homeboy-runner-<id>.service`. The unit runs
+   `homeboy daemon serve --addr 127.0.0.1:0` from the stable link
+   `~/.local/share/homeboy/runner-service/<id>/homeboy`, in the runner's
+   existing `daemon-generations/<id>/primary` state directory, with
+   `Restart=always`.
+2. Stops the idle controller-started daemon so the unit takes the daemon owner
+   lock, and stops idle generation daemons left by earlier rotation.
+3. Waits for the unit's lease, then marks the runner `service_managed`.
+
+For a service-managed runner:
+
+- **Connect** waits for the service's fresh lease, opens the tunnel, and
+  writes the session. It takes no runtime promotion lease, so attaching never
+  waits behind a running Cook's generation pin.
+- **Disconnect** closes the tunnel and removes the session. The daemon and its
+  jobs keep running.
+- **Refresh** never rotates generations. It builds the new binary, drains
+  through the active-job guard, repoints the unit's link, and restarts the
+  unit. The daemon's own startup recovers anything a previous owner left
+  behind.
+
+The service needs systemd user lingering on the runner host
+(`loginctl enable-linger`) so the unit keeps running without a login session.
