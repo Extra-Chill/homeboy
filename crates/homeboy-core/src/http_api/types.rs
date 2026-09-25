@@ -154,6 +154,10 @@ pub enum HttpEndpoint {
     JobEvents {
         id: String,
     },
+    JobWatch {
+        id: String,
+        request: homeboy_runner_contract::RunnerApiWatchRequest,
+    },
     JobCancel {
         id: String,
     },
@@ -288,6 +292,7 @@ impl HttpEndpoint {
             Self::Jobs => "jobs.list",
             Self::Job { .. } => "jobs.show",
             Self::JobEvents { .. } => "jobs.events",
+            Self::JobWatch { .. } => "jobs.watch",
             Self::JobCancel { .. } => "jobs.cancel",
             Self::JobProjectionCancel { .. } => "jobs.cancel_projection",
             Self::JobReadyRun { .. } => "jobs.required",

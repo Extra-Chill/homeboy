@@ -15,7 +15,8 @@ use homeboy_core::lab_contract::{run_location_index_path, JobArtifactMetadata, L
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_runner_contract::{
-    RunnerApiSubmitRequest, WorkspaceIdentity, WorkspaceOwnerLease,
+    RunnerApiOperationFailureCode, RunnerApiSubmitRequest, RunnerApiWatchResponse,
+    RunnerApiWatchTerminalOutcome, WorkspaceIdentity, WorkspaceOwnerLease,
     RUNNER_API_SUBMIT_REQUEST_SCHEMA, RUNNER_API_V1, WORKSPACE_CLAIM_PROTOCOL_VERSION,
     WORKSPACE_OWNER_LEASE_CAPABILITY,
 };
@@ -212,6 +213,9 @@ pub(super) fn exec_via_daemon(
         .transpose()?;
     let foreground_source_lease = std::cell::RefCell::new(None);
     let daemon_endpoint = std::cell::RefCell::new(local_url.to_string());
+    // The runner owns the job's event log; the controller keeps only a
+    // cursor into it (#13881 step 2).
+    let watch_follow = std::cell::RefCell::new(DaemonWatchFollow::default());
     return complete_submitted_runner_job(
         SubmittedRunnerJobFlow {
             runner,
@@ -294,19 +298,10 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            let (refreshed, endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
-                &client,
-                &daemon_endpoint.borrow(),
-                &job_id,
-                || {
-                    refreshed_daemon_endpoint(
-                        &runner.id,
-                        &job_id,
-                        accepted_daemon_identity.as_deref(),
-                    )
-                },
-            )
-            .map_err(|err| {
+            let reload = || {
+                refreshed_daemon_endpoint(&runner.id, &job_id, accepted_daemon_identity.as_deref())
+            };
+            let poll_failure = |err| {
                 terminal_runner_poll_failure(
                     runner,
                     &cwd,
@@ -320,14 +315,57 @@ pub(super) fn exec_via_daemon(
                     accepted_daemon_identity.as_deref(),
                     err,
                 )
-            })?;
+            };
+            // One watch read per tick: append the returned events, advance
+            // the cursor, and take terminal state from the response. A dropped
+            // connection repeats the read from the same cursor.
+            let mut follow = watch_follow.borrow_mut();
+            let (response, endpoint) = fetch_daemon_watch_resilient_with_endpoint_reload(
+                &client,
+                &daemon_endpoint.borrow(),
+                &job_id,
+                follow.cursor,
+                reload,
+            )
+            .map_err(poll_failure)?;
             *daemon_endpoint.borrow_mut() = endpoint;
-            Ok(refreshed)
+            follow.absorb(current.id, &response).map_err(poll_failure)?;
+            if !response.terminal {
+                return Ok(current.clone());
+            }
+            // Refresh the job once at terminality so artifacts and finish
+            // metadata reach the evidence path.
+            let (mut job, endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+                &client,
+                &daemon_endpoint.borrow(),
+                &job_id,
+                reload,
+            )
+            .map_err(poll_failure)?;
+            *daemon_endpoint.borrow_mut() = endpoint;
+            if let Some(status) = watch_terminal_status(&response) {
+                job.status = status;
+            }
+            Ok(job)
         },
         |job| {
-            fetch_daemon_events(&client, &daemon_endpoint.borrow(), &job.id.to_string()).map_err(
-                |error| lab_terminal_result_transport_error(runner, &cwd, &command, job, error),
-            )
+            let mut follow = watch_follow.borrow_mut();
+            if job.status.is_terminal() {
+                let endpoint = daemon_endpoint.borrow().clone();
+                let refreshed_endpoint = follow
+                    .drain_to_end(&client, &endpoint, &job.id.to_string(), || {
+                        refreshed_daemon_endpoint(
+                            &runner.id,
+                            &job.id.to_string(),
+                            accepted_daemon_identity.as_deref(),
+                        )
+                    })
+                    .map_err(|error| {
+                        lab_terminal_result_transport_error(runner, &cwd, &command, job, error)
+                    })?;
+                *daemon_endpoint.borrow_mut() = refreshed_endpoint;
+            }
+            Ok(follow.events.clone())
         },
         |job, events, result| {
             let request = crate::evidence::MirrorEvidenceRequest::new(
@@ -578,13 +616,6 @@ fn require_daemon_workspace_owner_lease_v2(client: &Client, local_url: &str) -> 
     })
 }
 
-/// Selects whether an admission may interoperate with legacy daemon responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DaemonAdmissionPolicy {
-    LegacyCompatible,
-    DurableLeaseRequired,
-}
-
 type WorkspaceOwnerRegistration = (WorkspaceIdentity, String);
 
 const ADMISSION_RECOVERY_WINDOW: Duration = Duration::from_secs(10);
@@ -624,7 +655,6 @@ struct AdmissionRenewalHealth {
 pub(crate) struct DaemonAdmissionReservationAuthority {
     daemon_lease_id: String,
     reservation_job_id: String,
-    token_present: bool,
     lease_expires_at_ms: u64,
     #[serde(skip)]
     renewal_health: Arc<Mutex<AdmissionRenewalHealth>>,
@@ -636,7 +666,6 @@ impl std::fmt::Debug for DaemonAdmissionReservationAuthority {
             .debug_struct("DaemonAdmissionReservationAuthority")
             .field("daemon_lease_id", &self.daemon_lease_id)
             .field("reservation_job_id", &self.reservation_job_id)
-            .field("token_present", &self.token_present)
             .field("lease_expires_at_ms", &self.lease_expires_at_ms)
             .finish()
     }
@@ -661,7 +690,7 @@ impl DaemonAdmissionReservationAuthority {
     /// Proves that the daemon, rather than local Drop cleanup, still owns the
     /// lease expiry/cancellation contract before the dispatcher submits `/exec`.
     pub(crate) fn prove_server_owned_expiry_or_cancellation_authority(&self) -> Result<()> {
-        if !self.token_present || self.lease_expires_at_ms == 0 {
+        if self.lease_expires_at_ms == 0 {
             return Err(Error::internal_unexpected(
                 "strict daemon admission has no server-owned lease authority",
             ));
@@ -693,7 +722,7 @@ impl DaemonAdmissionReservationAuthority {
 pub(crate) struct DaemonAdmissionReservation {
     local_url: String,
     job_id: String,
-    token: Option<String>,
+    token: String,
     workspace_owner_lease: Arc<Mutex<Option<WorkspaceOwnerLease>>>,
     renewer_stop: Option<Sender<()>>,
     renewer: Option<std::thread::JoinHandle<()>>,
@@ -725,7 +754,7 @@ impl Drop for DaemonAdmissionReservation {
         else {
             return;
         };
-        let mut payload = json!({ "admission_token": self.token.as_deref() });
+        let mut payload = json!({ "admission_token": self.token });
         if let Some(lease) = self
             .workspace_owner_lease
             .lock()
@@ -750,7 +779,6 @@ pub(crate) fn reserve_daemon_admission(
     command: &str,
     expected_daemon_lease_id: &str,
     idempotency_key: Option<&str>,
-    policy: DaemonAdmissionPolicy,
     workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
 ) -> Result<DaemonAdmissionReservation> {
     let client = Client::builder()
@@ -857,14 +885,13 @@ pub(crate) fn reserve_daemon_admission(
         body.get("admission_lease_protocol").and_then(Value::as_u64) == Some(1);
     let lease_expires_at_ms = body.pointer("/lease/expires_at_ms").and_then(Value::as_u64);
     let renewable = body.pointer("/lease/renewable").and_then(Value::as_bool) == Some(true);
-    if policy == DaemonAdmissionPolicy::DurableLeaseRequired
-        && !strict_admission_response_is_complete(
-            lease_protocol_confirmed,
-            token.as_deref(),
-            renewable,
-            lease_expires_at_ms,
-        )
-    {
+    let complete = strict_admission_response_is_complete(
+        lease_protocol_confirmed,
+        token.as_deref(),
+        renewable,
+        lease_expires_at_ms,
+    );
+    let Some(token) = token.clone().filter(|_| complete) else {
         return Err(strict_admission_rejection(
             &client,
             runner_id,
@@ -873,38 +900,28 @@ pub(crate) fn reserve_daemon_admission(
             token.as_deref(),
             lease_protocol_confirmed,
         ));
-    }
+    };
     let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
         lease_expires_at_ms,
         failure: None,
     }));
-    let token_present = token.is_some();
-    let (renewer_stop, renewer) = match token.as_deref() {
-        Some(token) => {
-            let (stop, renewer) = spawn_admission_renewer(
-                local_url.to_string(),
-                job.id.to_string(),
-                token.to_string(),
-                Arc::new(Mutex::new(workspace_owner_lease.clone())),
-                renewal_health.clone(),
-            );
-            (Some(stop), Some(renewer))
-        }
-        // Older daemons ignore the opt-in marker and retain their legacy,
-        // explicit-release-only reservation contract.
-        None => (None, None),
-    };
+    let (renewer_stop, renewer) = spawn_admission_renewer(
+        local_url.to_string(),
+        job.id.to_string(),
+        token.clone(),
+        Arc::new(Mutex::new(workspace_owner_lease.clone())),
+        renewal_health.clone(),
+    );
     Ok(DaemonAdmissionReservation {
         local_url: local_url.to_string(),
         job_id: job.id.to_string(),
         token,
         workspace_owner_lease: Arc::new(Mutex::new(workspace_owner_lease)),
-        renewer_stop,
-        renewer,
+        renewer_stop: Some(renewer_stop),
+        renewer: Some(renewer),
         authority: DaemonAdmissionReservationAuthority {
             daemon_lease_id: daemon_lease_id.to_string(),
             reservation_job_id: job.id.to_string(),
-            token_present,
             lease_expires_at_ms: lease_expires_at_ms.unwrap_or_default(),
             renewal_health,
         },
@@ -920,7 +937,6 @@ pub(crate) fn reserve_daemon_admission_with_recovery(
     command: &str,
     expected_daemon_lease_id: &str,
     idempotency_key: Option<&str>,
-    policy: DaemonAdmissionPolicy,
     workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
 ) -> Result<DaemonAdmissionReservation> {
     reserve_daemon_admission_with_recovery_with(
@@ -934,7 +950,6 @@ pub(crate) fn reserve_daemon_admission_with_recovery(
                 command,
                 expected_daemon_lease_id,
                 idempotency_key,
-                policy,
                 workspace_owner_registration.clone(),
             )
         },
@@ -1065,7 +1080,7 @@ fn strict_admission_rejection(
         .and_then(|body| serde_json::from_value::<Job>(body["job"].clone()).ok())
         .is_some_and(|job| job.status.is_terminal());
     let cleanup = if released {
-        "the legacy reservation was released and reconciled"
+        "the incomplete reservation was released and reconciled"
     } else {
         "the reservation could not be proven released; reconcile the daemon admission before retrying"
     };
@@ -1243,7 +1258,6 @@ mod admission_tests {
         let authority = DaemonAdmissionReservationAuthority {
             daemon_lease_id: "lease-a".to_string(),
             reservation_job_id: "job-a".to_string(),
-            token_present: true,
             lease_expires_at_ms: 42,
             renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth::default())),
         };
@@ -1261,7 +1275,6 @@ mod admission_tests {
         let authority = DaemonAdmissionReservationAuthority {
             daemon_lease_id: "lease-a".to_string(),
             reservation_job_id: "job-a".to_string(),
-            token_present: true,
             lease_expires_at_ms: 42,
             renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth {
                 lease_expires_at_ms: Some(42),
@@ -1284,7 +1297,6 @@ mod admission_tests {
         let authority = DaemonAdmissionReservationAuthority {
             daemon_lease_id: "lease-a".to_string(),
             reservation_job_id: "job-a".to_string(),
-            token_present: true,
             lease_expires_at_ms: 42,
             renewal_health: Arc::clone(&renewal_health),
         };
@@ -1858,11 +1870,35 @@ pub(super) fn fetch_daemon_job_resilient_with_endpoint_reload<Reload>(
 where
     Reload: Fn() -> Result<Option<String>>,
 {
+    daemon_read_resilient_with_endpoint_reload(
+        local_url,
+        |endpoint| fetch_daemon_job(client, endpoint, job_id),
+        job_id,
+        "polling",
+        reload_endpoint,
+    )
+}
+
+/// Repeat a daemon read through transient connection failures within the
+/// grace window, reloading the endpoint when the session reconnects. The
+/// read is retried from the same inputs, so a caller resuming from a cursor
+/// (#13881 step 1) never loses or duplicates what it already observed.
+fn daemon_read_resilient_with_endpoint_reload<T, Read, Reload>(
+    local_url: &str,
+    mut read: Read,
+    job_id: &str,
+    activity: &str,
+    reload_endpoint: Reload,
+) -> Result<(T, String)>
+where
+    Read: FnMut(&str) -> Result<T>,
+    Reload: Fn() -> Result<Option<String>>,
+{
     let transient_deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
     let mut endpoint = local_url.to_string();
     loop {
-        match fetch_daemon_job(client, &endpoint, job_id) {
-            Ok(job) => return Ok((job, endpoint)),
+        match read(&endpoint) {
+            Ok(value) => return Ok((value, endpoint)),
             Err(err) => {
                 if !daemon_poll_transport_was_lost(&err) {
                     return Err(err);
@@ -1877,7 +1913,7 @@ where
                     let mut surfaced = err;
                     surfaced.retryable = surfaced.retryable.or(Some(true));
                     return Err(surfaced.with_hint(format!(
-                        "Lost contact with the runner daemon while polling job `{job_id}` for longer than {}s; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {job_id}`.",
+                        "Lost contact with the runner daemon while {activity} job `{job_id}` for longer than {}s; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {job_id}`.",
                         DAEMON_POLL_TRANSIENT_GRACE.as_secs()
                     )));
                 }
@@ -1892,7 +1928,6 @@ where
         }
     }
 }
-
 pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
     matches!(
         error
@@ -1947,6 +1982,199 @@ pub(super) fn fetch_daemon_events(
     serde_json::from_value(body["events"].clone()).map_err(|err| {
         Error::internal_json(err.to_string(), Some("parse daemon job events".to_string()))
     })
+}
+
+/// One versioned watch read of a job's durable event log from a cursor
+/// (#13881 step 1), served by the read-only `GET /jobs/:id/watch` route.
+///
+/// A typed in-band failure (unknown job, a runner without standing) becomes a
+/// non-retryable error carrying its HTTP status, so the resilience layer
+/// treats it as an authoritative answer rather than a transport drop.
+fn fetch_daemon_watch(
+    client: &Client,
+    local_url: &str,
+    job_id: &str,
+    after_sequence: u64,
+) -> Result<RunnerApiWatchResponse> {
+    let path = format!("/jobs/{job_id}/watch?after_sequence={after_sequence}");
+    let data = daemon_get(client, local_url, &path).map_err(|error| {
+        // A daemon that does not serve the route predates the Runner API
+        // watch operation. Refreshing the runner is the only supported fix.
+        if error.details["http_status"] == 404 {
+            error.with_hint(
+                "The runner daemon does not serve the Runner API watch operation. Run `homeboy runner refresh <runner-id>` to upgrade it.".to_string(),
+            )
+        } else {
+            error
+        }
+    })?;
+    let body = canonical_daemon_body(&data, "daemon job watch response")?;
+    let response: RunnerApiWatchResponse = serde_json::from_value(body["response"].clone())
+        .map_err(|err| {
+            Error::internal_json(
+                err.to_string(),
+                Some("parse daemon job watch response".to_string()),
+            )
+        })?;
+    if response.job_id != job_id {
+        return Err(Error::internal_unexpected(format!(
+            "runner daemon returned a watch page for job `{}` while following job `{job_id}`",
+            response.job_id
+        )));
+    }
+    if let Some(failure) = response.failure.as_ref() {
+        let http_status = match failure.code {
+            RunnerApiOperationFailureCode::JobNotFound => 404,
+            _ => 400,
+        };
+        let mut error = Error::new(
+            ErrorCode::InternalUnexpected,
+            format!(
+                "runner daemon refused to watch job `{job_id}`: {}",
+                failure.message
+            ),
+            json!({
+                "http_status": http_status,
+                "path": path,
+                "watch_failure": {
+                    "code": failure.code,
+                    "message": failure.message,
+                },
+            }),
+        );
+        error.retryable = Some(false);
+        return Err(error);
+    }
+    Ok(response)
+}
+
+/// Watch a job's event log with the same transient-grace and endpoint-reload
+/// resilience as the job poll. The read repeats from the same cursor after a
+/// dropped connection, so a resume never loses, duplicates, or reorders
+/// events (#13881 step 2).
+pub(super) fn fetch_daemon_watch_resilient_with_endpoint_reload<Reload>(
+    client: &Client,
+    local_url: &str,
+    job_id: &str,
+    after_sequence: u64,
+    reload_endpoint: Reload,
+) -> Result<(RunnerApiWatchResponse, String)>
+where
+    Reload: Fn() -> Result<Option<String>>,
+{
+    daemon_read_resilient_with_endpoint_reload(
+        local_url,
+        |endpoint| fetch_daemon_watch(client, endpoint, job_id, after_sequence),
+        job_id,
+        "watching",
+        reload_endpoint,
+    )
+}
+
+/// Terminality a watch page projects onto the followed job.
+fn watch_terminal_status(response: &RunnerApiWatchResponse) -> Option<JobStatus> {
+    if !response.terminal {
+        return None;
+    }
+    match response.terminal_outcome {
+        Some(RunnerApiWatchTerminalOutcome::Succeeded) => Some(JobStatus::Succeeded),
+        Some(RunnerApiWatchTerminalOutcome::Failed) => Some(JobStatus::Failed),
+        Some(RunnerApiWatchTerminalOutcome::Cancelled) => Some(JobStatus::Cancelled),
+        // A terminal page without a typed outcome leaves the refreshed job
+        // projection's status in place rather than inventing one.
+        None => None,
+    }
+}
+
+/// Upper bound on drain reads while assembling a terminal event log.
+const WATCH_FOLLOW_DRAIN_LIMIT: usize = 256;
+
+/// The controller-side cursor for one followed daemon job: the last sequence
+/// read, the events read so far in order, and whether a page has shown the
+/// list reaches the end of a terminal job's log (#13881 step 2).
+#[derive(Default)]
+pub(super) struct DaemonWatchFollow {
+    pub(super) cursor: u64,
+    pub(super) events: Vec<JobEvent>,
+    complete: bool,
+}
+
+impl DaemonWatchFollow {
+    /// Absorb one watch page. Events at or below the cursor are skipped, so
+    /// absorbing a page repeated after a dropped connection never duplicates
+    /// or reorders events.
+    pub(super) fn absorb(
+        &mut self,
+        job_id: uuid::Uuid,
+        response: &RunnerApiWatchResponse,
+    ) -> Result<()> {
+        for watched in &response.events {
+            if watched.sequence <= self.cursor {
+                continue;
+            }
+            let kind: JobEventKind =
+                serde_json::from_value(json!(watched.kind)).map_err(|err| {
+                    Error::internal_json(
+                        err.to_string(),
+                        Some("parse watched daemon job event kind".to_string()),
+                    )
+                })?;
+            self.events.push(JobEvent {
+                job_id,
+                kind,
+                sequence: watched.sequence,
+                timestamp_ms: watched.timestamp_ms,
+                message: watched.message.clone(),
+                data: watched.data.clone(),
+            });
+            self.cursor = watched.sequence;
+        }
+        self.cursor = self.cursor.max(response.next_sequence);
+        self.complete |= response.terminal;
+        Ok(())
+    }
+
+    /// Read until a page reports the job terminal at the end of its log. Paths
+    /// that learn terminality outside a watch tick (the agent-task lifecycle
+    /// short-circuit, wait-timeout cancellation) finish the log here.
+    pub(super) fn drain_to_end<Reload>(
+        &mut self,
+        client: &Client,
+        local_url: &str,
+        job_id: &str,
+        reload_endpoint: Reload,
+    ) -> Result<String>
+    where
+        Reload: Fn() -> Result<Option<String>>,
+    {
+        let job_uuid = uuid::Uuid::parse_str(job_id).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse followed daemon job id".to_string()),
+            )
+        })?;
+        let mut endpoint = local_url.to_string();
+        for _ in 0..WATCH_FOLLOW_DRAIN_LIMIT {
+            if self.complete {
+                return Ok(endpoint);
+            }
+            let (response, refreshed) = fetch_daemon_watch_resilient_with_endpoint_reload(
+                client,
+                &endpoint,
+                job_id,
+                self.cursor,
+                &reload_endpoint,
+            )?;
+            endpoint = refreshed;
+            self.absorb(job_uuid, &response)?;
+        }
+        if self.complete {
+            return Ok(endpoint);
+        }
+        Err(Error::internal_unexpected(format!(
+            "runner daemon never reported the end of the event log for job `{job_id}`"
+        )))
+    }
 }
 
 pub(super) fn daemon_job_context_error(

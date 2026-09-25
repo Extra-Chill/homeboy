@@ -72,7 +72,8 @@ pub use submission::{
 pub use watch::{
     RunnerApiWatchCapability, RunnerApiWatchRequest, RunnerApiWatchResponse,
     RunnerApiWatchTerminalOutcome, RunnerApiWatchedEvent, RUNNER_API_WATCH_CAPABILITY,
-    RUNNER_API_WATCH_REQUEST_SCHEMA, RUNNER_API_WATCH_RESPONSE_SCHEMA,
+    RUNNER_API_WATCH_CAPABILITY_VERSION, RUNNER_API_WATCH_REQUEST_SCHEMA,
+    RUNNER_API_WATCH_RESPONSE_SCHEMA,
 };
 pub use workspace::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceLease, RunnerWorkspaceSyncMode,

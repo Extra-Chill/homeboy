@@ -47,6 +47,7 @@ mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
 pub mod runner_staging;
+pub(crate) mod runner_watch;
 mod stop;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};

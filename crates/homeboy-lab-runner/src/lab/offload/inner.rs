@@ -2720,7 +2720,6 @@ pub(crate) fn run_lab_offload_inner(
                     &redact_argv_shell_display(&command_prefix.argv),
                     expected_daemon_lease_id,
                     agent_task_run_id.as_deref(),
-                    DaemonAdmissionPolicy::DurableLeaseRequired,
                     agent_task_run_id
                         .as_deref()
                         .map(homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present)

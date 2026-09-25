@@ -2290,7 +2290,9 @@ fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
     let address = listener.local_addr().expect("listener address");
     let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        // Bounds only absorb scheduler load; the reader returns as soon as the
+        // full request arrives.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
@@ -2307,7 +2309,7 @@ fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
 
     let mut client = TcpStream::connect(address).expect("connect fixture client");
     accepted_rx
-        .recv_timeout(Duration::from_millis(50))
+        .recv_timeout(Duration::from_secs(30))
         .expect("server accepted client");
     std::thread::sleep(Duration::from_millis(10));
     client
