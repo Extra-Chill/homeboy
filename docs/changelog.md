@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.391.0] - 2026-09-25
+
+### Added
+- run the Lab daemon as a runner-owned systemd service
+- follow Lab jobs through the watch cursor only
+
+### Fixed
+- keep oversized materialized-env values off subprocess envp
+- fail Cook admission fast on deterministic validation errors
+
 ## [0.390.1] - 2026-09-25
 
 ### Fixed
