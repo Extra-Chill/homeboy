@@ -28,6 +28,9 @@ const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-sele
 // a `const` sited next to its helper is still in its temporal dead zone when
 // that top-level await reaches it.
 const RUNTIME_SERVICE_PREEXECUTION_FAILURES = new Set(['provider-unavailable', 'provision-failed', 'readiness-failed', 'interrupted']);
+// Zero-test diagnoses that mean a suite-owned changed-file scope selected
+// nothing. These always fail the suite, independent of `phpunit_no_tests`.
+const SCOPED_ZERO_TEST_CAUSES = new Set(['changed_file_filter_mismatch', 'changed_file_sandbox_path_untranslated']);
 // The plugin-relative test directory `synthesizeManagedDefaultSuite` scans.
 // `resolvePhpunitSuites` only ever leaves a suite's `config` empty for the
 // single implicit suite it returns when neither wp_codebox_phpunit_config nor
@@ -1579,6 +1582,20 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
 
   const diagnosis = await phpunitExecutionDiagnosis(artifactDirectory, results, execution, stageLog, recipeRunSteps, managedRuntimeServices);
   await writeFile(path.join(filesDirectory, 'phpunit-execution-diagnosis.json'), `${JSON.stringify(diagnosis, null, 2)}\n`);
+
+  // A changed-file scope only reaches a suite when this adapter has already
+  // established that the suite declares those files (suiteChangedScopeBySuite).
+  // So "requested N, executed 0" is never a legitimate empty suite: the scope
+  // failed to select files the suite owns. The generic zero-test policy
+  // (`phpunit_no_tests`, default "skipped") must not apply here, or a PR that
+  // edits a suite-owned test silently disables that suite for itself and the
+  // gate reports a pass having run nothing (Extra-Chill/homeboy-extensions#2882,
+  // Automattic/wp-codebox#2528). Fail closed, whatever that setting says.
+  if (results && typeof results === 'object' && diagnosis.executed_tests === 0 && SCOPED_ZERO_TEST_CAUSES.has(diagnosis.cause)) {
+    results.status = 'failed';
+    await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
+    process.stdout.write(`SCOPED_ZERO_TESTS_FAILED cause=${diagnosis.cause}: the changed-file scope selected suite-owned tests but none executed; refusing to report this suite as passed.\n`);
+  }
 
   process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
   process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');

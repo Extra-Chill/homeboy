@@ -150,6 +150,15 @@ try {
   await readFile(path.join(publishedFiles, 'phpunit-output.log'), 'utf8');
 
   assert.match(transcript, /PHPUNIT_ZERO_TESTS cause=changed_file_filter_mismatch/);
+
+  // A suite-owned changed-file scope that executes nothing must FAIL, not be
+  // reported as a skipped/empty pass (Extra-Chill/homeboy-extensions#2882).
+  // The fixture's WP Codebox reports status "skipped" with total 0 — exactly
+  // the shape that previously became a green gate.
+  const publishedResults = JSON.parse(await readFile(path.join(publishedFiles, 'test-results.json'), 'utf8'));
+  assert.equal(publishedResults.status, 'failed', `a zero-matched suite-owned scope must fail, got: ${publishedResults.status}`);
+  assert.match(transcript, /SCOPED_ZERO_TESTS_FAILED cause=changed_file_filter_mismatch/);
+  assert.notEqual(run.status, 0, 'the adapter must exit non-zero when a suite-owned scope executed no tests');
   assert.match(transcript, /PHPUnit execution diagnosis: artifact:\/\/files\/phpunit-execution-diagnosis\.json/);
 } catch (error) {
   process.stderr.write(`${transcript}\n`);
