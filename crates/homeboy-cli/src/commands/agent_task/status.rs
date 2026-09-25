@@ -873,6 +873,7 @@ fn attach_durable_read_availability(
     }
 }
 
+const STDERR_INLINE_LIMIT: usize = 4 * 1024;
 const OPERATOR_HEAVY_FIELDS: &[&str] = &[
     "diff",
     "patch",
@@ -929,9 +930,14 @@ fn project_operator_value(
                     || (evidence_content && key == "body")
                 {
                     if let Value::String(text) = item {
+                        let inline_small_stderr = key == "stderr"
+                            && text.len() <= STDERR_INLINE_LIMIT
+                            && !is_failure_result(text);
                         if let Some(redacted) = bounded_failure_result(text, failure_budget) {
                             *text = redacted;
-                        } else if is_failure_result(text) || text.len() > COMPACT_TEXT_LIMIT {
+                        } else if !inline_small_stderr
+                            && (is_failure_result(text) || text.len() > COMPACT_TEXT_LIMIT)
+                        {
                             let digest = content_hash::sha256_hex(text.as_bytes());
                             *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
                         }
@@ -1040,6 +1046,18 @@ mod bounded_failure_result_tests {
         RAW_FAILURE_BYTE_LIMIT, RAW_FAILURE_COUNT_LIMIT, RAW_FAILURE_JSON_DEPTH_LIMIT,
         RAW_FAILURE_PARSE_BYTE_LIMIT,
     };
+
+    #[test]
+    fn small_stderr_is_inlined_instead_of_hashed() {
+        let stderr = "x".repeat(1456);
+        let mut payload = serde_json::json!({
+            "runner": { "error": { "message": "Remote command failed", "stderr": stderr.clone() } }
+        });
+
+        project_operator_output(&mut payload);
+
+        assert_eq!(payload["runner"]["error"]["stderr"], stderr);
+    }
 
     #[test]
     fn retains_code_less_payloads_for_every_liftable_failure_status() {

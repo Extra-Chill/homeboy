@@ -112,6 +112,111 @@ pub struct RunnerResourceGuardViolation {
     pub process_count_limit: u64,
 }
 
+impl RunnerResourceGuardViolation {
+    pub fn blocker_code(&self) -> String {
+        format!("resource_guard.{}", self.reason)
+    }
+
+    pub fn observed_summary(&self) -> String {
+        if self.reason == "rss_limit_exceeded" {
+            format!(
+                "rss_bytes={} exceeds limit {}",
+                self.rss_bytes, self.rss_limit_bytes
+            )
+        } else {
+            format!(
+                "process_count={} exceeds limit {}",
+                self.process_count, self.process_count_limit
+            )
+        }
+    }
+
+    pub fn operator_message(&self) -> String {
+        format!("{}: {}", self.blocker_code(), self.observed_summary())
+    }
+
+    pub fn remedy(&self) -> String {
+        if self.reason == "rss_limit_exceeded" {
+            format!(
+                "raise HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES above {} (limit {}); do not resume into the same guard",
+                self.rss_bytes, self.rss_limit_bytes
+            )
+        } else {
+            format!(
+                "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above {} (limit {}); do not resume into the same guard",
+                self.process_count, self.process_count_limit
+            )
+        }
+    }
+}
+
+/// A guard stop found in a runner result, job event, or operator log payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceGuardStop {
+    pub violation: RunnerResourceGuardViolation,
+    pub exit_code: Option<i64>,
+}
+
+const GUARD_SEARCH_DEPTH: usize = 16;
+
+/// Find a resource-guard stop nested in runner job events, result metrics, or
+/// the `runner.result.transport.metrics.guard_violation` log shape.
+pub fn find_resource_guard_stop(value: &serde_json::Value) -> Option<ResourceGuardStop> {
+    find_resource_guard_stop_at(value, 0)
+}
+
+fn find_resource_guard_stop_at(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Option<ResourceGuardStop> {
+    if depth > GUARD_SEARCH_DEPTH {
+        return None;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Some(mut stop) = stop_on_object(fields) {
+                if stop.exit_code.is_none() {
+                    stop.exit_code = fields.get("exit_code").and_then(serde_json::Value::as_i64);
+                }
+                return Some(stop);
+            }
+            let mut found = None;
+            for nested in fields.values() {
+                if let Some(stop) = find_resource_guard_stop_at(nested, depth + 1) {
+                    found = Some(stop);
+                    break;
+                }
+            }
+            if let Some(stop) = found.as_mut() {
+                if stop.exit_code.is_none() {
+                    stop.exit_code = fields.get("exit_code").and_then(serde_json::Value::as_i64);
+                }
+            }
+            found
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_resource_guard_stop_at(item, depth + 1)),
+        _ => None,
+    }
+}
+
+fn stop_on_object(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<ResourceGuardStop> {
+    let raw = fields
+        .get("guard_violation")
+        .or_else(|| fields.get("resource_guard_violation"))?;
+    let violation = serde_json::from_value::<RunnerResourceGuardViolation>(raw.clone()).ok()?;
+    if violation.reason.trim().is_empty() {
+        return None;
+    }
+    Some(ResourceGuardStop {
+        exit_code: fields.get("exit_code").and_then(serde_json::Value::as_i64),
+        violation,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +309,41 @@ mod tests {
         let metrics =
             serde_json::from_value::<RunnerResourceMetrics>(value.clone()).expect("deserialize");
         assert_eq!(serde_json::to_value(metrics).expect("serialize"), value);
+    }
+
+    #[test]
+    fn nested_log_shape_becomes_a_typed_guard_stop() {
+        let rss_bytes: u64 = 13_173_456_896;
+        let value = serde_json::json!({
+            "runner": {
+                "result": {
+                    "transport": {
+                        "exit_code": 1,
+                        "metrics": {
+                            "guard_violation": {
+                                "reason": "process_count_limit_exceeded",
+                                "message": "stopped",
+                                "rss_bytes": rss_bytes,
+                                "rss_limit_bytes": 1024,
+                                "process_count": 141,
+                                "process_count_limit": 128
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let stop = find_resource_guard_stop(&value).expect("guard stop");
+        assert_eq!(stop.exit_code, Some(1));
+        assert_eq!(
+            stop.violation.blocker_code(),
+            "resource_guard.process_count_limit_exceeded"
+        );
+        assert!(stop.violation.observed_summary().contains("141"));
+        assert!(stop
+            .violation
+            .remedy()
+            .contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"));
     }
 }

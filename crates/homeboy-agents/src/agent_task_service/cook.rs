@@ -2426,6 +2426,102 @@ mod run_lifecycle_projection_tests {
     }
 
     #[test]
+    fn resource_guard_stop_becomes_the_cook_result_blocker() {
+        let mut failed = AgentTaskRunResult {
+            value: report("failed", CookDisposition::Terminal),
+            exit_code: 1,
+        };
+        failed.value.failure_context = Some(AgentTaskCookFailureContext {
+            cook_id: "cook".to_string(),
+            latest_run_id: "run".to_string(),
+            selected_run_id: None,
+            selected_task_id: None,
+            selected_artifact_id: None,
+            promotion_provenance: None,
+            durable_recipe_ref: "homeboy://agent-task/cooks/cook/recipe".to_string(),
+            lifecycle_state: "failed".to_string(),
+            phase: "provider".to_string(),
+            reason_code: "failed".to_string(),
+            diagnostic: None,
+            continuation_admission: None,
+            blocking_claim: None,
+            provider_budget_consumed: false,
+            provider_executions_consumed: 0,
+            recovery_legal: true,
+            recovery_reason: "resume".to_string(),
+            legal_actions: vec![AgentTaskCookRecoveryAction {
+                action: "resume".to_string(),
+                command: "homeboy agent-task resume run".to_string(),
+            }],
+            next_actions: vec![AgentTaskCookRecoveryAction {
+                action: "resume".to_string(),
+                command: "homeboy agent-task resume run".to_string(),
+            }],
+        });
+        let record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run",
+                "plan_id": "plan",
+                "state": "failed",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "runner_id": "homeboy-lab",
+                    "runner_job_events": [{
+                        "kind": "result",
+                        "data": {
+                            "exit_code": 1,
+                            "metrics": {
+                                "guard_violation": {
+                                    "reason": "process_count_limit_exceeded",
+                                    "message": "stopped",
+                                    "rss_bytes": 8,
+                                    "rss_limit_bytes": 16,
+                                    "process_count": 141,
+                                    "process_count_limit": 128
+                                }
+                            }
+                        }
+                    }]
+                }
+            }))
+            .expect("record");
+
+        apply_resource_guard_stop(
+            &mut failed,
+            &record.metadata,
+            &record.run_id,
+            record.runner_id(),
+        );
+
+        assert_eq!(
+            failed.value.terminal_failure_classification.as_deref(),
+            Some("resource_guard.process_count_limit_exceeded")
+        );
+        let value = serde_json::to_value(&failed.value).expect("serialize");
+        let context = failed.value.failure_context.expect("failure context");
+        assert_eq!(
+            context.reason_code,
+            "resource_guard.process_count_limit_exceeded"
+        );
+        assert!(context.next_actions[0]
+            .command
+            .contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"));
+        assert!(!context.next_actions[0]
+            .command
+            .contains("agent-task resume"));
+        assert_eq!(
+            value["primary_failure"]["operation"],
+            "resource_guard.process_count_limit_exceeded"
+        );
+        assert!(value["stop_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("141"));
+    }
+
+    #[test]
     fn a_cook_report_omits_the_retired_lifecycle_projection() {
         let report = report("durable_failure", CookDisposition::Terminal);
         let lifecycle = report.lifecycle();
@@ -3748,6 +3844,49 @@ fn child_terminal_state(
             return None
         }
     })
+}
+
+pub(crate) fn apply_resource_guard_stop(
+    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
+    metadata: &Value,
+    run_id: &str,
+    runner_id: Option<&str>,
+) {
+    let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(metadata) else {
+        return;
+    };
+    let violation = &stop.violation;
+    let remedy = AgentTaskCookRecoveryAction {
+        action: "raise_resource_guard".to_string(),
+        command: violation.remedy(),
+    };
+    let diagnostic = serde_json::json!({
+        "code": violation.blocker_code(),
+        "message": violation.operator_message(),
+        "observed": violation.observed_summary(),
+    });
+    report.value.terminal_phase = Some("resource_guard".to_string());
+    report.value.terminal_failure_classification = Some(violation.blocker_code());
+    report.value.stop_reason = Some(violation.operator_message());
+    report.value.primary_failure = Some(AgentTaskCookPrimaryFailure {
+        schema: "homeboy/agent-task-cook-primary-failure/v1",
+        provider_id: runner_id.unwrap_or("runner").to_string(),
+        operation: violation.blocker_code(),
+        phase: "resource_guard".to_string(),
+        exit_code: stop.exit_code.unwrap_or(1),
+        stderr_excerpt: violation.observed_summary(),
+        evidence_ref: format!("homeboy://agent-task/run/{run_id}/logs"),
+        next_action: remedy.clone(),
+        diagnostic: Some(diagnostic.clone()),
+    });
+    if let Some(context) = report.value.failure_context.as_mut() {
+        context.phase = "resource_guard".to_string();
+        context.reason_code = violation.blocker_code();
+        context.recovery_reason = violation.remedy();
+        context.next_actions = vec![remedy.clone()];
+        context.legal_actions = vec![remedy];
+        context.diagnostic = Some(diagnostic);
+    }
 }
 
 fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
@@ -7842,7 +7981,7 @@ fn run_cook_spine(
                 attempt,
                 run_id: run_id.clone(),
                 run_state: format!("{:?}", record.state),
-                aggregate_path: record.aggregate_path,
+                aggregate_path: record.aggregate_path.clone(),
                 promotion: None,
                 feedback: None,
             });
@@ -7917,6 +8056,12 @@ fn run_cook_spine(
                     }
                 }
             }
+            apply_resource_guard_stop(
+                &mut report,
+                &record.metadata,
+                &record.run_id,
+                record.runner_id(),
+            );
             return Ok(report);
         }
 

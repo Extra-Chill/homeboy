@@ -4401,17 +4401,25 @@ fn enqueue_exec_request(
                 }
                 if exit_code != 0 {
                     job.result(result.clone())?;
-                    return Err(Error::remote_command_failed(RemoteCommandFailedDetails {
-                        command: plan.command.join(" "),
-                        exit_code,
-                        stdout,
-                        stderr,
-                        target: TargetDetails {
-                            project_id: None,
-                            server_id: Some(plan.runner_id.clone()),
-                            host: None,
+                    let message = metrics
+                        .as_ref()
+                        .and_then(homeboy_runner_contract::find_resource_guard_stop)
+                        .map(|stop| stop.violation.operator_message())
+                        .unwrap_or_else(|| "Remote command failed".to_string());
+                    return Err(Error::remote_command_failed_with_details(
+                        message,
+                        RemoteCommandFailedDetails {
+                            command: plan.command.join(" "),
+                            exit_code,
+                            stdout,
+                            stderr,
+                            target: TargetDetails {
+                                project_id: None,
+                                server_id: Some(plan.runner_id.clone()),
+                                host: None,
+                            },
                         },
-                    }));
+                    ));
                 }
 
                 Ok(result)
