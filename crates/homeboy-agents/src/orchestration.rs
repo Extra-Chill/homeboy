@@ -5930,6 +5930,20 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             retry: None,
         });
     }
+    if matches!(
+        record.state,
+        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
+    ) {
+        if let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(&record.metadata) {
+            return Some(ControlPlaneBlocker {
+                code: Some(stop.violation.blocker_code()),
+                message: redacted_bounded(&stop.violation.observed_summary(), MESSAGE_BOUND),
+                state: None,
+                reason: Some(redacted_bounded(&stop.violation.remedy(), MESSAGE_BOUND)),
+                retry: None,
+            });
+        }
+    }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
         if let Some(message) = failure
             .get("message")
@@ -10762,6 +10776,55 @@ mod tests {
             .expect_err("missing");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn project_record_names_a_runner_resource_guard_stop() {
+        let mut failed = record(AGENT_TASK_RUN);
+        failed.state = AgentTaskRunState::Failed;
+        failed
+            .metadata
+            .as_object_mut()
+            .expect("metadata")
+            .remove("cook_controller_failure");
+        let rss_bytes: u64 = 13_173_456_896;
+        let rss_limit_bytes: u64 = 17_179_869_184;
+        failed.metadata["runner_job_events"] = json!([{
+            "kind": "result",
+            "data": {
+                "exit_code": 1,
+                "metrics": {
+                    "guard_violation": {
+                        "reason": "process_count_limit_exceeded",
+                        "message": "runner job resource guard stopped process tree after rss_bytes=13173456896, process_count=141; limits rss_bytes=17179869184, process_count=128",
+                        "rss_bytes": rss_bytes,
+                        "rss_limit_bytes": rss_limit_bytes,
+                        "process_count": 141,
+                        "process_count_limit": 128
+                    }
+                }
+            }
+        }]);
+
+        let resource = project_record(&failed, None).expect("project guard stop");
+        let blocker = resource.blocker.expect("typed blocker");
+        assert_eq!(
+            blocker.code.as_deref(),
+            Some("resource_guard.process_count_limit_exceeded")
+        );
+        assert!(blocker.message.contains("141"), "{}", blocker.message);
+        assert!(blocker.message.contains("128"), "{}", blocker.message);
+        let resume = resource
+            .action_eligibility
+            .expect("eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
     }
 
     #[test]

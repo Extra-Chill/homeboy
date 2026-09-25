@@ -6070,7 +6070,7 @@ pub(crate) fn cook_report_with_stores(
             )
         })
         .flatten();
-    AgentTaskRunResult {
+    let mut report = AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
             cook_id,
@@ -6094,7 +6094,21 @@ pub(crate) fn cook_report_with_stores(
                 .map(|(recipe, lifecycle)| (recipe.clone(), lifecycle.clone())),
         },
         exit_code,
+    };
+    if report.exit_code != 0 {
+        if let Some(run_id) = report.value.latest_run_id.clone() {
+            if let Some(record) = lifecycle_store.and_then(|store| store.read_record(&run_id).ok())
+            {
+                super::cook::apply_resource_guard_stop(
+                    &mut report,
+                    &record.metadata,
+                    &record.run_id,
+                    record.runner_id(),
+                );
+            }
+        }
     }
+    report
 }
 
 /// Rebind reports returned through `CookService` to its authoritative stores.

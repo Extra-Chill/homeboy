@@ -828,7 +828,13 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Publication: {publication}"));
     }
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
-        lines.push(format!("Blocker: {blocker}"));
+        if let Some(code) = string_value(payload, &["blocker", "code"])
+            .filter(|code| code.starts_with("resource_guard."))
+        {
+            lines.push(format!("Blocker: {code} ({blocker})"));
+        } else {
+            lines.push(format!("Blocker: {blocker}"));
+        }
     }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
@@ -851,6 +857,13 @@ fn render_status_summary(payload: &Value) -> Option<String> {
 }
 
 fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
+    if string_value(payload, &["blocker", "code"])
+        .is_some_and(|code| code.starts_with("resource_guard."))
+    {
+        if let Some(remedy) = string_value(payload, &["blocker", "reason"]) {
+            return remedy.to_string();
+        }
+    }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
@@ -2258,6 +2271,43 @@ mod tests {
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
         assert!(!summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
+    }
+
+    #[test]
+    fn status_summary_names_a_resource_guard_remedy_instead_of_resume() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751",
+            "state": "failed",
+            "artifacts": [],
+            "blocker": {
+                "code": "resource_guard.process_count_limit_exceeded",
+                "message": "process_count=141 exceeds limit 128",
+                "reason": "raise HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT above 141 (limit 128); do not resume into the same guard"
+            },
+            "action_eligibility": {
+                "actions": [{
+                    "action": "resume",
+                    "availability": "available"
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(
+            summary.contains("Blocker: resource_guard.process_count_limit_exceeded"),
+            "{summary}"
+        );
+        assert!(summary.contains("141"), "{summary}");
+        assert!(summary.contains("128"), "{summary}");
+        assert!(
+            summary.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"),
+            "{summary}"
+        );
+        assert!(
+            !summary.contains("Next: homeboy agent-task resume"),
+            "{summary}"
+        );
     }
 
     #[test]

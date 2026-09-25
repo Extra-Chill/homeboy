@@ -183,9 +183,21 @@ fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, 
     (ControlPlaneActionAvailability::Indeterminate, reason.into())
 }
 
+fn resource_guard_blocks_replay(record: &AgentTaskRunRecord) -> bool {
+    matches!(
+        record.state,
+        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
+    ) && homeboy_runner_contract::find_resource_guard_stop(&record.metadata).is_some()
+}
+
 fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
     if record.metadata.get("queue_quarantine").is_some() {
         return unavailable("run is quarantined and must be re-armed before resume");
+    }
+    if resource_guard_blocks_replay(record) {
+        return unavailable(
+            "runner resource guard stopped this attempt; resume would hit the same guard",
+        );
     }
     if super::has_pending_detached_cook_handoff(record)
         && matches!(
@@ -262,6 +274,11 @@ fn retry_availability(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> (ControlPlaneActionAvailability, String) {
+    if resource_guard_blocks_replay(record) {
+        return unavailable(
+            "runner resource guard stopped this attempt; retry would hit the same guard",
+        );
+    }
     if !matches!(
         record.state,
         AgentTaskRunState::Failed
