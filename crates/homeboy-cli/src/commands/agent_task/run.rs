@@ -397,6 +397,7 @@ pub(crate) fn preview_cook(
             resolve_cook_preview_destination(args)
         })?;
     project_preview_dirty_admission(&mut provision);
+    let staging_component = preview_staging_component(&args, &provision)?;
     let base_preparation = if let (Some(path), Some(base)) = (
         provision
             .get("path")
@@ -442,6 +443,7 @@ pub(crate) fn preview_cook(
         let mut resolved = cook_preview_resolved_request(&args, placement);
         resolved["base_preparation"] = provision["base_preparation"].clone();
         resolved["workspace"] = provision;
+        attach_preview_staging_component(&mut resolved, staging_component.as_ref());
         return Ok((
             cook_preview_result(resolved, progress, replay, None, failure),
             exit_code,
@@ -550,10 +552,44 @@ pub(crate) fn preview_cook(
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
     resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    attach_preview_staging_component(&mut resolved, staging_component.as_ref());
     Ok((
         cook_preview_result(resolved, progress, replay, None, None),
         0,
     ))
+}
+
+fn preview_staging_component(
+    args: &AgentTaskCookArgs,
+    provision: &Value,
+) -> homeboy::core::Result<Option<Value>> {
+    let component_id = homeboy::agents::agent_task_service::admitted_component_id(
+        args.repository_identity.as_ref(),
+    );
+    let Some(path) = provision
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| Path::new(path).is_dir())
+    else {
+        return Ok(component_id.map(|component_id| {
+            serde_json::json!({
+                "component_id": component_id,
+                "resolved": false,
+            })
+        }));
+    };
+    let component =
+        homeboy::core::deps::resolve_checkout_component(component_id.as_deref(), Path::new(path))?;
+    Ok(Some(serde_json::json!({
+        "component_id": component.id,
+        "resolved": true,
+    })))
+}
+
+fn attach_preview_staging_component(resolved: &mut Value, staging_component: Option<&Value>) {
+    if let Some(staging_component) = staging_component {
+        resolved["staging_component"] = staging_component.clone();
+    }
 }
 
 fn cook_preview_result(
@@ -2630,6 +2666,111 @@ mod preview_tests {
             format_resolved_execution_placement_line(&directive),
             "cook: placement: local"
         );
+    }
+
+    /// #15039: preview reports the same admitted-component resolution lab staging
+    /// uses, so a nested registration cannot pass preview and fail staging.
+    #[test]
+    fn preview_reports_the_staging_component_for_a_nested_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("repository root");
+            let primary = root.path().join("blocks-engine");
+            let nested = primary.join("php-transformer");
+            let worktree = root.path().join("blocks-engine@fix-issue-2194");
+            let remote_url = "https://example.test/org/blocks-engine.git";
+            std::fs::create_dir_all(&nested).expect("nested component");
+            for args in [
+                vec!["init", "--quiet"],
+                vec!["config", "user.email", "fixture@example.test"],
+                vec!["config", "user.name", "Fixture"],
+                vec!["remote", "add", "origin", remote_url],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&primary)
+                    .status()
+                    .expect("git setup")
+                    .success());
+            }
+            std::fs::write(primary.join("README.md"), "root\n").expect("readme");
+            std::fs::write(nested.join("composer.json"), "{}").expect("nested manifest");
+            assert!(std::process::Command::new("git")
+                .args(["add", "."])
+                .current_dir(&primary)
+                .status()
+                .expect("stage")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(&primary)
+                .status()
+                .expect("commit")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args(["branch", "-M", "main"])
+                .current_dir(&primary)
+                .status()
+                .expect("rename default branch")
+                .success());
+            assert!(std::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    "fix/issue-2194",
+                    worktree.to_str().expect("worktree"),
+                ])
+                .current_dir(&primary)
+                .status()
+                .expect("worktree")
+                .success());
+            let registrations = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&registrations).expect("registrations");
+            for (id, path) in [("blocks-engine", &primary), ("php-transformer", &nested)] {
+                std::fs::write(
+                    registrations.join(format!("{id}.json")),
+                    serde_json::json!({
+                        "local_path": path,
+                        "remote_url": remote_url,
+                    })
+                    .to_string(),
+                )
+                .expect("register component");
+            }
+
+            let (preview, exit_code) = preview_cook(
+                cook(&[
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--repo",
+                    "blocks-engine",
+                    "--prompt",
+                    "stage the nested repository",
+                    "--to-worktree",
+                    worktree.to_str().expect("worktree"),
+                    "--no-finalize",
+                ]),
+                None,
+            )
+            .expect("preview uses the admitted component");
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                preview["resolved"]["staging_component"]["component_id"],
+                "blocks-engine"
+            );
+            assert_eq!(preview["resolved"]["staging_component"]["resolved"], true);
+            let staged = homeboy::core::deps::dependency_install_plan_for_component(
+                &worktree,
+                Some("blocks-engine"),
+            )
+            .expect("staging resolves the same admitted component");
+            assert!(staged.is_empty() || staged.iter().all(|step| step.provider_id == "composer"));
+        });
     }
 
     #[test]

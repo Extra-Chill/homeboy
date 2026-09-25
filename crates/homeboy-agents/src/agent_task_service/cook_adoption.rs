@@ -642,12 +642,21 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 None,
             )
         })?;
+    let admitted_component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .clone()
+        .or_else(|| {
+            super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
+        });
     super::cook_baseline::compare_gate_failures_to_verified_base(
         &mut promotion,
         &source_worktree,
         &gate_workspace,
         &candidate_base_sha,
         options.gates.gate_timeout(),
+        admitted_component_id.as_deref(),
         |compared, total| {
             lifecycle_store.checkpoint_candidate_adoption(
                 &record.run_id,

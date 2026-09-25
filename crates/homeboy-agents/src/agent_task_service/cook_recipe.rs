@@ -2737,14 +2737,19 @@ fn reconstruct_recipe_options(
         .attempts
         .first()
         .expect("validated recipe has attempt");
-    let gates = serde_json::from_value(recipe.gate_policy.clone()).map_err(|error| {
-        Error::validation_invalid_argument(
-            "cook_recipe.gate_policy",
-            format!("malformed gate policy: {error}"),
-            None,
-            None,
-        )
-    })?;
+    let mut gates: crate::agent_task_gate::VerifyGateOptions =
+        serde_json::from_value(recipe.gate_policy.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_recipe.gate_policy",
+                format!("malformed gate policy: {error}"),
+                None,
+                None,
+            )
+        })?;
+    if gates.gate_environment.admitted_component_id.is_none() {
+        gates.gate_environment.admitted_component_id =
+            super::cook::cook_repository_identity_component_id(&initial.plan);
+    }
     let provider_command = recipe
         .promotion_transport
         .get("provider_command")
