@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::fuzz::{
     parse_fuzz_hotspot_set_value, parse_fuzz_observation_set_value,
-    parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzHotspot,
-    FuzzResultEnvelope,
+    parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzFindingStatus,
+    FuzzHotspot, FuzzResultEnvelope,
 };
 
 use super::report::{
@@ -11,9 +11,9 @@ use super::report::{
     required_artifact_count,
 };
 use super::types::{
-    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotPolicy,
-    FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
-    FuzzGateStatusChange,
+    FuzzCompareArgs, FuzzCompareDeltas, FuzzCompareFindingSnapshot, FuzzCompareHotspotDelta,
+    FuzzCompareHotspotPolicy, FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary,
+    FuzzCompareOutput, FuzzCompareSnapshot, FuzzGateStatusChange,
 };
 
 const FUZZ_COMPARE_SCHEMA: &str = "homeboy/fuzz-compare/v1";
@@ -151,6 +151,8 @@ fn snapshot(envelope: &FuzzResultEnvelope) -> FuzzCompareSnapshot {
         failure_rate,
         finding_severity_counts: finding_severity_counts(envelope),
         critical_finding_keys: critical_finding_keys(envelope),
+        open_findings: open_findings(envelope),
+        closed_finding_keys: closed_finding_keys(envelope),
         hotspots: hotspot_snapshots(envelope),
         missing_required_artifacts,
         gate_status_counts,
@@ -205,6 +207,66 @@ fn critical_finding_keys(envelope: &FuzzResultEnvelope) -> Vec<String> {
     keys
 }
 
+/// Open findings (`status` `open` or `confirmed`) at every severity, keyed
+/// by `fingerprint` (falling back to `id`). `suppressed` and `mitigated`
+/// findings are excluded here entirely: they are known/accepted, not
+/// active, so they cannot register as either a new finding (regression) or
+/// a resolved finding (improvement). See issue #15056.
+fn open_findings(envelope: &FuzzResultEnvelope) -> Vec<FuzzCompareFindingSnapshot> {
+    let mut findings = envelope
+        .campaign
+        .as_ref()
+        .map(|campaign| {
+            campaign
+                .findings
+                .iter()
+                .filter(|finding| {
+                    matches!(
+                        finding.status,
+                        FuzzFindingStatus::Open | FuzzFindingStatus::Confirmed
+                    )
+                })
+                .map(|finding| FuzzCompareFindingSnapshot {
+                    key: finding.fingerprint.as_ref().unwrap_or(&finding.id).clone(),
+                    severity: finding.severity.trim().to_ascii_lowercase(),
+                    title: finding.title.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    findings.sort_by(|a, b| a.key.cmp(&b.key));
+    findings.dedup_by(|a, b| a.key == b.key);
+    findings
+}
+
+/// Keys of findings with status `suppressed` or `mitigated`. A finding key
+/// that moves from open (baseline) to one of these statuses (candidate)
+/// stops being open, but a human decision to accept or mitigate a known
+/// finding is not the same as the finding being genuinely fixed/removed, so
+/// it must not be reported as a resolved finding either. See issue #15056.
+fn closed_finding_keys(envelope: &FuzzResultEnvelope) -> Vec<String> {
+    let mut keys = envelope
+        .campaign
+        .as_ref()
+        .map(|campaign| {
+            campaign
+                .findings
+                .iter()
+                .filter(|finding| {
+                    matches!(
+                        finding.status,
+                        FuzzFindingStatus::Suppressed | FuzzFindingStatus::Mitigated
+                    )
+                })
+                .map(|finding| finding.fingerprint.as_ref().unwrap_or(&finding.id).clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 fn deltas(
     baseline: &FuzzCompareSnapshot,
     candidate: &FuzzCompareSnapshot,
@@ -230,6 +292,7 @@ fn deltas(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let (new_findings, resolved_findings) = finding_deltas(baseline, candidate);
     let hotspot_deltas = hotspot_deltas(&baseline.hotspots, &candidate.hotspots, hotspot_policy);
     let new_hotspots = hotspot_deltas
         .iter()
@@ -277,11 +340,64 @@ fn deltas(
             .difference(&candidate_critical)
             .cloned()
             .collect(),
+        new_findings,
+        resolved_findings,
         hotspot_deltas,
         new_hotspots,
         resolved_hotspots,
         gate_status_changes: gate_status_changes(&baseline.gate_statuses, &candidate.gate_statuses),
     }
+}
+
+/// Diffs open findings (any severity) by key. A new open finding is a
+/// regression; a resolved open finding is an improvement.
+///
+/// A finding that moves from `open`/`confirmed` to `suppressed`/`mitigated`
+/// disappears from both `baseline.open_findings` and
+/// `candidate.open_findings`' set difference candidates, but is excluded
+/// from `resolved_findings` via `candidate.closed_finding_keys`: accepting
+/// or suppressing a known finding is a human decision, not a fix, so it
+/// must never register as an improvement. This mirrors the existing
+/// `critical_finding_keys` compatibility contract, extended to every
+/// severity. See issue #15056.
+fn finding_deltas(
+    baseline: &FuzzCompareSnapshot,
+    candidate: &FuzzCompareSnapshot,
+) -> (
+    Vec<FuzzCompareFindingSnapshot>,
+    Vec<FuzzCompareFindingSnapshot>,
+) {
+    let baseline_open = baseline
+        .open_findings
+        .iter()
+        .map(|finding| (finding.key.clone(), finding))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_open = candidate
+        .open_findings
+        .iter()
+        .map(|finding| (finding.key.clone(), finding))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_closed = candidate
+        .closed_finding_keys
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let mut new_findings = candidate_open
+        .iter()
+        .filter(|(key, _)| !baseline_open.contains_key(*key))
+        .map(|(_, finding)| (*finding).clone())
+        .collect::<Vec<_>>();
+    new_findings.sort();
+
+    let mut resolved_findings = baseline_open
+        .iter()
+        .filter(|(key, _)| !candidate_open.contains_key(*key) && !candidate_closed.contains(*key))
+        .map(|(_, finding)| (*finding).clone())
+        .collect::<Vec<_>>();
+    resolved_findings.sort();
+
+    (new_findings, resolved_findings)
 }
 
 fn hotspot_snapshots(envelope: &FuzzResultEnvelope) -> Vec<FuzzCompareHotspotSnapshot> {
@@ -576,6 +692,9 @@ fn regressions(deltas: &FuzzCompareDeltas) -> Vec<String> {
     if !deltas.new_critical_findings.is_empty() {
         regressions.push("new critical findings".to_string());
     }
+    if !deltas.new_findings.is_empty() {
+        regressions.push(format!("new findings: {}", deltas.new_findings.len()));
+    }
     if !deltas.missing_required_artifacts.is_empty() {
         regressions.push("new missing required artifacts".to_string());
     }
@@ -621,6 +740,12 @@ fn improvements(deltas: &FuzzCompareDeltas) -> Vec<String> {
     }
     if !deltas.resolved_critical_findings.is_empty() {
         improvements.push("critical findings resolved".to_string());
+    }
+    if !deltas.resolved_findings.is_empty() {
+        improvements.push(format!(
+            "resolved findings: {}",
+            deltas.resolved_findings.len()
+        ));
     }
     if !deltas.resolved_required_artifacts.is_empty() {
         improvements.push("required artifacts restored".to_string());
@@ -714,6 +839,106 @@ mod tests {
         assert!(regressions.contains(&"new critical findings".to_string()));
         assert!(regressions.contains(&"new missing required artifacts".to_string()));
         assert!(regressions.contains(&"gate changed from passed to failed".to_string()));
+    }
+
+    #[test]
+    fn fuzz_compare_reports_new_non_critical_finding_as_regression() {
+        let baseline = snapshot(&envelope("baseline", 0, 0, 0, 0, &[], &["error"], true));
+        let candidate = snapshot(&envelope(
+            "candidate",
+            0,
+            0,
+            0,
+            0,
+            &[],
+            &["error", "error"],
+            true,
+        ));
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+
+        assert_eq!(
+            deltas
+                .new_findings
+                .iter()
+                .map(|finding| finding.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fingerprint-1"]
+        );
+        assert!(deltas.resolved_findings.is_empty());
+        assert!(regressions(&deltas).contains(&"new findings: 1".to_string()));
+    }
+
+    #[test]
+    fn fuzz_compare_reports_resolved_non_critical_findings_as_improvement() {
+        let baseline = snapshot(&envelope(
+            "baseline",
+            0,
+            0,
+            0,
+            0,
+            &[],
+            &["error", "error"],
+            true,
+        ));
+        let candidate = snapshot(&envelope("candidate", 0, 0, 0, 0, &[], &["error"], true));
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+
+        assert!(deltas.new_findings.is_empty());
+        assert_eq!(
+            deltas
+                .resolved_findings
+                .iter()
+                .map(|finding| finding.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fingerprint-1"]
+        );
+        assert!(improvements(&deltas).contains(&"resolved findings: 1".to_string()));
+    }
+
+    #[test]
+    fn fuzz_compare_reports_no_finding_deltas_when_findings_unchanged() {
+        let baseline = snapshot(&envelope("baseline", 0, 0, 0, 0, &[], &["error"], true));
+        let candidate = snapshot(&envelope("candidate", 0, 0, 0, 0, &[], &["error"], true));
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+
+        assert!(deltas.new_findings.is_empty());
+        assert!(deltas.resolved_findings.is_empty());
+        assert!(regressions(&deltas).is_empty());
+        assert!(improvements(&deltas).is_empty());
+    }
+
+    /// A finding suppressed between baseline and candidate must not register
+    /// as a resolved finding: accepting a known finding is a human decision,
+    /// not a fix. Suppressed findings are excluded from both sides of the
+    /// open-finding diff entirely, so this compares as unchanged, not
+    /// improved.
+    #[test]
+    fn fuzz_compare_does_not_report_suppressed_finding_as_resolved_or_new() {
+        let mut baseline = envelope("baseline", 0, 0, 0, 0, &[], &["error"], true);
+        baseline.gates.clear();
+        baseline.required_artifacts.clear();
+        let mut candidate = envelope("candidate", 0, 0, 0, 0, &[], &["error"], true);
+        candidate.gates.clear();
+        candidate.required_artifacts.clear();
+        candidate
+            .campaign
+            .as_mut()
+            .expect("candidate campaign")
+            .findings[0]
+            .status = FuzzFindingStatus::Suppressed;
+
+        let baseline = snapshot(&baseline);
+        let candidate = snapshot(&candidate);
+        let deltas = deltas(&baseline, &candidate, FuzzCompareHotspotPolicy::Advisory);
+
+        // The finding is gone from candidate's open-finding set, same as a
+        // genuine fix would look, but it is not counted as resolved because
+        // it is still present in the candidate as `suppressed`: a human
+        // decision to accept a known finding, not a fix.
+        assert!(deltas.new_findings.is_empty());
+        assert!(deltas.resolved_findings.is_empty());
+        assert!(regressions(&deltas).is_empty());
+        assert!(improvements(&deltas).is_empty());
     }
 
     #[test]

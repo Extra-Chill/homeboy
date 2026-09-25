@@ -744,8 +744,8 @@ pub(crate) struct FuzzReplayLikeArgs {
 
 pub use super::types_extra::{
     FuzzArtifactPostprocessOutput, FuzzCampaignContract, FuzzCampaignDispatchRecordOutput,
-    FuzzCampaignRunOutput, FuzzCompareDeltas, FuzzCompareHotspotDelta, FuzzCompareHotspotSnapshot,
-    FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
+    FuzzCampaignRunOutput, FuzzCompareDeltas, FuzzCompareFindingSnapshot, FuzzCompareHotspotDelta,
+    FuzzCompareHotspotSnapshot, FuzzCompareHotspotSummary, FuzzCompareOutput, FuzzCompareSnapshot,
     FuzzContractGateProfileOutput, FuzzContractOutput, FuzzCoverageCompletenessOutput,
     FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
     FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzInspectCandidate,

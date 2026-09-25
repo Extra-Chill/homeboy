@@ -455,10 +455,31 @@ pub struct FuzzCompareSnapshot {
     pub failure_rate: f64,
     pub finding_severity_counts: BTreeMap<String, usize>,
     pub critical_finding_keys: Vec<String>,
+    /// Open findings (`status` `open` or `confirmed`) at every severity,
+    /// keyed by `fingerprint` (falling back to `id`). `suppressed` and
+    /// `mitigated` findings are excluded, so accepting a known finding never
+    /// registers as a change. See `homeboy fuzz compare` issue #15056.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_findings: Vec<FuzzCompareFindingSnapshot>,
+    /// Keys of findings with status `suppressed` or `mitigated` in this
+    /// envelope. Used to tell a genuinely resolved finding (absent from the
+    /// candidate entirely) apart from one a human has merely accepted or
+    /// suppressed: the latter must not register as an improvement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub closed_finding_keys: Vec<String>,
     pub hotspots: Vec<FuzzCompareHotspotSnapshot>,
     pub missing_required_artifacts: Vec<String>,
     pub gate_status_counts: BTreeMap<String, usize>,
     pub gate_statuses: BTreeMap<String, String>,
+}
+
+/// One open finding as tracked for `fuzz compare` diffing, keyed by
+/// `fingerprint` (falling back to `id`).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FuzzCompareFindingSnapshot {
+    pub key: String,
+    pub severity: String,
+    pub title: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -492,6 +513,19 @@ pub struct FuzzCompareDeltas {
     pub resolved_required_artifacts: Vec<String>,
     pub new_critical_findings: Vec<String>,
     pub resolved_critical_findings: Vec<String>,
+    /// Open findings (any severity) present in the candidate but not the
+    /// baseline, keyed by fingerprint/id. Critical findings also appear
+    /// here; `new_critical_findings` remains for compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub new_findings: Vec<FuzzCompareFindingSnapshot>,
+    /// Open findings present in the baseline that are genuinely absent from
+    /// the candidate. Deliberately excludes a baseline-open finding whose
+    /// key still appears in the candidate with status `suppressed` or
+    /// `mitigated`: accepting or suppressing a known finding is not a fix,
+    /// so it must not register as an improvement, even though the finding
+    /// is no longer in the candidate's open set either.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_findings: Vec<FuzzCompareFindingSnapshot>,
     pub hotspot_deltas: Vec<FuzzCompareHotspotDelta>,
     pub new_hotspots: Vec<String>,
     pub resolved_hotspots: Vec<String>,
