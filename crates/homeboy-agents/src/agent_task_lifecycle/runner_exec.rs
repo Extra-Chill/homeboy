@@ -108,6 +108,27 @@ const COMMAND_RESULT_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const COMMAND_RESULT_RUN_REF_LIMIT: usize = 32;
 const DESCENDANT_RUN_GRAPH_LIMIT: usize = 64;
 
+const HYDRATION_RUN_SEGMENT: &str = "-lab-hydration-";
+
+fn hydration_cook_parent(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Option<String> {
+    let (attempt_id, _) = run_id.split_once(HYDRATION_RUN_SEGMENT)?;
+    if attempt_id.is_empty() {
+        return None;
+    }
+    let attempt = lifecycle_store
+        .read_record_without_historical_import(attempt_id)
+        .ok()?;
+    attempt
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .filter(|cook_id| !cook_id.is_empty())
+        .map(str::to_string)
+}
+
 fn ensure_runner_exec_observation_run(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -178,6 +199,9 @@ fn ensure_runner_exec_observation_run(
     );
     if let Some(runner_job_id) = runner_job_id {
         metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
+    }
+    if let Some(cook_id) = hydration_cook_parent(lifecycle_store, &run.id) {
+        metadata.insert("parent_run_id".to_string(), json!(cook_id));
     }
     store.upsert_imported_run_preserving_terminal(&run)?;
     Ok(run)

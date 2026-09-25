@@ -87,8 +87,8 @@ pub fn list_runs(
         (deduped.canonical, deduped.hidden_mirrors)
     };
 
-    // Nest Cook attempts and lab-hydration children under the Cook id the
-    // operator was given, unless they asked for every underlying row.
+    // Nest rows that recorded parent_run_id under the Cook that owns them,
+    // unless the caller asked for every underlying row.
     let (run_records, cook_children) = if args.include_mirrors {
         (run_records, HashMap::new())
     } else {
@@ -110,6 +110,10 @@ pub fn list_runs(
         active_runner_jobs.complete,
     );
 
+    let run_records = run_records
+        .into_iter()
+        .map(|run| project_redirected_cook_status(&store, run))
+        .collect::<homeboy::core::Result<Vec<_>>>()?;
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
     for run in &mut runs {
         if let Some(children) = cook_children.get(&run.id) {
@@ -139,11 +143,6 @@ pub fn list_runs(
     ))
 }
 
-/// Nest attempt and lab-hydration rows under the Cook id that owns them.
-///
-/// Children are identified by the Cook attempt / hydration id shape, or by a
-/// parent pointer already stored on the row. Rows whose owner is not in this
-/// page stay top-level.
 fn group_cook_sub_runs(runs: Vec<RunRecord>) -> (Vec<RunRecord>, HashMap<String, Vec<RunRecord>>) {
     let ids = runs
         .iter()
@@ -152,49 +151,50 @@ fn group_cook_sub_runs(runs: Vec<RunRecord>) -> (Vec<RunRecord>, HashMap<String,
     let mut children: HashMap<String, Vec<RunRecord>> = HashMap::new();
     let mut canonical = Vec::new();
     for run in runs {
-        if let Some(owner) = cook_sub_run_owner(&run, &ids) {
-            children.entry(owner).or_default().push(run);
-        } else {
-            canonical.push(run);
+        match run
+            .metadata_json
+            .get("parent_run_id")
+            .and_then(Value::as_str)
+        {
+            Some(parent) if parent != run.id && ids.contains(parent) => {
+                children.entry(parent.to_string()).or_default().push(run);
+            }
+            _ => canonical.push(run),
         }
     }
     (canonical, children)
 }
 
-fn cook_sub_run_owner(run: &RunRecord, ids: &HashSet<String>) -> Option<String> {
-    for pointer in [
-        "/parent_run_id",
-        "/cook_id",
-        "/lab/explicit_run_id",
-        "/runner_execution_record/local_run_id",
-        "/runner_execution_record/mirror_run_id",
-        "/agent_task_run/metadata/cook_id",
-    ] {
-        if let Some(parent) = run.metadata_json.pointer(pointer).and_then(Value::as_str) {
-            if let Some(owner) = cook_owner_in_page(parent, ids) {
-                if owner != run.id {
-                    return Some(owner);
-                }
-            }
-        }
+fn project_redirected_cook_status(
+    store: &ObservationStore,
+    mut run: RunRecord,
+) -> homeboy::core::Result<RunRecord> {
+    let Some(attempt_id) = redirected_cook_attempt_id(&run) else {
+        return Ok(run);
+    };
+    if let Some(attempt) = store.get_run(attempt_id)? {
+        run.status = attempt.status;
+        run.finished_at = attempt.finished_at;
+    } else if run.status == RunStatus::Pass.as_str() {
+        run.status = RunStatus::Running.as_str().to_string();
+        run.finished_at = None;
     }
-    cook_owner_in_page(&run.id, ids).filter(|owner| owner != &run.id)
+    Ok(run)
 }
 
-fn cook_owner_in_page(id: &str, ids: &HashSet<String>) -> Option<String> {
-    let base = id.split("-lab-hydration-").next().unwrap_or(id);
-    if let Some((owner, _)) = base.split_once("-attempt-") {
-        if !owner.is_empty() && ids.contains(owner) {
-            return Some(owner.to_string());
-        }
+fn redirected_cook_attempt_id(run: &RunRecord) -> Option<&str> {
+    let handoff = run
+        .metadata_json
+        .pointer("/agent_task_run/metadata/detached_cook_handoff")?;
+    if handoff.get("cook_id").and_then(Value::as_str) != Some(run.id.as_str())
+        || handoff.get("state").and_then(Value::as_str) != Some("redirected")
+    {
+        return None;
     }
-    if id.contains("-lab-hydration-") && ids.contains(base) && base != id {
-        return Some(base.to_string());
-    }
-    if ids.contains(id) {
-        return Some(id.to_string());
-    }
-    None
+    handoff
+        .get("attempt_run_id")
+        .and_then(Value::as_str)
+        .filter(|attempt_id| *attempt_id != run.id)
 }
 
 fn list_active_runs(args: RunsListArgs) -> CmdResult<RunsOutput> {
@@ -1625,6 +1625,7 @@ pub(super) fn run_detail(
     run_id: &str,
 ) -> homeboy::core::Result<RunDetail> {
     let (run, artifacts) = runs_service::load_run_with_artifacts(store, run_id)?;
+    let run = project_redirected_cook_status(store, run)?;
     Ok(RunDetail {
         summary: run_summary(run.clone()),
         homeboy_version: run.homeboy_version,
