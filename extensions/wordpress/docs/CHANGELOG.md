@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.0] - 2026-09-25
+
+### Added
+- run WP Codebox layout-sweep workloads through homeboy fuzz
+
 ## [3.49.2] - 2026-09-25
 
 ### Fixed
