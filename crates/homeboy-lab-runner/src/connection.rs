@@ -757,6 +757,12 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
         recorded_endpoint,
         live_lease_expectation,
     } = options;
+    // A service-managed runner owns its daemon, so attaching replaces no
+    // runtime state and takes no promotion lease. Waiting on that lease would
+    // block every reconnect behind any running Cook's generation pin.
+    if load_in_roots(roots, runner_id)?.settings.service_managed {
+        return service::connect_service_runner(roots, runner_id);
+    }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
     // different configured executable halfway through the transaction.
@@ -4245,9 +4251,14 @@ mod status_read_purity_tests {
 }
 
 mod remote_daemon;
+mod service;
 mod session_store;
 
 use remote_daemon::*;
+pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_service;
+pub use service::{
+    install as install_runner_service, service_status as runner_service_status, RunnerServiceReport,
+};
 use session_store::*;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 

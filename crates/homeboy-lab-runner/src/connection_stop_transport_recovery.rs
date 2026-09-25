@@ -133,6 +133,11 @@ pub(crate) fn disconnect_with_session_in_roots(
     expected_session: Option<&RunnerSession>,
     force: bool,
 ) -> Result<RunnerDisconnectReport> {
+    if load_in_roots(roots, runner_id)?.settings.service_managed {
+        // The runner owns its daemon; disconnecting only detaches and takes
+        // no promotion lease.
+        return service::detach_service_runner(runner_id);
+    }
     let promotion_lease = homeboy_core::runtime_promotion::acquire_in_root(
         &homeboy_core::paths::runtime_promotion_dir_in_root(roots.data()),
         "runner daemon disconnect",

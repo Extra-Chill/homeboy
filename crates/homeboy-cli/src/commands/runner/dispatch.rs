@@ -11,7 +11,7 @@ use std::time::Duration;
 use super::super::output_runtime::{CommandPresentation, CommandRun};
 use super::super::CmdResult;
 use super::broker::run_broker;
-use super::cli::{RunnerArgs, RunnerCommand};
+use super::cli::{RunnerArgs, RunnerCommand, RunnerServiceCommand};
 use super::exec::{execute, RunnerExecInput};
 use super::jobs::RunnerJobCommandOutput;
 use super::registry::{add, connect, enable, list, remove, set, show, RunnerAddInput};
@@ -403,6 +403,26 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             .map(|output| (RunnerCommandOutput::RefreshPlan(Box::new(output)), 0)),
         RunnerCommand::Broker { command } => {
             run_broker(command).map(|output| (RunnerCommandOutput::Broker(Box::new(output)), 0))
+        }
+        RunnerCommand::Service { command } => {
+            let (command, report) = match command {
+                RunnerServiceCommand::Install { runner_id } => (
+                    "runner.service.install",
+                    homeboy::runner::install_runner_service(&runner_id)?,
+                ),
+                RunnerServiceCommand::Status { runner_id } => (
+                    "runner.service.status",
+                    homeboy::runner::runner_service_status(&runner_id)?,
+                ),
+            };
+            Ok((
+                RunnerCommandOutput::Service(Box::new(super::types::RunnerServiceOutput {
+                    variant: "runner_service",
+                    command,
+                    report,
+                })),
+                0,
+            ))
         }
     }
 }

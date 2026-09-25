@@ -361,6 +361,7 @@ pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
     daemon_lab_handoff_capabilities, status_for_admission,
 };
+pub use connection::{install_runner_service, runner_service_status, RunnerServiceReport};
 pub use runner_probe_gate::observe_runner_capabilities;
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;

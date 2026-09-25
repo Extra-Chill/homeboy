@@ -71,6 +71,11 @@ pub struct RunnerSettings {
     pub homeboy_path: Option<String>,
     #[serde(default)]
     pub daemon: bool,
+    /// The runner daemon runs as a host service (a systemd user unit) that the
+    /// runner owns. The controller attaches to it and never starts, replaces,
+    /// or rotates it (#13881 step 3). Set by `homeboy runner service install`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub service_managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
     /// Maximum seconds the controller waits for an accepted runner job. Unset
