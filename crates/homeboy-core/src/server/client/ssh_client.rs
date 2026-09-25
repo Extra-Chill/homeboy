@@ -28,6 +28,14 @@ use super::{CommandOutput, SshClient};
 pub(crate) const SECRET_ENV_STDIN_SENTINEL: &str = "__HOMEBOY_SECRET_ENV_END__";
 const MANAGED_SESSION_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Values at or below this length are `export`ed as before. Above it, Linux's
+/// `MAX_ARG_STRLEN` (32 pages, 128KiB) makes `export`ing the value unsafe: it
+/// would break every later `execve()` in the same shell, including probes
+/// that never reference the value (homeboy#15001). Comfortably below the
+/// 128KiB kernel limit to leave headroom for the `NAME=` prefix and whatever
+/// else is already exported in the shell.
+const SECRET_ENV_ARGV_SAFE_VALUE_LEN: usize = 100_000;
+
 /// Where a command's stdin bytes come from when it is dispatched over SSH (or
 /// the localhost fast path).
 #[derive(Clone, Copy)]
@@ -46,18 +54,44 @@ enum SshStdin<'a> {
 /// Each line before the sentinel is a literal `NAME=VALUE` pair. Names and
 /// values arrive on the SSH channel's stdin, so neither the controller-local
 /// `ssh` argv nor the remote login-shell argv (both visible in `ps`) ever carry
-/// the secret. Values are applied with the `export` builtin — not `eval` — so
-/// shell metacharacters in a value are inert (no command injection). A value
-/// containing a literal newline is the one unsupported shape; OAuth/API tokens
-/// never contain one.
+/// the secret. A value containing a literal newline is the one unsupported
+/// shape; OAuth/API tokens never contain one.
+///
+/// Values at or below [`SECRET_ENV_ARGV_SAFE_VALUE_LEN`] are applied with the
+/// `export` builtin, exactly as before: `export "$key=$value"` treats its
+/// dynamically-named operand as data, not shell syntax, so metacharacters in
+/// a value are inert (no command injection, no `eval`).
+///
+/// Larger values are never `export`ed. Once a value is exported it becomes
+/// part of every later `execve()`'s envp in that shell, and Linux enforces
+/// `MAX_ARG_STRLEN` (32 pages, 128KiB) per argv/envp string — an oversized
+/// exported value makes *every subsequent command* in the composed script
+/// fail with "Argument list too long", including probes that never reference
+/// it (homeboy#15001). Instead the value is round-tripped through a private
+/// `mktemp` file into a plain (unexported) shell variable via `read`, which —
+/// like `export` — treats its operand as a variable name to bind, not shell
+/// syntax to parse, so this is injection-safe the same way. The variable
+/// stays usable via ordinary parameter expansion (`$KEY`, `${#KEY}`, …) in
+/// this shell; it just never reaches a child process's own environment,
+/// because there was never a safe way to deliver a value this large through
+/// `execve()`'s envp in the first place.
 fn secret_env_stdin_read_loop() -> String {
     format!(
         "while IFS= read -r __homeboy_env_line; do \
 [ \"$__homeboy_env_line\" = \"{sentinel}\" ] && break; \
 __homeboy_env_key=${{__homeboy_env_line%%=*}}; \
-export \"$__homeboy_env_key=${{__homeboy_env_line#*=}}\"; \
+__homeboy_env_val=${{__homeboy_env_line#*=}}; \
+if [ ${{#__homeboy_env_val}} -gt {threshold} ]; then \
+__homeboy_env_tmp=$(mktemp) || exit 1; \
+printf '%s\\n' \"$__homeboy_env_val\" > \"$__homeboy_env_tmp\" || exit 1; \
+IFS= read -r \"$__homeboy_env_key\" < \"$__homeboy_env_tmp\" || exit 1; \
+rm -f \"$__homeboy_env_tmp\"; \
+else \
+export \"$__homeboy_env_key=$__homeboy_env_val\"; \
+fi; \
 done",
         sentinel = SECRET_ENV_STDIN_SENTINEL,
+        threshold = SECRET_ENV_ARGV_SAFE_VALUE_LEN,
     )
 }
 
