@@ -3741,7 +3741,6 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                     "lab.staging-dispatch",
                     lease_id,
                     Some(&request.recipe.run_id),
-                    crate::execution::DaemonAdmissionPolicy::DurableLeaseRequired,
                     homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present(
                         &request.recipe.run_id,
                     )?,

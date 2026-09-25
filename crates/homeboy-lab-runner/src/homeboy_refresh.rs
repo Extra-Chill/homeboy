@@ -15,8 +15,8 @@ use homeboy_core::git::{run_git, run_git_output};
 use homeboy_core::output::MergeOutput;
 
 use super::connection::configured_runner_homeboy_build_identity;
+use super::execution::reserve_daemon_admission;
 use super::execution::{exec_with_status_snapshot, exec_with_status_snapshot_in_roots};
-use super::execution::{reserve_daemon_admission, DaemonAdmissionPolicy};
 use super::{
     copy_snapshot_to_directory, exec, load, load_in_roots, materialize_runner_extension_with_env,
     merge, merge_in_roots, normalize_runner_command_env_for_homeboy_path,
@@ -1706,7 +1706,6 @@ pub(crate) fn probe_reconnected_admission_readiness_in_roots(
                 &format!("runner.refresh_homeboy readiness probe ({identity_commit})"),
                 expected_lease_id,
                 None,
-                DaemonAdmissionPolicy::LegacyCompatible,
                 None,
             )
             .map(|reservation| {

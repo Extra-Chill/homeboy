@@ -4,8 +4,7 @@ use uuid::Uuid;
 
 use super::{daemon_endpoint_response, error_response, HttpResponse};
 use crate::api_jobs::{
-    JobArtifactMetadata, JobEventKind, JobStatus, JobStore, RemoteRunnerJobRequest,
-    RemoteRunnerJobResult,
+    JobArtifactMetadata, JobEventKind, JobStore, RemoteRunnerJobRequest, RemoteRunnerJobResult,
 };
 use crate::broker_auth::{BrokerAuthStore, BrokerScope};
 use crate::error::{Error, Result};
@@ -14,11 +13,10 @@ use homeboy_runner_contract::{
     RunnerApiClaimOutcome, RunnerApiClaimRequest, RunnerApiClaimResponse,
     RunnerApiHeartbeatOutcome, RunnerApiHeartbeatRequest, RunnerApiHeartbeatResponse,
     RunnerApiOperationFailure, RunnerApiOperationFailureCode, RunnerApiSubmitOutcome,
-    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RunnerApiWatchRequest, RunnerApiWatchResponse,
-    RunnerApiWatchTerminalOutcome, RunnerApiWatchedEvent, RUNNER_API_CLAIM_REQUEST_SCHEMA,
-    RUNNER_API_CLAIM_RESPONSE_SCHEMA, RUNNER_API_HEARTBEAT_REQUEST_SCHEMA,
-    RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA, RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1,
-    RUNNER_API_WATCH_REQUEST_SCHEMA, RUNNER_API_WATCH_RESPONSE_SCHEMA,
+    RunnerApiSubmitRequest, RunnerApiSubmitResponse, RunnerApiWatchRequest,
+    RUNNER_API_CLAIM_REQUEST_SCHEMA, RUNNER_API_CLAIM_RESPONSE_SCHEMA,
+    RUNNER_API_HEARTBEAT_REQUEST_SCHEMA, RUNNER_API_HEARTBEAT_RESPONSE_SCHEMA,
+    RUNNER_API_SUBMIT_RESPONSE_SCHEMA, RUNNER_API_V1, RUNNER_API_WATCH_REQUEST_SCHEMA,
 };
 use homeboy_runner_contract::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
@@ -841,10 +839,9 @@ fn claim(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
 /// The versioned Runner API v1 `watch` operation: resume one job's durable
 /// event log from the client's last-read sequence number (#13881 step 1).
 ///
-/// Operation-level conditions (unknown job, a runner without standing on the
-/// job, an unsupported API version) are typed `RunnerApiOperationFailure`
-/// values in the versioned response; authentication remains an HTTP concern
-/// and still produces `401` through `auth_or_bad_request`.
+/// Request parsing and broker authorization stay at this route; the operation
+/// itself is the transport-neutral service in [`super::runner_watch`], shared
+/// with the local read-only `GET /jobs/:id/watch` route (#13881 step 2).
 fn watch(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
     let request: RunnerApiWatchRequest = parse_body(body, "Runner API watch request")?;
     if request.schema != RUNNER_API_WATCH_REQUEST_SCHEMA {
@@ -876,20 +873,6 @@ fn watch(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         // their Submit credential any unrelated worker privileges.
         Err(_) => auth.authorize(BrokerScope::Submit, None)?,
     };
-    let Ok(job_id) = Uuid::parse_str(&request.job_id) else {
-        return Ok(watch_failure_response(
-            &request,
-            RunnerApiOperationFailureCode::JobNotFound,
-            format!("remote runner job not found: {}", request.job_id),
-        ));
-    };
-    let Ok(job) = job_store.get(job_id) else {
-        return Ok(watch_failure_response(
-            &request,
-            RunnerApiOperationFailureCode::JobNotFound,
-            format!("remote runner job not found: {job_id}"),
-        ));
-    };
     // A runner-bound credential owns through its paired id; an unbound
     // credential (open loopback, trusted local) owns through the runner id the
     // request names. Keep the same ownership rule as the job reads.
@@ -897,76 +880,8 @@ fn watch(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) ->
         .filter(|grant| !grant.runner_id.is_empty())
         .map(|grant| grant.runner_id)
         .unwrap_or_else(|| request.runner_id.clone());
-    if job
-        .target_runner_id
-        .as_deref()
-        .is_some_and(|target| target != watching_runner)
-    {
-        return Ok(watch_failure_response(
-            &request,
-            RunnerApiOperationFailureCode::RunnerNotAuthorized,
-            format!("remote runner job is not owned by runner {watching_runner}"),
-        ));
-    }
-
-    // Exclusive lower bound: only events with `sequence > after_sequence` are
-    // returned, ascending, so a resume sees every later event exactly once.
-    let mut later_events = job_store
-        .events(job_id)?
-        .into_iter()
-        .filter(|event| event.sequence > request.after_sequence)
-        .collect::<Vec<_>>();
-    later_events.sort_by_key(|event| event.sequence);
-    let later_event_count = later_events.len();
-    let page = match request.limit {
-        Some(limit) => {
-            let keep = (limit as usize).min(later_events.len());
-            later_events.truncate(keep);
-            later_events
-        }
-        None => later_events,
-    };
-    let next_sequence = page
-        .last()
-        .map(|event| event.sequence)
-        .unwrap_or(request.after_sequence);
-    // A terminal job is reported terminal only on the page that reaches the
-    // end of its log, so a client that stops watching at `terminal: true`
-    // never misses events left behind a `limit`.
-    let page_reaches_end = page.len() == later_event_count;
-    let terminal = job.status.is_terminal() && page_reaches_end;
-    let terminal_outcome = match job.status {
-        _ if !terminal => None,
-        JobStatus::Succeeded => Some(RunnerApiWatchTerminalOutcome::Succeeded),
-        JobStatus::Failed => Some(RunnerApiWatchTerminalOutcome::Failed),
-        JobStatus::Cancelled => Some(RunnerApiWatchTerminalOutcome::Cancelled),
-        JobStatus::Queued | JobStatus::Running => None,
-    };
-    Ok(json!({
-        "response": RunnerApiWatchResponse {
-            schema: RUNNER_API_WATCH_RESPONSE_SCHEMA.to_string(),
-            api_version: RUNNER_API_V1,
-            job_id: request.job_id.clone(),
-            events: page
-                .into_iter()
-                .map(|event| RunnerApiWatchedEvent {
-                    sequence: event.sequence,
-                    kind: serde_json::to_value(event.kind)
-                        .expect("serialize job event kind")
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                    timestamp_ms: event.timestamp_ms,
-                    message: event.message,
-                    data: event.data,
-                })
-                .collect(),
-            next_sequence,
-            terminal,
-            terminal_outcome,
-            failure: None,
-        }
-    }))
+    let response = super::runner_watch::watch_job(job_store, &request, Some(&watching_runner))?;
+    Ok(json!({ "response": response }))
 }
 
 /// The failure value of the watch operation: the versioned response envelope
@@ -977,19 +892,7 @@ fn watch_failure_response(
     message: impl Into<String>,
 ) -> Value {
     json!({
-        "response": RunnerApiWatchResponse {
-            schema: RUNNER_API_WATCH_RESPONSE_SCHEMA.to_string(),
-            api_version: request.api_version,
-            job_id: request.job_id.clone(),
-            events: Vec::new(),
-            next_sequence: request.after_sequence,
-            terminal: false,
-            terminal_outcome: None,
-            failure: Some(RunnerApiOperationFailure {
-                code,
-                message: message.into(),
-            }),
-        }
+        "response": super::runner_watch::watch_failure(request, code, message),
     })
 }
 

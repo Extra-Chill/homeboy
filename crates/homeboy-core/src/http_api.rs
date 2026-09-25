@@ -266,6 +266,14 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["jobs", id, "events"]) => Ok(HttpEndpoint::JobEvents {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Get, ["jobs", id, "watch"]) => Ok(HttpEndpoint::JobWatch {
+            id: (*id).to_string(),
+            request: {
+                let mut request = job_watch_request(path)?;
+                request.job_id = (*id).to_string();
+                request
+            },
+        }),
         (HttpMethod::Post, ["jobs", id, "cancel"]) => Ok(HttpEndpoint::JobCancel {
             id: (*id).to_string(),
         }),
@@ -334,6 +342,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
+                "GET /jobs/:id/watch".to_string(),
                 "POST /jobs/:id/cancel".to_string(),
                 "GET /tools".to_string(),
                 "GET /tools/:id".to_string(),
@@ -681,6 +690,18 @@ where
             "job_id": id,
             "events": job_store.events(parse_job_id(id)?)?,
         }),
+        HttpEndpoint::JobWatch { id, request } => {
+            // The SSH tunnel is this surface's trust boundary, so the local
+            // reader resolves through the shared watch service with no
+            // runner-bound ownership restriction — the same rule the
+            // neighbouring job reads use (#13881 step 2).
+            let response = crate::daemon::runner_watch::watch_job(job_store, request, None)?;
+            json!({
+                "command": "api.jobs.watch",
+                "job_id": id,
+                "response": response,
+            })
+        }
         HttpEndpoint::JobCancel { id } => {
             let job_id = parse_job_id(id)?;
             json!({
@@ -2071,6 +2092,32 @@ fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
             Some(run_id.to_string()),
             None,
         )
+    })
+}
+
+/// Parse a read-only `GET /jobs/:id/watch` query into the versioned Runner
+/// API watch request. `after_sequence` defaults to 0 and `limit` is optional;
+/// the schema and API version are pinned to Runner API v1 by construction.
+fn job_watch_request(path: &str) -> Result<homeboy_runner_contract::RunnerApiWatchRequest> {
+    let after_sequence = match query_value(path, "after_sequence") {
+        Some(value) => value.parse::<u64>().map_err(|error| {
+            Error::validation_invalid_argument("after_sequence", error.to_string(), None, None)
+        })?,
+        None => 0,
+    };
+    let limit = match query_value(path, "limit") {
+        Some(value) => Some(value.parse::<u32>().map_err(|error| {
+            Error::validation_invalid_argument("limit", error.to_string(), None, None)
+        })?),
+        None => None,
+    };
+    Ok(homeboy_runner_contract::RunnerApiWatchRequest {
+        schema: homeboy_runner_contract::RUNNER_API_WATCH_REQUEST_SCHEMA.to_string(),
+        api_version: homeboy_runner_contract::RUNNER_API_V1,
+        runner_id: String::new(),
+        job_id: String::new(),
+        after_sequence,
+        limit,
     })
 }
 

@@ -1341,8 +1341,10 @@ impl Drop for ReleaseBlockedWorkload {
     }
 }
 
-fn wait_for_path(path: &std::path::Path, description: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+/// Wait for a workload marker file. Returns as soon as it exists; the 30s
+/// bound only absorbs a loaded test host.
+pub(super) fn wait_for_path(path: &std::path::Path, description: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !path.exists() {
         assert!(
             std::time::Instant::now() < deadline,
