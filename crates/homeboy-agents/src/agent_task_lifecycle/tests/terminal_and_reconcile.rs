@@ -3480,9 +3480,6 @@ fn cancel_marks_queued_run_and_tasks_cancelled() {
 /// none, so the ambient retention pass this file's sibling test depends on is
 /// never entered here.
 #[test]
-#[ignore = "homeboy#15005: aggregate_source_exact has no fallback (e.g. the \
-observation-store mirror) when the canonical local aggregate.json is missing, \
-contradicting this test's documented intent"]
 fn aggregate_source_loads_completed_run_without_path_spelunking() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =

@@ -6815,10 +6815,6 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
 }
 
 #[test]
-#[ignore = "homeboy#15008: record_promotion_in_store latches CandidateRecoverable \
-onto this historical run permanently once any verification_pending promotion is \
-carried forward for provenance, and never reverts it after the remediation's \
-final applied promotion lands"]
 fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publication() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut fixture = CandidateAdoptionFixture::new_without_recovery(
@@ -13833,9 +13829,6 @@ fn adoption_prefers_authenticated_preacceptance_recovery_over_failure_aggregate(
 }
 
 #[test]
-#[ignore = "homeboy#15005: finalization reads the never-executed historical \
-orphan's aggregate.json (which does not exist) with no fallback, the same root \
-cause as aggregate_source_loads_completed_run_without_path_spelunking"]
 fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_replay() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");

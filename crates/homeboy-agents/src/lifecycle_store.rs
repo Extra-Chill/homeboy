@@ -554,14 +554,39 @@ impl AgentTaskLifecycleStore {
             )
         })?;
         let path = self.aggregate_path(&record.run_id);
-        let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
-        serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        let raw = String::from_utf8(raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        Ok((raw, path))
+        // The canonical local aggregate.json is the controller-owned, exact-bytes
+        // source (c138e12162) and stays preferred whenever it exists. But a run's
+        // record can outlive that file — retention sweeps, or a controller crash
+        // between writing the record and materializing the file — leaving the
+        // durable record pointing at an aggregate that genuinely is not on this
+        // installation's disk. Falling back to the SQLite-backed observation
+        // mirror in that case only, rather than propagating a plain IO error,
+        // keeps this accessor resolving whatever local evidence still exists
+        // instead of spelunking `record.aggregate_path`'s stored string, which
+        // may itself name a foreign installation's path (#7505).
+        match fs::metadata(&path) {
+            Ok(_) => {
+                let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
+                serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                let raw = String::from_utf8(raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let aggregate = self.read_aggregate_readonly(&record.run_id)?;
+                let raw = serde_json::to_string(&aggregate).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) => Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            )),
+        }
     }
 
     pub fn operation_claim(

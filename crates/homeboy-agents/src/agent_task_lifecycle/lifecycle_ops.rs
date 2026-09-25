@@ -5670,6 +5670,55 @@ pub fn reconcile_status_with_options(
 /// `validate_recipe_attempt_record_with_controller_plan` with a plan read from
 /// the injected lifecycle store, so the recipe half and the plan half cannot
 /// come from different homes.
+/// Resolve a `CandidateRecoverable` latch left behind by a completed
+/// candidate adoption on a record whose own execution never reached a
+/// provider (a genuine pre-execution failure, durably preserved as
+/// authenticated adoption provenance by `record_pre_execution_failure`).
+///
+/// `record_promotion_in_store`'s #14315 override only ever *sets*
+/// `CandidateRecoverable` for a verification-pending or gate-failed
+/// checkpoint; nothing reverts it once the adoption that latched it
+/// concludes, so it stays latched permanently even after the adoption's
+/// terminal outcome is known (homeboy#15008).
+///
+/// Reverting eagerly the moment `finish_candidate_adoption_in_store` marks
+/// the adoption attempt itself completed would erase this record's chance to
+/// be picked up by the continuation-enqueue reconciliation below: a
+/// candidate-adoption review can dispatch remediation to a *different*,
+/// still-pending run (`candidate_adoption.remediation_run_id`) before this
+/// record's own outcome is knowable, and `enqueue_terminal_continuation`
+/// deliberately only ever queues a continuation for `Succeeded`,
+/// `CandidateRecoverable`, or `PartialRecoverable` records. So this waits
+/// until any dispatched remediation is itself terminal — meaning there is
+/// nothing left to resume — before restoring this record's true terminal
+/// fact.
+fn reconcile_candidate_adoption_terminal_state_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
+    if record.state != AgentTaskRunState::CandidateRecoverable
+        || record.metadata.get("pre_execution_failure").is_none()
+    {
+        return Ok(false);
+    }
+    let Some(adoption) = record.candidate_adoption.as_ref() else {
+        return Ok(false);
+    };
+    if !matches!(adoption.state.as_str(), "completed" | "failed") {
+        return Ok(false);
+    }
+    if let Some(remediation_run_id) = adoption.remediation_run_id.clone() {
+        let remediation_terminal = lifecycle_store
+            .read_record(&remediation_run_id)
+            .is_ok_and(|remediation| remediation.state.is_terminal());
+        if !remediation_terminal {
+            return Ok(false);
+        }
+    }
+    set_run_state(record, AgentTaskRunState::Failed);
+    Ok(true)
+}
+
 pub fn reconcile_status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -5776,6 +5825,9 @@ pub fn reconcile_status_in_store(
     }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
+        lifecycle_store.write_record(&record)?;
+    }
+    if reconcile_candidate_adoption_terminal_state_in_store(lifecycle_store, &mut record)? {
         lifecycle_store.write_record(&record)?;
     }
     if record.state.is_terminal() {
@@ -8080,6 +8132,16 @@ pub fn record_promotion_in_store(
             return false;
         }
         record.updated_at = Some(now_timestamp());
+        // Captured before this write overwrites `latest_promotion` below, so
+        // this is the status of the *previous* promotion recorded for this
+        // run — the one the pending/failed-gate branch below may have already
+        // latched `CandidateRecoverable` for (homeboy#15008).
+        let previous_status = record
+            .metadata
+            .get("latest_promotion")
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let metadata = record.ensure_metadata_object();
         // The first post-apply checkpoint is immutable recovery authority. Later
         // gate/finalization reports advance `latest_promotion` without obscuring
@@ -8110,6 +8172,38 @@ pub fn record_promotion_in_store(
             Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
         ) {
             set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+        } else if promotion.get("status").and_then(Value::as_str) == Some("applied")
+            && record.state == AgentTaskRunState::CandidateRecoverable
+            && previous_status.as_deref() == Some("verification_pending")
+            && record.candidate_adoption.is_none()
+        {
+            // The branch above only ever *sets* `CandidateRecoverable`;
+            // nothing previously reverted it once a later promotion for the
+            // same run's own live progression reached a conclusive status.
+            // That left it permanently latched even once a still-pending
+            // candidate went on to apply clean (the #14315 case: this run was
+            // never anything but its own straight-line execution, so once
+            // verification completes there is nothing left to wait on).
+            //
+            // Scoped to reverting a `verification_pending` checkpoint
+            // specifically: a *documented* `gate_failed` (a candidate that
+            // was actually rejected, not merely unverified) must stay a
+            // permanent scar on this run's history even after a later
+            // corrected promotion proves a different candidate clean — that
+            // is the existing, deliberately un-reverted behavior of
+            // `corrected_promotion_replaces_gate_failed_latest_proof`.
+            //
+            // Excluded whenever `candidate_adoption` is active on this
+            // record: an adoption's own gate/verification checkpoints can
+            // legitimately land here mid-flight — e.g. once gates pass but
+            // before a still-pending review-form follow-up resolves — and
+            // reverting early would hide the adoption's pending continuation
+            // before it concludes.
+            // `reconcile_candidate_adoption_terminal_state_in_store` (below)
+            // is the one place that can tell adoption has truly concluded —
+            // including any dispatched remediation — so it owns the
+            // equivalent revert for that flow (homeboy#15008).
+            set_run_state(record, AgentTaskRunState::Succeeded);
         }
         if let Some(acceptance) = record.acceptance.as_mut() {
             let candidate = acceptance_candidate(&promotion);
