@@ -506,6 +506,96 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
     }
 }
 
+/// A detached Cook's latest attempt reached a terminal state outside the
+/// launching `run_cook_with_runtime` call.
+///
+/// Admission marks the printed Cook id succeeded so an exit observer cannot
+/// fail the placeholder. That bookkeeping transition is not the Cook outcome.
+/// The attempt's terminal state is, and it has to reach the configured
+/// transport even when the launching process already exited.
+pub(crate) fn notify_detached_cook_terminal(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    attempt_run_id: &str,
+    status: &str,
+    exit_code: i32,
+) {
+    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+        lifecycle_store,
+        cook_id,
+        COOK_TERMINAL_DELIVERED_BY,
+    )
+    .unwrap_or(false);
+    if !claimed {
+        return;
+    }
+    let kind = if exit_code == 0 || status == "cancelled" {
+        NotifyEventKind::Completed
+    } else {
+        NotifyEventKind::NeedsAttention
+    };
+    let payload = cook_actions(
+        NotifyPayload::new(
+            kind,
+            cook_subject(cook_id, attempt_run_id, None).with_phase("terminal"),
+        )
+        .with_fact("Status", status.to_string()),
+        cook_id,
+    );
+    let event = NotifyEvent::lifecycle(kind, cook_id, status)
+        .with_title(format!(
+            "cook {} — {cook_id}",
+            if exit_code == 0 {
+                "succeeded"
+            } else if status == "cancelled" {
+                "cancelled"
+            } else {
+                "needs attention"
+            }
+        ))
+        .with_payload(payload);
+    let route = effective_route(attempt_run_id).or_else(|| effective_route(cook_id));
+    let dispatch = notify_outbox::dispatch_with_outbox(
+        &event.with_route(route.as_ref()),
+        Some(NotifyOnceMarker::new(
+            COOK_SUBJECT_KIND,
+            cook_id,
+            COOK_TERMINAL_DELIVERED_BY,
+        )),
+    );
+    let persisted = terminal_outcome(
+        cook_id,
+        route.is_some(),
+        &dispatch.outcome,
+        &dispatch.disposition,
+    );
+    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
+        lifecycle_store,
+        cook_id,
+        persisted,
+    );
+    match dispatch.disposition {
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
+                lifecycle_store,
+                cook_id,
+                COOK_TERMINAL_DELIVERED_BY,
+            );
+            if let Ok(store) =
+                lifecycle_store.open_observation_initialized_without_historical_import()
+            {
+                let _ = store.mark_notification_delivered(cook_id, COOK_TERMINAL_DELIVERED_BY);
+            }
+        }
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
+                lifecycle_store,
+                cook_id,
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batch / wave terminal (W3-5)
 // ---------------------------------------------------------------------------

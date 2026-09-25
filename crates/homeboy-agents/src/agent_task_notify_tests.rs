@@ -335,6 +335,38 @@ fn latest_delivery(cook_id: &str) -> Value {
 }
 
 #[test]
+fn detached_cook_terminal_failure_reaches_the_configured_transport() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("test.cook", vec!["true"]);
+        set_default_transport("test.cook");
+        let store = test_lifecycle_store();
+        let cook_id = "cook-detached-notify";
+        crate::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+            .expect("parent");
+        let attempt_id = "cook-detached-notify-attempt-1-abcd1234";
+        let plan = crate::agent_task_scheduler::AgentTaskPlan::new("notify-attempt", Vec::new());
+        crate::agent_task_lifecycle::submit_plan(&plan, Some(attempt_id)).expect("attempt");
+        crate::agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, attempt_id)
+            .expect("index");
+        assert!(
+            crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+                .expect("read outcome")
+                .is_none(),
+            "indexing an attempt is admission bookkeeping, not a terminal cook"
+        );
+        store
+            .mutate_record(attempt_id, |record| {
+                record.state = crate::agent_task_lifecycle::AgentTaskRunState::Failed;
+                true
+            })
+            .expect("fail attempt");
+        let delivery = latest_delivery(cook_id);
+        assert_eq!(delivery["status"], "delivered");
+        assert_eq!(delivery["transport"], "test.cook");
+    });
+}
+
+#[test]
 fn terminal_delivery_records_success_and_confirms_the_once_marker() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("test.cook", vec!["true"]);
