@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.7.6] - 2026-09-25
+
+### Fixed
+- authenticate npm publish with the runner's token or OIDC
+
 ## [3.7.5] - 2026-09-23
 
 ### Fixed
