@@ -3531,14 +3531,20 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )
             })?;
         Self::check_cancelled(cancellation)?;
-        let recorded = crate::lab::offload::hydrate_for_lab_workspace_exec_with_lifecycle(
-            request.recipe.skip_deps_hydration,
-            &request.recipe.runner_id,
-            local_path,
-            &workspace.remote_cwd,
-            plan,
-            Some(&request.recipe.run_id),
-        )?;
+        let component_id =
+            homeboy_agents::agent_task_service::cook_repository_identity_component_id(
+                &request.durable_agent_task_plan,
+            );
+        let recorded =
+            crate::lab::offload::hydrate_for_lab_workspace_exec_with_lifecycle_for_component(
+                request.recipe.skip_deps_hydration,
+                &request.recipe.runner_id,
+                local_path,
+                &workspace.remote_cwd,
+                plan,
+                Some(&request.recipe.run_id),
+                component_id.as_deref(),
+            )?;
         Self::check_cancelled(cancellation)?;
         let plan = serde_json::to_value(&recorded.hydration.plan).map_err(|error| {
             Error::internal_json(

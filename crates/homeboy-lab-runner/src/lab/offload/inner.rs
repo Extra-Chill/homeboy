@@ -2458,14 +2458,19 @@ pub(crate) fn run_lab_offload_inner(
     }
 
     let dependency_hydration_timer = overhead.phase(LabOffloadPhase::DependencyHydration);
-    let recorded_dependency_hydration = hydrate_for_lab_workspace_exec_with_lifecycle(
-        request.skip_deps_hydration,
-        runner_id,
-        &synced.local_path,
-        &remote_cwd,
-        plan,
-        agent_task_run_id.as_deref(),
-    )?;
+    let component_id = request
+        .durable_agent_task_plan
+        .and_then(homeboy_agents::agent_task_service::cook_repository_identity_component_id);
+    let recorded_dependency_hydration =
+        hydrate_for_lab_workspace_exec_with_lifecycle_for_component(
+            request.skip_deps_hydration,
+            runner_id,
+            &synced.local_path,
+            &remote_cwd,
+            plan,
+            agent_task_run_id.as_deref(),
+            component_id.as_deref(),
+        )?;
     dependency_hydration_timer.finish();
     let dependency_hydration = recorded_dependency_hydration.hydration;
     plan = dependency_hydration.plan;

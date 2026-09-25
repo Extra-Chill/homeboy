@@ -5405,6 +5405,15 @@ fn run_cook_with_runtime(
         // including when a durable request was assembled outside the CLI.
         options.finalization.draft_pr = true;
     }
+    if options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .is_none()
+    {
+        options.gates.gate_environment.admitted_component_id =
+            cook_repository_identity_component_id(&options.identity.initial_plan);
+    }
     let notification_options = options.clone();
     if let Some(result) = resume_provider_ci_if_ready(
         &mut options,
@@ -8084,6 +8093,11 @@ fn run_cook_spine(
                 std::path::Path::new(&repository_root),
                 &base_sha,
                 options.gates.gate_timeout(),
+                options
+                    .gates
+                    .gate_environment
+                    .admitted_component_id
+                    .as_deref(),
                 |_compared, _total| Ok(()),
             )?;
             lifecycle_store.record_promotion(
@@ -9750,22 +9764,22 @@ fn materialize_pending_cook_workspace(
 /// need to resolve a review profile or component-scoped path for an
 /// already-admitted Cook should prefer this over re-deriving from the bare
 /// checkout path.
-pub(crate) fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
-    let component_id = plan
-        .metadata
-        .pointer("/cook_repository_identity/component_id")
-        .and_then(Value::as_str)?;
-    let requested_repository = plan
-        .metadata
-        .pointer("/cook_repository_identity/provenance")
-        .and_then(Value::as_str)
-        == Some("--repo:requested-repository");
-    let component_registered = plan
-        .metadata
-        .pointer("/cook_repository_identity/component_registered")
+pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
+    admitted_component_id(plan.metadata.get("cook_repository_identity"))
+}
+
+/// The registered component identity recorded at Cook admission. Callers that
+/// already have this identity must not re-resolve it from a worktree path.
+pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
+    let identity = identity?;
+    let component_id = identity.get("component_id").and_then(Value::as_str)?;
+    let requested_repository =
+        identity.get("provenance").and_then(Value::as_str) == Some("--repo:requested-repository");
+    let component_registered = identity
+        .get("component_registered")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if requested_repository || !component_registered {
+    if requested_repository || !component_registered || component_id.is_empty() {
         return None;
     }
     Some(component_id.to_string())

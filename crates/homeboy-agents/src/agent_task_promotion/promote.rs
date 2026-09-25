@@ -2406,11 +2406,16 @@ fn run_promotion_gates(
                 );
             }),
         };
-        let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_with_policy(
+        let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
             &gate_workspace,
             options.gates.hydrate_dependencies,
             "destination_gate_workspace",
             &hydration_policy,
+            options
+                .gates
+                .gate_environment
+                .admitted_component_id
+                .as_deref(),
         )
         .map_err(|error| {
             gate_setup_failure(

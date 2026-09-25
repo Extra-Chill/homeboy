@@ -647,7 +647,17 @@ pub fn run_validation_dependency_lifecycle(component: &Component, path: &Path) -
 /// A provider install failure is propagated as an error so callers can
 /// distinguish a genuine setup failure from a real gate result.
 pub fn materialize_worktree_dependencies(path: &Path) -> Result<bool> {
-    let Some(component) = resolve_component_for_dependency_materialization(path) else {
+    materialize_worktree_dependencies_for_component(path, None)
+}
+
+/// Materialize declared dependencies using a component identity already recorded
+/// at admission. When `component_id` is known, the worktree path is not re-resolved.
+pub fn materialize_worktree_dependencies_for_component(
+    path: &Path,
+    component_id: Option<&str>,
+) -> Result<bool> {
+    let Some(component) = resolve_component_for_dependency_materialization(path, component_id)
+    else {
         return Ok(false);
     };
 
@@ -666,9 +676,12 @@ pub fn materialize_worktree_dependencies(path: &Path) -> Result<bool> {
     Ok(ran)
 }
 
-fn resolve_component_for_dependency_materialization(path: &Path) -> Option<Component> {
+fn resolve_component_for_dependency_materialization(
+    path: &Path,
+    component_id: Option<&str>,
+) -> Option<Component> {
     let path_arg = path.display().to_string();
-    let mut component = component::resolve_effective(None, Some(&path_arg), None).ok()?;
+    let mut component = component::resolve_effective(component_id, Some(&path_arg), None).ok()?;
     component.local_path = path_arg;
     Some(component)
 }

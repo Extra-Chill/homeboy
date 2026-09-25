@@ -395,6 +395,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .gate_shared_cargo_target
                     .then_some(true)
                     .or_else(|| args.no_gate_shared_cargo_target.then_some(false)),
+                admitted_component_id: None,
                 extension_inputs: args.gate_extension_inputs,
             },
             gate_toolchains: args

@@ -1716,6 +1716,7 @@ fn verify_replacement_gates_owned(
 ) -> Result<AgentTaskPromotionReport> {
     let accept_inherited_failures = gates.accept_inherited_failures;
     let gate_timeout = gates.gate_timeout();
+    let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
     let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "latest_promotion",
@@ -1855,6 +1856,7 @@ fn verify_replacement_gates_owned(
             .unwrap_or(&target_path),
         &verified_base.sha,
         gate_timeout,
+        admitted_component_id.as_deref(),
         |_, _| Ok(()),
     )?;
     // #11290's import boundary requires command evidence for each accepted gate.
