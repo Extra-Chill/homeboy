@@ -669,7 +669,7 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\n: > {}\nprintf '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"%s\",\"actions\":[\"%s\"]}}\\n' \"$FIXTURE_SECRET\" \"$FIXTURE_SECRET\"\n",
+                    "#!/bin/sh\ncat >/dev/null\n: > {}\nprintf '{{\"schema\":\"homeboy/external-check-detail-response/v1\",\"provider\":\"fixture-ci\",\"summary\":\"%s\",\"actions\":[\"%s\"]}}\\n' \"$FIXTURE_SECRET\" \"$FIXTURE_SECRET\"\n",
                     homeboy_engine_primitives::shell::quote_path(&marker.to_string_lossy())
                 ),
             )
