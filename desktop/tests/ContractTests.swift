@@ -23,9 +23,10 @@ let aggregateFiles = [
     "StackGitAPIAuthContractTests.swift",
     "QualityAuditReviewTriageContractTests.swift",
     "ControlPlaneContractTests.swift",
+    "CookComposerContractTests.swift",
     "ContractTestRunner.swift",
-
 ].map { testsDir.appendingPathComponent($0).path }
+    + [repoRoot.appendingPathComponent("Homeboy/Views/Orchestration/CookComposerModel.swift").path]
 
 let compile = Process()
 compile.executableURL = URL(fileURLWithPath: "/usr/bin/env")

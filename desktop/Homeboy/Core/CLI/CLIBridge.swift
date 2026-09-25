@@ -516,6 +516,20 @@ actor CLIBridge {
         return try response.decode(type)
     }
 
+    /// Executes a command with stdin input and decodes its JSON output.
+    /// Mirrors `executeJSON`, but for commands (e.g. `agent-task cook
+    /// --prompt -`) whose input must be piped rather than passed as a
+    /// shell-quoted argument.
+    func executeJSONWithStdin<T: Decodable>(
+        _ args: [String],
+        stdin: String,
+        as type: T.Type,
+        timeout: TimeInterval = 30
+    ) async throws -> T {
+        let response = try await executeWithStdin(args, stdin: stdin, timeout: timeout)
+        return try response.decode(type)
+    }
+
     /// Executes a command expecting a standard CLIResponse structure
     /// - Parameters:
     ///   - args: Arguments to pass to the CLI

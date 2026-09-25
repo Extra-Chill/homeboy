@@ -15,6 +15,7 @@ struct MissionsView: View {
     @State private var isPerformingAction = false
     @State private var actionError: (any DisplayableError)?
     @State private var showRawJSON = false
+    @State private var showCookComposer = false
 
     private var isActive: Bool { navigationState.selectedItem == .missions }
 
@@ -74,6 +75,13 @@ struct MissionsView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    showCookComposer = true
+                } label: {
+                    Label("New Cook", systemImage: "flame")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     Task {
                         await missionStore.loadMissions()
                         await missionStore.loadRuns()
@@ -85,6 +93,9 @@ struct MissionsView: View {
             }
         }
         .frame(minWidth: 260)
+        .sheet(isPresented: $showCookComposer) {
+            CookComposerView()
+        }
     }
 
     /// Missions with at least one loaded run, newest run first.

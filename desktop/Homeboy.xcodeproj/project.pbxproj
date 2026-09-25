@@ -21,6 +21,7 @@
 		1A9C5FC30453DD2AFD03062D /* BenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941D61AD6DA0DA2420DB13B8 /* BenchView.swift */; };
 		1AEFFA5D377D403DDA560237 /* RemoteFileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */; };
 		1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0B9A725382C46F30D83C02 /* CLIError.swift */; };
+		1DBC1006D2D49099F3F78854 /* CookComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */; };
 		22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */; };
 		278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */; };
 		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
@@ -35,6 +36,7 @@
 		337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4784FCC0B29C23649013882 /* CopyButton.swift */; };
 		339E905F86E47CF88C0386B8 /* RemoteLogViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A71037D397037D1741B78222 /* RemoteLogViewerView.swift */; };
 		34FF9AD0FE0BE2ADE1F07752 /* SiteListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21391AE5E442FFA2A2843821 /* SiteListView.swift */; };
+		364E9DAE57B4B08D341D3E83 /* CookComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC5959FD60272D345EC59721 /* CookComposerView.swift */; };
 		36E2AEA91D720BC0FCE5D660 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E103FB783F1B8F1CF84750F4 /* DeployerView.swift */; };
 		38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */; };
 		3AE96B334740E1FD5BF12CE8 /* RemoteFileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */; };
@@ -134,6 +136,7 @@
 		E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */; };
 		E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
 		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
+		E8669A6388102A44C9D3B640 /* CookComposerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */; };
 		E8A0E0A1E7364CFEB6EB48AF /* SchemaResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C26B6355BFA87F894B3BFBB /* SchemaResolver.swift */; };
 		EC7E0C50096E39206C199118 /* QualityViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */; };
 		EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */; };
@@ -162,6 +165,7 @@
 		21391AE5E442FFA2A2843821 /* SiteListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SiteListView.swift; sourceTree = "<group>"; };
 		2734F8A242983E0642DBD72B /* HomeboyLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyLabView.swift; sourceTree = "<group>"; };
 		2C3174A2A7BEDDBA90DED9D2 /* ControlPlaneModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPlaneModels.swift; sourceTree = "<group>"; };
+		2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerModel.swift; sourceTree = "<group>"; };
 		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
 		2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsView.swift; sourceTree = "<group>"; };
 		3320B46DC4876237EA4C9ACE /* GitOperationsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsViewModel.swift; sourceTree = "<group>"; };
@@ -242,6 +246,7 @@
 		B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
 		B709FB776FF5A95CAE18A7D2 /* QualityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityView.swift; sourceTree = "<group>"; };
 		B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHistoryViewModel.swift; sourceTree = "<group>"; };
+		B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerViewModel.swift; sourceTree = "<group>"; };
 		B91594B5A5CCE7AE78D16BD3 /* QueryEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryEditorView.swift; sourceTree = "<group>"; };
 		BA88D343E94C4C34E1069813 /* CodeTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeTextView.swift; sourceTree = "<group>"; };
 		BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePathResolver.swift; sourceTree = "<group>"; };
@@ -284,6 +289,7 @@
 		F708A9D50196DF375A7477A0 /* FleetManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetManagementView.swift; sourceTree = "<group>"; };
 		F84CD4544E216646E96957DA /* ExtensionActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionActionsBar.swift; sourceTree = "<group>"; };
 		F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataTableConstants.swift; sourceTree = "<group>"; };
+		FC5959FD60272D345EC59721 /* CookComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerView.swift; sourceTree = "<group>"; };
 		FCE83D5EB31A4A89A0764753 /* ExtensionInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionInstallSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -311,6 +317,9 @@
 			children = (
 				C47343CB9B7F9993BBDEDAF1 /* ActivityView.swift */,
 				901FE67B6F52FCFB49871577 /* CapacityView.swift */,
+				2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */,
+				FC5959FD60272D345EC59721 /* CookComposerView.swift */,
+				B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */,
 				E1141AB6BCCA0B060BE60AB1 /* MissionsView.swift */,
 				16CE88667247CB091618C4F8 /* RunnersView.swift */,
 			);
@@ -867,6 +876,9 @@
 				B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */,
 				B64B5A0883C3992694AF34A8 /* ControlPlaneClient.swift in Sources */,
 				50C3063245F5FF6D48F45D65 /* ControlPlaneModels.swift in Sources */,
+				1DBC1006D2D49099F3F78854 /* CookComposerModel.swift in Sources */,
+				364E9DAE57B4B08D341D3E83 /* CookComposerView.swift in Sources */,
+				E8669A6388102A44C9D3B640 /* CookComposerViewModel.swift in Sources */,
 				337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */,
 				1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */,
 				E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */,

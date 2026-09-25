@@ -20,6 +20,7 @@ func runTests(testDir: String) throws {
     try runStackGitAPIAuthContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runQualityAuditReviewTriageContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
     try runControlPlaneContractTests(testDir: testDir, fixturesDir: fixturesDir, decoder: decoder)
+    try runCookComposerContractTests(fixturesDir: fixturesDir)
 
     print("")
     print("All contract tests passed")

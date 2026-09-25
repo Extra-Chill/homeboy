@@ -10,6 +10,7 @@ struct ActivityView: View {
     @EnvironmentObject private var navigationState: AppNavigationState
 
     @State private var refreshTask: Task<Void, Never>?
+    @State private var showCookComposer = false
 
     private var isActive: Bool { navigationState.selectedItem == .activity }
 
@@ -28,6 +29,9 @@ struct ActivityView: View {
             } else {
                 stop()
             }
+        }
+        .sheet(isPresented: $showCookComposer) {
+            CookComposerView()
         }
     }
 
@@ -48,6 +52,12 @@ struct ActivityView: View {
             if missionStore.isLoadingRuns {
                 ProgressView()
                     .controlSize(.small)
+            }
+
+            Button {
+                showCookComposer = true
+            } label: {
+                Label("New Cook", systemImage: "flame")
             }
 
             Button {
