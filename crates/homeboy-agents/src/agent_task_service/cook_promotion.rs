@@ -5395,9 +5395,35 @@ fn cook_attempt_execution_in_store(
 ) -> Result<CookAttemptExecution> {
     let plan = lifecycle_store.read_controller_plan(run_id)?;
     let record = lifecycle_store.read_record(run_id)?;
-    if let Some(task) = plan.tasks.iter().find(|task| {
-        agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, task).is_some()
-    }) {
+    // `candidate_adoption_recovery_outcome` only recognizes its own narrow set
+    // of authenticated recovery markers (an expired preacceptance handoff with
+    // no runner job ever recorded, or a specific pre-execution failure
+    // phase). A historical source attempt can be a genuine never-executed
+    // orphan through a path that helper does not cover — e.g. a lab handoff
+    // that was dispatched (recording a runner job id) and only later expired
+    // — while still having produced no outcome evidence at all. A single
+    // field like `provider_executions_consumed == 0` is not a safe stand-in
+    // by itself: plenty of legitimately-executed fixtures never bump that
+    // counter. Require the same durable absence-of-evidence combination
+    // `candidate_adoption_recovery_outcome`'s own expired-handoff branch
+    // checks (minus its narrower runner-job-id requirement) before treating
+    // this attempt as never having produced a real outcome, so an attempt
+    // that genuinely executed keeps reading its authoritative outcome
+    // (homeboy#15005).
+    let never_executed = record.aggregate_path.is_none()
+        && record.totals.is_none()
+        && record.artifact_refs.is_empty()
+        && record.provider_handles.is_empty()
+        && record.latest_executor_evidence.is_none()
+        && record.metadata["provider_executions_consumed"] == 0;
+    let described_task = plan
+        .tasks
+        .iter()
+        .find(|task| {
+            agent_task_lifecycle::candidate_adoption_recovery_outcome(&record, task).is_some()
+        })
+        .or_else(|| never_executed.then(|| plan.tasks.first()).flatten());
+    if let Some(task) = described_task {
         if task.executor.backend.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "provider_tool",
