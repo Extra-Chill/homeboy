@@ -406,12 +406,12 @@ pub(crate) use git_dependency_materialization::{
     RunnerGitDependencyMaterializationOptions, RunnerGitDependencyMaterializationOutput,
 };
 pub use homeboy_refresh::{
-    plan_homeboy_binary_refresh, refresh_homeboy_binary, runner_dev_sync,
+    plan_homeboy_binary_refresh, refresh_homeboy_binary, refresh_live_progress, runner_dev_sync,
     HomeboyBinaryRefreshArtifacts, HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode,
     HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
     HomeboyControllerContinuationAction, HomeboyRefreshPhase, HomeboyRefreshReadiness,
-    HomeboyRefreshReadinessState, RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions,
-    RunnerDevSyncOutput, RunnerDevSyncPlan,
+    HomeboyRefreshReadinessState, RefreshLiveProgress, RunnerDevSyncExtensionProvenance,
+    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;
@@ -1023,6 +1023,7 @@ fn lab_runner_admission_candidate(
     capabilities_ready: bool,
     exact_version: bool,
 ) -> DefaultLabRunnerCandidate {
+    let version_blocked = lab::offload::metadata::session_reported_version_blocks_admission(status);
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
         lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(status, exact_version)
     });
@@ -1031,16 +1032,20 @@ fn lab_runner_admission_candidate(
         mode,
         connected: status.connected,
         capacity,
-        stale_daemon: admission_warning.is_some(),
+        stale_daemon: admission_warning.is_some() || version_blocked,
         unverified_daemon: status.unverified_daemon().is_some(),
         admission_fresh: lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
             status,
             exact_version,
-        ),
+        ) && !version_blocked,
         admission_failure_reason: admission_warning
-            .map(|warning| warning.mismatch_predicate.to_string()),
+            .map(|warning| warning.mismatch_predicate.to_string())
+            .or_else(|| {
+                version_blocked.then(|| "controller_version != runner_homeboy_version".to_string())
+            }),
         admission_remediation: admission_warning
             .and_then(|_| status.admission_action())
+            .or_else(|| version_blocked.then(|| status.admission_action()).flatten())
             .map(|action| action.render_command()),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,

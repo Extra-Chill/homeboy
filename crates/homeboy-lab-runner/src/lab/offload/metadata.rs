@@ -595,6 +595,30 @@ pub(crate) fn classify_runner_homeboy_version_drift(
     }
 }
 
+/// The version `runner status --full` prints blocks cook admission when it
+/// differs from the controller at MAJOR or MINOR.
+///
+/// A matching build identity must not hide `session.homeboy_version`. Same
+/// MAJOR.MINOR patch drift stays compatible; that case is already classified
+/// by [`classify_runner_homeboy_version_drift`].
+pub(crate) fn session_reported_version_blocks_admission(status: &RunnerStatusReport) -> bool {
+    let Some(session) = status.session.as_ref() else {
+        return false;
+    };
+    let runner_version = canonical_build_identity(&session.homeboy_version);
+    let controller_version = homeboy_product_identity::product_version();
+    if runner_version.is_empty() || runner_version == canonical_build_identity(controller_version) {
+        return false;
+    }
+    match (
+        parse_major_minor(controller_version),
+        parse_major_minor(runner_version),
+    ) {
+        (Some(controller), Some(runner)) => controller != runner,
+        _ => true,
+    }
+}
+
 /// Whether the status-level daemon warning blocks Lab admission under the
 /// runner's configured version policy. A patch-only controller/version warning
 /// is compatible unless exact matching was explicitly requested; every other

@@ -585,6 +585,14 @@ impl Drop for UpgradeOperation {
                     "optional refresh did not finish after controller promotion",
                 );
             }
+            if self.metadata["runners"]["status"] == "pending"
+                || self.metadata["runners"]["status"] == "running"
+            {
+                self.metadata["runners"] = component(
+                    "interrupted",
+                    "runner refresh did not finish after controller promotion",
+                );
+            }
             self.finish(RunStatus::Pass);
             return;
         }
@@ -705,6 +713,29 @@ pub fn persist_upgrade_heartbeat(run_id: &str, elapsed: Duration) -> Result<()> 
 
 pub(crate) fn emit_upgrade_phase(phase: &str) {
     eprintln!("[upgrade] {phase}");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+pub(crate) fn upgrade_runner_progress_message(elapsed: Duration) -> String {
+    format!(
+        "phase=refreshing_configured_runners sub_phase=build elapsed={}s",
+        elapsed.as_secs()
+    )
+}
+
+pub(crate) fn persist_runner_progress(run_id: &str, elapsed: Duration) -> Result<()> {
+    emit_upgrade_phase(&upgrade_runner_progress_message(elapsed));
+    patch_metadata(run_id, |metadata| {
+        metadata["phase"] = json!("refreshing_configured_runners");
+        merge_elapsed_seconds(metadata, elapsed.as_secs());
+        metadata["runners"] = component(
+            "running",
+            format!(
+                "refreshing configured runners (build) elapsed={}s",
+                elapsed.as_secs()
+            ),
+        );
+    })
 }
 
 pub(crate) fn upgrade_extension_progress_message(
@@ -1375,6 +1406,39 @@ mod tests {
                     .as_ref()
                     .map(|component| component.status.as_str()),
                 Some("running")
+            );
+        });
+    }
+
+    #[test]
+    fn interrupting_during_runner_refresh_marks_runners_interrupted() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let id = {
+                let mut operation = UpgradeOperation::start("homeboy upgrade");
+                let id = operation.id().expect("persisted operation").to_string();
+                operation
+                    .mark_controller_promoted_durable("controller installation completed")
+                    .expect("persist controller promotion");
+                operation
+                    .mark_extensions_durable(
+                        "skipped",
+                        "dirty linked checkout skipped once (wordpress). remedy: homeboy extension update wordpress --force",
+                    )
+                    .expect("persist extension notice");
+                operation
+                    .set_phase_durable("refreshing configured runners")
+                    .expect("persist runner refresh");
+                id
+            };
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            assert_eq!(status.phase, "interrupted_after_controller");
+            assert_eq!(
+                status
+                    .runners
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("interrupted")
             );
         });
     }

@@ -16,8 +16,8 @@ use super::execution::{
     resolve_source_workspace,
 };
 use super::operation::{
-    persist_extension_progress, persist_upgrade_heartbeat, run_with_upgrade_heartbeats,
-    UpgradeOperation, UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+    persist_extension_progress, persist_runner_progress, persist_upgrade_heartbeat,
+    run_with_upgrade_heartbeats, UpgradeOperation, UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
 };
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
@@ -502,17 +502,19 @@ fn run_controller_upgrade_with_operation(
                     (vec![], vec![])
                 } else {
                     operation.set_phase_durable("refreshing configured runners")?;
-                    super::with_runner_upgrade(|p| {
-                        p.upgrade_configured_runners_with_explicit_source_path(
-                            force,
-                            convergence_runner_method,
-                            convergence_source_path,
-                            convergence_source_path.is_some(),
-                            None,
-                            runner_targets,
-                            &extensions_updated,
-                            Some(&promotion_lease),
-                        )
+                    refresh_configured_runners_with_progress(operation, || {
+                        super::with_runner_upgrade(|p| {
+                            p.upgrade_configured_runners_with_explicit_source_path(
+                                force,
+                                convergence_runner_method,
+                                convergence_source_path,
+                                convergence_source_path.is_some(),
+                                None,
+                                runner_targets,
+                                &extensions_updated,
+                                Some(&promotion_lease),
+                            )
+                        })
                     })?
                 }
             };
@@ -900,17 +902,19 @@ fn run_controller_upgrade_with_operation(
             (vec![], vec![])
         } else {
             operation.set_phase_durable("refreshing configured runners")?;
-            super::with_runner_upgrade(|p| {
-                p.upgrade_configured_runners_with_explicit_source_path(
-                    force,
-                    runner_method_override,
-                    source_upgrade_path.as_deref(),
-                    source_upgrade_path.is_some(),
-                    new_build_identity.as_deref(),
-                    runner_targets,
-                    &extensions_updated,
-                    Some(&promotion_lease),
-                )
+            refresh_configured_runners_with_progress(operation, || {
+                super::with_runner_upgrade(|p| {
+                    p.upgrade_configured_runners_with_explicit_source_path(
+                        force,
+                        runner_method_override,
+                        source_upgrade_path.as_deref(),
+                        source_upgrade_path.is_some(),
+                        new_build_identity.as_deref(),
+                        runner_targets,
+                        &extensions_updated,
+                        Some(&promotion_lease),
+                    )
+                })
             })?
         }
     } else {
@@ -1674,37 +1678,109 @@ fn invalidate_superseded_evidence(result: &mut UpgradeResult) {
     result.runners_skipped.clear();
 }
 
+fn refresh_configured_runners_with_progress<T>(
+    operation: &UpgradeOperation,
+    refresh: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let operation_id = operation.id().map(str::to_string);
+    let progress_failure = std::sync::Mutex::new(None);
+    let result = run_with_upgrade_heartbeats(
+        UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+        |elapsed| {
+            let reported = if let Some(run_id) = operation_id.as_deref() {
+                persist_runner_progress(run_id, elapsed)
+            } else {
+                upgrade_phase(&super::operation::upgrade_runner_progress_message(elapsed));
+                Ok(())
+            };
+            if let Err(error) = reported {
+                let mut failure = progress_failure
+                    .lock()
+                    .expect("record runner progress failure");
+                if failure.is_none() {
+                    *failure = Some(error);
+                }
+            }
+        },
+        refresh,
+    );
+    if let Some(error) = progress_failure
+        .into_inner()
+        .expect("runner progress failures are not poisoned")
+    {
+        return Err(error);
+    }
+    result
+}
+
+const DIRTY_LINKED_PREFIX: &str = "Linked extension source repo has uncommitted changes";
+
+fn is_dirty_linked_skip(skip: &ExtensionUpgradeSkip) -> bool {
+    skip.reason.starts_with(DIRTY_LINKED_PREFIX)
+}
+
+fn dirty_linked_summary(skips: &[&ExtensionUpgradeSkip]) -> String {
+    let ids = skips
+        .iter()
+        .map(|skip| skip.extension_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remedy_id = skips
+        .first()
+        .map(|skip| skip.extension_id.as_str())
+        .unwrap_or("<id>");
+    format!(
+        "dirty linked checkout reported once ({ids}): Linked extension source repo has uncommitted changes. remedy: homeboy extension update {remedy_id} --force"
+    )
+}
+
 fn extension_component_status(
     attempted: bool,
     skipped_by_flag: bool,
     updated: &[ExtensionUpgradeEntry],
     skipped: &[ExtensionUpgradeSkip],
 ) -> UpgradeComponentStatus {
+    let blocking = skipped
+        .iter()
+        .filter(|skip| !is_dirty_linked_skip(skip))
+        .collect::<Vec<_>>();
+    let dirty = skipped
+        .iter()
+        .filter(|skip| is_dirty_linked_skip(skip))
+        .collect::<Vec<_>>();
     let status = if skipped_by_flag {
         "skipped"
     } else if !attempted {
         "not_run"
-    } else if skipped.is_empty() {
-        "completed"
+    } else if blocking.is_empty() {
+        if dirty.is_empty() {
+            "completed"
+        } else {
+            "skipped"
+        }
     } else {
         "partial"
     };
-    // A bare count buries a real failure: when anything was skipped, the
-    // summary carries each extension id with the reason it was skipped, so a
-    // `partial` extension outcome is self-explanatory (#12181).
-    let summary = if skipped.is_empty() {
+    // A dirty linked checkout is one operator notice with its remedy. It must
+    // not turn the upgrade into a silent partial. Real skips still name each
+    // failure so a `partial` outcome stays self-explanatory (#12181).
+    let summary = if blocking.is_empty() && !dirty.is_empty() {
+        dirty_linked_summary(&dirty)
+    } else if skipped.is_empty() {
         format!("{} updated, {} skipped", updated.len(), skipped.len())
     } else {
-        let detail = skipped
+        let mut detail = blocking
             .iter()
             .map(|skip| format!("{}: {}", skip.extension_id, skip.reason))
-            .collect::<Vec<_>>()
-            .join("; ");
+            .collect::<Vec<_>>();
+        if !dirty.is_empty() {
+            detail.push(dirty_linked_summary(&dirty));
+        }
         format!(
             "{} updated, {} skipped ({})",
             updated.len(),
             skipped.len(),
-            detail
+            detail.join("; ")
         )
     };
     component_status(status, &summary)
@@ -1988,7 +2064,7 @@ fn workspace_from_executable_path(exe_path: &Path) -> Option<PathBuf> {
 // Upgrade output must remain visible when a controller captures stdout/stderr.
 // `homeboy_core::log_status!` intentionally only writes to an interactive terminal.
 fn upgrade_phase(phase: &str) {
-    eprintln!("[upgrade] {phase}");
+    super::operation::emit_upgrade_phase(phase);
 }
 
 /// Restart declared binary-resident services after a successful binary swap.
@@ -2398,13 +2474,23 @@ fn update_all_extensions(
                 });
             }
             Err(e) => {
-                homeboy_core::log_status!("upgrade", "  {} skipped: {}", id, e.message);
+                if !e.message.starts_with(DIRTY_LINKED_PREFIX) {
+                    homeboy_core::log_status!("upgrade", "  {} skipped: {}", id, e.message);
+                }
                 skipped.push(ExtensionUpgradeSkip {
                     extension_id: id.clone(),
                     reason: e.message,
                 });
             }
         }
+    }
+
+    let dirty = skipped
+        .iter()
+        .filter(|skip| is_dirty_linked_skip(skip))
+        .collect::<Vec<_>>();
+    if !dirty.is_empty() {
+        upgrade_phase(&dirty_linked_summary(&dirty));
     }
 
     Ok((updated, skipped))
@@ -4527,16 +4613,49 @@ mod convergence_tests {
     }
 
     #[test]
+    fn dirty_linked_checkout_is_reported_once_with_remedy_and_not_partial() {
+        let skips = vec![
+            ExtensionUpgradeSkip {
+                extension_id: "wordpress".to_string(),
+                reason: "Linked extension source repo has uncommitted changes for wordpress: src/plugin.php. Use --force to proceed, which applies the update over the listed changes.".to_string(),
+            },
+            ExtensionUpgradeSkip {
+                extension_id: "woocommerce".to_string(),
+                reason: "Linked extension source repo has uncommitted changes for woocommerce: src/plugin.php. Use --force to proceed, which applies the update over the listed changes.".to_string(),
+            },
+        ];
+        let status = extension_component_status(true, false, &[], &skips);
+        assert_ne!(status.status, "partial", "{status:?}");
+        assert_eq!(status.summary.matches("uncommitted changes").count(), 1);
+        assert!(status.summary.contains("remedy:"), "{status:?}");
+        assert!(
+            status.summary.contains("homeboy extension update"),
+            "{status:?}"
+        );
+        let message = upgrade_message(
+            true,
+            Some("0.390.0"),
+            None,
+            RunnerConvergenceDisposition::Converged,
+            &[],
+            &[],
+            Some(&status),
+        );
+        assert!(!message.contains("EXTENSIONS PARTIAL"), "{message}");
+        assert!(!message.contains("PARTIAL:"), "{message}");
+    }
+
+    #[test]
     fn extension_status_names_each_skip_reason_when_partial() {
         let skips = vec![ExtensionUpgradeSkip {
             extension_id: "wordpress".to_string(),
-            reason: "Linked extension source repo has uncommitted changes".to_string(),
+            reason: "extension source is unreachable".to_string(),
         }];
         let status = extension_component_status(true, false, &[], &skips);
         assert_eq!(status.status, "partial");
         assert_eq!(
             status.summary,
-            "0 updated, 1 skipped (wordpress: Linked extension source repo has uncommitted changes)"
+            "0 updated, 1 skipped (wordpress: extension source is unreachable)"
         );
     }
 
@@ -4544,7 +4663,7 @@ mod convergence_tests {
     fn partial_extension_outcome_is_prominent_in_upgrade_message() {
         let skips = vec![ExtensionUpgradeSkip {
             extension_id: "wordpress".to_string(),
-            reason: "Linked extension source repo has uncommitted changes".to_string(),
+            reason: "extension source is unreachable".to_string(),
         }];
         let status = extension_component_status(true, false, &[], &skips);
         let message = upgrade_message(
@@ -4557,7 +4676,7 @@ mod convergence_tests {
             Some(&status),
         );
         assert!(
-            message.ends_with(". EXTENSIONS PARTIAL: 0 updated, 1 skipped (wordpress: Linked extension source repo has uncommitted changes)"),
+            message.ends_with(". EXTENSIONS PARTIAL: 0 updated, 1 skipped (wordpress: extension source is unreachable)"),
             "{message}"
         );
         let plain = upgrade_message(

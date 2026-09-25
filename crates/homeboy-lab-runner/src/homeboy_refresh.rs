@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,89 @@ use super::{
     RunnerExecOutput, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
     RunnerFileTransfer, RunnerKind,
 };
+
+const REFRESH_SUBPHASES: &[&str] = &["fetch", "build", "install", "verify"];
+
+struct RefreshLiveState {
+    started: Instant,
+    sub_phase: String,
+}
+
+static REFRESH_LIVE: Mutex<Option<RefreshLiveState>> = Mutex::new(None);
+
+/// Live `refresh-homeboy` sub-phase. Heartbeats read this instead of repeating
+/// a static `phase=refresh` object for the whole materialize.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshLiveProgress {
+    pub sub_phase: String,
+    pub elapsed_seconds: u64,
+}
+
+pub fn refresh_live_progress() -> Option<RefreshLiveProgress> {
+    let live = REFRESH_LIVE.lock().expect("refresh live progress");
+    let live = live.as_ref()?;
+    Some(RefreshLiveProgress {
+        sub_phase: live.sub_phase.clone(),
+        elapsed_seconds: live.started.elapsed().as_secs(),
+    })
+}
+
+pub(crate) fn begin_refresh_live_progress(sub_phase: &str) {
+    let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
+    if live.is_none() {
+        *live = Some(RefreshLiveState {
+            started: Instant::now(),
+            sub_phase: normalize_refresh_sub_phase(sub_phase).to_string(),
+        });
+    } else {
+        set_refresh_live_sub_phase_locked(live.as_mut().expect("live progress"), sub_phase);
+    }
+}
+
+pub(crate) fn set_refresh_live_sub_phase(sub_phase: &str) {
+    let mut live = REFRESH_LIVE.lock().expect("refresh live progress");
+    if live.is_none() {
+        *live = Some(RefreshLiveState {
+            started: Instant::now(),
+            sub_phase: normalize_refresh_sub_phase(sub_phase).to_string(),
+        });
+        return;
+    }
+    set_refresh_live_sub_phase_locked(live.as_mut().expect("live progress"), sub_phase);
+}
+
+fn set_refresh_live_sub_phase_locked(state: &mut RefreshLiveState, sub_phase: &str) {
+    state.sub_phase = normalize_refresh_sub_phase(sub_phase).to_string();
+}
+
+pub(crate) fn clear_refresh_live_progress() {
+    *REFRESH_LIVE.lock().expect("refresh live progress") = None;
+}
+
+pub(crate) fn note_refresh_progress_phase(phase: Option<&str>) {
+    let Some(phase) = phase else {
+        return;
+    };
+    if REFRESH_SUBPHASES.contains(&phase) {
+        set_refresh_live_sub_phase(phase);
+    }
+}
+
+fn normalize_refresh_sub_phase(phase: &str) -> &str {
+    if REFRESH_SUBPHASES.contains(&phase) {
+        phase
+    } else {
+        "fetch"
+    }
+}
+
+struct RefreshLiveGuard;
+
+impl Drop for RefreshLiveGuard {
+    fn drop(&mut self) {
+        clear_refresh_live_progress();
+    }
+}
 
 const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DEFAULT_HOMEBOY_REF: &str = "main";
@@ -541,12 +625,19 @@ pub fn refresh_homeboy_binary_in_roots(
         .uses_diagnostic_ssh();
     let exec_options =
         refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
+    begin_refresh_live_progress(if plan.mode == "materialize" {
+        "fetch"
+    } else {
+        "verify"
+    });
+    let _refresh_live = RefreshLiveGuard;
     let (exec_output, exit_code) = exec_with_status_snapshot_in_roots(
         roots,
         &plan.runner_id,
         exec_options,
         connection_status.clone(),
     )?;
+    set_refresh_live_sub_phase("verify");
     let execution_phase = refresh_phase(refresh_execution_phase_name(&plan), true, exit_code);
     if exit_code != 0 {
         return Ok((
@@ -2647,7 +2738,7 @@ fn materialize_script(
     authority_commits: &[&str],
 ) -> String {
     let mut script = format!(
-        "set -e\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
+        "set -e\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"fetch\"}}'\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"build\"}}'\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"install\"}}'\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
@@ -2668,7 +2759,8 @@ fn materialize_script(
         1,
     );
     script.push_str(
-        r#"identity=$("$immutable_binary" self identity)
+        r#"printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"verify"}'
+identity=$("$immutable_binary" self identity)
 provenance="$slot_dir/provenance"
 staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
 trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
