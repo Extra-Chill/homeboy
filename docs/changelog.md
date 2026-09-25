@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.390.0] - 2026-09-25
+
+### Added
+- Runner API v1 watch operation with sequence resume
+
+### Changed
+- pin homeboy-action with full-suite escalation for harness changes
+
+### Fixed
+- make the homeboy-run artifact marker a generic default
+- refresh auto-detected bump type after remote_sync fast-forward
+
 ## [0.389.0] - 2026-09-24
 
 ### Added
