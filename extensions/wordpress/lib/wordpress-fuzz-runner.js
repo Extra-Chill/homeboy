@@ -79,14 +79,40 @@ async function runWordPressFuzzRunnerResult(options = {}) {
 async function dispatchWordPressFuzzRunnerResult(options = {}) {
 	const env = options.env || readWordPressFuzzRunnerEnv();
 	const workload = options.workload || readJsonFile(requiredString(env.workloadPath, 'HOMEBOY_FUZZ_WORKLOAD_PATH'));
-	if (isLayoutSweepWorkloadDeclaration(workload)) {
-		return runLayoutSweepFuzzRunnerResult({ ...options, env, workload });
+	const layoutSweep = layoutSweepDeclarationFromWorkload(workload);
+	if (layoutSweep) {
+		return runLayoutSweepFuzzRunnerResult({ ...options, env, workload: layoutSweep });
 	}
 	return runWordPressFuzzRunnerResult({ ...options, env, workload });
 }
 
+/**
+ * Find a layout-sweep declaration in a workload file.
+ *
+ * Homeboy core loads every workload file as a `homeboy/fuzz-workload/v1`
+ * envelope (id, safety_class, ...). Like other WordPress workloads, the
+ * extension-specific payload lives at `workload.definition`. A bare
+ * declaration is also accepted for direct runner use.
+ * @param {Object} workload Workload file contents.
+ * @return {Object|null} Layout-sweep declaration, or null.
+ */
+function layoutSweepDeclarationFromWorkload(workload) {
+	if (!objectOrUndefined(workload)) {
+		return null;
+	}
+	if (workload.schema === LAYOUT_SWEEP_WORKLOAD_SCHEMA) {
+		return workload;
+	}
+	const definition = objectOrUndefined(workload.workload?.definition);
+	if (definition && definition.schema === LAYOUT_SWEEP_WORKLOAD_SCHEMA) {
+		// The envelope id is the workload identity Homeboy selected.
+		return { ...definition, id: definition.id || workload.id };
+	}
+	return null;
+}
+
 function isLayoutSweepWorkloadDeclaration(workload) {
-	return Boolean(objectOrUndefined(workload) && workload.schema === LAYOUT_SWEEP_WORKLOAD_SCHEMA);
+	return Boolean(layoutSweepDeclarationFromWorkload(workload));
 }
 
 /**
@@ -1300,6 +1326,7 @@ module.exports = {
 	dispatchWordPressFuzzRunnerResult,
 	runLayoutSweepFuzzRunnerResult,
 	isLayoutSweepWorkloadDeclaration,
+	layoutSweepDeclarationFromWorkload,
 	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 	readWordPressFuzzRunnerEnv,

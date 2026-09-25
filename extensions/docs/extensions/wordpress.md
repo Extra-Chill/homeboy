@@ -1105,6 +1105,31 @@ const result = await runWordPressLayoutSweepWorkload({
 // result.observations: report-only drag perf observations; they never gate findings.
 ```
 
+To run a declaration through `homeboy fuzz`, wrap it in a core
+`homeboy/fuzz-workload/v1` envelope. The envelope carries the Homeboy
+identity and safety class, and the declaration rides at
+`workload.definition`, like other WordPress workloads. Declare the file in a
+rig's `fuzz_workloads.wordpress` list and run
+`homeboy fuzz run <component> --rig <rig> --workload <id>`.
+
+```json
+{
+  "schema": "homeboy/fuzz-workload/v1",
+  "id": "canvas-preview",
+  "label": "Canvas preview layout sweep",
+  "safety_class": "read_only",
+  "workload": {
+    "definition": {
+      "schema": "homeboy/wordpress-layout-sweep-workload/v1",
+      "preview": { "url": "/?pagename=canvas-preview", "recipe": { "...": "..." } },
+      "containerSelector": ".wp-block-tabor-canvas",
+      "itemSelector": ":scope > .canvas__grid > .canvas__item",
+      "modeProperty": "--canvas-viewport"
+    }
+  }
+}
+```
+
 Each grouped layout finding in the `wp-codebox/layout-sweep/v1` summary maps
 to a `homeboy/fuzz-finding/v1` entry whose identity is `kind` + `container` +
 `item`. Evidence carries the width range, worst magnitude, scenarios, count,

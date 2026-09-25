@@ -16,6 +16,7 @@ const {
 	WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA,
 	dispatchWordPressFuzzRunnerResult,
 	isLayoutSweepWorkloadDeclaration,
+	layoutSweepDeclarationFromWorkload,
 	writeHomeboyFuzzArtifactFiles,
 	writeHomeboyFuzzResultsFile,
 } = require('../lib/wordpress-fuzz-runner');
@@ -37,9 +38,35 @@ async function main() {
 	try {
 		await assertLayoutSweepWorkloadDispatchesThroughCodebox(root);
 		await assertNonLayoutSweepWorkloadKeepsExistingPath(root);
+		assertCoreEnvelopeCarriesTheDeclaration();
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
 	}
+}
+
+// Homeboy core loads workload files as `homeboy/fuzz-workload/v1` envelopes
+// (id and safety_class required). The declaration rides at
+// `workload.definition`, like other WordPress workloads.
+function assertCoreEnvelopeCarriesTheDeclaration() {
+	const declaration = {
+		schema: LAYOUT_SWEEP_WORKLOAD_SCHEMA,
+		preview: { url: '/canvas-demo/' },
+		containerSelector: '.wp-block-tabor-canvas',
+		itemSelector: ':scope > .canvas__grid > .canvas__item',
+	};
+	const envelope = {
+		schema: 'homeboy/fuzz-workload/v1',
+		id: 'canvas-preview',
+		safety_class: 'read_only',
+		workload: { definition: declaration },
+	};
+	assert.equal(isLayoutSweepWorkloadDeclaration(envelope), true);
+	const found = layoutSweepDeclarationFromWorkload(envelope);
+	assert.equal(found.schema, LAYOUT_SWEEP_WORKLOAD_SCHEMA);
+	assert.equal(found.id, 'canvas-preview', 'the envelope id becomes the declaration id when the definition has none');
+	assert.equal(layoutSweepDeclarationFromWorkload({ ...envelope, workload: { definition: { ...declaration, id: 'own-id' } } }).id, 'own-id');
+	assert.equal(layoutSweepDeclarationFromWorkload({ schema: 'homeboy/fuzz-workload/v1', id: 'x', safety_class: 'read_only', workload: { runner: 'wp-codebox' } }), null);
+	console.log('wordpress fuzz runner layout-sweep core envelope smoke passed');
 }
 
 async function assertLayoutSweepWorkloadDispatchesThroughCodebox(root) {
@@ -59,8 +86,9 @@ async function assertLayoutSweepWorkloadDispatchesThroughCodebox(root) {
 		seed: 3,
 		scenarios: ['sweep'],
 	};
-	fs.writeFileSync(workloadPath, `${JSON.stringify(declaration, null, 2)}\n`);
-	assert.equal(isLayoutSweepWorkloadDeclaration(declaration), true);
+	const envelope = { schema: 'homeboy/fuzz-workload/v1', id: 'canvas-grid-dispatch', safety_class: 'read_only', workload: { definition: declaration } };
+	fs.writeFileSync(workloadPath, `${JSON.stringify(envelope, null, 2)}\n`);
+	assert.equal(isLayoutSweepWorkloadDeclaration(envelope), true);
 
 	const fixtureSummary = {
 		schema: LAYOUT_SWEEP_SUMMARY_SCHEMA,
