@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.1] - 2026-09-25
+
+### Fixed
+- accept layout-sweep declarations inside core fuzz workload envelopes
+
 ## [3.50.0] - 2026-09-25
 
 ### Added
