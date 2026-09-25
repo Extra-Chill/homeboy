@@ -717,6 +717,22 @@ credential by id, and `list` reports non-secret credential metadata. See
 [Broker authentication and pairing](#broker-authentication-and-pairing) for the
 full trust model.
 
+### `service`
+
+```sh
+homeboy runner service install homeboy-lab
+homeboy runner service status homeboy-lab
+```
+
+Run the runner daemon as a systemd user unit that the runner owns. `install`
+requires an idle runner. It writes the unit, hands the controller-started
+daemon over to it, stops idle leftover generation daemons, and marks the runner
+`service_managed`. After that, `connect` only attaches, `disconnect` only
+detaches, and `refresh-homeboy --reconnect` repoints the unit's binary and
+restarts it instead of rotating daemon generations. `status` reports the unit
+and the daemon lease it holds. See
+[Runner-Owned Service](../architecture/runner-connection.md#runner-owned-service).
+
 ### `job`
 
 ```sh
