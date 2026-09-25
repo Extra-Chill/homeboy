@@ -809,7 +809,8 @@ impl RunnerStatusReport {
     /// configured job binary for admission.
     pub fn daemon_compatible_for_admission(&self) -> bool {
         self.admission_blocking_stale_daemon().is_none()
-            && !crate::lab::offload::metadata::session_reported_version_blocks_admission(self)
+            && (self.stale_daemon.is_some()
+                || !crate::lab::offload::metadata::session_reported_version_blocks_admission(self))
     }
 
     /// The admission freshness fence shared by placement and dispatch.
@@ -1070,7 +1071,9 @@ impl RunnerStatusReport {
                 return Some(action);
             }
         }
-        if crate::lab::offload::metadata::session_reported_version_blocks_admission(self) {
+        if self.stale_daemon.is_none()
+            && crate::lab::offload::metadata::session_reported_version_blocks_admission(self)
+        {
             return Some(crate::daemon_repair::refresh_homeboy_action(
                 &self.runner_id,
             ));

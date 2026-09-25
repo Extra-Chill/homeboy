@@ -615,7 +615,9 @@ pub(crate) fn session_reported_version_blocks_admission(status: &RunnerStatusRep
         parse_major_minor(runner_version),
     ) {
         (Some(controller), Some(runner)) => controller != runner,
-        _ => true,
+        // Unparseable fixture versions are not a new admission fence. Existing
+        // stale-daemon warnings still refuse a proven mismatch.
+        _ => false,
     }
 }
 

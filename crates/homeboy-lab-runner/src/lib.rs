@@ -1023,7 +1023,8 @@ fn lab_runner_admission_candidate(
     capabilities_ready: bool,
     exact_version: bool,
 ) -> DefaultLabRunnerCandidate {
-    let version_blocked = lab::offload::metadata::session_reported_version_blocks_admission(status);
+    let version_blocked = status.stale_daemon.is_none()
+        && lab::offload::metadata::session_reported_version_blocks_admission(status);
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
         lab::offload::metadata::lab_runner_homeboy_has_blocking_status_drift(status, exact_version)
     });
