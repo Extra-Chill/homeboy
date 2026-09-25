@@ -497,8 +497,59 @@ impl AgentTaskCookJob {
             _ => agent_task_lifecycle::AgentTaskRunState::Failed,
         });
         self.phase = WorkJobPhase::Completed;
+        if let Some(attempt_run_id) = self.run_id.as_deref() {
+            notify_detached_cook_attempt(&self.request.cook_id, attempt_run_id)?;
+        }
         self.completed_result()
     }
+}
+
+fn notify_detached_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record(attempt_run_id)?;
+    if !record.state.is_terminal() {
+        return Ok(());
+    }
+    let exit_code = i32::from(record.state != agent_task_lifecycle::AgentTaskRunState::Succeeded);
+    crate::agent_task_notify::cook_terminal_for_attempt(
+        cook_id,
+        attempt_run_id,
+        attempt_status_label(record.state),
+        exit_code,
+    );
+    Ok(())
+}
+
+fn attempt_status_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'static str {
+    use agent_task_lifecycle::AgentTaskRunState;
+    match state {
+        AgentTaskRunState::Queued => "queued",
+        AgentTaskRunState::Running => "running",
+        AgentTaskRunState::Succeeded => "succeeded",
+        AgentTaskRunState::CandidateRecoverable => "candidate_recoverable",
+        AgentTaskRunState::PartialRecoverable => "partial_recoverable",
+        AgentTaskRunState::PartialFailure => "partial_failure",
+        AgentTaskRunState::Failed => "failed",
+        AgentTaskRunState::Cancelled => "cancelled",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
+    let mut job = AgentTaskCookJob::new(AgentTaskCookJobRequest {
+        schema: AGENT_TASK_COOK_JOB_SCHEMA.to_string(),
+        cook_id: cook_id.to_string(),
+        child_pid: 1,
+        child_start_identity: ProcessStartIdentity::Linux { starttime_ticks: 1 },
+        supervisor_id: None,
+        launcher_id: Some("detached-finalizer".to_string()),
+        pinned_retry_run_id: None,
+        child_session_ref: None,
+    })?;
+    job.phase = WorkJobPhase::Supervising;
+    job.observe_terminal(Some(attempt_run_id.to_string()))?;
+    Ok(())
 }
 
 fn latest_run_id_for_job(request: &AgentTaskCookJobRequest) -> Option<String> {

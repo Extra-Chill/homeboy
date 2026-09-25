@@ -360,6 +360,14 @@ fn detached_cook_terminal_failure_reaches_the_configured_transport() {
                 true
             })
             .expect("fail attempt");
+        assert!(
+            crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+                .expect("read outcome")
+                .is_none(),
+            "persisting a terminal attempt is not the cook notification"
+        );
+        crate::agent_task_service::finalize_detached_cook_attempt(cook_id, attempt_id)
+            .expect("detached finalizer");
         let delivery = latest_delivery(cook_id);
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport"], "test.cook");
