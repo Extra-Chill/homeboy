@@ -1294,6 +1294,63 @@ pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
     Ok(released.is_some())
 }
 
+/// Terminalize an exact replay claim after its supervised worker exits with a
+/// deterministic (non-retryable) validation failure, instead of releasing it
+/// back to the queue for another bounded attempt (#15009). A deterministic
+/// failure — a missing model-override acknowledgement, an invalid gate, a bad
+/// argument — fails identically on every retry; retrying it for up to an hour
+/// only delays the operator from seeing the real blocker, which the bounded
+/// admission budget then reports as a generic "runner shortage" once
+/// exhausted. `reason` is the worker's own typed error message, surfaced
+/// verbatim so `agent-task status` shows the real cause.
+///
+/// Mirrors [`release_unmaterialized_cook_replay_claim_after_worker_exit`]'s
+/// ownership guard exactly; only the terminal disposition differs. A
+/// published index or reserved child record remains authoritative and is
+/// never overridden here either.
+pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
+    cook_id: &str,
+    fence: u64,
+    token: &str,
+    reason: &str,
+) -> Result<bool> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let token = token.to_string();
+    let failed = store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
+            return false;
+        }
+        let reserved_child_published = record.metadata["detached_cook_handoff"]
+            ["materializing_attempt_run_id"]
+            .as_str()
+            .is_some_and(|run_id| store.read_record(run_id).is_ok());
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if reserved_child_published
+            || !matches!(
+                admission["lease"]["state"].as_str(),
+                Some("claimed" | "consumed" | "materializing")
+            )
+            || admission["lease"]["fence"].as_u64() != Some(fence)
+            || admission["lease"]["token"].as_str() != Some(token.as_str())
+        {
+            return false;
+        }
+        admission["state"] = json!("failed");
+        admission["reason"] = json!(homeboy_core::redaction::redact_string(reason));
+        admission
+            .as_object_mut()
+            .expect("unmaterialized admission object")
+            .remove("lease");
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    if failed.is_some() {
+        let _ = fail_detached_cook_handoff_parent_in_store(&store, &cook_id, reason);
+    }
+    Ok(failed.is_some())
+}
+
 /// Rearm one blocked admission for an explicit scoped resume. Active replay or
 /// materialization ownership is preserved; terminal records are never reopened.
 pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRunRecord> {

@@ -1054,6 +1054,13 @@ fn admit_unmaterialized_cook(
     };
     let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    // Run every check the replay worker will run, including model-override
+    // confirmation, before any admission record is persisted (#15009). A
+    // queued Lab admission has no TTY to prompt against, so a submission that
+    // needs `--acknowledge-model-override` is refused here, named, at submit
+    // time — not admitted only to fail the same deterministic check on every
+    // bounded replay attempt for the next hour.
+    crate::commands::agent_task::run::require_model_override_acknowledgement_for_cook(&resolved)?;
     let mut replay_args = normalized_args.to_vec();
     crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
         &mut replay_args,
@@ -2037,7 +2044,13 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
             )
         })?;
         let worker_pid = child.id();
-        supervise_replay_worker(intent.cook_id.clone(), fence, token.to_string(), child);
+        supervise_replay_worker(
+            intent.cook_id.clone(),
+            fence,
+            token.to_string(),
+            worker_log.clone(),
+            child,
+        );
         Ok(serde_json::json!({
             "schema": "homeboy/unmaterialized-cook-replay-receipt/v1",
             "worker_pid": worker_pid,
@@ -2047,18 +2060,56 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     }
 }
 
+/// Terminalize a replay claim with its worker's real deterministic failure
+/// instead of the generic release-and-requeue path, when one is available and
+/// not itself marked retryable (#15009). Bounded admission retries exist for
+/// genuinely transient conditions (a runner that dropped between selection
+/// and dispatch, a busy observation store); a deterministic validation
+/// failure — missing model-override acknowledgement, an invalid gate, a bad
+/// argument — fails identically on every attempt and must not consume the
+/// hour-long retry budget only to be reported as a generic "runner shortage"
+/// once exhausted.
 fn supervise_replay_worker(
     cook_id: String,
     fence: u64,
     token: String,
+    worker_log: PathBuf,
     mut child: std::process::Child,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ = child.wait();
+        let diagnostic = local_detach::detached_child_diagnostic(&worker_log);
+        if let Some(reason) = deterministic_replay_worker_failure(diagnostic) {
+            if agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
+                &cook_id, fence, &token, &reason,
+            )
+            .unwrap_or(false)
+            {
+                return;
+            }
+        }
         let _ = agent_task_lifecycle::release_unmaterialized_cook_replay_claim_after_worker_exit(
             &cook_id, fence, &token,
         );
     })
+}
+
+/// Classify a replay worker's exit diagnostic (#15009): `Some(message)` only
+/// for a typed failure that is *not* itself marked retryable, so the caller
+/// terminalizes the admission with the worker's real message instead of
+/// requeuing it. A missing/unparsable diagnostic (worker crash, oom-kill, a
+/// log the bounded capture could not read) and an explicitly `retryable: true`
+/// diagnostic both return `None` and fall through to the existing
+/// release-and-requeue path — retrying is still correct for anything that
+/// is not a known deterministic failure.
+fn deterministic_replay_worker_failure(
+    diagnostic: Result<serde_json::Value, &'static str>,
+) -> Option<String> {
+    let diagnostic = diagnostic.ok()?;
+    if diagnostic["retryable"].as_bool() == Some(true) {
+        return None;
+    }
+    diagnostic["message"].as_str().map(str::to_string)
 }
 
 fn validate_replay_intent(
