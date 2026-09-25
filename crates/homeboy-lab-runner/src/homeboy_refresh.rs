@@ -503,6 +503,7 @@ pub fn refresh_homeboy_binary_in_roots(
 
     let runner = load_in_roots(roots, &plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
+    let service_managed = runner.settings.service_managed;
     let fresh_ssh_bootstrap = fresh_ssh_bootstrap_eligible_in_roots(roots, &runner)?;
     // Reconciliation settles retained generation counts from the daemon's typed
     // job view. Consume that postcondition rather than immediately replacing it
@@ -864,11 +865,15 @@ pub fn refresh_homeboy_binary_in_roots(
             &plan.runner_id,
             refresh_session.as_ref(),
         )?;
-        if should_rotate_daemon_generation(
-            !active_jobs.is_empty(),
-            preserve_generations,
-            options.force,
-        ) {
+        // A service-managed runner never runs generations side by side. It
+        // drains through the active-job guard below and restarts its unit.
+        if !service_managed
+            && should_rotate_daemon_generation(
+                !active_jobs.is_empty(),
+                preserve_generations,
+                options.force,
+            )
+        {
             let (candidate_version, candidate_identity) = rotation_candidate_identity(&identity)?;
             let candidate_identity = candidate_identity.to_string();
             let candidate_binary_sha256 = materialized_binary_sha256(&exec_output.stdout);
@@ -986,6 +991,32 @@ pub fn refresh_homeboy_binary_in_roots(
                 ));
             }
         };
+        if service_managed {
+            // The runner is idle (or the operator forced the restart). Point
+            // the unit at the promoted binary and restart it; the reconnect
+            // below attaches to the new daemon.
+            if let Err(error) = super::connection::repoint_and_restart_runner_service(
+                roots,
+                &plan.runner_id,
+                &selected_binary_path,
+            ) {
+                return rollback_refresh_error_with(error, || {
+                    restore_runner_homeboy_path_if_selected_in_roots(
+                        roots,
+                        &plan.runner_id,
+                        &selected_binary_path,
+                        previous_homeboy_path.as_deref(),
+                    )
+                    .map(|_| ())
+                })
+                .map_err(|error| {
+                    let mut phases = phase_summary.clone();
+                    phases.push(refresh_phase("service_restart", true, 1));
+                    refresh_error_with_phase_summary(error, &phases)
+                });
+            }
+            phase_summary.push(refresh_phase("service_restart", true, 0));
+        }
         if let Err(error) = disconnect_before_reconnect(refresh_session.as_ref(), |session| {
             super::connection::disconnect_with_session_in_roots(
                 roots,
