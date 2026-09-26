@@ -342,6 +342,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
         attach_lab_snapshot_failure_projection(&mut value, &record);
     }
+    attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
         .as_array()
         .is_some_and(|actions| {
@@ -360,6 +361,34 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         }]);
     }
     Ok((value, exit_code))
+}
+
+fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
+    let Ok(record) = agent_task_lifecycle::exact_record(run_id) else {
+        return;
+    };
+    let recoverable = matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+    ) || matches!(
+        record
+            .metadata
+            .pointer("/latest_promotion/status")
+            .and_then(Value::as_str),
+        Some("gate_failed" | "no_op_gate_failed" | "no_changes_gate_failed")
+    );
+    if !recoverable
+        || record
+            .metadata
+            .get("cook_id")
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        return;
+    }
+    let guidance = agent_task_service_direct::promotion_replay_guidance(requested_id);
+    value["promotion_replay"] = guidance;
 }
 
 fn control_plane_run_requires_action(

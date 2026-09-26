@@ -8094,6 +8094,88 @@ pub(crate) fn resolve_run_id_in_store(
     }
 }
 
+/// Resolve a Cook ID to the attempt that owns the replayable candidate.
+///
+/// File-backed selection stays authoritative. When `aggregate.json` is gone,
+/// the indexed substantive attempt is kept if its record still has the exact
+/// candidate or gate evidence, so a newer submit-only attempt cannot hide it.
+pub fn resolve_cook_reader_run_id_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<String> {
+    let requested = sanitize_run_id(run_id);
+    if !lifecycle_store.cook_index_exists(&requested) {
+        if let Some(materializing) =
+            resolve_detached_cook_materializing_attempt_in_store(lifecycle_store, &requested)?
+        {
+            return Ok(materializing.run_id);
+        }
+        return Ok(requested);
+    }
+    let index = lifecycle_store.read_cook_index(&requested)?;
+    let selection = select_cook_candidate_in_store(lifecycle_store, &requested)?;
+    if selection.incomplete || selection.run_id.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "candidate selection is incomplete after its bounded recovery window",
+            Some(requested),
+            None,
+        ));
+    }
+    if !selection.reason.starts_with("no_substantive_candidate") {
+        return Ok(selection.run_id);
+    }
+    if let Some(run_id) = preserved_candidate_attempt_run_id(lifecycle_store, &index) {
+        return Ok(run_id);
+    }
+    Ok(selection.run_id)
+}
+
+fn preserved_candidate_attempt_run_id(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    index: &AgentTaskCookIndex,
+) -> Option<String> {
+    if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
+        if attempt_preserves_candidate_or_gate(lifecycle_store, &candidate.run_id) {
+            return Some(candidate.run_id.clone());
+        }
+    }
+    index.attempts.iter().rev().find_map(|attempt| {
+        attempt_preserves_candidate_or_gate(lifecycle_store, &attempt.run_id)
+            .then(|| attempt.run_id.clone())
+    })
+}
+
+fn attempt_preserves_candidate_or_gate(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> bool {
+    let Ok(record) = lifecycle_store.read_record_bounded(run_id) else {
+        return false;
+    };
+    let Some(promotion) = record.metadata.get("latest_promotion") else {
+        return record.latest_executor_evidence.is_some();
+    };
+    let status = promotion.get("status").and_then(Value::as_str);
+    matches!(
+        status,
+        Some(
+            "gate_failed"
+                | "no_op_gate_failed"
+                | "no_changes_gate_failed"
+                | "verification_pending"
+                | "applied"
+        )
+    ) || promotion
+        .get("deterministic_gates")
+        .and_then(Value::as_array)
+        .is_some_and(|gates| !gates.is_empty())
+        || promotion
+            .pointer("/provenance/candidate")
+            .is_some_and(|candidate| !candidate.is_null())
+        || promotion.get("patch_artifact").is_some()
+}
+
 fn acceptance_candidate(
     promotion: &Value,
 ) -> Option<crate::agent_task_promotion::AgentTaskCandidateFingerprint> {
