@@ -1637,6 +1637,23 @@ fn reconcile_recipe_attempt_for_continuation_in_stores(
     {
         return Ok(record);
     }
+    if record.state.is_terminal() {
+        if let Ok(aggregate) = lifecycle_store.read_aggregate(run_id) {
+            if !agent_task_lifecycle::terminal_artifact_projection_is_verified_in_store(
+                lifecycle_store,
+                &record,
+                &aggregate,
+            )? {
+                let mut recoverable = record.clone();
+                agent_task_lifecycle::record_terminal_artifact_projection_in_store(
+                    lifecycle_store,
+                    &mut recoverable,
+                    &aggregate,
+                )?;
+            }
+        }
+    }
+    let record = lifecycle_store.read_record(run_id)?;
     if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness_in_store(
         lifecycle_store,
         run_id,
