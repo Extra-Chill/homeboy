@@ -85,3 +85,19 @@ For a service-managed runner:
 
 The service needs systemd user lingering on the runner host
 (`loginctl enable-linger`) so the unit keeps running without a login session.
+
+## Unreachable recorded host
+
+Connect dials the configured server host. It does not discover a replacement
+address. SSH exit 255 with `Host is down`, or the same resolution/reachability
+failure, is `transport_unreachable` with that recorded host and the next check.
+That is not a missing Homeboy install.
+
+A numeric DHCP address is not stable. Set a stable hostname, or a DHCP
+reservation, on the existing server, then reconnect:
+
+```sh
+homeboy server set <server-id> --json '{"host":"<hostname>"}'
+```
+
+SSH host key verification stays on. Do not accept a new key.

@@ -400,6 +400,7 @@ pub struct LabRunnerHandoff {
 pub enum RunnerFailureKind {
     SshFailure,
     MissingRemoteHomeboy,
+    TransportUnreachable,
     RunnerCapabilityMissing,
     DaemonStartupFailure,
     TunnelFailure,

@@ -345,12 +345,17 @@ pub(crate) fn connect_service_runner(
     let identity = match remote_homeboy_identity(client, homeboy) {
         Ok(identity) => identity,
         Err(message) => {
-            return Ok(failed_connect(
+            let detail = message.clone();
+            return Ok(remote_connect_failure(
                 runner_id,
                 session_path,
+                &target.server_id,
+                &target.server.host,
+                -1,
+                &detail,
                 RunnerFailureKind::MissingRemoteHomeboy,
                 message,
-            ))
+            ));
         }
     };
     let Some(expected_identity) = identity.build_identity.clone() else {

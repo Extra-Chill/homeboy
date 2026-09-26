@@ -784,21 +784,37 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
 
     let ssh_probe = client.execute_with_timeout("true", REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !ssh_probe.success {
-        return Ok(failed_connect(
+        let fallback = bounded_remote_failure_message("SSH connectivity check", &ssh_probe);
+        let detail = if ssh_probe.stderr.trim().is_empty() {
+            fallback.clone()
+        } else {
+            ssh_probe.stderr.clone()
+        };
+        return Ok(remote_connect_failure(
             runner_id,
             session_path,
+            &server_id,
+            &server.host,
+            ssh_probe.exit_code,
+            &detail,
             RunnerFailureKind::SshFailure,
-            bounded_remote_failure_message("SSH connectivity check", &ssh_probe),
+            fallback,
         ));
     }
 
     let identity = remote_homeboy_identity(&client, homeboy);
     let Ok(identity) = identity else {
-        return Ok(failed_connect(
+        let message = identity.err().unwrap();
+        let detail = message.clone();
+        return Ok(remote_connect_failure(
             runner_id,
             session_path,
+            &server_id,
+            &server.host,
+            -1,
+            &detail,
             RunnerFailureKind::MissingRemoteHomeboy,
-            identity.err().unwrap(),
+            message,
         ));
     };
     let version = identity.version.clone();
