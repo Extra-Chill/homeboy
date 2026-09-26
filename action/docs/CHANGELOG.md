@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.9] - 2026-09-26
+
+### Fixed
+- decide from the command's own merge-base comparison when the baseline run measured nothing
+
 ## [2.20.8] - 2026-09-24
 
 ### Fixed
