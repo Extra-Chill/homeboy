@@ -441,7 +441,13 @@ it names an exact job with no recorded child PID, which is evidence homeboy does
 not have.
 
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
-it. This is the preferred Lab execution path because later `runner exec` calls
+it. Connect dials the configured server host and does not discover a new LAN
+address. SSH exit 255 with `Host is down` is `transport_unreachable` for that
+recorded host, not a missing Homeboy install. A numeric DHCP address is not
+stable: set a stable hostname or a DHCP reservation with `homeboy server set`,
+then reconnect. Host key verification stays on. See
+[Unreachable recorded host](../architecture/runner-connection.md#unreachable-recorded-host).
+This is the preferred Lab execution path because later `runner exec` calls
 can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.

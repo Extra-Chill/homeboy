@@ -1802,6 +1802,62 @@ mod tests {
             Some(conflicting)
         );
     }
+
+    #[test]
+    fn host_down_at_recorded_numeric_host_is_not_missing_homeboy() {
+        let detail = "remote Homeboy version check failed (exit 255): stdout=, stderr=ssh: connect to host 192.168.86.63 port 22: Host is down";
+        let (report, exit_code) = remote_connect_failure(
+            "homeboy-lab",
+            PathBuf::from("/tmp/homeboy-lab.json"),
+            "homeboy-lab",
+            "192.168.86.63",
+            -1,
+            detail,
+            RunnerFailureKind::MissingRemoteHomeboy,
+            detail.to_string(),
+        );
+
+        assert_eq!(exit_code, 20);
+        assert_eq!(
+            report.failure_kind,
+            Some(RunnerFailureKind::TransportUnreachable)
+        );
+        let value = serde_json::to_value(&report).expect("serialize connect report");
+        assert_eq!(value["failure_kind"], "transport_unreachable");
+        assert_eq!(
+            value["failure_evidence"]["classification"],
+            "transport_unreachable"
+        );
+        let message = value["failure_message"].as_str().expect("message");
+        assert!(message.contains("192.168.86.63"));
+        assert!(message.contains("Next check:"));
+        assert!(message.contains("DHCP reservation"));
+        assert!(message.contains("homeboy server set"));
+        assert!(!message.to_ascii_lowercase().contains("install"));
+        assert!(!message.contains("StrictHostKeyChecking=no"));
+
+        let (rejected, _) = remote_connect_failure(
+            "homeboy-lab",
+            PathBuf::from("/tmp/homeboy-lab.json"),
+            "homeboy-lab",
+            "192.168.86.205",
+            255,
+            "Host key verification failed.",
+            RunnerFailureKind::MissingRemoteHomeboy,
+            "should not be used".to_string(),
+        );
+        assert_ne!(
+            rejected.failure_kind,
+            Some(RunnerFailureKind::MissingRemoteHomeboy)
+        );
+        assert_ne!(
+            rejected.failure_kind,
+            Some(RunnerFailureKind::TransportUnreachable)
+        );
+        let rejected_message = rejected.failure_message.expect("host key message");
+        assert!(rejected_message.contains("Do not disable"));
+        assert!(!rejected_message.contains("StrictHostKeyChecking=no"));
+    }
 }
 
 pub(super) fn failed_connect(
@@ -1837,6 +1893,7 @@ pub(super) fn failed_connect(
                 classification: match failure_kind {
                     RunnerFailureKind::SshFailure => "ssh".to_string(),
                     RunnerFailureKind::MissingRemoteHomeboy => "version".to_string(),
+                    RunnerFailureKind::TransportUnreachable => "transport_unreachable".to_string(),
                     RunnerFailureKind::RunnerCapabilityMissing => "runner_capability".to_string(),
                     RunnerFailureKind::DaemonStartupFailure => "daemon_startup".to_string(),
                     RunnerFailureKind::TunnelFailure => "tunnel".to_string(),
@@ -1854,6 +1911,69 @@ pub(super) fn failed_connect(
             }),
         },
         20,
+    )
+}
+
+pub(super) fn remote_connect_failure(
+    runner_id: &str,
+    session_path: PathBuf,
+    server_id: &str,
+    host: &str,
+    exit_code: i32,
+    detail: &str,
+    fallback_kind: RunnerFailureKind,
+    fallback_message: String,
+) -> (RunnerConnectReport, i32) {
+    if homeboy_core::server::ssh_host_key_rejected(detail) {
+        return failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::SshFailure,
+            format!(
+                "SSH host key verification failed for recorded host `{host}`. Do not disable host key verification or accept a new key."
+            ),
+        );
+    }
+    if homeboy_core::server::ssh_transport_unreachable(exit_code, detail) {
+        return failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::TransportUnreachable,
+            transport_unreachable_message(server_id, host, detail),
+        );
+    }
+    let exit_255 = exit_code == 255 || detail.to_ascii_lowercase().contains("exit 255");
+    if fallback_kind == RunnerFailureKind::MissingRemoteHomeboy && exit_255 {
+        return failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::SshFailure,
+            fallback_message,
+        );
+    }
+    failed_connect(runner_id, session_path, fallback_kind, fallback_message)
+}
+
+fn transport_unreachable_message(server_id: &str, host: &str, detail: &str) -> String {
+    let line = detail
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("SSH exit 255");
+    let line: String = line.chars().take(240).collect();
+    let remedy = if host.parse::<std::net::IpAddr>().is_ok() {
+        format!(
+            "A numeric DHCP address is not a stable location. Set a stable hostname or a DHCP reservation with `homeboy server set {} --json '{{\"host\":\"<hostname>\"}}'`, then reconnect.",
+            shell::quote_arg(server_id)
+        )
+    } else {
+        format!(
+            "Confirm the configured host still resolves. Update it with `homeboy server set {} --json '{{\"host\":\"<hostname>\"}}'` if it does not, then reconnect.",
+            shell::quote_arg(server_id)
+        )
+    };
+    format!(
+        "SSH transport_unreachable for recorded host `{host}` ({line}). Next check: confirm `{host}` answers on SSH. {remedy} SSH host key verification stays on; do not accept a new key."
     )
 }
 
