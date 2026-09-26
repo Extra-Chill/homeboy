@@ -88,8 +88,8 @@ fn command_output_with_timeout_captures_child_output() {
     let mut command = Command::new("sh");
     command.args(["-c", "printf 'homeboy 0.247.5'; printf 'warn' >&2"]);
 
-    let output =
-        command_output_with_timeout(&mut command, Duration::from_secs(5)).expect("command output");
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(5), "test command")
+        .expect("command output");
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "homeboy 0.247.5");
