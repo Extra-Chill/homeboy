@@ -2179,17 +2179,9 @@ fn project_terminal_artifacts_in_store(
             }
             validate_projection_token("artifact.id", &artifact.id)?;
             validate_projection_token("artifact.kind", &artifact.kind)?;
-            let base_id = artifact.id.trim();
-            let logical_id = base_id;
-            // Observation artifact ids are globally unique. Keep the lifecycle
-            // logical id as the per-run lookup token exposed by runs artifact.
-            let mut id_hash = sha2::Sha256::new();
-            sha2::Digest::update(&mut id_hash, record.run_id.as_bytes());
-            sha2::Digest::update(&mut id_hash, [0]);
-            sha2::Digest::update(&mut id_hash, outcome.task_id.as_bytes());
-            sha2::Digest::update(&mut id_hash, [0]);
-            sha2::Digest::update(&mut id_hash, logical_id.as_bytes());
-            let artifact_id = format!("agent-task-{:x}", id_hash.finalize());
+            let logical_id = artifact.id.trim();
+            let artifact_id =
+                persisted_observation_artifact_id(&record.run_id, &outcome.task_id, logical_id);
             let mut metadata = json!({
                 "name": logical_id,
                 "agent_task": {
@@ -2263,9 +2255,20 @@ fn project_terminal_artifacts_in_store(
                         metadata,
                     )?;
                 } else {
-                    let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
-                        .artifacts
-                        .runner_artifact_ref(runner_id, &record.run_id, logical_id);
+                    let remote_ref = canonical_runner_artifact_ref(
+                        runner_id,
+                        &record.run_id,
+                        &outcome.task_id,
+                        logical_id,
+                    );
+                    let preserved_logical_alias = historical_logical_runner_alias(
+                        store,
+                        &artifact_id,
+                        &record.run_id,
+                        &outcome.task_id,
+                        artifact,
+                        &remote_ref,
+                    )?;
                     let mirror_result = if requires_durable_lab_projection(artifact) {
                         (|| -> Result<()> {
                             let mirror = tempfile::NamedTempFile::new().map_err(|error| {
@@ -2333,26 +2336,29 @@ fn project_terminal_artifacts_in_store(
                         Ok(())
                     };
 
-                    // Preserve the canonical runner retrieval alias even when
-                    // the controller also materializes verified bytes.
-                    store.import_artifact(&homeboy_core::observation::ArtifactRecord {
-                        id: artifact_id,
-                        run_id: record.run_id.clone(),
-                        kind: artifact.kind.clone(),
-                        artifact_type: "remote_file".to_string(),
-                        path: remote_ref,
-                        url: None,
-                        public_url: None,
-                        viewer_url: None,
-                        viewer_links: Vec::new(),
-                        sha256: artifact.sha256.clone(),
-                        size_bytes: artifact
-                            .size_bytes
-                            .and_then(|value| i64::try_from(value).ok()),
-                        mime: artifact.mime.clone(),
-                        metadata_json: metadata,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                    })?;
+                    // A historical remote_file may already occupy the persisted id
+                    // with a logical token path. Leave that row as evidence and
+                    // publish the controller-owned bytes under a derived id.
+                    if !preserved_logical_alias {
+                        store.import_artifact(&homeboy_core::observation::ArtifactRecord {
+                            id: artifact_id,
+                            run_id: record.run_id.clone(),
+                            kind: artifact.kind.clone(),
+                            artifact_type: "remote_file".to_string(),
+                            path: remote_ref,
+                            url: None,
+                            public_url: None,
+                            viewer_url: None,
+                            viewer_links: Vec::new(),
+                            sha256: artifact.sha256.clone(),
+                            size_bytes: artifact
+                                .size_bytes
+                                .and_then(|value| i64::try_from(value).ok()),
+                            mime: artifact.mime.clone(),
+                            metadata_json: metadata,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        })?;
+                    }
                     if let Err(error) = mirror_result {
                         projection_error.get_or_insert(error);
                     }
@@ -2586,6 +2592,62 @@ fn select_controller_artifact_projection(
             controller_projection_precedence(left).cmp(&controller_projection_precedence(right))
         })
         .ok_or_else(Vec::new)
+}
+
+pub(crate) fn persisted_observation_artifact_id(
+    run_id: &str,
+    task_id: &str,
+    logical_artifact_id: &str,
+) -> String {
+    let mut id_hash = sha2::Sha256::new();
+    sha2::Digest::update(&mut id_hash, run_id.as_bytes());
+    sha2::Digest::update(&mut id_hash, [0]);
+    sha2::Digest::update(&mut id_hash, task_id.as_bytes());
+    sha2::Digest::update(&mut id_hash, [0]);
+    sha2::Digest::update(&mut id_hash, logical_artifact_id.trim().as_bytes());
+    format!("agent-task-{:x}", id_hash.finalize())
+}
+
+fn historical_logical_runner_alias(
+    store: &homeboy_core::observation::ObservationStore,
+    artifact_id: &str,
+    run_id: &str,
+    task_id: &str,
+    artifact: &AgentTaskArtifact,
+    canonical_ref: &str,
+) -> Result<bool> {
+    let Some(existing) = store.get_artifact(artifact_id)? else {
+        return Ok(false);
+    };
+    let Some((prefix, _)) = canonical_ref.rsplit_once('/') else {
+        return Ok(false);
+    };
+    Ok(existing.artifact_type == "remote_file"
+        && existing.run_id == run_id
+        && existing.kind == artifact.kind
+        && existing.path == format!("{prefix}/{}", artifact.id)
+        && existing.sha256 == artifact.sha256
+        && existing.size_bytes
+            == artifact
+                .size_bytes
+                .and_then(|size| i64::try_from(size).ok())
+        && existing.metadata_json["agent_task"]["task_id"] == task_id
+        && existing.metadata_json["agent_task"]["logical_artifact_id"] == artifact.id)
+}
+
+pub(crate) fn canonical_runner_artifact_ref(
+    runner_id: &str,
+    run_id: &str,
+    task_id: &str,
+    logical_artifact_id: &str,
+) -> String {
+    homeboy_core::execution_contract::EXECUTION_CONTRACT
+        .artifacts
+        .runner_artifact_ref(
+            runner_id,
+            run_id,
+            &persisted_observation_artifact_id(run_id, task_id, logical_artifact_id),
+        )
 }
 
 fn controller_projection_artifact_id(artifact_id: &str) -> String {

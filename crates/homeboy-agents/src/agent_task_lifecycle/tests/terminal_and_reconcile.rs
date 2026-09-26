@@ -2515,6 +2515,82 @@ fn detached_lab_handoff_upgrades_existing_observation_record() {
     assert!(observation.metadata_json.get("agent_task_run").is_some());
 }
 
+fn prove_runner_artifact_record_serves_persisted_id(
+    run_id: &str,
+    task_id: &str,
+    logical_id: &str,
+    bytes: &[u8],
+    sha256: &str,
+) {
+    let persisted_id = persisted_observation_artifact_id(run_id, task_id, logical_id);
+    let source = tempfile::NamedTempFile::new().expect("producer patch");
+    std::fs::write(source.path(), bytes).expect("write producer patch");
+    let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+    store
+        .upsert_imported_run(&homeboy_core::observation::RunRecord {
+            id: run_id.to_string(),
+            kind: "agent-task".to_string(),
+            started_at: "2026-09-26T00:00:00Z".to_string(),
+            status: "fail".to_string(),
+            metadata_json: json!({}),
+            ..Default::default()
+        })
+        .expect("producer run");
+    let recorded = store
+        .record_artifact_with_id(
+            run_id,
+            "patch",
+            source.path(),
+            &persisted_id,
+            json!({
+                "name": logical_id,
+                "agent_task": {
+                    "task_id": task_id,
+                    "logical_artifact_id": logical_id
+                }
+            }),
+        )
+        .expect("producer artifact");
+    assert_eq!(recorded.id, persisted_id);
+    assert_eq!(recorded.sha256.as_deref(), Some(sha256));
+    assert_eq!(
+        recorded.metadata_json["agent_task"]["logical_artifact_id"],
+        logical_id
+    );
+
+    let jobs = homeboy_core::api_jobs::JobStore::default();
+    let fetched = homeboy_core::daemon::route_with_body(
+        "GET",
+        &format!("/runs/{run_id}/artifacts/{persisted_id}/content"),
+        None,
+        &jobs,
+    );
+    assert_eq!(fetched.status_code, 200, "{:?}", fetched.body);
+    assert_eq!(fetched.body["sha256"], sha256);
+    let download = fetched.artifact.expect("authenticated artifact bytes");
+    assert_eq!(std::fs::read(&download.path).expect("fetched bytes"), bytes);
+
+    let logical = homeboy_core::daemon::route_with_body(
+        "GET",
+        &format!("/runs/{run_id}/artifacts/{logical_id}/content"),
+        None,
+        &jobs,
+    );
+    assert_eq!(logical.status_code, 404, "{:?}", logical.body);
+    assert!(
+        logical.body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&format!("artifact record not found: {logical_id}")),
+        "{:?}",
+        logical.body
+    );
+
+    store
+        .delete_artifact_record(&persisted_id)
+        .expect("drop producer record before the controller imports the same id");
+}
+
 #[test]
 fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() {
     with_isolated_home(|_| {
@@ -2525,18 +2601,31 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
         let patch = b"patch bytes";
         let sha256 = format!("{:x}", sha2::Sha256::digest(patch));
         let response_sha256 = sha256.clone();
+        let persisted_id = persisted_observation_artifact_id("detached-run", "task-a", "patch");
+        let expected_ref =
+            canonical_runner_artifact_ref("local", "detached-run", "task-a", "patch");
+        prove_runner_artifact_record_serves_persisted_id(
+            "producer-patch-run",
+            "task-a",
+            "patch",
+            patch,
+            &sha256,
+        );
+        let served_id = persisted_id.clone();
         let listener = TcpListener::bind("127.0.0.1:0").expect("runner daemon listener");
         let address = listener.local_addr().expect("runner daemon address");
         std::thread::spawn(move || {
+            let persisted_content =
+                format!("GET /runs/detached-run/artifacts/{served_id}/content ");
             for _ in 0..5 {
                 let (mut stream, _) = listener.accept().expect("runner daemon request");
-                let mut request = [0; 1024];
+                let mut request = [0; 2048];
                 let read = stream.read(&mut request).expect("read runner request");
                 if read == 0 {
                     continue;
                 }
                 let request = String::from_utf8_lossy(&request[..read]);
-                if request.starts_with("GET /runs/detached-run/artifacts/patch/content ") {
+                if request.starts_with(&persisted_content) {
                     write!(
                         stream,
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Homeboy-Artifact-Sha256: {response_sha256}\r\nConnection: close\r\n\r\n{}",
@@ -2544,6 +2633,14 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
                         String::from_utf8_lossy(patch),
                     )
                     .expect("write artifact response");
+                } else if request.contains("/artifacts/patch/") {
+                    let body = "artifact record not found: patch";
+                    write!(
+                        stream,
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    )
+                    .expect("write logical-name miss");
                 } else {
                     write!(
                         stream,
@@ -2584,7 +2681,10 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             serde_json::to_string(&session).expect("session JSON"),
         )
         .expect("write session");
-        struct FakeRunnerEvidence;
+        struct FakeRunnerEvidence {
+            expected_ref: String,
+            persisted_id: String,
+        }
         impl homeboy_core::observation::runs_service::RunnerEvidenceProvider for FakeRunnerEvidence {
             fn mirror_connected_runner_run(
                 &self,
@@ -2631,7 +2731,11 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
                 output: Option<std::path::PathBuf>,
             ) -> Result<homeboy_core::observation::runs_service::RemoteArtifactDownloadInfo>
             {
-                assert_eq!(path, "runner-artifact://local/detached-run/patch");
+                assert_eq!(path, self.expected_ref);
+                assert!(
+                    !path.ends_with("/patch"),
+                    "logical name is metadata, not the fetch key"
+                );
                 let output_path = output.unwrap_or_else(|| {
                     homeboy_core::paths::artifact_root()
                         .expect("artifact root")
@@ -2645,8 +2749,8 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
                         size_bytes: Some(11),
                         sha256: Some(format!("{:x}", sha2::Sha256::digest(b"patch bytes"))),
                         artifact_ref: homeboy_runner_contract::RunnerArtifactRef {
-                            artifact_id: "patch".to_string(),
-                            name: None,
+                            artifact_id: self.persisted_id.clone(),
+                            name: Some("patch".to_string()),
                             path: Some(path.to_string()),
                             url: None,
                             mime: Some("text/x-patch".to_string()),
@@ -2659,7 +2763,10 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             }
         }
         homeboy_core::observation::runs_service::register_runner_evidence_provider(Box::new(
-            FakeRunnerEvidence,
+            FakeRunnerEvidence {
+                expected_ref: expected_ref.clone(),
+                persisted_id: persisted_id.clone(),
+            },
         ));
 
         let plan = test_plan();
@@ -2734,6 +2841,18 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             std::fs::read(artifact.path).expect("projection bytes"),
             patch
         );
+        let mirrored = store
+            .list_artifacts("detached-run")
+            .expect("mirrored projections")
+            .into_iter()
+            .find(|artifact| artifact.path.starts_with("runner-artifact://"))
+            .expect("canonical runner ref");
+        assert_eq!(mirrored.id, persisted_id);
+        assert_eq!(mirrored.path, expected_ref);
+        assert_eq!(
+            mirrored.metadata_json["agent_task"]["logical_artifact_id"],
+            "patch"
+        );
         let projection_count = store
             .list_artifacts("detached-run")
             .expect("initial projections")
@@ -2746,6 +2865,193 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
                 .expect("idempotent projections")
                 .len(),
             projection_count
+        );
+    });
+}
+
+#[test]
+fn historical_logical_runner_alias_recovers_without_replacing_evidence() {
+    with_isolated_home(|_| {
+        let patch = b"historical patch bytes";
+        let sha256 = format!("{:x}", sha2::Sha256::digest(patch));
+        let run_id = "historical-alias-run";
+        let persisted_id = persisted_observation_artifact_id(run_id, "task-a", "patch");
+        let logical_ref = format!("runner-artifact://homeboy-lab/{run_id}/patch");
+        let physical_ref = canonical_runner_artifact_ref("homeboy-lab", run_id, "task-a", "patch");
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submit");
+        let observation = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("observation store");
+        observation
+            .import_artifact(&homeboy_core::observation::ArtifactRecord {
+                id: persisted_id.clone(),
+                run_id: run_id.to_string(),
+                kind: "patch".to_string(),
+                artifact_type: "remote_file".to_string(),
+                path: logical_ref.clone(),
+                url: None,
+                public_url: None,
+                viewer_url: None,
+                viewer_links: Vec::new(),
+                sha256: Some(sha256.clone()),
+                size_bytes: Some(patch.len() as i64),
+                mime: Some("text/x-patch".to_string()),
+                metadata_json: json!({
+                    "name": "patch",
+                    "agent_task": { "task_id": "task-a", "logical_artifact_id": "patch" }
+                }),
+                created_at: "2026-09-26T00:00:00Z".to_string(),
+            })
+            .expect("historical alias");
+
+        struct PhysicalIdFetch {
+            physical_ref: String,
+            bytes: Vec<u8>,
+        }
+        impl homeboy_core::observation::runs_service::RunnerEvidenceProvider for PhysicalIdFetch {
+            fn mirror_connected_runner_run(
+                &self,
+                _: &str,
+            ) -> Result<Option<homeboy_core::observation::RunRecord>> {
+                Ok(None)
+            }
+            fn statuses(
+                &self,
+            ) -> Vec<homeboy_core::observation::runs_service::RunnerConnectionInfo> {
+                Vec::new()
+            }
+            fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(Value::Null)
+            }
+            fn runner_job_cancel(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(
+                homeboy_core::api_jobs::Job,
+                Vec<homeboy_core::api_jobs::JobEvent>,
+            )> {
+                unreachable!()
+            }
+            fn refresh_mirrored_daemon_evidence(
+                &self,
+                _: &str,
+            ) -> Result<Option<Vec<homeboy_core::observation::RunRecord>>> {
+                Ok(None)
+            }
+            fn mirrored_runner_job_identity(
+                &self,
+                _: &homeboy_core::observation::RunRecord,
+            ) -> Option<(String, String)> {
+                None
+            }
+            fn download_remote_artifact(
+                &self,
+                path: &str,
+                output: Option<std::path::PathBuf>,
+            ) -> Result<homeboy_core::observation::runs_service::RemoteArtifactDownloadInfo>
+            {
+                if path.ends_with("/patch") {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact_id",
+                        "runner artifact fetch failed with HTTP 404: artifact record not found: patch",
+                        Some("patch".to_string()),
+                        None,
+                    ));
+                }
+                assert_eq!(path, self.physical_ref);
+                let output_path = output.expect("controller mirror destination");
+                std::fs::write(&output_path, &self.bytes).expect("write recovered bytes");
+                Ok(
+                    homeboy_core::observation::runs_service::RemoteArtifactDownloadInfo {
+                        output_path,
+                        content_type: Some("text/x-patch".to_string()),
+                        size_bytes: Some(self.bytes.len() as i64),
+                        sha256: Some(format!("{:x}", sha2::Sha256::digest(&self.bytes))),
+                        artifact_ref: homeboy_runner_contract::RunnerArtifactRef {
+                            artifact_id: path.rsplit('/').next().unwrap_or_default().to_string(),
+                            name: Some("patch".to_string()),
+                            path: Some(path.to_string()),
+                            url: None,
+                            mime: Some("text/x-patch".to_string()),
+                            size_bytes: Some(self.bytes.len() as u64),
+                            sha256: Some(format!("{:x}", sha2::Sha256::digest(&self.bytes))),
+                            transport: Some("test".to_string()),
+                        },
+                    },
+                )
+            }
+        }
+        homeboy_core::observation::runs_service::register_runner_evidence_provider(Box::new(
+            PhysicalIdFetch {
+                physical_ref: physical_ref.clone(),
+                bytes: patch.to_vec(),
+            },
+        ));
+
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.status = AgentTaskAggregateStatus::PartialRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].artifacts.push(AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: None,
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(patch.len() as u64),
+            sha256: Some(sha256.clone()),
+            metadata: json!({
+                "executor_artifact_finalized": true,
+                "source_provenance": { "runner_id": "homeboy-lab" }
+            }),
+        });
+        record_runner_job_identity(run_id, "homeboy-lab", "job-1").expect("runner setup");
+        record_run_aggregate(run_id, &plan, &aggregate).expect("recover historical alias");
+
+        let evidence = observation
+            .get_artifact(&persisted_id)
+            .expect("read evidence")
+            .expect("historical alias preserved");
+        assert_eq!(evidence.artifact_type, "remote_file");
+        assert_eq!(evidence.path, logical_ref);
+        let projection = observation
+            .list_artifacts(run_id)
+            .expect("projections")
+            .into_iter()
+            .find(|artifact| {
+                artifact.artifact_type == "file"
+                    && artifact.metadata_json["agent_task"]["projection"] == "runner_mirrored"
+            })
+            .expect("controller-owned projection");
+        assert_ne!(projection.id, persisted_id);
+        assert_eq!(
+            std::fs::read(&projection.path).expect("projection bytes"),
+            patch
+        );
+        assert_eq!(projection.sha256.as_deref(), Some(sha256.as_str()));
+        let lifecycle_store =
+            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let (record, loaded) = lifecycle_store
+            .read_record_with_aggregate_bounded(run_id)
+            .expect("bounded read");
+        assert_eq!(
+            terminal_artifact_projection_readiness_for_observation_readonly_in_store(
+                &lifecycle_store,
+                &record,
+                loaded.as_ref(),
+            )
+            .expect("readonly preflight"),
+            None
         );
     });
 }
