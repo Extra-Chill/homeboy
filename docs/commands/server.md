@@ -72,7 +72,12 @@ Deletion is safety-checked:
 
 ```sh
 homeboy server list
+homeboy server list --full
 ```
+
+The default keeps `entities` as a bounded summary of `id`, `host`, `port`, `user`, and `kind`. Runner PATH, settings, environment, and resources are omitted. `output_budget` uses the shared collection budget; `continue_command` is `homeboy server list --full`.
+
+`homeboy server show <id>` and `homeboy server list --full` return the complete redacted server record. Sensitive environment values stay `[redacted]`.
 
 ### `connect`
 
@@ -121,7 +126,7 @@ Top-level fields:
 - `command`: action identifier (examples: `server.create`, `server.key.generate`)
 - `server_id`: present for single-server actions
 - `server`: server configuration (where applicable)
-- `servers`: list for `list`
+- `entities`: `list` rows. The default is the bounded summary; `--full` returns complete redacted server records
 - `updated`: list of updated field names (values are command-specific)
 - `deleted`: list of deleted IDs
 - `key`: object for key actions
