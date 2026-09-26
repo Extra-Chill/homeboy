@@ -2103,17 +2103,6 @@ fn lost_local_session_refuses_unreachable_daemon_with_active_jobs() {
 }
 
 #[test]
-fn orphan_adoption_command_carries_exact_lease_and_untracked_child_confirmation() {
-    let job_id =
-        uuid::Uuid::parse_str("fbac0390-dbb1-464b-8716-0894ccc05f2f").expect("valid job ID");
-    let command = remote_daemon_adopt_orphan_command("/opt/homeboy", "lease dead", &[job_id]);
-
-    assert!(command.contains("daemon adopt-orphan"));
-    assert!(command.contains("--lease-id 'lease dead'"));
-    assert!(command.contains("--confirm-untracked-child-dead fbac0390-dbb1-464b-8716-0894ccc05f2f"));
-}
-
-#[test]
 fn refuses_to_replace_proven_dead_daemon_with_active_jobs_when_lease_mismatches() {
     let session = direct_ssh_session("lease-recorded");
     let status = remote_daemon_status_for_test_with_reason(

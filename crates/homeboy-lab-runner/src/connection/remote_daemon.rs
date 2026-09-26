@@ -2346,18 +2346,6 @@ fn remote_daemon_adopt_orphan(
     })
 }
 
-pub(super) fn remote_daemon_adopt_orphan_command(
-    homeboy: &str,
-    lease_id: &str,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-) -> String {
-    format!(
-        "{} {}",
-        shell::quote_arg(homeboy),
-        remote_daemon_adopt_orphan_args(lease_id, confirmed_no_pid_job_ids),
-    )
-}
-
 fn remote_daemon_adopt_orphan_args(
     lease_id: &str,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
