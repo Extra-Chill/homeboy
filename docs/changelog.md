@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.391.3] - 2026-09-26
+
+### Changed
+- remove unused orphan adoption wrapper
+
+### Fixed
+- start installed daemon after binary swap
+- bound default server list output
+- classify unreachable SSH transport
+- resolve runner patch artifacts by persisted id
+
 ## [0.391.2] - 2026-09-25
 
 ### Fixed
