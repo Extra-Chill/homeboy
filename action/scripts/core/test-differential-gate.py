@@ -116,6 +116,86 @@ def main() -> None:
             "missing metric files are inconclusive",
         )
 
+        # The candidate's own lint already compared the changed files against
+        # the merge base (`baseline_provenance.compared`, `resolution: git_base`).
+        # When the action's separate baseline run measures nothing (it linted
+        # zero files), that compared evidence decides: new findings still fail
+        # instead of degrading to warn-only `inconclusive`.
+        # See Extra-Chill/homeboy-action#509.
+        lint_dir = root / "lint"
+        lint_current = lint_dir / "current"
+        lint_base = lint_dir / "base"
+        lint_current.mkdir(parents=True)
+        lint_base.mkdir(parents=True)
+        compared = {
+            "base_ref": "e54332ba",
+            "compared": True,
+            "resolution": "git_base",
+            "scope": "changed",
+            "files": ["includes/a.php"],
+        }
+        write_json(
+            lint_current / "review-lint.json",
+            {
+                "success": False,
+                "status": "failed",
+                "data": {
+                    "status": "failed",
+                    "findings": [{"id": "alignment"}],
+                    "baseline_comparison": {"drift_increased": True, "delta": 1, "new_items": [{"fingerprint": "e28e568c"}]},
+                    "baseline_provenance": compared,
+                },
+            },
+        )
+        write_json(
+            lint_base / "review-lint.json",
+            {"success": True, "status": "succeeded", "data": {"status": "passed", "hints": ["Lint ran no scopes: 8 changed file(s) were considered"]}},
+        )
+        write_json(lint_base / "baseline-status.json", {"review lint": {"status": "pass", "exit_code": 0, "structured_output": True}})
+        assert_equal(
+            {"review lint": "fail"},
+            run_gate({"review lint": "fail"}, lint_current, lint_base),
+            "new findings proven by the candidate's own compared baseline still fail when the external baseline measured nothing",
+        )
+
+        write_json(
+            lint_current / "review-lint.json",
+            {
+                "success": False,
+                "status": "failed",
+                "data": {
+                    "status": "failed",
+                    "findings": [{"id": "pre-existing"}],
+                    "baseline_comparison": {"drift_increased": False, "delta": 0, "new_items": []},
+                    "baseline_provenance": compared,
+                },
+            },
+        )
+        assert_equal(
+            {"review lint": "baseline_red"},
+            run_gate({"review lint": "fail"}, lint_current, lint_base),
+            "findings the candidate's compared baseline shows as pre-existing are baseline_red",
+        )
+
+        write_json(
+            lint_current / "review-lint.json",
+            {
+                "success": False,
+                "status": "failed",
+                "data": {
+                    "status": "failed",
+                    "findings": [{"id": "alignment"}],
+                    "baseline_comparison": {"drift_increased": True, "delta": 1, "new_items": [{"fingerprint": "e28e568c"}]},
+                    "baseline_provenance": {**compared, "compared": False},
+                },
+            },
+        )
+        assert_equal(
+            {"review lint": "inconclusive"},
+            run_gate({"review lint": "fail"}, lint_current, lint_base),
+            "an uncompared candidate baseline does not decide the verdict",
+        )
+
     print("All differential gate checks passed.")
 
 

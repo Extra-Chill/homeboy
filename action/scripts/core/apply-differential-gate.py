@@ -163,6 +163,25 @@ def metric_for(command: str, directory: str) -> tuple[int | None, str | None]:
     return (value, TOTAL) if value is not None else (None, None)
 
 
+def compared_baseline_drift(command: str, directory: str) -> bool | None:
+    """Whether the command's own merge-base comparison found new findings.
+
+    `homeboy review lint --changed-since` lints the changed files at the merge
+    base itself and records the result as `baseline_comparison` with
+    `baseline_provenance.compared`. That is a complete differential measurement
+    of this change, so it can decide the verdict when the action's separate
+    baseline run produced no measurement. Returns None when no compared
+    baseline is present.
+    """
+    data = unwrap(read_json(os.path.join(directory, f"{output_stem(command)}.json")))
+    comparison = data.get("baseline_comparison")
+    provenance = data.get("baseline_provenance")
+    if not isinstance(comparison, dict) or not isinstance(provenance, dict) or provenance.get("compared") is not True:
+        return None
+    drift = comparison.get("drift_increased")
+    return drift if isinstance(drift, bool) else None
+
+
 def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
     status = read_json(os.path.join(base_dir, "baseline-status.json"))
     if not isinstance(status, dict):
@@ -539,6 +558,24 @@ def main() -> int:
                 file=sys.stderr,
             )
             continue
+
+        if base is None:
+            drift = compared_baseline_drift(command, current_dir)
+            if drift is True:
+                print(
+                    f"::error::Differential gate rejected {command}: the baseline run produced no "
+                    f"measurement, but the command's own merge-base comparison found new findings.",
+                    file=sys.stderr,
+                )
+                continue
+            if drift is False:
+                adjusted[command] = "baseline_red"
+                print(
+                    f"::warning::Differential gate marked {command} baseline_red: the command's own "
+                    f"merge-base comparison found no new findings; every finding is pre-existing.",
+                    file=sys.stderr,
+                )
+                continue
 
         if current is None or base is None:
             adjusted[command] = "inconclusive"
