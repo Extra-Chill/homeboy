@@ -85,14 +85,33 @@ async function openCodeProviderCapacity(provider, options = {}) {
 
 async function accountCapacity(source, provider, account, now, options) {
 	if (account.expires && account.expires <= now) {
-		// Refreshing would rotate a token another tool owns; report it instead.
-		return { account: account.label, state: 'credential_expired' };
+		// OAuth access tokens live for hours and only the active pool account
+		// is refreshed on use, so an idle but healthy account reads as expired
+		// here within hours. Without refreshing it, this lookup cannot tell
+		// idle from revoked, and refreshing would spend a single-use refresh
+		// token that the auth plugin owning this pool must rotate under its
+		// own lock. Report the account as unverified with the timestamps an
+		// operator needs to judge staleness, never as dead.
+		return unverifiedAccount(provider, account, now);
 	}
 	const [label, usage] = await Promise.all([
 		accountLabel(source, account, options),
 		accountUsage(source, provider, account, options),
 	]);
 	return { account: label, ...usage };
+}
+
+function unverifiedAccount(provider, account, now) {
+	const result = {
+		account: account.label,
+		state: 'unverified',
+		reason: 'access_token_expired',
+		token_expired_at: isoTime(account.expires),
+	};
+	if (account.lastUsed) result.last_used_at = isoTime(account.lastUsed);
+	const hours = Math.floor((now - account.expires) / 3_600_000);
+	result.diagnostic = `${provider} access token expired ${hours >= 48 ? `${Math.floor(hours / 24)}d` : `${hours}h`} ago; not probed, because renewing it would spend a single-use grant owned by the auth plugin. The account may be idle or revoked`;
+	return result;
 }
 
 async function accountLabel(source, account, options) {
@@ -297,7 +316,7 @@ function windowName(seconds) {
 
 /**
  * Every connected account for a provider, as `{ label, credential,
- * accountId?, expires? }`. Labels never contain credentials.
+ * accountId?, expires?, lastUsed? }`. Labels never contain credentials.
  */
 function providerAccounts(provider, env, fileSystem) {
 	const storePath = authStorePath(env);
@@ -323,12 +342,14 @@ function providerAccounts(provider, env, fileSystem) {
 function oauthAccount(entry, label, named = false) {
 	if (entry?.type !== 'oauth' || typeof entry.access !== 'string' || !entry.access) return null;
 	const expires = Number(entry.expires);
+	const lastUsed = Number(entry.lastUsed);
 	return {
 		label: String(label),
 		named,
 		credential: entry.access,
 		...(typeof entry.accountId === 'string' && entry.accountId ? { accountId: entry.accountId } : {}),
 		...(Number.isFinite(expires) && expires > 0 ? { expires } : {}),
+		...(Number.isFinite(lastUsed) && lastUsed > 0 ? { lastUsed } : {}),
 	};
 }
 

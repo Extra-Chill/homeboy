@@ -204,7 +204,7 @@ async function poolTests() {
 	// Four Claude plans plus a stale login: three spent for the week, one healthy.
 	const env = dataHome({ anthropic: oauth('active') }, {
 		anthropic: [
-			oauth('stale', { expires: NOW - 1, email: 'old@example.com' }),
+			oauth('stale', { expires: NOW - 3 * 86_400_000, lastUsed: NOW - 3 * 86_400_000 - 1_800_000, email: 'old@example.com' }),
 			oauth('plan-a'),
 			oauth('plan-b'),
 			oauth('plan-c'),
@@ -232,12 +232,19 @@ async function poolTests() {
 	});
 	assert.equal(calls.length, 4, 'expired pooled credentials are reported without a request');
 	assert.deepEqual(pool.accounts.map((account) => [account.account, account.state]), [
-		['old@example.com', 'credential_expired'],
+		['old@example.com', 'unverified'],
 		['anthropic#1', 'exhausted'],
 		['plan-b@example.com', 'exhausted'],
 		['anthropic#3', 'exhausted'],
 		['anthropic#4', 'available'],
 	]);
+	// An expired access token on an idle pool account is not evidence the
+	// account is dead: it is reported as unverified with staleness facts.
+	assert.equal(pool.accounts[0].reason, 'access_token_expired');
+	assert.equal(pool.accounts[0].token_expired_at, new Date(NOW - 3 * 86_400_000).toISOString());
+	assert.equal(pool.accounts[0].last_used_at, new Date(NOW - 3 * 86_400_000 - 1_800_000).toISOString());
+	assert.match(pool.accounts[0].diagnostic, /expired 3d ago; not probed/);
+	assert.ok(!('credential' in pool.accounts[0]) && !JSON.stringify(pool.accounts[0]).includes('stale'), 'unverified report never carries the credential');
 	assert.equal(pool.accounts[1].reset_at, '2026-09-25T03:00:00.000Z');
 	assert.equal(pool.exhausted, false);
 	assert.equal(pool.scope, 'opencode:anthropic');

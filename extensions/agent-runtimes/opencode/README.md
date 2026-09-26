@@ -72,14 +72,21 @@ contract:
   account in it is checked. Without a pool, the single `auth.json` entry is
   checked.
 - **Per-account results:** `capacity.accounts` reports each account as
-  `available`, `exhausted`, `credential_expired`, `credential_rejected`, or
+  `available`, `exhausted`, `unverified`, `credential_rejected`, or
   `lookup_failed`, along with its windows and reset time. Each account is
   labeled by its stored email. For Anthropic accounts stored without an email,
   the label comes from the OAuth profile endpoint
   (`api.anthropic.com/api/oauth/profile`), so an operator knows which login to
-  sign in to, for example to use a banked reset. Expired access tokens
-  are reported and never refreshed, because the plugin that owns them rotates
-  them.
+  sign in to, for example to use a banked reset.
+- **Idle pool accounts:** OAuth access tokens expire within hours, and only the
+  active pool account is refreshed on use, so idle healthy accounts routinely
+  carry an expired access token. Such an account is reported as `unverified`
+  with `reason: "access_token_expired"`, `token_expired_at`, `last_used_at`
+  (when the pool records it), and a diagnostic. It is never refreshed or
+  requested: refresh tokens are single-use and belong to the auth plugin that
+  rotates the pool, under its own lock. `unverified` means "not measured", not
+  "dead"; `credential_rejected` is the state that means the provider refused
+  the credential.
 - **Route capacity:** `capacity` is
   `{ remaining, limit: 100, unit: "percent", reset_at }` for the pool, taken
   from the available account with the most capacity left. When every account
