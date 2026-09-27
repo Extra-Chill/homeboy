@@ -104,6 +104,12 @@ pub struct ScopeConfig {
     pub deploy: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<CommandScopeConfig>,
+    /// Package completeness only: which tracked runtime files the release
+    /// archive must contain. Unlike `release`, this never affects which commits
+    /// count as releasable, so a source tree that ships as a compiled build
+    /// output can be excluded here without hiding its changes from releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<CommandScopeConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fleet: Option<CommandScopeConfig>,
 }
