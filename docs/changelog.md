@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.391.4] - 2026-09-27
+
+### Fixed
+- align Lab admission with ready runner evidence
+- explain route-less notification handoff
+- select compatible OAuth account defaults
+- bound exact tracker activity lookups
+
 ## [0.391.3] - 2026-09-26
 
 ### Changed
