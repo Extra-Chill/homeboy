@@ -371,10 +371,30 @@ pub fn handle_with_jobs_and_runner<R>(
 where
     R: AnalysisJobRunner,
 {
+    handle_with_jobs_runner_and_context(
+        request,
+        job_store,
+        analysis_runner,
+        &crate::control_plane::ControlPlaneInvocationContext::default(),
+    )
+}
+
+/// Execute a routed HTTP API request with the caller's control-plane services.
+/// Daemon connections pass their job service so loop status and stop do not
+/// open a second transport back into the same process.
+pub fn handle_with_jobs_runner_and_context<R>(
+    request: HttpApiRequest,
+    job_store: &JobStore,
+    analysis_runner: R,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
+) -> Result<HttpApiResponse>
+where
+    R: AnalysisJobRunner,
+{
     let endpoint = route(request.method, &request.path)?;
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
-            return control_plane_run_response(endpoint.clone(), id);
+            return control_plane_run_response(endpoint.clone(), id, context);
         }
         HttpEndpoint::ControlPlaneRunReferences { id, reference_type } => {
             return control_plane_references_response(endpoint.clone(), id, *reference_type);
@@ -482,7 +502,12 @@ where
             return control_plane_capabilities_response();
         }
         HttpEndpoint::ControlPlaneRunActions { id } => {
-            return control_plane_action_response(endpoint.clone(), id, request.body.as_ref());
+            return control_plane_action_response(
+                endpoint.clone(),
+                id,
+                request.body.as_ref(),
+                context,
+            );
         }
         HttpEndpoint::ResourceTopology { root } => {
             return topology_response(endpoint.clone(), root.clone());
@@ -1132,8 +1157,12 @@ fn control_plane_submission_response(
     }
 }
 
-fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
-    match control_plane_run(run_id) {
+fn control_plane_run_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
+) -> Result<HttpApiResponse> {
+    match control_plane_run(run_id, context) {
         Ok(resource) => control_plane_ok(endpoint, resource),
         Err(error) => control_plane_err(endpoint, error),
     }
@@ -1211,6 +1240,7 @@ fn control_plane_action_response(
     endpoint: HttpEndpoint,
     run_id: &str,
     body: Option<&Value>,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
 ) -> Result<HttpApiResponse> {
     let result = body
         .cloned()
@@ -1230,13 +1260,8 @@ fn control_plane_action_response(
             })
         })
         .and_then(|request| {
-            control_plane_run_id(run_id).and_then(|run_id| {
-                crate::control_plane::execute_action(
-                    &run_id,
-                    &request,
-                    &crate::control_plane::ControlPlaneInvocationContext::default(),
-                )
-            })
+            control_plane_run_id(run_id)
+                .and_then(|run_id| crate::control_plane::execute_action(&run_id, &request, context))
         });
     match result {
         Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),
@@ -1246,12 +1271,13 @@ fn control_plane_action_response(
 
 fn control_plane_run(
     run_id: &str,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
 ) -> std::result::Result<
     homeboy_control_plane_contract::ControlPlaneRun,
     homeboy_control_plane_contract::ControlPlaneError,
 > {
     let run_id = control_plane_run_id(run_id)?;
-    crate::control_plane::run(&run_id)
+    crate::control_plane::run_with_context(&run_id, context)
 }
 
 fn control_plane_run_id(

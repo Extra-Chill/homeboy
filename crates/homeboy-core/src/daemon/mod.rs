@@ -7129,7 +7129,10 @@ fn route_read_only_api(
         }
     }
 
-    match http_api::handle_with_jobs_and_runner(
+    let context = crate::control_plane::ControlPlaneInvocationContext {
+        daemon: Some(DaemonControllerJobService::new(job_store.clone())),
+    };
+    match http_api::handle_with_jobs_runner_and_context(
         http_api::HttpApiRequest {
             method,
             path: path.to_string(),
@@ -7137,6 +7140,7 @@ fn route_read_only_api(
         },
         job_store,
         analysis_runner,
+        &context,
     ) {
         Ok(response) => HttpResponse {
             status_code: response.status,
