@@ -875,6 +875,89 @@ fn preflight_agent_task_runner_secret_env_accepts_runner_ref() {
 }
 
 #[test]
+fn preflight_checks_effective_provider_plan_names_not_only_cli_task_names() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "effective-provider-plan",
+            "tasks": [{
+                "schema": "homeboy/agent-task-request/v1",
+                "task_id": "effective-route",
+                "executor": { "backend": "opencode" },
+                "instructions": "Use the effective provider route."
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write plan");
+
+    let args = run_plan_args(&plan_path);
+    let secret_env_plan =
+        SecretEnvPlan::from_secret_env_names(["EFFECTIVE_PROVIDER_RUNNER_SECRET_TEST".to_string()]);
+    let err = preflight_agent_task_runner_secret_env_plan(
+        "lab-a",
+        &fixture_runner(HashMap::new()),
+        &args,
+        &HashMap::new(),
+        &secret_env_plan,
+    )
+    .expect_err("a missing effective-route identity must refuse before staging");
+
+    assert!(err
+        .message
+        .contains("EFFECTIVE_PROVIDER_RUNNER_SECRET_TEST"));
+    assert!(err.details["tried"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item
+            .as_str()
+            .is_some_and(|text| text.contains("secret_env references")))));
+}
+
+#[test]
+fn preflight_accepts_present_effective_provider_plan_name() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let plan_path = temp.path().join("plan.json");
+    std::fs::write(
+        &plan_path,
+        serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "effective-provider-plan",
+            "tasks": [{
+                "schema": "homeboy/agent-task-request/v1",
+                "task_id": "effective-route",
+                "executor": { "backend": "opencode" },
+                "instructions": "Use the effective provider route."
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write plan");
+    let name = "EFFECTIVE_PROVIDER_RUNNER_SECRET_TEST";
+    let args = run_plan_args(&plan_path);
+    let secret_env_plan = SecretEnvPlan::from_secret_env_names([name.to_string()]);
+    let runner = fixture_runner(HashMap::from([(
+        name.to_string(),
+        RunnerSecretEnvRef {
+            env: Some(name.to_string()),
+            file: None,
+            secret: None,
+        },
+    )]));
+
+    preflight_agent_task_runner_secret_env_plan(
+        "lab-a",
+        &runner,
+        &args,
+        &HashMap::new(),
+        &secret_env_plan,
+    )
+    .expect("the runner-owned effective identity should admit");
+}
+
+#[test]
 fn preflight_agent_task_runner_secret_env_accepts_request_env() {
     let temp = tempfile::tempdir().expect("tempdir");
     let plan_path = temp.path().join("plan.json");
