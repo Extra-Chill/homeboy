@@ -129,6 +129,13 @@ pub fn publish_subtree(
                 "tag-only".to_string()
             } else if remote_tree == split_tree {
                 "already-identical".to_string()
+            } else if destination_matches_later_source_tree(
+                &repo_root,
+                &config.prefix,
+                &source_commit,
+                &remote_tree,
+            )? {
+                "already-contained".to_string()
             } else if is_ancestor(&repo_root, commit, &split_commit)? {
                 "update".to_string()
             } else {
@@ -136,6 +143,7 @@ pub fn publish_subtree(
                     "branch",
                     &config.branch,
                     commit,
+                    &split_commit,
                     &remote_tree,
                     &split_tree,
                 ));
@@ -246,6 +254,38 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+fn destination_matches_later_source_tree(
+    repo: &Path,
+    prefix: &str,
+    source_commit: &str,
+    destination_tree: &str,
+) -> Result<bool> {
+    let commits = run(
+        repo,
+        &[
+            "log",
+            "--all",
+            "--ancestry-path",
+            "--format=%H",
+            &format!("{source_commit}.."),
+        ],
+        "inspect later subtree source history",
+    )?;
+    for commit in commits.lines() {
+        let Ok(tree) = run(
+            repo,
+            &["rev-parse", &format!("{commit}:{prefix}")],
+            "resolve later source subtree tree",
+        ) else {
+            continue;
+        };
+        if tree.trim() == destination_tree {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 struct RemoteRefs {
     branch: Option<String>,
     tag: Option<String>,
@@ -333,10 +373,17 @@ fn validate_config(config: &SubtreePublicationConfig) -> Result<()> {
     Ok(())
 }
 
-fn conflict(kind: &str, name: &str, commit: &str, actual_tree: &str, expected_tree: &str) -> Error {
+fn conflict(
+    kind: &str,
+    name: &str,
+    commit: &str,
+    expected_commit: &str,
+    actual_tree: &str,
+    expected_tree: &str,
+) -> Error {
     Error::validation_invalid_argument(
         "subtree",
-        format!("Subtree {kind} {name} conflicts: {commit} has tree {actual_tree}, expected {expected_tree}; refusing force push"),
+        format!("Subtree {kind} {name} conflicts: destination {commit} (tree {actual_tree}) and split {expected_commit} (tree {expected_tree}) diverge; refusing force push"),
         None,
         None,
     )
@@ -476,7 +523,7 @@ mod tests {
             tag: false,
             ..Default::default()
         };
-        publish_subtree(root.path(), &config, "v1", None, false).unwrap();
+        let published = publish_subtree(root.path(), &config, "v1", None, false).unwrap();
         let other = tempfile::tempdir().unwrap();
         git(
             other.path(),
@@ -491,10 +538,18 @@ mod tests {
         let error = publish_subtree(root.path(), &config, "v1", None, false)
             .expect_err("different destination tree must be rejected");
         assert!(error.message.contains("refusing force push"));
+        assert!(error.message.contains(&published.split_commit));
+        let destination = run(
+            remote.path(),
+            &["rev-parse", "refs/heads/main"],
+            "resolve destination",
+        )
+        .unwrap();
+        assert!(error.message.contains(destination.trim()));
     }
 
     #[test]
-    fn successive_releases_fast_forward_and_old_tag_replay_conflicts() {
+    fn successive_releases_fast_forward_and_old_split_replay_is_noop() {
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
@@ -536,8 +591,43 @@ mod tests {
         assert_eq!(tag_only_replay.branch_action, "tag-only");
 
         let replay = publish_subtree(root.path(), &config, "source-v1", Some("1.0.0"), false)
-            .expect_err("replaying an old split against a newer branch must conflict");
-        assert!(replay.message.contains("refusing force push"));
+            .expect("replaying an old split contained in the branch is a no-op");
+        assert_eq!(replay.branch_action, "already-contained");
+    }
+
+    #[test]
+    fn replay_is_noop_when_destination_tree_matches_later_source_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        git(root.path(), &["config", "user.email", "test@example.com"]);
+        git(root.path(), &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(root.path().join("pkg")).unwrap();
+        std::fs::write(root.path().join("pkg/file"), "first").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-qm", "source one"]);
+        let first_source =
+            run(root.path(), &["rev-parse", "HEAD"], "resolve first source").unwrap();
+        let config = SubtreePublicationConfig {
+            prefix: "pkg".into(),
+            remote: remote.path().display().to_string(),
+            branch: "main".into(),
+            tag: false,
+            ..Default::default()
+        };
+        let first =
+            publish_subtree(root.path(), &config, first_source.trim(), None, false).unwrap();
+
+        std::fs::write(root.path().join("pkg/file"), "later").unwrap();
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-qm", "source two"]);
+        publish_subtree(root.path(), &config, "HEAD", None, false).unwrap();
+
+        let replay = publish_subtree(root.path(), &config, first_source.trim(), None, false)
+            .expect("older source split replay should be a no-op");
+        assert_eq!(replay.split_commit, first.split_commit);
+        assert_eq!(replay.branch_action, "already-contained");
     }
 
     #[test]
