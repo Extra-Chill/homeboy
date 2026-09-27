@@ -427,6 +427,12 @@ fn declared_output_checks(
                 deps::DependencyInstallOutputKind::Directory => "-d",
             };
             checks.push(format!("test {predicate} {}", shell::quote_arg(&path)));
+            // An existing but empty dependency directory is not evidence of
+            // an installed dependency tree (prepared-source snapshots can
+            // retain the directory while excluding its contents).
+            if output.kind == deps::DependencyInstallOutputKind::Directory {
+                checks.push(format!("test -n \"$(ls -A {})\"", shell::quote_arg(&path)));
+            }
         }
     }
     Ok(checks)
@@ -1182,6 +1188,49 @@ mod tests {
             assert_eq!(second.status, "reused_prepared_cache");
             assert_eq!(
                 std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm run count"),
+                "x"
+            );
+        });
+    }
+
+    #[test]
+    fn prepared_source_with_empty_node_modules_hydrates_before_reuse() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            write_detected_node_adapter(home.path());
+            let path_guard = FakeBinGuard::install(
+                "npm",
+                "#!/bin/sh\nmkdir -p node_modules/example\nprintf installed > node_modules/example/index.js\nprintf x >> npm-runs\n",
+            );
+            crate::create(
+                &path_guard.local_runner_spec("lab-empty-node-modules"),
+                false,
+            )
+            .expect("create local runner");
+            let project = tempfile::tempdir().expect("controller project");
+            std::fs::write(project.path().join("package.json"), "{}").expect("package manifest");
+            std::fs::write(project.path().join("package-lock.json"), "{}").expect("lockfile");
+            let remote = tempfile::tempdir().expect("runner workspace");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("prepared marker");
+            std::fs::create_dir(remote.path().join("node_modules"))
+                .expect("empty excluded dependency directory");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-empty-node-modules",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("empty prepared dependency output triggers hydration");
+
+            assert_eq!(output.status, "hydrated");
+            assert_eq!(output.steps[0].provider_id, "npm");
+            assert!(remote
+                .path()
+                .join("node_modules/example/index.js")
+                .is_file());
+            assert_eq!(
+                std::fs::read_to_string(remote.path().join("npm-runs")).expect("npm ran"),
                 "x"
             );
         });
