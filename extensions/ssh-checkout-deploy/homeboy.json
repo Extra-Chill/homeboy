@@ -1,0 +1,10 @@
+{
+  "id": "ssh-checkout-deploy",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "ssh-checkout-deploy.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ]
+}

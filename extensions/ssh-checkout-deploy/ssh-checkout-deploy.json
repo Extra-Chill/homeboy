@@ -1,0 +1,53 @@
+{
+  "name": "SSH Checkout Deploy",
+  "id": "ssh-checkout-deploy",
+  "version": "0.1.0",
+  "icon": "server",
+  "description": "Deploy an exact commit through a remote checkout's own deploy command",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": [
+      "json",
+      "mjs"
+    ]
+  },
+  "cli": {
+    "tool": "ssh-checkout-deploy",
+    "display_name": "SSH checkout deploy",
+    "command_template": "{{cliPath}} {{extension_path}}/scripts/ssh-checkout-deploy.mjs {{args}}",
+    "default_cli_path": "node"
+  },
+  "executable": {
+    "runtime": {
+      "run_command": "node {{extension_path}}/scripts/ssh-checkout-deploy.mjs {{args}}"
+    }
+  },
+  "deployment_providers": [
+    {
+      "schema": "homeboy/ssh-checkout-deploy-command/v1",
+      "id": "ssh-checkout-deploy.deploy",
+      "label": "Deploy an exact commit through a remote checkout's deploy command",
+      "command": "node {{extension_path}}/scripts/ssh-checkout-deploy.mjs --contract {{payload.contract}}",
+      "dry_run_command": "node {{extension_path}}/scripts/ssh-checkout-deploy.mjs --dry-run --contract {{payload.contract}}",
+      "contract": {
+        "input_schema": "homeboy/deployment-provider-payload/v1",
+        "result_schema": "homeboy/ssh-checkout-deploy-result/v1",
+        "owns_provider_lifecycle": true,
+        "secret_values_in_argv_or_artifacts": false,
+        "requires_clean_immutable_source": true
+      },
+      "layered_input": {
+        "schema": "homeboy/deployment-provider-payload/v1",
+        "target_required": true,
+        "result_schema": "homeboy/ssh-checkout-deploy-result/v1"
+      },
+      "capabilities": [
+        "preflight",
+        "branch-tip-freshness",
+        "remote-clean-checkout",
+        "shared-lock-retry",
+        "no-retry-after-lost-connection"
+      ]
+    }
+  ]
+}
