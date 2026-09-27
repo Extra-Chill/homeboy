@@ -236,6 +236,49 @@ pub fn admit_reconstructable_artifact_work(roots: Vec<PathBuf>) -> Result<()> {
     admit_reconstructable_artifact_work_in_root(&data_root, roots)
 }
 
+/// Read-only counterpart to worktree capacity admission, using the same probe
+/// and configured reserve as the admission path.
+pub fn reconstructable_artifact_capacity_preview(root: &Path) -> serde_json::Value {
+    let retention = crate::defaults::load_config().retention;
+    let probe_root = capacity_probe_root(root);
+    let budget = disk_budget(
+        &probe_root,
+        "managed worktree",
+        "worktree capacity is not measurable on this platform",
+    );
+    let reserve_bytes = crate::capacity::filesystem_relative_reserve_bytes(
+        retention.reconstructable_artifact_reserve_bytes,
+        budget.total_bytes,
+    );
+    let available_bytes = budget.available_bytes;
+    let shortfall_bytes = available_bytes.map(|available| reserve_bytes.saturating_sub(available));
+    let state = match (available_bytes, shortfall_bytes) {
+        (Some(_), Some(0)) => "available",
+        (Some(_), Some(_)) => "shortfall",
+        _ => "unknown",
+    };
+    serde_json::json!({
+        "schema": "homeboy/worktree-capacity-preview/v1",
+        "state": state,
+        "path": root,
+        "probe_path": probe_root,
+        "available_bytes": available_bytes,
+        "reserved_bytes": reserve_bytes,
+        "shortfall_bytes": shortfall_bytes,
+    })
+}
+
+/// Use the target filesystem for missing worktrees by probing the nearest
+/// existing ancestor. Both preview and execution admission use this resolver.
+fn capacity_probe_root(path: &Path) -> PathBuf {
+    let mut root = path;
+    while !root.exists() {
+        let Some(parent) = root.parent() else { break };
+        root = parent;
+    }
+    root.to_path_buf()
+}
+
 /// [`admit_reconstructable_artifact_work`] against an explicitly injected data
 /// root, which is where the cross-process retention lock lives.
 pub fn admit_reconstructable_artifact_work_in_root(
@@ -254,7 +297,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
             let reserve = crate::capacity::filesystem_relative_reserve_bytes(
                 retention.reconstructable_artifact_reserve_bytes,
                 disk_budget(
-                    root,
+                    &capacity_probe_root(root),
                     "managed worktree",
                     "worktree capacity is not measurable on this platform",
                 )
@@ -285,7 +328,7 @@ pub fn admit_reconstructable_artifact_work_in_root(
 
     for (root, reserve_bytes) in pressured {
         let budget = disk_budget(
-            root,
+            &capacity_probe_root(root),
             "managed worktree",
             "worktree capacity is not measurable on this platform",
         );
@@ -366,7 +409,7 @@ fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn below_reconstructable_reserve(root: &Path, reserve_bytes: u64) -> bool {
     disk_budget(
-        root,
+        &capacity_probe_root(root),
         "managed worktree",
         "worktree capacity is not measurable on this platform",
     )
@@ -394,7 +437,6 @@ fn reconstructable_admission_error(
                     "--path",
                     repository_root.as_str(),
                     "--all-worktrees",
-                    "--merged-only",
                     "--sort",
                     "size",
                     "--limit",
@@ -404,7 +446,7 @@ fn reconstructable_admission_error(
             ),
             ExecutableAction::new(
                 "capacity.reserve.apply_repository_artifacts",
-                "remove approved artifacts from merged repository worktrees",
+                "remove Homeboy-managed reclaimable artifacts across repository worktrees",
                 "homeboy",
                 [
                     "cleanup",
