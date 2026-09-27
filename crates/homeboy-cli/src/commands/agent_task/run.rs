@@ -225,17 +225,18 @@ pub(crate) fn detached_cook_route_less_warning(
     let resolver = resolution
         .resolver_transport
         .as_deref()
-        .map(|transport| format!(" installed resolver transport {transport}"))
-        .unwrap_or_else(|| " no installed resolver transport matched".to_string());
-    let missing = (!resolution.missing_context.is_empty()).then(|| {
-        format!(
-            "; provide caller context: {}",
-            resolution.missing_context.join(", ")
-        )
-    });
+        .map(|transport| format!(" resolver transport `{transport}` was consulted"))
+        .unwrap_or_else(|| " no resolver supplied a route".to_string());
+    let missing = (!resolution.missing_context.is_empty())
+        .then(|| {
+            format!(
+                "; resolver-reported caller context missing: {}",
+                resolution.missing_context.join(", ")
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
-        "cook: detached notification route is route-less;{resolver}{missing}. Terminal updates will not return to the launching notification destination; inspect them with `homeboy agent-task status <cook-id>`",
-        missing = missing.unwrap_or_default(),
+        "cook: detached notification route is route-less;{resolver}{missing}. The Homeboy process can resolve only caller context available to its installed resolver; an active Discord thread is not inferred from extension readiness. To return terminal updates, invoke Cook with `--notification-transport <transport> --notification-route <route>` (or set `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE` in the Homeboy process environment); inspect this Cook with `homeboy agent-task status <cook-id>`",
     ))
 }
 
@@ -10584,10 +10585,22 @@ mod tests {
         let warning = detached_cook_route_less_warning(&resolution).expect("warning");
         assert!(warning.contains("generic.completed"));
         assert!(warning.contains("CALLER_THREAD_ID"));
+        assert!(warning.contains("active Discord thread is not inferred"));
+        assert!(
+            warning.contains("--notification-transport <transport> --notification-route <route>")
+        );
+        assert!(warning.contains("HOMEBOY_NOTIFICATION_TRANSPORT"));
         assert!(!warning.contains("opaque-destination"));
 
         resolution.classification = "resolver".to_string();
         assert!(detached_cook_route_less_warning(&resolution).is_none());
+
+        resolution.classification = "route_less".to_string();
+        resolution.resolver_transport = None;
+        resolution.missing_context.clear();
+        let warning = detached_cook_route_less_warning(&resolution).expect("warning");
+        assert!(warning.contains("no resolver supplied a route"));
+        assert!(!warning.contains("no installed resolver transport matched"));
     }
 
     #[test]
