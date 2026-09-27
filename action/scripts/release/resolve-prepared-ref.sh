@@ -50,10 +50,17 @@ if [ -z "${branch_sha}" ]; then
 fi
 
 if [ "${source_sha}" != "${branch_sha}" ]; then
-  echo "::error::prepared-ref '${prepared_ref}' resolved to ${source_sha}, but origin/${release_branch} is ${branch_sha}; refusing to release a stale prepared source."
-  exit 1
+  message="prepared-ref '${prepared_ref}' resolved to ${source_sha}, but origin/${release_branch} is ${branch_sha}; superseded by ${branch_sha}; next run will release."
+  echo "::notice::${message}"
+  echo "stale=true" >> "${GITHUB_OUTPUT}"
+  echo "### Release skipped: prepared source superseded" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  echo "${message}" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  exit 0
 fi
 
 echo "Resolved prepared-ref '${prepared_ref}' to ${source_sha} (current origin/${release_branch})."
-echo "source-sha=${source_sha}" >> "${GITHUB_OUTPUT}"
-echo "source-ref=${prepared_ref}" >> "${GITHUB_OUTPUT}"
+{
+  echo "source-sha=${source_sha}"
+  echo "source-ref=${prepared_ref}"
+  echo "stale=false"
+} >> "${GITHUB_OUTPUT}"

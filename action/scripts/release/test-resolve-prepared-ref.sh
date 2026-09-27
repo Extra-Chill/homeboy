@@ -30,14 +30,18 @@ git -C "${TMP_DIR}/work" add file
 git -C "${TMP_DIR}/work" commit -qm newer
 git -C "${TMP_DIR}/work" push -q origin HEAD:main
 
-if GITHUB_OUTPUT="${TMP_DIR}/stale-output" \
+if GITHUB_STEP_SUMMARY="${TMP_DIR}/stale-summary" GITHUB_OUTPUT="${TMP_DIR}/stale-output" \
   PREPARED_REF="${first_sha}" \
   RELEASE_BRANCH="main" \
-  bash -c "cd '${TMP_DIR}/work' && bash '${ROOT_DIR}/scripts/release/resolve-prepared-ref.sh'"; then
-  printf 'FAIL: stale prepared ref was accepted\n'
+  bash -c "cd '${TMP_DIR}/work' && bash '${ROOT_DIR}/scripts/release/resolve-prepared-ref.sh'" >"${TMP_DIR}/stale-log" 2>&1; then
+  grep -Fqx 'stale=true' "${TMP_DIR}/stale-output"
+  grep -Fq '::notice::' "${TMP_DIR}/stale-log"
+  grep -Fq "superseded by ${git_sha:-$(git -C "${TMP_DIR}/work" rev-parse HEAD)}; next run will release." "${TMP_DIR}/stale-summary"
+  printf 'PASS: stale prepared ref is a successful skip with summary notice\n'
+else
+  printf 'FAIL: stale prepared ref must be a successful skip\n'
   exit 1
 fi
-printf 'PASS: stale prepared ref is rejected\n'
 
 # Authenticated resolution over smart HTTP. GitHub's Git endpoint accepts
 # Basic credentials with an `x-access-token` username and rejects Bearer, so

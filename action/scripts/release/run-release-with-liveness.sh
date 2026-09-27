@@ -38,4 +38,17 @@ else
 fi
 echo "::endgroup::"
 
+if [ "${exit_code}" -ne 0 ] && [ "${phase}" = "release_execution" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### Release execution failed"
+    echo "- Step: ${label}"
+    printf '%s\n' "- Command: \`bash ${SCRIPT_DIR}/run-release.sh\`"
+    echo "- Exit code: ${exit_code}"
+    echo "- Last 40 log lines:"
+    echo '```text'
+    if [ -s "${log_file}" ]; then tail -n 40 "${log_file}"; else echo "(no command output)"; fi
+    echo '```'
+  } >> "${GITHUB_STEP_SUMMARY}"
+fi
+
 exit "${exit_code}"

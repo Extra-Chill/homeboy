@@ -250,7 +250,7 @@ jobs:
         run: bash .homeboy-action/scripts/release/resolve-prepared-ref.sh
 
       - name: Check out resolved prepared source revision
-        if: inputs.prepared-ref != ''
+        if: inputs.prepared-ref != '' && steps.source-sha.outputs.stale != 'true'
         uses: actions/checkout@v6
         with:
           ref: ${{ steps.source-sha.outputs.source-sha }}
@@ -267,6 +267,7 @@ jobs:
 
       - name: Dry-run release check
         id: release-check
+        if: steps.source-sha.outputs.stale != 'true'
         uses: ./.homeboy-action
         with:
           commands: release
@@ -298,6 +299,7 @@ jobs:
 
       - name: Decide whether to release
         id: check
+        if: steps.source-sha.outputs.stale != 'true'
         env:
           # A manual dispatch is an explicit human "retry this now" — it must
           # never be silently skipped by a stale failed-SHA marker. The marker
@@ -377,11 +379,13 @@ jobs:
       # Exclude it per-clone (never a tracked change) so the gate stays honest
       # about the consumer's own files.
       - name: Exclude nested action checkout from the working tree
+        if: steps.revalidate-source.outputs.stale != 'true'
         shell: bash
         run: echo '.homeboy-action/' >> .git/info/exclude
 
       - uses: ./.homeboy-action
         id: release
+        if: steps.revalidate-source.outputs.stale != 'true'
         with:
           commands: release
           config-dir: ${{ inputs.config-dir }}

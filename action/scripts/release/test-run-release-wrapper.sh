@@ -262,6 +262,7 @@ run_liveness_wrapper() {
   HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS="${HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS:-1}" \
   HOMEBOY_ACTION_PHASE_BUDGET_SECONDS="${HOMEBOY_ACTION_PHASE_BUDGET_SECONDS:-1}" \
   HOMEBOY_ACTION_PHASE_PROGRESS_FILE="${TEST_DIR}/phases.jsonl" \
+  GITHUB_STEP_SUMMARY="${TEST_DIR}/step-summary.md" \
   RUNNER_TEMP="${TEST_DIR}" \
   bash "${RUN_RELEASE_WITH_LIVENESS}"
 }
@@ -604,6 +605,7 @@ setup_fixture
 HOMEBOY_MOCK_SCENARIO="released"
 GH_TOKEN="secret123"
 EXECUTION_OUTPUT="$(run_liveness_wrapper 2>&1)"
+assert_contains 'Retained homeboy release execution log' "${EXECUTION_OUTPUT}" "release execution prints its retained log"
 if ! jq -e 'select(.phase == "release_execution" and .event == "completed" and .status == "completed" and .owner == "Homeboy release subsystem")' "${TEST_DIR}/phases.jsonl" >/dev/null; then
   printf 'FAIL: real release did not select the release_execution phase\n'
   exit 1
@@ -633,5 +635,22 @@ fi
 assert_contains 'homeboy release execution exceeded its 3s execution timeout' "${TIMEOUT_OUTPUT}" "release timeout has standard timeout classification"
 assert_contains 'Retained homeboy release execution log' "${TIMEOUT_OUTPUT}" "release timeout prints retained logs after cleanup"
 printf 'PASS: release liveness timeout cleans descendants without mutation\n'
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="step-failed"
+GH_TOKEN="secret123"
+set +e
+SUMMARY_FAILURE_OUTPUT="$(run_liveness_wrapper 2>&1)"
+SUMMARY_FAILURE_EXIT=$?
+set -e
+if [ "${SUMMARY_FAILURE_EXIT}" -eq 0 ]; then
+  printf 'FAIL: failed release unexpectedly passed through liveness wrapper\n'
+  exit 1
+fi
+SUMMARY="$(<"${TEST_DIR}/step-summary.md")"
+assert_contains 'Retained homeboy release execution log' "${SUMMARY_FAILURE_OUTPUT}" "failed release prints its retained log"
+assert_contains 'Release execution failed' "${SUMMARY}" "release failures persist in the step summary"
+assert_contains 'Exit code: 1' "${SUMMARY}" "release summary records the exit code"
+assert_contains 'gh-upload-failed' "${SUMMARY}" "release summary includes the final diagnostic lines"
 
 printf 'All run-release wrapper checks passed.\n'

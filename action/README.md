@@ -276,8 +276,12 @@ The check job resolves it to an immutable SHA, requires it to equal the current
 `release-branch` tip, and checks out that same SHA for the real release. This
 validation is repeated in the real release job immediately before the action
 starts, preventing a stale prepared commit from releasing over newer branch
-state. Pass a branch such as `prepared-ref: main` when sequential monorepo jobs
-need the newest branch tip after an earlier component release commit; the
+state. If the branch advances during preparation, the run now succeeds as a
+skip, writes a notice and job-summary reason naming the newer SHA, and leaves
+the next run to release it. A release execution failure also writes the step,
+command, exit code, and last 40 log lines to the job summary. Pass a branch such
+as `prepared-ref: main` when sequential monorepo jobs need the newest branch tip
+after an earlier component release commit; the
 workflow resolves that branch again and exposes `source-sha` plus
 `released-source-sha` for downstream callers. Empty `component` and
 `prepared-ref` preserve root-consumer behavior.
