@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::{
-    RollingDrainState, RunnerActiveJobState, RunnerDaemonGenerationStatus, RunnerSessionState,
-    RunnerStatusReport,
+    RollingDrainState, RunnerActiveJobState, RunnerDaemonGenerationStatus, RunnerExecMode,
+    RunnerSessionState, RunnerStatusReport,
 };
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::error::Error;
@@ -307,4 +307,134 @@ fn only_lease_mismatch_is_treated_as_authoritative() {
     assert!(!admission_readiness_failure_is_authoritative(
         &transport_drop_error()
     ));
+}
+
+fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput) {
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "homeboy-lab".to_string(),
+        mode: "select".to_string(),
+        source: None,
+        git_ref: None,
+        target_dir: None,
+        binary_path: "/runner/homeboy".to_string(),
+        script: "fixture".to_string(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+    let execution = RunnerExecOutput {
+        variant: "exec",
+        command: "runner.exec",
+        runner_id: "homeboy-lab".to_string(),
+        dry_run: false,
+        mode: RunnerExecMode::Daemon,
+        argv: Vec::new(),
+        remote_cwd: "/runner".to_string(),
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        source_snapshot: None,
+        job: None,
+        runner_job: None,
+        job_id: None,
+        job_events: None,
+        mirror_run_id: None,
+        patch: None,
+        mutation_artifacts: None,
+        artifacts: Vec::new(),
+        promoted_outputs: Vec::new(),
+        structured_summaries: Vec::new(),
+        metrics: None,
+        capture: None,
+        execution_record: None,
+        runner_result: None,
+        handoff: None,
+        diagnostics: None,
+    };
+    (plan, execution)
+}
+
+/// #15087: every named phase (materialize/select, promotion, disconnect,
+/// reconnect, daemon identity verification, admission readiness) can report
+/// `succeeded` while the runner's own admission postcondition still refuses
+/// to converge. That must never surface as `failure: None` alongside a
+/// non-zero exit — the exact "exited 1 without reporting a failure cause"
+/// this issue reported.
+#[test]
+fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
+    let (plan, execution) = unconverged_refresh_fixture();
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &readiness_report(freshness(
+            false,
+            Some(DaemonStaleReasonCode::VersionMismatch),
+        )),
+        &[generation("lease-new", true, 0)],
+        &[],
+    );
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
+
+    let failure = unconverged_refresh_failure(&plan, &execution, false, Some(&readiness))
+        .expect("a non-converged reconnect must carry a named failure cause");
+    let message = failure
+        .verification
+        .expect("unconverged failure carries a verification message");
+    assert!(
+        message.contains("did not converge"),
+        "failure must explain that the reconnect did not converge: {message}"
+    );
+    assert!(
+        message.contains("Blocked"),
+        "failure must name the readiness state that blocked convergence: {message}"
+    );
+}
+
+/// A converged reconnect (readiness `Ready`, or no reconnect at all) must
+/// never synthesize a failure — this exercises both branches side by side so
+/// a future edit cannot silently start reporting spurious failures on the
+/// success path.
+#[test]
+fn converged_or_absent_readiness_never_synthesizes_a_failure() {
+    let (plan, execution) = unconverged_refresh_fixture();
+    let ready = refresh_readiness_from_status(
+        "homeboy-lab",
+        &readiness_report(freshness(true, None)),
+        &[generation("lease-new", true, 0)],
+        &[],
+    );
+    assert_eq!(ready.state, HomeboyRefreshReadinessState::Ready);
+
+    assert!(unconverged_refresh_failure(&plan, &execution, true, Some(&ready)).is_none());
+    assert!(unconverged_refresh_failure(&plan, &execution, true, None).is_none());
+}
+
+/// The rendered message must be actionable on its own: name the admission
+/// state, whether jobs are accepted, daemon freshness, the exact owners
+/// fencing convergence, and the one command that resumes the lifecycle.
+#[test]
+fn unconverged_readiness_message_names_state_owners_and_next_action() {
+    let readiness = refresh_readiness_from_status(
+        "homeboy-lab",
+        &{
+            let mut report = readiness_report(freshness(true, None));
+            report.active_job_count = 1;
+            report
+        },
+        &[
+            generation("lease-old", false, 1),
+            generation("lease-new", true, 0),
+        ],
+        &[],
+    );
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
+
+    let message = unconverged_readiness_message("homeboy-lab", &readiness);
+    assert!(message.contains("homeboy-lab"));
+    assert!(message.contains("Draining"));
+    assert!(message.contains("accepting_jobs=false"));
+    assert!(message.contains("daemon_fresh=true"));
+    assert!(message.contains("lease-old"), "must name the fencing owner");
+    assert!(
+        message.contains("homeboy runner reconcile homeboy-lab"),
+        "must surface the exact continuation command"
+    );
 }

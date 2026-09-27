@@ -134,6 +134,58 @@ pub(super) fn command_output(
     }
 }
 
+/// #15087: `daemon_unleased_process_conflict` is the one classification a
+/// journaled `ensure-running` replacement must never replay again — the
+/// remote authoritatively refused the exact operation id, not a lost
+/// response. Every other shape (a different classification, a timeout, or a
+/// success envelope) must be left alone so a genuinely retryable failure
+/// keeps its replay authority.
+#[test]
+fn ensure_running_refusal_is_terminal_only_for_the_unleased_process_conflict_classification() {
+    let conflict = command_output(
+        false,
+        serde_json::json!({
+            "success": false,
+            "error": {
+                "code": "internal.unexpected",
+                "message": "daemon lease is absent or stale while foreground daemon candidates remain live",
+                "details": { "classification": "daemon_unleased_process_conflict" }
+            }
+        })
+        .to_string(),
+        false,
+    );
+    assert!(is_terminal_ensure_running_refusal(&conflict));
+
+    let bootstrap_failure = command_output(
+        false,
+        serde_json::json!({
+            "success": false,
+            "error": {
+                "code": "internal.unexpected",
+                "message": "transient SSH failure",
+                "details": { "classification": "daemon_bootstrap_failure" }
+            }
+        })
+        .to_string(),
+        false,
+    );
+    assert!(!is_terminal_ensure_running_refusal(&bootstrap_failure));
+
+    let timed_out = command_output(false, String::new(), true);
+    assert!(!is_terminal_ensure_running_refusal(&timed_out));
+
+    let success = command_output(
+        true,
+        serde_json::json!({ "success": true, "data": {} }).to_string(),
+        false,
+    );
+    assert!(!is_terminal_ensure_running_refusal(&success));
+
+    let unparseable = command_output(false, "not json", false);
+    assert!(!is_terminal_ensure_running_refusal(&unparseable));
+}
+
 #[test]
 fn ensure_running_failure_candidates_are_deduplicated_within_the_byte_budget() {
     let candidates = (0..20)
