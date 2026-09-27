@@ -3690,6 +3690,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &request.recipe.normalized_args,
             public_env,
         )?;
+        crate::lab::secrets::merge_agent_task_provider_secret_env(
+            &mut secret_handoff,
+            &request.durable_agent_task_plan,
+        );
         crate::lab::secrets::merge_managed_service_secret_env(
             &mut secret_handoff,
             Some(&request.durable_agent_task_plan),

@@ -503,7 +503,7 @@ pub(crate) fn route_after_parse_with_provenance(
     );
     // Lab routing carries the durable plan opaquely as JSON (core does not
     // depend on the agent-task subsystem); serialize the selected typed plan.
-    let durable_agent_task_plan = run_handoff
+    let durable_plan = run_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
         .or_else(|| {
@@ -516,7 +516,9 @@ pub(crate) fn route_after_parse_with_provenance(
             generic_detached_handoff
                 .as_ref()
                 .map(|handoff| &handoff.plan)
-        })
+        });
+    let durable_agent_task_plan = durable_plan
+        .as_ref()
         .map(|plan| {
             serde_json::to_value(plan).map_err(|error| {
                 Error::internal_json(
@@ -535,6 +537,15 @@ pub(crate) fn route_after_parse_with_provenance(
                 .filter(|handoff| handoff.replays_generic_command)
                 .map(|handoff| handoff.run_id.as_str())
         });
+
+    if let (Some(runner_id), Some(plan)) = (route_runner_id, durable_plan) {
+        if !homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+            let runner = homeboy::runner::load(runner_id)?;
+            homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(
+                runner_id, &runner, plan,
+            )?;
+        }
+    }
 
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
