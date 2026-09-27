@@ -5978,6 +5978,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cli_startup_registers_both_extension_audit_providers() {
+        const CHILD: &str = "HOMEBOY_AUDIT_STARTUP_PROVIDER_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "cli_startup_registers_both_extension_audit_providers",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("run startup provider assertions in an isolated test process");
+            assert!(
+                status.success(),
+                "isolated startup test exited with {status}"
+            );
+            return;
+        }
+
         crate::test_support::with_isolated_home(|home| {
             write_audit_extension(home.path());
 
