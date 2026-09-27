@@ -105,6 +105,18 @@ parameters:
         - */dist/*
         - */tools/*
         - */scoper.inc.php
+        # Standalone smoke harnesses run under plain `php`, so they declare
+        # bare stand-ins for the classes and functions they touch. Anything
+        # listed here is excluded from analysis *and* discovery; if harnesses
+        # were only excluded from analysis, those stand-ins would still enter
+        # the symbol graph as project source, outrank the real Composer or
+        # dependency declarations, and turn every real member access in
+        # production code into a bogus finding
+        # (Extra-Chill/data-machine#3474). The harness role is already never
+        # an analysis target (see wordpress_lint_role_for_path()).
+        - */tests/*-smoke.php
+        - */tests/smoke-*.php
+        - */tests/**/*-smoke.php
 
     parallel:
         maximumNumberOfProcesses: 2
