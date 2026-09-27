@@ -912,6 +912,34 @@ mod tests {
     }
 
     #[test]
+    fn cook_parses_existing_checkout_and_prompt_file_shortcuts_with_rotation() {
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--dir",
+            "/tmp/existing-worktree",
+            "--prompt-file",
+            "@task.md",
+            "--model",
+            "preferred/model",
+            "--allow-provider-rotation",
+            "--no-finalize",
+        ])
+        .expect("existing-worktree Cook parses");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        assert_eq!(cook.dispatch.cwd.as_deref(), Some("/tmp/existing-worktree"));
+        assert_eq!(cook.dispatch.prompt.as_deref(), Some("@task.md"));
+        assert_eq!(cook.dispatch.model.as_deref(), Some("preferred/model"));
+        assert!(cook.allow_provider_rotation);
+    }
+
+    #[test]
     fn cook_parser_preserves_an_explicit_execution_cap_without_a_rotation_override() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
