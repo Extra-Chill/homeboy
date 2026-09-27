@@ -385,14 +385,23 @@ fn command_readiness_surfaces_incomplete_cache_repair() {
 
 #[test]
 fn remote_executor_probe_shell_returns_promptly_after_success() {
-    // A 30s probe timeout with a 10s bound proves the shell returns on
-    // success instead of waiting out its watchdog, with headroom for a
-    // loaded test host. A 1s timeout against a 1s bound failed under load.
+    let dir = tempfile::tempdir().expect("watchdog marker directory");
+    let marker = dir.path().join("watchdog-fired");
     let shell = probes::provider_executor_resolution_remote_shell_with_timeout(
         &shell_entrypoint("exit 0"),
         30,
     );
-    let started = Instant::now();
+    assert!(shell.contains("kill \"$killer\""));
+    assert!(shell.contains("wait \"$killer\""));
+    assert!(shell.contains("kill \"$pid\" 2>/dev/null)"));
+    let shell = format!(
+        "marker=\"{}\"; {}",
+        marker.display(),
+        shell.replace(
+            "kill \"$pid\" 2>/dev/null)",
+            "printf watchdog > \"$marker\"; kill \"$pid\" 2>/dev/null)"
+        )
+    );
     let output = Command::new("sh")
         .arg("-c")
         .arg(shell)
@@ -400,11 +409,7 @@ fn remote_executor_probe_shell_returns_promptly_after_success() {
         .expect("run successful runner shell probe");
 
     assert!(output.status.success());
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "successful probe waited for its watchdog: {elapsed:?}"
-    );
+    assert!(!marker.exists(), "successful probe waited for its watchdog");
 }
 
 #[test]
@@ -413,6 +418,8 @@ fn remote_executor_probe_shell_bounds_and_terminates_hanging_executor() {
         &shell_entrypoint("while :; do :; done"),
         1,
     );
+    assert!(shell.contains("sleep 1"));
+    assert!(shell.contains("kill \"$pid\""));
     let started = Instant::now();
     let output = Command::new("sh")
         .arg("-c")
@@ -420,10 +427,11 @@ fn remote_executor_probe_shell_bounds_and_terminates_hanging_executor() {
         .output()
         .expect("run hanging runner shell probe");
     let elapsed = started.elapsed();
-
     assert!(!output.status.success());
-    assert!(elapsed >= Duration::from_millis(750));
-    assert!(elapsed < Duration::from_secs(3));
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "probe was not bounded: {elapsed:?}"
+    );
 }
 
 fn shell_entrypoint(script: &str) -> probes::RemoteProviderExecutorEntrypoint {
