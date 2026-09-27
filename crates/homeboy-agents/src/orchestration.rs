@@ -6682,6 +6682,33 @@ impl ControlPlaneProvider for RegisteredProvider {
         OrchestrationService::new(LifecycleStoreLookup::new(store)).run(requested_id)
     }
 
+    fn run_with_context(
+        &self,
+        requested_id: &RunId,
+        context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneRun, ControlPlaneError> {
+        if let Some(loop_id) =
+            crate::agent_task_loop_controller::loop_id_from_control_plane_run(requested_id.as_str())
+        {
+            match crate::agent_task_loop_controller::controller_file_exists(loop_id) {
+                Ok(true) => {
+                    // The registry holds its provider lock during this call. Reuse
+                    // this provider for the stored read rather than re-entering it.
+                    return crate::agent_task_loop_controller::loop_status_read_with(
+                        loop_id,
+                        context,
+                        |run| self.run(run),
+                    )
+                    .map(|read| read.resource)
+                    .map_err(|error| ControlPlaneError::unavailable(error.message));
+                }
+                Ok(false) => {}
+                Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
+            }
+        }
+        self.run(requested_id)
+    }
+
     fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
@@ -7117,6 +7144,16 @@ impl ControlPlaneProvider for RegisteredProvider {
         context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError> {
         validate_action_request(request)?;
+        if let Some(loop_id) =
+            crate::agent_task_loop_controller::loop_id_from_control_plane_run(requested_id.as_str())
+        {
+            // Action dispatch also runs under the registry lock.
+            crate::agent_task_loop_controller::migrate_loop_control_plane_identity_with(
+                loop_id,
+                |run| self.run(run),
+            )
+            .map_err(|error| ControlPlaneError::unavailable(error.message))?;
+        }
         let store = AgentTaskLifecycleStore::from_environment()
             .map_err(|error| ControlPlaneError::unavailable(error.message))?;
         let observation = store
@@ -7322,8 +7359,8 @@ pub fn register() {
 #[cfg(test)]
 mod loop_control_plane_tests {
     use crate::agent_task_loop_controller::{
-        control_plane_run_id, create_controller, loop_runtime_metadata, loop_work_status,
-        resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
+        control_plane_run_id, create_controller, loop_runtime_metadata, loop_status_read,
+        loop_work_status, resume_loop, stamp_loop_runtime_metadata, stop_loop, write_controller,
     };
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
@@ -7361,6 +7398,115 @@ mod loop_control_plane_tests {
                 .expect("status");
             let after = std::fs::read(path).expect("controller bytes");
             assert_eq!(before, after);
+        });
+    }
+
+    #[test]
+    fn legacy_loop_status_does_not_publish_or_rewrite_the_controller() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
+                "legacy-loop-status",
+                "repair",
+                "v1",
+            );
+            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
+                .expect("path");
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+            std::fs::write(&path, serde_json::to_vec(&record).expect("record")).expect("write");
+            let before = std::fs::read(&path).expect("bytes");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+
+            let read = loop_status_read(
+                &record.loop_id,
+                &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+            )
+            .expect("legacy status");
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: format!("/v1/control-plane/runs/{canonical}"),
+                body: None,
+            })
+            .expect("HTTP status");
+
+            assert_eq!(std::fs::read(&path).expect("bytes"), before);
+            assert_eq!(read.resource.run, canonical);
+            assert_eq!(
+                read.resource.owner.as_ref().expect("owner").id,
+                record.loop_id
+            );
+            assert_eq!(read.work, serde_json::Value::Null);
+            assert_eq!(http.status, 200);
+            assert_eq!(
+                http.body["resource"],
+                serde_json::to_value(&read.resource).expect("resource")
+            );
+            let store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("store");
+            let observation = store.open_observation_readonly().expect("observation");
+            assert!(observation
+                .get_run(canonical.as_str())
+                .expect("lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn loop_status_and_stop_share_the_control_plane_route() {
+        with_isolated_home(|_| {
+            super::register();
+            let record = create_controller("loop-shared-status", "repair", "v1").expect("created");
+            let path = crate::agent_task_loop_controller::controller_record_path(&record.loop_id)
+                .expect("path");
+            let before = std::fs::read(&path).expect("bytes");
+            let canonical = control_plane_run_id(&record.loop_id).expect("canonical id");
+            let context = homeboy_core::control_plane::ControlPlaneInvocationContext::default();
+            let read = loop_status_read(&record.loop_id, &context).expect("status");
+            assert_eq!(std::fs::read(&path).expect("bytes"), before);
+            let direct = homeboy_core::control_plane::run(&canonical).expect("service status");
+            assert_eq!(read.resource, direct);
+            let http = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
+                method: homeboy_core::http_api::HttpMethod::Get,
+                path: format!("/v1/control-plane/runs/{canonical}"),
+                body: None,
+            })
+            .expect("HTTP status");
+            assert_eq!(
+                http.body["resource"],
+                serde_json::to_value(&direct).expect("resource")
+            );
+
+            let (stopped, first) = stop_loop(&record.loop_id, "shared stop").expect("stop");
+            assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            let (_stopped_again, second) =
+                stop_loop(&record.loop_id, "shared stop again").expect("repeated stop");
+            assert_eq!(second.outcome, ControlPlaneActionOutcome::AlreadySatisfied);
+            let mut resumed = crate::agent_task_loop_controller::load_controller(&record.loop_id)
+                .expect("stopped controller");
+            stamp_loop_runtime_metadata(&mut resumed.metadata, true, Some(0), false)
+                .expect("turn on");
+            resumed.updated_at = chrono::Utc::now().to_rfc3339();
+            write_controller(&resumed).expect("persist on");
+            let acknowledgement =
+                resume_loop(&record.loop_id, Some(0), json!({ "backend": "unused" }))
+                    .expect("resume at revolution limit");
+            assert_eq!(
+                acknowledgement.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            let after = loop_status_read(&record.loop_id, &context).expect("status after resume");
+            assert_eq!(
+                loop_runtime_metadata(&after.controller.metadata)["on"],
+                true
+            );
+            assert_eq!(
+                homeboy_core::control_plane::run(&canonical)
+                    .expect("service status after resume")
+                    .run,
+                canonical
+            );
         });
     }
 

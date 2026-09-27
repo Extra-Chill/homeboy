@@ -381,6 +381,16 @@ pub trait ControlPlaneProvider: Send + Sync {
         )))
     }
 
+    /// Stored lookup plus the invocation-context interpreter. The default keeps
+    /// providers that do not own live domain reads on `run`.
+    fn run_with_context(
+        &self,
+        requested_id: &RunId,
+        _context: &ControlPlaneInvocationContext,
+    ) -> Result<ControlPlaneRun, ControlPlaneError> {
+        self.run(requested_id)
+    }
+
     fn mission(&self, requested_id: &MissionId) -> Result<ControlPlaneMission, ControlPlaneError> {
         Err(ControlPlaneError::not_found(format!(
             "control-plane mission not found: {requested_id}"
@@ -597,6 +607,19 @@ pub fn authorize_extension_execution(
 }
 
 pub fn run(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
+    run_with_context(requested_id, &ControlPlaneInvocationContext::default())
+}
+
+pub fn run_with_context(
+    requested_id: &RunId,
+    context: &ControlPlaneInvocationContext,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
+    with_provider(|provider| provider.run_with_context(requested_id, context))
+}
+
+/// Stored projection only. Domain interpreters call this so a live read does
+/// not re-enter `run_with_context`.
+pub fn run_stored(requested_id: &RunId) -> Result<ControlPlaneRun, ControlPlaneError> {
     with_provider(|provider| provider.run(requested_id))
 }
 
