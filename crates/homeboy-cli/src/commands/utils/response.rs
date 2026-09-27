@@ -523,6 +523,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         // transient "busy" condition, not a hard failure — map it to the
         // general error code alongside the other internal/unexpected states.
         ErrorCode::InternalIoError
+        | ErrorCode::ReleaseDeadlineExceeded
         | ErrorCode::InternalJsonError
         | ErrorCode::InternalUnexpected => 1,
     }

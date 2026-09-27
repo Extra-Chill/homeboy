@@ -2,7 +2,10 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read, Write};
 use std::process::Command as ProcessCommand;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -124,7 +127,45 @@ const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD
 const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBACK_RECONCILIATION";
 const RELEASE_DEADLINE_CHILD_ENV: &str = "HOMEBOY_RELEASE_DEADLINE_CHILD";
 const RELEASE_DEADLINE_SECS_ENV: &str = "HOMEBOY_RELEASE_DEADLINE_SECS";
-const DEFAULT_RELEASE_DEADLINE: Duration = Duration::from_secs(30);
+const RELEASE_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
+const RELEASE_EXECUTION_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
+
+fn release_stage_deadline(stage: &str) -> Duration {
+    if stage == "executing release pipeline" {
+        RELEASE_EXECUTION_DEADLINE
+    } else {
+        RELEASE_DISCOVERY_DEADLINE
+    }
+}
+
+fn release_deadline(override_secs: Option<u64>, stage: &str) -> Duration {
+    override_secs
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| release_stage_deadline(stage))
+}
+
+#[cfg(test)]
+fn release_deadline_with_test_duration(
+    override_secs: Option<u64>,
+    stage: &str,
+    execution_duration: Duration,
+) -> Duration {
+    override_secs
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            if stage == "executing release pipeline" {
+                execution_duration
+            } else {
+                RELEASE_DISCOVERY_DEADLINE
+            }
+        })
+}
+
+fn release_deadline_expired(idle_for: Duration, deadline: Duration) -> bool {
+    idle_for >= deadline
+}
 
 /// Run release commands in a killable child. Release resolution uses synchronous
 /// filesystem and git calls, so a timer in this process could report a timeout
@@ -136,12 +177,10 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
         return None;
     }
 
-    let deadline = std::env::var(RELEASE_DEADLINE_SECS_ENV)
+    let deadline_override = std::env::var(RELEASE_DEADLINE_SECS_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_RELEASE_DEADLINE);
+        .filter(|seconds| *seconds > 0);
     let executable = std::env::current_exe().ok()?;
     let mut child = ProcessCommand::new(executable)
         .args(args.iter().skip(1))
@@ -166,6 +205,8 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     });
     let stage = Arc::new(Mutex::new(String::from("startup")));
     let stage_for_reader = Arc::clone(&stage);
+    let last_progress = Arc::new(AtomicU64::new(0));
+    let progress_for_reader = Arc::clone(&last_progress);
     let stderr_thread = thread::spawn(move || {
         let mut stderr = stderr;
         let mut buffer = [0_u8; 4096];
@@ -174,6 +215,7 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
             if bytes == 0 {
                 break;
             }
+            progress_for_reader.fetch_add(1, Ordering::Relaxed);
             let chunk = &buffer[..bytes];
             let _ = std::io::stderr().write_all(chunk);
             let _ = std::io::stderr().flush();
@@ -197,6 +239,8 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     });
 
     let started = Instant::now();
+    let mut last_progress_at = started;
+    let mut observed_progress = 0;
     let timed_out = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -209,8 +253,24 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
                     status.code().unwrap_or(1).try_into().unwrap_or(1),
                 ));
             }
-            Ok(None) if started.elapsed() >= deadline => break true,
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                // The child is allowed to run as long as it keeps producing output;
+                // the deadline is an inactivity window, not a pipeline runtime cap.
+                let observed = last_progress.load(Ordering::Relaxed);
+                if observed != observed_progress {
+                    observed_progress = observed;
+                    last_progress_at = Instant::now();
+                }
+                let current_stage = stage
+                    .lock()
+                    .map(|current| current.clone())
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let deadline = release_deadline(deadline_override, &current_stage);
+                if release_deadline_expired(last_progress_at.elapsed(), deadline) {
+                    break true;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
             Err(_) => break false,
         }
     };
@@ -226,12 +286,14 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
             .lock()
             .map(|current| current.clone())
             .unwrap_or_else(|_| "unknown".to_string());
-        let error = crate::core::Error::internal_io(
+        let deadline = release_deadline(deadline_override, &stalled_stage);
+        let error = crate::core::Error::release_deadline_exceeded(
             format!(
-                "release command exceeded its {}s deadline while stalled in stage `{stalled_stage}`",
-                deadline.as_secs()
+                "release command made no progress for {}s while stalled in stage `{stalled_stage}`",
+                deadline.as_secs(),
             ),
-            Some(format!("release stage: {stalled_stage}")),
+            stalled_stage,
+            deadline.as_secs(),
         );
         crate::commands::output_runtime::emit_json_result_for_identity(
             Err(error),
@@ -247,6 +309,67 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
     let _ = stderr_thread.join();
     let _ = stdout_thread.join();
     None
+}
+
+#[cfg(test)]
+mod release_deadline_tests {
+    use super::{
+        release_deadline, release_deadline_expired, release_deadline_with_test_duration,
+        RELEASE_EXECUTION_DEADLINE,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn progress_keeps_release_alive_past_original_deadline() {
+        let deadline = Duration::from_secs(30);
+        // Simulated stage output at 29s, followed by more work through 58s.
+        let idle_for = Duration::from_secs(29);
+        assert!(!release_deadline_expired(idle_for, deadline));
+    }
+
+    #[test]
+    fn child_without_progress_expires_and_reports_typed_error() {
+        let deadline = Duration::from_secs(2);
+        assert!(release_deadline_expired(Duration::from_secs(2), deadline));
+        let error = crate::core::Error::release_deadline_exceeded(
+            "stalled in stage `resolving component`",
+            "resolving component",
+            2,
+        );
+        assert_eq!(error.code.as_str(), "release_deadline_exceeded");
+        assert!(error.details["recovery"]
+            .as_str()
+            .unwrap()
+            .contains("HOMEBOY_RELEASE_DEADLINE_SECS"));
+    }
+
+    #[test]
+    fn deadline_changes_from_discovery_to_execution_and_override_is_explicit() {
+        assert_eq!(
+            release_deadline(None, "resolving component"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            release_deadline(None, "executing release pipeline"),
+            RELEASE_EXECUTION_DEADLINE
+        );
+        assert_eq!(
+            release_deadline(Some(7), "executing release pipeline"),
+            Duration::from_secs(7)
+        );
+    }
+
+    #[test]
+    fn silent_execution_survives_past_discovery_window() {
+        let idle_for = Duration::from_secs(31);
+        let execution_deadline = release_deadline_with_test_duration(
+            None,
+            "executing release pipeline",
+            Duration::from_secs(60),
+        );
+        assert!(release_deadline_expired(idle_for, Duration::from_secs(30)));
+        assert!(!release_deadline_expired(idle_for, execution_deadline));
+    }
 }
 
 fn generic_route_policy_snapshot(
