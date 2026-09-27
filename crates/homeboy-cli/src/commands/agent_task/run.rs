@@ -10608,11 +10608,47 @@ pub(super) fn run_resume_with_executor(
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
+    let explicit_local =
+        homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+            result.placement.requested == homeboy_lab_runner_contract::Placement::Local
+        });
+    let reconstruct = if explicit_local {
+        reconstruct_local_cook_attempt_dispatcher
+    } else {
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher
+    };
     retry_with(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        reconstruct,
     )
+}
+
+fn reconstruct_local_cook_attempt_dispatcher(
+    recipe: &Value,
+) -> homeboy::core::Result<
+    Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+> {
+    if recipe.get("kind").and_then(Value::as_str) == Some("lab") {
+        let admission = homeboy::core::parsed_command_preflight::captured_result()
+            .map(|result| result.resource_admission);
+        if let Some(
+            homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+                label,
+                ..
+            },
+        ) = admission
+        {
+            return Err(Error::validation_invalid_argument(
+                "placement",
+                format!("explicit local retry refused: controller resource admission rejected {label}; wait for controller capacity or retry without --placement local"),
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    }
+    crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(recipe)
 }
 
 pub(super) fn retry_with<F>(
@@ -10627,6 +10663,11 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
+    if let Some(error) = explicit_local_retry_admission_refusal(
+        homeboy::core::parsed_command_preflight::captured_result().as_ref(),
+    ) {
+        return Err(error);
+    }
     let route_override = cook_provider_route_override(
         args.backend.clone(),
         args.selector.clone(),
@@ -10711,6 +10752,27 @@ where
     ))
 }
 
+fn explicit_local_retry_admission_refusal(
+    preflight: Option<&homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult>,
+) -> Option<Error> {
+    let result = preflight?;
+    if result.placement.requested != homeboy_lab_runner_contract::Placement::Local {
+        return None;
+    }
+    let homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+        label, ..
+    } = &result.resource_admission
+    else {
+        return None;
+    };
+    Some(Error::validation_invalid_argument(
+        "placement",
+        format!("explicit local retry refused: controller resource admission rejected {label}; wait for controller capacity or retry without --placement local"),
+        None,
+        None,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -10743,6 +10805,81 @@ mod tests {
             panic!("cook command");
         };
         *args
+    }
+
+    #[test]
+    fn explicit_local_retry_selects_controller_owned_dispatch_for_lab_recipe() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "retry",
+            "cook-previously-lab",
+            "--placement",
+            "local",
+            "--run",
+        ])
+        .expect("the exact operator retry form parses");
+        assert_eq!(
+            cli.placement,
+            crate::cli_surface::Placement::Local,
+            "a post-subcommand --placement maps to the same global CLI field",
+        );
+
+        let normalized = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            "cook-previously-lab".to_string(),
+            "--placement".to_string(),
+            "local".to_string(),
+            "--run".to_string(),
+        ];
+        let mut preflight =
+            homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                normalized.clone(),
+                crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                    &cli,
+                    &normalized,
+                ),
+                None,
+                None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, None, false),
+                None,
+            );
+        preflight.resource_admission =
+            homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+                label: "agent-task retry".to_string(),
+                engages_at: homeboy::core::parsed_command_preflight::ResourceHeat::Hot,
+                evidence:
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionEvidence::Observed {
+                        pressure: homeboy::core::parsed_command_preflight::ResourceHeat::Hot,
+                    },
+            };
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        homeboy::core::parsed_command_preflight::capture_result(preflight);
+        let captured = homeboy::core::parsed_command_preflight::captured_result()
+            .expect("completed CLI preflight captured");
+        assert_eq!(captured.placement.requested, cli.placement);
+        let refusal = super::explicit_local_retry_admission_refusal(Some(&captured))
+            .expect("hot local admission must refuse before reservation");
+        assert_eq!(
+            refusal.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(refusal
+            .message
+            .contains("resource admission rejected agent-task retry"));
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+
+        let recipe = serde_json::json!({ "kind": "lab", "runner_id": "lab-1" });
+        let dispatcher = super::reconstruct_local_cook_attempt_dispatcher(&recipe)
+            .expect("explicit local placement should reconstruct locally");
+        assert!(
+            dispatcher.is_none(),
+            "the retry successor must be controller-owned rather than sent to the prior Lab runner",
+        );
     }
 
     #[test]

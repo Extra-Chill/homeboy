@@ -1508,40 +1508,52 @@ fn validate_durable_publication_eligibility(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
-        && lifecycle
-            .provider_runtime
-            .iter()
-            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
-    let producing_runtime = lifecycle.provider_runtime.iter().find(|runtime| {
-        runtime.task_id == promotion.source.task_id
-            && runtime.state == ProviderRuntimeState::Succeeded
-    });
+    let producing_runtime = lifecycle
+        .provider_runtime
+        .iter()
+        .rev()
+        .find(|runtime| runtime.task_id == promotion.source.task_id);
+    let producing_runtime_succeeded =
+        producing_runtime.is_some_and(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
     let fingerprinted_candidate = matches!(
         serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionCandidate>(
             promotion.provenance["candidate"].clone(),
         ),
         Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
     );
-    let successful_fallback_produced_candidate = lifecycle.execution.state
+    // Retry history is durable and intentionally retains failed attempts. It
+    // must not veto publication when the canonical receipt for the task that
+    // produced this promoted candidate records a successful attempt. Bind that
+    // receipt to a fingerprinted candidate and green applied promotion; do not
+    // infer success from the aggregate or promotion alone.
+    let successful_provider_produced_candidate = lifecycle.execution.state
         == RunExecutionState::Succeeded
-        && producing_runtime.is_some()
-        && fingerprinted_candidate;
-    if (all_provider_runtimes_succeeded || successful_fallback_produced_candidate)
-        && (lifecycle.execution.state == RunExecutionState::Succeeded
-            // `CandidateRecoverable` and `PartialRecoverable` were folded into
-            // `PartialFailure` before #6761, so they reached this check as
-            // `PartialFailure` and were eligible. They are listed explicitly
-            // now to keep that behavior — splitting the projection must not
-            // quietly narrow durable-publication eligibility.
-            || (matches!(
-                lifecycle.execution.state,
-                RunExecutionState::PartialFailure
-                    | RunExecutionState::CandidateRecoverable
-                    | RunExecutionState::PartialRecoverable
-            ) && lifecycle.provider_runtime.iter().all(|runtime| {
-                runtime.metadata["evidence_source"] == "durable_provider_execution"
-            })))
+        && producing_runtime_succeeded
+        && fingerprinted_candidate
+        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        && !promotion.gate_results.is_empty()
+        && promotion
+            .gate_results
+            .iter()
+            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
+        && lifecycle
+            .provider_runtime
+            .iter()
+            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
+    let authenticated_partial_provider_recovery = matches!(
+        lifecycle.execution.state,
+        RunExecutionState::PartialFailure
+            | RunExecutionState::CandidateRecoverable
+            | RunExecutionState::PartialRecoverable
+    ) && all_provider_runtimes_succeeded
+        && lifecycle
+            .provider_runtime
+            .iter()
+            .all(|runtime| runtime.metadata["evidence_source"] == "durable_provider_execution");
+    if (lifecycle.execution.state == RunExecutionState::Succeeded
+        && (all_provider_runtimes_succeeded || successful_provider_produced_candidate))
+        || authenticated_partial_provider_recovery
     {
         return Ok(DurablePublicationEligibility::ProviderRun);
     }

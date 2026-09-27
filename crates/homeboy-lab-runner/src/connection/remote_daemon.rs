@@ -1632,15 +1632,34 @@ mod tests {
     }
 
     #[test]
-    fn daemon_lifecycle_command_uses_the_runner_scoped_state_directory() {
+    fn daemon_lifecycle_command_uses_a_controller_scoped_state_directory() {
+        let controller =
+            homeboy_core::paths::sanitize_path_segment(&crate::connection::controller_id());
         assert_eq!(
             remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
-            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/primary\" /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0"
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
         );
         assert_eq!(
             remote_daemon_command("runner/a", "/opt/homeboy", "daemon status"),
-            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/primary\" /opt/homeboy daemon status"
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" /opt/homeboy daemon status")
         );
+    }
+
+    #[test]
+    fn two_controllers_have_disjoint_daemon_stores_and_preserve_each_others_jobs() {
+        let first_store = remote_daemon_state_dir("shared-runner", "controller-a");
+        let second_store = remote_daemon_state_dir("shared-runner", "controller-b");
+        assert_ne!(first_store, second_store);
+        assert!(first_store.ends_with("/controllers/controller-a/primary"));
+        assert!(second_store.ends_with("/controllers/controller-b/primary"));
+        let first_status =
+            format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon status");
+        let second_start = format!("HOMEBOY_DAEMON_STATE_DIR=\"{second_store}\" /opt/homeboy daemon ensure-running --addr 127.0.0.1:0");
+        let first_stop = format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon stop --lease-id lease-a");
+        assert!(first_status.contains("controllers/controller-a"));
+        assert!(second_start.contains("controllers/controller-b"));
+        assert!(first_stop.contains("controllers/controller-a"));
+        assert!(!second_start.contains("controllers/controller-a"));
     }
 }
 
@@ -2218,11 +2237,17 @@ pub(super) fn remote_daemon_ensure_running_command(
 }
 
 fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
-    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
+    let state_dir = remote_daemon_state_dir(runner_id, &crate::connection::controller_id());
     format!(
-        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/{runner_segment}/primary\" {} {args}",
+        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} {args}",
         shell::quote_arg(homeboy),
     )
+}
+
+fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
+    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
+    let controller_segment = homeboy_core::paths::sanitize_path_segment(controller_id);
+    format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/primary")
 }
 
 pub(super) fn remote_daemon_force_stop(
