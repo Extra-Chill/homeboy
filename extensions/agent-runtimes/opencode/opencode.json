@@ -271,6 +271,9 @@
           }
         },
         "openai-oauth": {
+          "model_providers": [
+            "openai"
+          ],
           "secret_env": [
             "AI_PROVIDER_OPENCODE_OPENAI_ACCESS",
             "AI_PROVIDER_OPENCODE_OPENAI_REFRESH",
