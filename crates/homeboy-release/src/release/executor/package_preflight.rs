@@ -520,12 +520,8 @@ mod tests {
             }),
             ..Component::default()
         };
-        validate_package_completeness(
-            &component,
-            repo.path(),
-            &zip_artifacts("build/package.zip"),
-        )
-        .expect("package-scope excluded source should not fail completeness");
+        validate_package_completeness(&component, repo.path(), &zip_artifacts("build/package.zip"))
+            .expect("package-scope excluded source should not fail completeness");
     }
 
     #[test]

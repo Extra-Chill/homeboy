@@ -1130,8 +1130,7 @@ mod tests {
             }),
             ..Component::default()
         };
-        let commits =
-            get_component_changes_since_tag(&component, Some("v1.0.0")).expect("changes");
+        let commits = get_component_changes_since_tag(&component, Some("v1.0.0")).expect("changes");
         assert_eq!(commits.len(), 1, "package exclude must not hide the fix");
         assert_eq!(commits[0].subject, "fix: block template");
 
@@ -1146,9 +1145,11 @@ mod tests {
             }),
             ..component
         };
-        let commits =
-            get_component_changes_since_tag(&legacy, Some("v1.0.0")).expect("changes");
-        assert!(commits.is_empty(), "release exclude keeps its existing meaning");
+        let commits = get_component_changes_since_tag(&legacy, Some("v1.0.0")).expect("changes");
+        assert!(
+            commits.is_empty(),
+            "release exclude keeps its existing meaning"
+        );
     }
 
     #[test]
