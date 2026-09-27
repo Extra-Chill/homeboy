@@ -667,17 +667,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 "view",
                 &pr.number.to_string(),
                 "--json",
-                "baseRefName,headRefName,headRefOid,headRepository",
+                "baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner",
             ],
         )?;
         let pr_head_sha = pr_value["headRefOid"]
             .as_str()
             .unwrap_or_default()
             .to_string();
-        let head_repository = pr_value["headRepository"]["nameWithOwner"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let head_repository = pr_head_repository_from_json(&pr_value);
         if pr_value["baseRefName"].as_str() != Some(base)
             || pr_value["headRefName"].as_str() != Some(head)
         {
@@ -986,8 +983,89 @@ fn gh_json(path: &str, args: &[&str]) -> Result<serde_json::Value> {
     })
 }
 
+/// Derives a PR head repository's `owner/name` slug from a `gh pr view --json
+/// headRepository,headRepositoryOwner` payload.
+///
+/// `gh` does not populate `headRepository.nameWithOwner`; that field is only
+/// present on `repo view`. The owner login must instead be read from the
+/// separate `headRepositoryOwner` field and joined with `headRepository.name`.
+/// If either half is missing, this returns an empty string so the publication
+/// binding check fails closed instead of silently treating an unresolved
+/// owner as a same-repository match.
+fn pr_head_repository_from_json(pr_value: &serde_json::Value) -> String {
+    let owner = pr_value["headRepositoryOwner"]["login"].as_str();
+    let name = pr_value["headRepository"]["name"].as_str();
+    match (owner, name) {
+        (Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => {
+            format!("{owner}/{name}")
+        }
+        _ => String::new(),
+    }
+}
+
 fn is_git_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+mod pr_head_repository_tests {
+    use super::pr_head_repository_from_json;
+    use serde_json::json;
+
+    #[test]
+    fn resolves_owner_and_name_from_the_real_gh_payload() {
+        // Verified against `gh pr view 911 -R Extra-Chill/extrachill-events
+        // --json headRepository,headRepositoryOwner,isCrossRepository`.
+        let value = json!({
+            "headRepository": {"id": "R_kgDOP30Kgg", "name": "extrachill-events"},
+            "headRepositoryOwner": {"id": "O_kgDODalOjg", "login": "Extra-Chill"},
+            "isCrossRepository": false,
+        });
+        assert_eq!(
+            pr_head_repository_from_json(&value),
+            "Extra-Chill/extrachill-events"
+        );
+    }
+
+    #[test]
+    fn a_fork_head_carries_the_forks_owner_login() {
+        let value = json!({
+            "headRepository": {"id": "R_fork", "name": "extrachill-events"},
+            "headRepositoryOwner": {"id": "O_fork", "login": "some-contributor"},
+            "isCrossRepository": true,
+        });
+        // Same repository name, different owner: this must not collapse to
+        // the base repository's `owner/name` slug.
+        assert_eq!(
+            pr_head_repository_from_json(&value),
+            "some-contributor/extrachill-events"
+        );
+        assert_ne!(
+            pr_head_repository_from_json(&value),
+            "Extra-Chill/extrachill-events"
+        );
+    }
+
+    #[test]
+    fn missing_owner_fails_closed_to_an_empty_string() {
+        let value = json!({
+            "headRepository": {"id": "R_kgDOP30Kgg", "name": "extrachill-events"},
+        });
+        assert_eq!(pr_head_repository_from_json(&value), "");
+    }
+
+    #[test]
+    fn missing_repository_name_also_fails_closed() {
+        let value = json!({
+            "headRepositoryOwner": {"id": "O_kgDODalOjg", "login": "Extra-Chill"},
+        });
+        assert_eq!(pr_head_repository_from_json(&value), "");
+    }
+
+    #[test]
+    fn a_wholly_absent_payload_fails_closed() {
+        assert_eq!(pr_head_repository_from_json(&json!({})), "");
+    }
 }
 
 pub(super) fn validate_real_candidate_fingerprint(

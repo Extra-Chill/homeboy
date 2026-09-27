@@ -572,6 +572,43 @@ fn finalization_rejects_candidate_remote_pr_and_fork_binding_mismatches() {
 }
 
 #[test]
+fn fork_head_binding_drift_carries_the_real_validation_reason() {
+    // Regression test for #15108: the drift error used to report the fixed
+    // literal "binding tuple mismatch" no matter why the binding failed,
+    // which gave the operator no way to tell a genuine cross-repository (fork)
+    // head from a SHA race. It must now surface
+    // `validate_publication_binding`'s actual reason.
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "candidate-sha".to_string(),
+            pr_head_sha: "candidate-sha".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            // A real cross-repository (fork) head: same SHAs, different owner.
+            head_repository: "contributor/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("a fork PR head must still be refused");
+
+    assert!(
+        error.message.contains(
+            "binding_error=publication binding must record the candidate tree, exact changed files, and a same-repository PR head"
+        ),
+        "drift error must carry the specific validation reason instead of a generic mismatch notice, got: {error}"
+    );
+    assert!(
+        !error.message.contains("binding_error=binding tuple mismatch"),
+        "the literal placeholder must no longer appear, got: {error}"
+    );
+}
+
+#[test]
 fn finalization_refuses_remote_drift_immediately_before_pr_mutation() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -1133,6 +1170,47 @@ fn recovers_a_merged_pr_without_republishing() {
     assert!(report.finalization_outcome.published);
     assert!(!backend.created && !backend.updated);
     assert_eq!(backend.publication_binding_calls, 1);
+}
+
+#[test]
+fn merged_pr_recovery_refuses_a_fork_binding_with_the_real_validation_reason() {
+    // Same regression as #15108, but on the already-merged recovery path
+    // (no new PR is created, so there is nothing to quarantine): the binding
+    // failure reason must still reach the operator instead of being silently
+    // discarded.
+    let mut backend = MockBackend {
+        candidate_state: Some(AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        }),
+        merged_pr: Some(AgentTaskPrRef {
+            number: 76,
+            url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
+            is_draft: false,
+        }),
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "candidate-sha".to_string(),
+            pr_head_sha: "candidate-sha".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "contributor/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("a fork PR head must still be refused");
+
+    assert!(!backend.created && !backend.updated);
+    assert_eq!(backend.quarantine_calls, 0, "no PR mutation was performed");
+    assert!(
+        error.message.contains(
+            "binding_error=publication binding must record the candidate tree, exact changed files, and a same-repository PR head"
+        ),
+        "drift error must carry the specific validation reason, got: {error}"
+    );
 }
 
 #[test]

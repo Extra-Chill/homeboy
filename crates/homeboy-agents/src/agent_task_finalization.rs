@@ -452,13 +452,15 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &changed_files,
                 &merged,
             )?;
-            if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files)
-            {
-                return Err(publication_drift_error(
-                    commit_sha,
-                    &binding.remote_sha,
-                    Some(&binding.pr_head_sha),
-                    "no PR mutation performed",
+            if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+                return Err(append_binding_error(
+                    publication_drift_error(
+                        commit_sha,
+                        &binding.remote_sha,
+                        Some(&binding.pr_head_sha),
+                        "no PR mutation performed",
+                    ),
+                    binding_validation_reason(&error),
                 ));
             }
             return Ok(report(
@@ -588,7 +590,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     };
-    if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+    if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
         return Err(publication_drift_with_cleanup_error(
             backend,
             &options.path,
@@ -597,7 +599,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &binding.remote_sha,
             Some(&binding.pr_head_sha),
             quarantine_capability,
-            "binding tuple mismatch",
+            binding_validation_reason(&error),
         ));
     }
 
@@ -1181,6 +1183,20 @@ pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Resul
     Ok(())
 }
 
+/// `validate_publication_binding`'s errors are built with
+/// `Error::validation_invalid_argument("publication_binding", ...)`, whose
+/// `message` bakes in a `"Invalid argument 'publication_binding': "` prefix.
+/// Call sites that fold that reason into a drift error already name the
+/// `publication_binding` field themselves, so this strips the redundant
+/// prefix and returns just the specific reason (for example, "a
+/// same-repository PR head").
+fn binding_validation_reason(error: &Error) -> &str {
+    error
+        .message
+        .strip_prefix("Invalid argument 'publication_binding': ")
+        .unwrap_or(&error.message)
+}
+
 fn validate_publication_binding(
     binding: &AgentTaskPublicationBinding,
     candidate_sha: &str,
@@ -1306,11 +1322,19 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
         observed_pr_head_sha,
         &cleanup,
     );
+    append_binding_error(drift, binding_error)
+}
+
+/// Carries `validate_publication_binding`'s specific failure reason (for
+/// example, "same-repository PR head" or "candidate SHA...must match")
+/// forward onto a drift error, so operators can see which field differed
+/// instead of a generic mismatch notice.
+fn append_binding_error(error: Error, binding_error: &str) -> Error {
     Error::validation_invalid_argument(
         "publication_binding",
         format!(
             "{}; binding_error={}",
-            drift.message,
+            error.message,
             bounded_publication_diagnostic(binding_error)
         ),
         None,
