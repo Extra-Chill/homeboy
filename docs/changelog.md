@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.395.0] - 2026-09-27
+
+### Added
+- disclose Cook preview budget
+
+### Changed
+- rustfmt
+
+### Fixed
+- resolve PR head repository from headRepositoryOwner so Cook stops closing its own PRs
+- preflight Lab provider secrets before Cook admission
+- include effective provider secrets in Lab staging preflight
+
 ## [0.394.1] - 2026-09-27
 
 ### Fixed
