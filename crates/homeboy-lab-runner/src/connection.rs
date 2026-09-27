@@ -414,8 +414,10 @@ pub(crate) fn rotate_daemon_generation_in_roots(
         generation
     };
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let state_dir =
-        format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/{generation}");
+    let controller_segment = homeboy_core::paths::sanitize_path_segment(&controller_id());
+    let state_dir = format!(
+        "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
+    );
     let command = format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} daemon ensure-running --addr 127.0.0.1:0",
         shell::quote_arg(candidate_homeboy),
