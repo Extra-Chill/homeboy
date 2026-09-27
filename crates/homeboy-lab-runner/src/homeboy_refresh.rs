@@ -1262,6 +1262,13 @@ pub fn refresh_homeboy_binary_in_roots(
         .map(|continuation| vec![continuation])
         .unwrap_or_else(|| plan.followup_commands.clone());
     let next_actions = controller_continuation_actions(&plan, &identity, Vec::new())?;
+    // Every mechanical phase above can report `succeeded` while the runner's
+    // own admission state still refuses to converge (e.g. a drift predicate
+    // trips again immediately after reconnect). A non-zero exit must always
+    // carry the reason it failed; leaving `failure: None` here reproduced
+    // #15087's "exited 1 without reporting a failure cause" with every listed
+    // phase green.
+    let failure = unconverged_refresh_failure(&plan, &exec_output, converged, readiness.as_ref());
     Ok((
         HomeboyBinaryRefreshOutput {
             variant: "refresh_homeboy",
@@ -1280,7 +1287,7 @@ pub fn refresh_homeboy_binary_in_roots(
             followup_commands,
             readiness,
             reconnect_deferred: None,
-            failure: None,
+            failure,
             bootstrap_provenance: Some(HomeboyBootstrapProvenance {
                 transport: if diagnostic_ssh_bootstrap {
                     "ssh_bootstrap"
@@ -1529,6 +1536,52 @@ fn refresh_readiness_from_status(
             }),
         ),
     }
+}
+
+/// The refresh's final, non-phase-scoped verdict: a reconnect can complete
+/// every named phase successfully and still leave the runner's own admission
+/// state refusing to accept work. That case must exit non-zero with a named
+/// cause; returning `None` here is exactly the bug #15087 reported ("exited 1
+/// without reporting a failure cause" with every listed phase `succeeded`).
+fn unconverged_refresh_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: &RunnerExecOutput,
+    converged: bool,
+    readiness: Option<&HomeboyRefreshReadiness>,
+) -> Option<HomeboyBinaryRefreshFailure> {
+    if converged {
+        return None;
+    }
+    let readiness = readiness?;
+    Some(refresh_verification_failure(
+        plan,
+        execution.clone(),
+        unconverged_readiness_message(&plan.runner_id, readiness),
+    ))
+}
+
+/// Describe why the post-reconnect readiness postcondition did not converge.
+/// This is the failure cause reported for the exit-1 branch that previously
+/// shipped `failure: None` alongside every phase reporting `succeeded`
+/// (#15087).
+fn unconverged_readiness_message(
+    runner_id: &str,
+    readiness: &HomeboyRefreshReadiness,
+) -> String {
+    let owners = if readiness.owners.is_empty() {
+        String::new()
+    } else {
+        format!(" (owners: {})", readiness.owners.join(", "))
+    };
+    let next = readiness
+        .continuation
+        .as_deref()
+        .map(|command| format!(" Next: `{command}`."))
+        .unwrap_or_default();
+    format!(
+        "runner `{runner_id}` refresh completed every required step but did not converge: admission state is `{:?}` (accepting_jobs={}, daemon_fresh={}){owners}.{next}",
+        readiness.state, readiness.accepting_jobs, readiness.daemon_fresh,
+    )
 }
 
 fn refresh_owned_lease(session: super::RunnerSession) -> Option<String> {

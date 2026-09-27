@@ -65,7 +65,7 @@ fn service_state_dir(runner_id: &str) -> String {
     )
 }
 
-pub(crate) fn render_service_unit(runner_id: &str) -> String {
+pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> String {
     format!(
         r#"[Unit]
 Description=Homeboy runner daemon ({runner_id})
@@ -74,6 +74,7 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{state_dir}
+Environment={token_env}={startup_token}
 Environment=PATH={path}
 ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
 Restart=always
@@ -84,6 +85,7 @@ TimeoutStopSec=30s
 WantedBy=default.target
 "#,
         state_dir = service_state_dir(runner_id),
+        token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
         path = SERVICE_PATH,
         link = service_binary_link(runner_id),
     )
@@ -101,20 +103,33 @@ mv -f "$link.next" "$link""#,
     )
 }
 
-pub(crate) fn install_script(runner_id: &str, binary: &str) -> String {
+/// Write the rendered unit and reload systemd's view of it. Shared by
+/// install (which also enables and starts the unit for the first time) and
+/// repoint-and-restart (which only needs the file on disk to be current
+/// before its own restart), so a repoint always carries the daemon's startup
+/// token even when the unit predates this being rendered (#15087).
+fn write_unit_script(runner_id: &str, startup_token: &str) -> String {
     let unit = service_unit_name(runner_id);
     format!(
-        r#"set -eu
-{point}
-unit_dir="$HOME/.config/systemd/user"
+        r#"unit_dir="$HOME/.config/systemd/user"
 mkdir -p "$unit_dir"
 cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 {unit_text}HOMEBOY_UNIT
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
-systemctl --user daemon-reload
+systemctl --user daemon-reload"#,
+        unit_text = render_service_unit(runner_id, startup_token),
+    )
+}
+
+pub(crate) fn install_script(runner_id: &str, binary: &str, startup_token: &str) -> String {
+    let unit = service_unit_name(runner_id);
+    format!(
+        r#"set -eu
+{point}
+{write_unit}
 systemctl --user enable {unit}"#,
         point = point_binary_script(runner_id, binary),
-        unit_text = render_service_unit(runner_id),
+        write_unit = write_unit_script(runner_id, startup_token),
     )
 }
 
@@ -260,7 +275,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
 
     run_remote(
         client,
-        &install_script(runner_id, homeboy),
+        &install_script(runner_id, homeboy, &uuid::Uuid::new_v4().to_string()),
         "writing the runner service unit",
     )?;
     let retired_generations = run_remote(
@@ -313,18 +328,25 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
 /// Point the service at `binary` and restart it. Callers first prove the
 /// runner is idle (or explicitly force the restart), because restarting the
 /// unit stops the daemon's child processes.
+///
+/// The unit file is rewritten (not just the binary link) on every repoint, so
+/// a unit installed before the daemon's startup token was rendered self-heals
+/// here rather than staying stuck with the empty token an older install left
+/// behind (#15087).
 pub(crate) fn repoint_and_restart(
     roots: &paths::PathRoots,
     runner_id: &str,
     binary: &str,
 ) -> Result<()> {
     let target = service_target(roots, runner_id)?;
+    let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
         &format!(
-            "set -eu\n{}\nsystemctl --user restart {}",
-            point_binary_script(runner_id, binary),
-            service_unit_name(runner_id)
+            "set -eu\n{point}\n{write_unit}\nsystemctl --user restart {unit}",
+            point = point_binary_script(runner_id, binary),
+            write_unit = write_unit_script(runner_id, &startup_token),
+            unit = service_unit_name(runner_id),
         ),
         "restarting the runner service",
     )?;
@@ -503,7 +525,7 @@ mod tests {
 
     #[test]
     fn unit_runs_serve_from_the_stable_link_in_the_runner_state_dir() {
-        let unit = render_service_unit("homeboy-lab");
+        let unit = render_service_unit("homeboy-lab", "test-startup-token");
         assert!(unit.contains(
             "ExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/homeboy daemon serve --addr 127.0.0.1:0"
         ));
@@ -516,6 +538,30 @@ mod tests {
             service_unit_name("homeboy-lab"),
             "homeboy-runner-homeboy-lab.service"
         );
+    }
+
+    /// The service-owned daemon must publish an attributable startup token in
+    /// its own lease. Without this, `daemon status`/`ensure-running`/
+    /// `reconcile-unleased-candidates` can never tell this process apart from
+    /// an unrelated foreground `daemon serve`, and every controller operation
+    /// that inspects ownership fails closed (#15087).
+    #[test]
+    fn unit_carries_the_daemon_startup_token_env_var() {
+        let unit = render_service_unit("homeboy-lab", "a-fresh-token");
+        assert!(unit.contains(&format!(
+            "Environment={}=a-fresh-token",
+            paths::DAEMON_STARTUP_TOKEN_ENV
+        )));
+    }
+
+    #[test]
+    fn each_install_and_repoint_gets_its_own_fresh_startup_token() {
+        let first = render_service_unit("homeboy-lab", "token-a");
+        let second = render_service_unit("homeboy-lab", "token-b");
+        assert!(first.contains("token-a"));
+        assert!(!first.contains("token-b"));
+        assert!(second.contains("token-b"));
+        assert!(!second.contains("token-a"));
     }
 
     #[test]
@@ -586,10 +632,24 @@ mod tests {
 
     #[test]
     fn install_script_writes_the_rendered_unit_verbatim() {
-        let script = install_script("homeboy-lab", "/opt/homeboy");
+        let script = install_script("homeboy-lab", "/opt/homeboy", "install-token");
         let start = script.find("<<'HOMEBOY_UNIT'\n").unwrap() + "<<'HOMEBOY_UNIT'\n".len();
         let end = script.find("HOMEBOY_UNIT\nmv").unwrap();
-        assert_eq!(&script[start..end], render_service_unit("homeboy-lab"));
+        assert_eq!(
+            &script[start..end],
+            render_service_unit("homeboy-lab", "install-token")
+        );
         assert!(script.ends_with("systemctl --user enable homeboy-runner-homeboy-lab.service"));
+    }
+
+    /// Repoint-and-restart must rewrite the unit (not just the binary link),
+    /// so a unit installed before the startup token existed self-heals to
+    /// carry one the next time refresh restarts it (#15087).
+    #[test]
+    fn repoint_script_rewrites_the_unit_with_a_fresh_token() {
+        let write_unit = write_unit_script("homeboy-lab", "repoint-token");
+        assert!(write_unit.contains("repoint-token"));
+        assert!(write_unit.contains("systemctl --user daemon-reload"));
+        assert!(write_unit.contains("cat > \"$unit_dir/homeboy-runner-homeboy-lab.service.tmp\""));
     }
 }

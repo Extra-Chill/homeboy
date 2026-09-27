@@ -1840,6 +1840,28 @@ fn remote_daemon_ensure_running(
         remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
+        // Every homeboy command failure exits 2 by convention (see
+        // `cli_runtime.rs`), so a nonzero remote exit is not proof the JSON
+        // body on stdout is unusable — the remote's own typed error envelope
+        // is usually still there. Prefer it: a refusal like
+        // `daemon_unleased_process_conflict` must be reported (and retired)
+        // as itself, not flattened into a generic bootstrap failure that
+        // hides the real, non-retryable cause (#15087).
+        if let Some(error) = parse_envelope(&output.stdout)
+            .ok()
+            .filter(|envelope| !envelope.success)
+            .and_then(|envelope| envelope.error)
+        {
+            return Err(RemoteDaemonEnsureError::EnsureRunning(
+                summarize_ensure_running_failure(
+                    runner_id,
+                    &command,
+                    &error,
+                    &output.stderr,
+                    None,
+                ),
+            ));
+        }
         return Err(RemoteDaemonEnsureError::EnsureRunning(
             summarize_ensure_running_failure(
                 runner_id,

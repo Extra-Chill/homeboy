@@ -963,6 +963,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                     super::generation_store::retire_rejected_state_loss_replacement(
                         runner_id, &output,
                     )?;
+                } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
+                    super::generation_store::retire_rejected_ensure_running_replacement(
+                        runner_id,
+                        output.exit_code,
+                        output.timed_out,
+                        &output.stdout,
+                        &output.stderr,
+                    )?;
                 }
                 return Ok(failed_connect(
                     runner_id,
@@ -1006,6 +1014,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                 if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
                     super::generation_store::retire_rejected_state_loss_replacement(
                         runner_id, &output,
+                    )?;
+                } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
+                    super::generation_store::retire_rejected_ensure_running_replacement(
+                        runner_id,
+                        output.exit_code,
+                        output.timed_out,
+                        &output.stdout,
+                        &output.stderr,
                     )?;
                 }
                 return Ok(failed_connect(
@@ -1418,6 +1434,25 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     };
     let Ok(daemon) = daemon else {
         let error = daemon.err().expect("failed daemon connection has an error");
+        let classification = error.details.get("classification").and_then(Value::as_str);
+        // `daemon_unleased_process_conflict` on the *first* ensure-running
+        // attempt journaled the exact command this operation id names before
+        // crossing the remote mutation boundary. The remote's refusal is
+        // authoritative, not a lost response, so replaying that same command
+        // on the next connect would refuse identically forever — the stale
+        // pending replacement operation #15087 reported as never clearing.
+        if classification == Some("daemon_unleased_process_conflict") {
+            // Best-effort: the journal write above always precedes this exact
+            // remote call, so the pending operation should match, but this
+            // cleanup must never mask the real failure being reported below.
+            let _ = super::generation_store::retire_rejected_ensure_running_replacement(
+                runner_id,
+                1,
+                false,
+                "",
+                &error.message,
+            );
+        }
         let failure_evidence_ref = error
             .details
             .get("failure_evidence_ref")
@@ -1926,6 +1961,34 @@ fn is_terminal_state_loss_refusal(output: &homeboy_core::server::CommandOutput) 
         .or_else(|| envelope.error.as_ref().and_then(|error| error.get("code")))
         .and_then(Value::as_str);
     matches!(code, Some(code) if code.starts_with("validation.") || code.starts_with("policy."))
+}
+
+/// `daemon_unleased_process_conflict` is the remote authoritatively refusing
+/// this exact journaled operation id because a live process it cannot prove
+/// it owns already holds the store (see `refuse_unleased_process_conflict` in
+/// homeboy-core). That is not a lost response worth replaying — the same
+/// command will refuse identically forever, which is exactly how #15087's
+/// stale pending replacement operation kept replaying on every subsequent
+/// `runner connect`/`refresh-homeboy --reconnect`.
+fn is_terminal_ensure_running_refusal(output: &homeboy_core::server::CommandOutput) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let Ok(envelope) = parse_envelope(&output.stdout) else {
+        return false;
+    };
+    if envelope.success {
+        return false;
+    }
+    ensure_running_refusal_classification(envelope.error.as_ref())
+        == Some("daemon_unleased_process_conflict")
+}
+
+fn ensure_running_refusal_classification(error: Option<&Value>) -> Option<&str> {
+    error
+        .and_then(|error| error.get("details"))
+        .and_then(|details| details.get("classification"))
+        .and_then(Value::as_str)
 }
 
 fn remote_state_loss_recovery_command(
