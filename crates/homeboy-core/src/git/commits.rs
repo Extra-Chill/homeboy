@@ -1104,6 +1104,54 @@ mod tests {
     }
 
     #[test]
+    fn package_scope_exclude_does_not_hide_releasable_commits() {
+        // A compiled-source tree excluded from package completeness must still
+        // count toward releasable commits (homeboy#15088).
+        let (dir, path) = init_repo();
+        git(&path, &["tag", "v1.0.0"]);
+        fs::create_dir_all(dir.path().join("blocks")).expect("blocks dir");
+        commit_file(
+            &dir,
+            &path,
+            "blocks/render.php",
+            "<?php\n",
+            "fix: block template",
+        );
+
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: path.clone(),
+            scopes: Some(crate::component::ScopeConfig {
+                package: Some(crate::component::CommandScopeConfig {
+                    include: Vec::new(),
+                    exclude: vec!["blocks/**".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..Component::default()
+        };
+        let commits =
+            get_component_changes_since_tag(&component, Some("v1.0.0")).expect("changes");
+        assert_eq!(commits.len(), 1, "package exclude must not hide the fix");
+        assert_eq!(commits[0].subject, "fix: block template");
+
+        // The legacy release exclude still hides it (unchanged behaviour).
+        let legacy = Component {
+            scopes: Some(crate::component::ScopeConfig {
+                release: Some(crate::component::CommandScopeConfig {
+                    include: Vec::new(),
+                    exclude: vec!["blocks/**".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..component
+        };
+        let commits =
+            get_component_changes_since_tag(&legacy, Some("v1.0.0")).expect("changes");
+        assert!(commits.is_empty(), "release exclude keeps its existing meaning");
+    }
+
+    #[test]
     fn parse_commit_records_with_body() {
         // Simulate git log output with field/record separators
         let raw = format!(

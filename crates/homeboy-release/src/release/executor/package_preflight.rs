@@ -226,7 +226,7 @@ fn package_completeness_error(
             "checked_artifact_type": "zip"
         }).to_string()),
         Some(vec![
-            "Update the release.package action so this artifact includes every mapped tracked runtime file, or add an explicit release scope exclude for intentional omissions.".to_string(),
+            "Update the release.package action so this artifact includes every mapped tracked runtime file, or add an explicit `scopes.package` exclude for intentional omissions (e.g. source compiled into a shipped build output). A `scopes.release` exclude also hides those paths from releasable-commit detection.".to_string(),
         ]),
     ))
 }
@@ -275,6 +275,13 @@ fn release_scope(component: &Component) -> CommandScopeConfig {
         if let Some(release) = scopes.release.as_ref() {
             scope.include.extend(release.include.clone());
             scope.exclude.extend(release.exclude.clone());
+        }
+        // `scopes.package` narrows completeness without touching releasable
+        // commit detection (which reads `scopes.release` only), so compiled
+        // source trees can be excluded here and still trigger releases.
+        if let Some(package) = scopes.package.as_ref() {
+            scope.include.extend(package.include.clone());
+            scope.exclude.extend(package.exclude.clone());
         }
     }
     scope
@@ -488,6 +495,37 @@ mod tests {
         }];
         validate_package_completeness(&component, repo.path(), &artifacts)
             .expect("excluded runtime file should not fail");
+    }
+
+    #[test]
+    fn package_completeness_honors_package_scope_excludes() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("blocks")).expect("blocks dir");
+        std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
+        std::fs::write(repo.path().join("blocks/render.php"), "<?php\n").expect("block");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "plugin.php", "blocks/render.php"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("plugin/plugin.php", "<?php\n")]);
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: repo.path().to_string_lossy().to_string(),
+            scopes: Some(homeboy_core::component::ScopeConfig {
+                package: Some(CommandScopeConfig {
+                    include: Vec::new(),
+                    exclude: vec!["blocks/**".to_string()],
+                }),
+                ..Default::default()
+            }),
+            ..Component::default()
+        };
+        validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect("package-scope excluded source should not fail completeness");
     }
 
     #[test]
