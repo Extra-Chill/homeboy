@@ -432,6 +432,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         None
     };
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
+    if let (Some(form_title), Some(pr)) = (&options.cook_form_title, &existing) {
+        if let Some(existing_title) = backend.open_pr_title(&options.path, pr.number)? {
+            if !existing_title.trim().is_empty()
+                && !existing_title.starts_with("Cook ")
+                && existing_title != *form_title
+            {
+                options.title = existing_title;
+            }
+        }
+    }
     if existing.is_none() {
         if let Some(merged) = backend.find_merged_pr(&options.path, &options.base, &head)? {
             let observed_remote_sha =

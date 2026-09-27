@@ -8,7 +8,7 @@ use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotio
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
     classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create, pr_edit, pr_find,
-    push_at, remote_branch_head_over_push_transport, resolve_default_remote,
+    pr_view, push_at, remote_branch_head_over_push_transport, resolve_default_remote,
     resolve_effective_push_url, run_git, CommitOptions, GitPushRemote, GitPushTransportClass,
     GitPushTransportKind, PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
     DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
@@ -536,6 +536,10 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             url: item.url,
             is_draft: item.is_draft,
         }))
+    }
+
+    fn open_pr_title(&mut self, path: &str, number: u64) -> Result<Option<String>> {
+        Ok(pr_view(None, number, Some(path.to_string()))?.title)
     }
 
     fn verify_remote_candidate(

@@ -30,6 +30,8 @@ struct MockBackend {
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    existing_title: Option<String>,
+    last_title: Option<String>,
     merged_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
@@ -304,6 +306,10 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(self.merged_pr.clone())
     }
 
+    fn open_pr_title(&mut self, _path: &str, _number: u64) -> Result<Option<String>> {
+        Ok(self.existing_title.clone())
+    }
+
     fn verify_remote_candidate(
         &mut self,
         _path: &str,
@@ -336,7 +342,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _path: &str,
         _base: &str,
         _head: &str,
-        _title: &str,
+        title: &str,
         body: &str,
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
@@ -344,6 +350,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             return Err(Error::git_command_failed("gh pr create failed"));
         }
         self.created = true;
+        self.last_title = Some(title.to_string());
         self.created_draft = draft;
         self.create_calls += 1;
         self.last_body = body.to_string();
@@ -358,10 +365,11 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         &mut self,
         _path: &str,
         number: u64,
-        _title: &str,
+        title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
         self.updated = true;
+        self.last_title = Some(title.to_string());
         self.last_body = body.to_string();
         Ok(AgentTaskPrRef {
             number,
@@ -701,6 +709,57 @@ fn post_mutation_drift_quarantines_existing_ready_pr_as_draft() {
     assert!(error
         .message
         .contains("cleanup_state=existing_pr_converted_to_draft"));
+}
+
+#[test]
+fn cook_form_title_fresh_and_existing_pr_precedence() {
+    let form_title = "Require a specific Cook review title";
+    let mut fresh = MockBackend {
+        changed_files: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let mut request = options();
+    request.title = form_title.into();
+    request.cook_form_title = Some(form_title.into());
+    request.draft_pr = true;
+    finalize_pr_with_backend(request.clone(), &mut fresh).unwrap();
+    assert_eq!(fresh.last_title.as_deref(), Some(form_title));
+
+    for (existing_title, expected) in [
+        ("Cook homeboy", form_title),
+        (
+            "Operator-edited specific title",
+            "Operator-edited specific title",
+        ),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".into()],
+            existing_pr: Some(AgentTaskPrRef {
+                number: 77,
+                url: "https://github.com/Extra-Chill/homeboy/pull/77".into(),
+                is_draft: true,
+            }),
+            existing_title: Some(existing_title.into()),
+            ..Default::default()
+        };
+        finalize_pr_with_backend(request.clone(), &mut backend).unwrap();
+        assert_eq!(backend.last_title.as_deref(), Some(expected));
+    }
+
+    request.title = "Explicit --title".into();
+    request.cook_form_title = None;
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".into()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".into(),
+            is_draft: true,
+        }),
+        existing_title: Some("Operator-edited specific title".into()),
+        ..Default::default()
+    };
+    finalize_pr_with_backend(request, &mut backend).unwrap();
+    assert_eq!(backend.last_title.as_deref(), Some("Explicit --title"));
 }
 
 #[test]
@@ -3310,6 +3369,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
         verified_base_sha: Some("verified-base".to_string()),
         head: None,
         title: "Cook issue #3678".to_string(),
+        cook_form_title: None,
         commit_message: "finalize cook loop PR plumbing".to_string(),
         gate_results,
         normalized_gate_results,
