@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.395.1] - 2026-09-27
+
+### Fixed
+- honor local placement on Cook retry
+- reconcile interrupted owner in status
+- reject unwritable binary targets before download
+- admit green retried provider publication
+- reproject sensitive mappings on Cook retry
+- isolate shared Lab daemon by controller
+
 ## [0.395.0] - 2026-09-27
 
 ### Added
