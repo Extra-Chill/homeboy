@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.392.0] - 2026-09-27
+
+### Added
+- project bounded directory evidence to Lab
+
+### Fixed
+- lease-fence stale controller daemon rotation
+
 ## [0.391.6] - 2026-09-27
 
 ### Fixed
