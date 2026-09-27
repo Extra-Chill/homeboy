@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.10] - 2026-09-27
+
+### Fixed
+- skip stale prepared sources and summarize failures
+
 ## [2.20.9] - 2026-09-26
 
 ### Fixed
