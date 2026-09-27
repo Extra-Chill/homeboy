@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.2] - 2026-09-27
+
+### Fixed
+- detect a component's phpstan-wordpress include from active neon lines only
+
 ## [3.50.1] - 2026-09-25
 
 ### Fixed
