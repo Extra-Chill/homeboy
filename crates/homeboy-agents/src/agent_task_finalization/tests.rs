@@ -2248,6 +2248,103 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
 }
 
 #[test]
+fn durable_finalization_accepts_successful_retry_with_failed_attempt_history() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.provider_runtime.insert(
+        0,
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "lab".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({
+                "evidence_source": "durable_provider_execution",
+                "attempt": 0,
+                "model": "openai/gpt-5.6-terra"
+            }),
+        },
+    );
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful canonical retry receipt admits publication");
+
+    assert_eq!(report.status, "review_ready");
+    assert!(backend.created);
+}
+
+#[test]
+fn durable_finalization_rejects_stale_success_when_latest_producer_failed_or_gates_are_red() {
+    for gates_green in [true, false] {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+        if !gates_green {
+            gate_proof.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+        }
+        let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+        lifecycle.provider_runtime.push(ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "lab".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({
+                "evidence_source": "durable_provider_execution",
+                "attempt": 1,
+                "model": "openai/gpt-5.6-terra"
+            }),
+        });
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(lifecycle),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+        assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+        assert!(!backend.created && !backend.committed && !backend.pushed);
+    }
+}
+
+#[test]
+fn durable_finalization_preserves_authenticated_partial_provider_recovery() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.execution.state = RunExecutionState::PartialFailure;
+    lifecycle.provider_runtime[0].metadata["evidence_source"] = json!("durable_provider_execution");
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("authenticated all-successful provider recovery remains eligible");
+
+    assert_eq!(report.status, "review_ready");
+    assert!(backend.created);
+}
+
+#[test]
 fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new(
