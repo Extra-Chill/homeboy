@@ -540,6 +540,7 @@ pub(crate) fn preview_cook(
     resolve_cook_execution_budget(&args, &mut plan)?;
     plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    preflight_preview_lab_provider_secret_env(&placement, &plan)?;
 
     let executor = plan
         .tasks
@@ -558,6 +559,23 @@ pub(crate) fn preview_cook(
         cook_preview_result(resolved, progress, replay, None, None),
         0,
     ))
+}
+
+fn preflight_preview_lab_provider_secret_env(
+    placement: &Value,
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    if placement.get("selected").and_then(Value::as_str) != Some("lab") {
+        return Ok(());
+    }
+    let Some(runner_id) = placement.get("selected_runner").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+        return Ok(());
+    }
+    let runner = homeboy::runner::load(runner_id)?;
+    homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(runner_id, &runner, plan)
 }
 
 fn preview_staging_component(
@@ -3212,6 +3230,59 @@ mod preview_tests {
                 !summary.contains("static inputs only; admission not checked"),
                 "admissible preview must not claim admission was skipped: {summary}"
             );
+        });
+    }
+
+    #[test]
+    fn preview_provider_secrets_require_a_runner_ref_only_when_the_plan_declares_one() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner_id = "lab-secret-preview";
+            homeboy::runner::runners::create(
+                &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
+                false,
+            )
+            .expect("register runner without secret refs");
+            let placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": runner_id,
+            });
+            let plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+                serde_json::from_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-plan/v1",
+                    "plan_id": "provider-secret-preview",
+                    "tasks": [{
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "provider-route",
+                        "executor": { "backend": "fixture" },
+                        "instructions": "Check the runner secret contract."
+                    }],
+                }))
+                .expect("parse plan");
+
+            preflight_preview_lab_provider_secret_env(&placement, &plan)
+                .expect("a no-secret plan needs no runner credential");
+
+            let mut required_plan = plan;
+            required_plan.tasks[0].executor.secret_env =
+                vec!["PROVIDER_PREVIEW_SECRET_TEST".to_string()];
+            let error = preflight_preview_lab_provider_secret_env(&placement, &required_plan)
+                .expect_err("missing runner-owned reference must block preview");
+            assert!(error.message.contains("PROVIDER_PREVIEW_SECRET_TEST"));
+
+            let configured_runner = "lab-secret-configured-preview";
+            homeboy::runner::runners::create(
+                &format!(
+                    r#"{{"id":"{configured_runner}","kind":"local","secret_env":{{"PROVIDER_PREVIEW_SECRET_TEST":{{"env":"PROVIDER_PREVIEW_SECRET_TEST"}}}}}}"#
+                ),
+                false,
+            )
+            .expect("register runner with secret reference");
+            let configured_placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": configured_runner,
+            });
+            preflight_preview_lab_provider_secret_env(&configured_placement, &required_plan)
+                .expect("present runner reference admits the same plan");
         });
     }
 

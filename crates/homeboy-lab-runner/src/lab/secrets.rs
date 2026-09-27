@@ -648,6 +648,43 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
     Err(error)
 }
 
+/// Check the effective provider identities before a Lab attempt is admitted.
+/// This is deliberately value-free: the controller only needs the runner's
+/// configured reference inventory, not the referenced secret material.
+pub fn preflight_agent_task_runner_provider_secret_env_plan(
+    runner_id: &str,
+    runner: &Runner,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
+    let names = agent_task_runner_provider_secret_env_names(plan);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let secret_env_plan = SecretEnvPlan::from_secret_env_names(names);
+    preflight_agent_task_runner_secret_env_plan(
+        runner_id,
+        runner,
+        &[],
+        &HashMap::new(),
+        &secret_env_plan,
+    )
+}
+
+/// Resolve only the effective provider's required runner secret identities.
+/// Both Cook admission and staging consume this set without resolving values.
+pub fn agent_task_runner_provider_secret_env_names(plan: &AgentTaskPlan) -> Vec<String> {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers.providers());
+    names.extend(
+        plan.tasks
+            .iter()
+            .flat_map(|task| task.executor.secret_env.iter().cloned()),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub(crate) fn preflight_lab_secret_env_handoff(
     runner_id: &str,
     runner: Option<&Runner>,

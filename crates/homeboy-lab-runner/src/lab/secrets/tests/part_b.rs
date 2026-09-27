@@ -958,6 +958,44 @@ fn preflight_accepts_present_effective_provider_plan_name() {
 }
 
 #[test]
+fn provider_plan_preflight_uses_effective_provider_names_before_staging() {
+    let name = "EFFECTIVE_PROVIDER_RUNNER_SECRET_TEST";
+    let mut plan = serde_json::from_value::<AgentTaskPlan>(serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "plan_id": "effective-provider-plan",
+        "tasks": [{
+            "schema": "homeboy/agent-task-request/v1",
+            "task_id": "effective-route",
+            "executor": { "backend": "opencode", "secret_env": [name] },
+            "instructions": "Use the effective provider route."
+        }]
+    }))
+    .expect("plan fixture");
+    plan.tasks[0].executor.secret_env = vec![name.to_string()];
+
+    let error = preflight_agent_task_runner_provider_secret_env_plan(
+        "lab-a",
+        &fixture_runner(HashMap::new()),
+        &plan,
+    )
+    .expect_err("missing runner identity must fail before staging");
+    assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    assert!(error.message.contains(name));
+    assert!(!error.message.contains("token"));
+
+    let runner = fixture_runner(HashMap::from([(
+        name.to_string(),
+        RunnerSecretEnvRef {
+            env: Some(name.to_string()),
+            file: None,
+            secret: None,
+        },
+    )]));
+    preflight_agent_task_runner_provider_secret_env_plan("lab-a", &runner, &plan)
+        .expect("present runner identity should pass");
+}
+
+#[test]
 fn preflight_agent_task_runner_secret_env_accepts_request_env() {
     let temp = tempfile::tempdir().expect("tempdir");
     let plan_path = temp.path().join("plan.json");
