@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.3] - 2026-09-27
+
+### Fixed
+- exclude smoke-harness stand-ins from PHPStan discovery
+
 ## [3.50.2] - 2026-09-27
 
 ### Fixed
