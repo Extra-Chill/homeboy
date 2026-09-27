@@ -391,6 +391,18 @@ generate_dependency_config() {
             done < <(homeboy_resolve_phpstan_dependency_signature_files "$dependency_path")
         done <<< "$dependency_paths"
 
+        # Pin function files of Composer-installed WordPress plugins; see
+        # homeboy_resolve_phpstan_composer_plugin_function_files().
+        while IFS= read -r plugin_function_file; do
+            [ -z "$plugin_function_file" ] && continue
+            if [ "$scan_file_count" -eq 0 ]; then
+                printf '%s\n' '    scanFiles:'
+            fi
+            scan_file_count=$((scan_file_count + 1))
+            has_component_context=1
+            printf '        - %s\n' "$plugin_function_file"
+        done < <(homeboy_resolve_phpstan_composer_plugin_function_files "$PLUGIN_PATH")
+
         if [ -f "$wordpress_api_overrides" ]; then
             if [ "$scan_file_count" -eq 0 ]; then
                 printf '%s\n' '    scanFiles:'
@@ -463,6 +475,61 @@ homeboy_resolve_phpstan_context_files() {
 # prevent — as unresolved-method findings rather than arity ones. Vendored
 # code, node_modules, build output, and the dependency's own tests are excluded
 # above, so the remaining tree is first-party source.
+# Function files of Composer-installed WordPress plugins.
+#
+# A plugin pulled in through Composer (package type `wordpress-plugin`, e.g. a
+# substrate vendored into the component) usually lists only its bootstrap file
+# in `autoload.files`. That bootstrap returns early outside WordPress (an
+# `ABSPATH` or `__PHPSTAN_RUNNING__` guard) before its `require_once` chain
+# runs, and its `classmap` covers classes only. Top-level functions declared in
+# the required files are therefore invisible to PHPStan, and every real call
+# from component source is reported as `Function ... not found`, which
+# components paper over with per-call `@phpstan-ignore`.
+#
+# `scanFiles:` parses declarations without executing the file, so top-level
+# side effects in those files (hook registrations) are harmless here. Only
+# files that declare a top-level function are emitted, keeping the set small.
+homeboy_resolve_phpstan_composer_plugin_function_files() {
+    local component_path="$1"
+    local installed="${component_path}/vendor/composer/installed.json"
+
+    [ -f "$installed" ] || return 0
+    command -v php >/dev/null 2>&1 || return 0
+
+    php -r '
+        $installed = json_decode( (string) file_get_contents( $argv[1] ), true );
+        $packages  = isset( $installed["packages"] ) ? $installed["packages"] : ( is_array( $installed ) ? $installed : array() );
+        $vendor    = dirname( $argv[1], 2 );
+        foreach ( $packages as $package ) {
+            if ( ! is_array( $package ) || "wordpress-plugin" !== ( $package["type"] ?? "" ) ) {
+                continue;
+            }
+            $rel  = (string) ( $package["install-path"] ?? ( "../" . ( $package["name"] ?? "" ) ) );
+            $root = realpath( $vendor . "/composer/" . $rel );
+            if ( false === $root || ! is_dir( $root ) ) {
+                continue;
+            }
+            $it = new RecursiveIteratorIterator(
+                new RecursiveCallbackFilterIterator(
+                    new RecursiveDirectoryIterator( $root, FilesystemIterator::SKIP_DOTS ),
+                    static function ( $file ) {
+                        return ! ( $file->isDir() && in_array( $file->getFilename(), array( "vendor", "node_modules", "tests", "build", "dist", "tools", "stubs" ), true ) );
+                    }
+                )
+            );
+            foreach ( $it as $file ) {
+                if ( "php" !== $file->getExtension() ) {
+                    continue;
+                }
+                $code = (string) file_get_contents( $file->getPathname() );
+                if ( preg_match( "/^function\\s+&?[A-Za-z_][A-Za-z0-9_]*\\s*\\(/m", $code ) ) {
+                    echo $file->getPathname(), "\n";
+                }
+            }
+        }
+    ' "$installed" 2>/dev/null
+}
+
 homeboy_resolve_phpstan_dependency_signature_files() {
     local dependency_path="$1"
     local depth="${HOMEBOY_PHPSTAN_DEPENDENCY_SIGNATURE_DEPTH:-10}"

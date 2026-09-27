@@ -158,6 +158,7 @@
       "bash tests/node-test-result-parser-smoke.sh",
       "bash tests/phpstan-dependency-signature-shadowing-smoke.sh",
       "bash tests/phpstan-smoke-harness-class-shadowing-smoke.sh",
+      "bash tests/phpstan-composer-wordpress-plugin-functions-smoke.sh",
       "bash tests/phpstan-temp-config-suffix-smoke.sh",
       "node tests/playground-readiness-smoke.js",
       "bash tests/prepared-bench-dependency-cache-smoke.sh",
