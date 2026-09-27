@@ -203,6 +203,19 @@ run_phpstan
 assert_file_not_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "a component supplying phpstan-wordpress does not also receive the extension default"
 assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "a component supplying phpstan-wordpress still has its own config included"
 
+# A component that removed its include but kept a comment naming the path
+# must still receive the extension's WordPress environment. A raw grep read the
+# comment as the include and dropped the stubs entirely (#2892).
+printf '%s\n' \
+    '# This file previously opened with' \
+    '#   includes:' \
+    '#       - vendor/szepeviktor/phpstan-wordpress/extension.neon' \
+    'parameters:' \
+    '    level: 5' > "${COMPONENT_DIR}/phpstan.neon.dist"
+run_phpstan
+assert_file_contains "$CONFIG_CAPTURE" "${EXTENSION_DIR}/phpstan.neon.dist" "a commented-out phpstan-wordpress include does not withhold the extension default"
+assert_file_contains "$CONFIG_CAPTURE" "${COMPONENT_DIR}/phpstan.neon.dist" "a commented-out include still has the component config included"
+
 printf '%s\n' 'parameters:' '    level: max' > "${COMPONENT_DIR}/phpstan.neon.dist"
 
 HOMEBOY_PHPSTAN_LEVEL=5 run_phpstan

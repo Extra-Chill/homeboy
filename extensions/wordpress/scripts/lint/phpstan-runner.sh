@@ -278,7 +278,13 @@ if [ -n "$PHPSTAN_COMPONENT_CONFIG" ]; then
     # to cost them the environment, so a good many carry it today. They keep
     # working untouched, and migrate by deleting the include, at which point
     # they inherit the extension's copy.
-    if grep -Eq 'phpstan-wordpress/extension\.neon' "$PHPSTAN_COMPONENT_CONFIG"; then
+    #
+    # Only an active include counts. Components that dropped the include often
+    # keep a comment explaining why (naming this exact path), and a raw grep
+    # read that comment as the include — silently withholding the extension's
+    # WordPress environment and reporting every core call as `not found`
+    # (homeboy-extensions#2892). Neon comments start with `#`; strip them first.
+    if sed -E 's/#.*$//' "$PHPSTAN_COMPONENT_CONFIG" | grep -Eq 'phpstan-wordpress/extension\.neon'; then
         PHPSTAN_COMPONENT_CONFIG_SUPPLIES_WORDPRESS=1
     fi
     if grep -Eq '^[[:space:]]*-[[:space:]]+\.?/?phpstan-baseline\.neon([[:space:]]*(#.*)?)?$' "$PHPSTAN_COMPONENT_CONFIG"; then
