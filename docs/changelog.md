@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.391.5] - 2026-09-27
+
+### Changed
+- accept typed SSH transport rejection across hosts
+- use unreachable TEST-NET runner fixture
+- isolate audit provider startup from parallel registries
+
+### Fixed
+- use stage-aware inactivity deadlines
+
 ## [0.391.4] - 2026-09-27
 
 ### Fixed
