@@ -1197,9 +1197,7 @@ where
         request,
         request.local_output_file.is_some(),
     )?;
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
+    let attachment = load_recipe_attachment(&lab_lifecycle_store, run_id)?;
     let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan_in_store(
         &lab_lifecycle_store,
         run_id,
@@ -1958,9 +1956,42 @@ impl LabStagingRecipeRef {
 }
 
 pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    load_lab_staging_recipe_in_store(&store, run_id)
+}
+
+fn load_recipe_attachment(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<homeboy_agents::agent_task_lifecycle::PrivateRunAttachment<LabStagingRecipe>> {
+    homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<LabStagingRecipe>(
+        run_id,
+        LAB_STAGING_RECIPE_ATTACHMENT_KIND,
+    )
+    .map_err(|error| {
+        if error.details.get("json_parse").is_some() {
+            if let Err(persist_error) =
+                homeboy_agents::agent_task_lifecycle::record_lab_staging_json_error(
+                    store,
+                    run_id,
+                    "loading_recipe",
+                    LAB_STAGING_RECIPE_ATTACHMENT_KIND,
+                    &error,
+                )
+            {
+                return persist_error;
+            }
+        }
+        error
+    })
+}
+
+fn load_lab_staging_recipe_in_store(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<LabStagingRequest> {
+    let attachment = load_recipe_attachment(store, run_id)?;
     let recipe = attachment.payload;
     recipe.validate()?;
     if recipe.run_id != run_id {
@@ -1971,7 +2002,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
             None,
         ));
     }
-    let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)?;
+    let record = homeboy_agents::agent_task_lifecycle::status_in_store(store, run_id)?;
     if record.run_id != recipe.run_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -1981,7 +2012,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
         ));
     }
     let durable_agent_task_plan =
-        homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)?;
+        homeboy_agents::agent_task_lifecycle::load_controller_plan_in_store(store, run_id)?;
     if durable_agent_task_plan.plan_id != record.plan_id {
         return Err(Error::validation_invalid_argument(
             "plan_id",
@@ -2002,10 +2033,10 @@ fn load_validated_staging_request(
     recipe_ref: &LabStagingRecipeRef,
 ) -> Result<LabStagingExecutionRequest> {
     recipe_ref.validate()?;
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
-    let staging = load_lab_staging_recipe(run_id)?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let attachment = load_recipe_attachment(&store, run_id)?;
+    let staging = load_lab_staging_recipe_in_store(&store, run_id)?;
     if attachment.payload_digest != recipe_ref.attachment_digest
         || staging.recipe.runner_id != runner_id
         || staging.durable_agent_task_plan.plan_id != recipe_ref.durable_plan_id
@@ -7677,6 +7708,52 @@ mod tests {
             )
             .public_projection();
             assert!(!public.to_string().contains("private-marker"));
+        });
+    }
+
+    #[test]
+    fn malformed_recipe_diagnostic_is_visible_after_run_cancellation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "malformed-recipe-after-cancel";
+            submit_recipe_run(run_id);
+            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+            let recipe_path = homeboy_core::paths::homeboy_data()
+                .expect("data root")
+                .join("agent-task-runs")
+                .join(run_id)
+                .join("private/lab-staging-recipe.json");
+            std::fs::create_dir_all(recipe_path.parent().expect("private directory"))
+                .expect("create private directory");
+            std::fs::write(&recipe_path, br#"{"payload":"secret-marker",broken}"#)
+                .expect("write malformed recipe fixture");
+
+            assert!(load_lab_staging_recipe_in_store(&store, run_id).is_err());
+            homeboy_agents::agent_task_lifecycle::cancel_run_in_store(
+                &store,
+                run_id,
+                Some("fixture cancellation"),
+            )
+            .expect("cancel run after staging error");
+
+            let status = homeboy_agents::agent_task_lifecycle::status_in_store(&store, run_id)
+                .expect("status after cancellation");
+            let diagnostic = &status.metadata["lab_staging_diagnostic"];
+            assert_eq!(diagnostic["cause"], "json_parse");
+            assert_eq!(diagnostic["field_status"], "unknown");
+            assert!(diagnostic["field"].is_null());
+            assert_eq!(diagnostic["phase"], "loading_recipe");
+            assert_eq!(
+                diagnostic["attachment_kind"],
+                LAB_STAGING_RECIPE_ATTACHMENT_KIND
+            );
+            assert_eq!(diagnostic["parse"]["category"], "data");
+            assert!(diagnostic["parse"]["line"].as_u64().is_some());
+            assert!(diagnostic["parse"]["column"].as_u64().is_some());
+
+            let status_json = serde_json::to_string(&status).expect("serialize status");
+            assert!(!status_json.contains("secret-marker"));
+            assert!(!status_json.contains("private/lab-staging-recipe"));
         });
     }
 

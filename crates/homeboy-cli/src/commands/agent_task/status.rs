@@ -341,6 +341,14 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
     if let Ok(record) = agent_task_lifecycle::exact_record(&target.run_id) {
         attach_lab_snapshot_failure_projection(&mut value, &record);
+        if let Some(diagnostic) = lab_staging_root_cause(&record) {
+            value["blocker_summary"] = json!(diagnostic.message);
+            value["next_action"] = json!({
+                "description": "Repair or recreate the malformed private Lab staging recipe, then retry the run.",
+                "command": format!("homeboy agent-task retry {}", quote_arg(&record.run_id)),
+            });
+            value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
+        }
     }
     if value["action_eligibility"]["actions"]
         .as_array()
@@ -1934,6 +1942,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let mut nested_reasons = current_lifecycle_diagnostic
         .clone()
         .into_iter()
+        .chain(lab_staging_root_cause(&record))
         .chain(queued_runner_ownership.clone())
         .chain(persisted_cook_failure_diagnostic(&record))
         .collect::<Vec<_>>();
@@ -2036,6 +2045,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         current_lifecycle_diagnostic.is_some(),
         queued_runner_ownership.is_some(),
     );
+    let next_commands = if lab_staging_root_cause(&record).is_some() {
+        vec![format!("homeboy agent-task retry {}", quote_arg(run_id))]
+    } else {
+        next_commands
+    };
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
@@ -4883,6 +4897,9 @@ fn compact_mandatory_field(field: &str) -> bool {
             | "status"
             | "state"
             | "lab_transport_failure"
+            | "blocker_summary"
+            | "next_action"
+            | "lab_staging_diagnostic"
             | "full_command"
     )
 }
@@ -5054,6 +5071,47 @@ fn compact_cook_diagnostic(diagnostic: &Value) -> Value {
         "code": cause.get("code"),
         "field": cause.get("field").or_else(|| diagnostic.pointer("/details/field")),
         "message": bounded_value(cause.get("message").unwrap_or(&Value::Null)),
+    })
+}
+
+fn lab_staging_root_cause(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
+    let diagnostic = record.metadata.get("lab_staging_diagnostic")?;
+    if diagnostic.get("schema")?.as_str()? != "homeboy/lab-staging-diagnostic/v1"
+        || diagnostic.get("cause")?.as_str()? != "json_parse"
+    {
+        return None;
+    }
+    let phase = diagnostic.get("phase")?.as_str()?;
+    let attachment_kind = diagnostic.get("attachment_kind")?.as_str()?;
+    let parse = diagnostic.get("parse")?;
+    let category = parse.get("category")?.as_str()?;
+    if phase != "loading_recipe"
+        || attachment_kind != "lab-staging-recipe"
+        || !matches!(category, "syntax" | "data" | "eof" | "io")
+    {
+        return None;
+    }
+    let line = parse.get("line")?.as_u64()?;
+    let column = parse.get("column")?.as_u64()?;
+    let message = format!(
+        "Lab staging recipe JSON could not be parsed ({category}, line {line}, column {column}); the failing field is unknown"
+    );
+    Some(CollectedDiagnostic {
+        task_id: "controller".to_string(),
+        class: "lab_staging.json_parse".to_string(),
+        message,
+        source: "current_lifecycle".to_string(),
+        data: json!({
+            "phase": phase,
+            "cause": "json_parse",
+            "attachment_kind": attachment_kind,
+            "category": category,
+            "line": line,
+            "column": column,
+            "field": null,
+            "field_status": "unknown",
+            "next_action": "Repair or recreate the private Lab staging recipe, then retry the run.",
+        }),
     })
 }
 
@@ -5453,7 +5511,6 @@ fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregat
     payload
 }
 
-#[cfg(test)]
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
     collected_diagnostic_value_with_details(item, false)
 }
@@ -5483,6 +5540,8 @@ fn collected_diagnostic_value_with_details(
     } else if item.source == "lab_preacceptance_transport" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if item.source == "runner_ownership" {
+        value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
+    } else if item.source == "current_lifecycle" && item.class == "lab_staging.json_parse" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();
