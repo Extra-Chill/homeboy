@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.4] - 2026-09-27
+
+### Fixed
+- make Composer-installed WordPress plugin functions visible to PHPStan
+
 ## [3.50.3] - 2026-09-27
 
 ### Fixed
