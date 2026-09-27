@@ -321,6 +321,35 @@ pub fn resolve_parsed_command_preflight(
         && matches!(input.runner, RunnerIntent::Default)
         && !auto_split_placement_requires_lab;
     if preferred_runner_inadmissible && !auto_route_fallback {
+        let runner_reason = policy.selected_runner_id.as_deref().map(|runner_id| {
+            lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref())
+        });
+        let local_admission = evaluate_resource_admission(
+            &input.resource_admission,
+            policy.resource_admission_evidence,
+        );
+        let local_reason = auto_split_placement_requires_lab
+            .then(|| local_route_inadmissible_reason(&local_admission))
+            .flatten();
+        let local_fallback_rejected = local_reason.is_some();
+        let mut remediation = if auto_split_placement_requires_lab {
+            policy
+                .lab_readiness
+                .as_ref()
+                .map(|readiness| {
+                    readiness
+                        .remediation_commands
+                        .iter()
+                        .cloned()
+                        .chain(readiness.reasons.iter().cloned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        remediation.extend(runner_reason.clone());
+        remediation.extend(local_reason.clone());
         return Err(crate::Error::validation_invalid_argument(
             if auto_split_placement_requires_lab {
                 "placement"
@@ -328,25 +357,20 @@ pub fn resolve_parsed_command_preflight(
                 "selected_runner_id"
             },
             if auto_split_placement_requires_lab {
-                "required Lab placement has no selected ready runner"
+                if local_fallback_rejected {
+                    format!(
+                        "required Lab placement has no selected ready runner ({}); local fallback is inadmissible ({})",
+                        runner_reason.as_deref().unwrap_or("Lab readiness unavailable"),
+                        local_reason.as_deref().unwrap_or_default()
+                    )
+                } else {
+                    "required Lab placement has no selected ready runner".to_string()
+                }
             } else {
-                "selected runner requires admitted connected readiness evidence"
+                "selected runner requires admitted connected readiness evidence".to_string()
             },
             policy.selected_runner_id.clone(),
-            auto_split_placement_requires_lab.then(|| {
-                policy
-                    .lab_readiness
-                    .as_ref()
-                    .map(|readiness| {
-                        readiness
-                            .remediation_commands
-                            .iter()
-                            .cloned()
-                            .chain(readiness.reasons.iter().cloned())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }),
+            auto_split_placement_requires_lab.then_some(remediation),
         ));
     }
     if policy.runner_admitted && policy.runner_incompatible {
@@ -1108,6 +1132,41 @@ mod tests {
             .expect_err("stale Cook Lab admission must block before execution");
         assert_eq!(error.details["field"], "placement");
         assert!(error.message.contains("required Lab placement"));
+    }
+
+    #[test]
+    fn split_cook_auto_reports_runner_and_local_preflight_when_neither_route_is_ready() {
+        let mut input = split_cook_input();
+        input.resource_admission = ResourceAdmissionRequirement::Required {
+            label: "agent-task cook".into(),
+            engages_at: ResourceHeat::Warm,
+        };
+        let error = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            input,
+            auto_route_policy(
+                Some("homeboy-lab"),
+                "connected_ineligible",
+                Vec::new(),
+                vec!["runner admission expired".into()],
+                false,
+                ResourceAdmissionEvidence::Observed {
+                    pressure: ResourceHeat::Hot,
+                },
+            ),
+        )
+        .expect_err("automatic Cook must fail before attempting inadmissible local work");
+
+        assert_eq!(error.details["field"], "placement");
+        assert!(error
+            .message
+            .contains("Lab runner homeboy-lab inadmissible"));
+        assert!(error.message.contains("local fallback is inadmissible"));
+        assert!(error.message.contains("agent-task cook"));
+        assert!(error
+            .details
+            .to_string()
+            .contains("runner admission expired"));
     }
 
     #[test]
