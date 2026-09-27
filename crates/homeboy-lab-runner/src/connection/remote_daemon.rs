@@ -1853,13 +1853,7 @@ fn remote_daemon_ensure_running(
             .and_then(|envelope| envelope.error)
         {
             return Err(RemoteDaemonEnsureError::EnsureRunning(
-                summarize_ensure_running_failure(
-                    runner_id,
-                    &command,
-                    &error,
-                    &output.stderr,
-                    None,
-                ),
+                summarize_ensure_running_failure(runner_id, &command, &error, &output.stderr, None),
             ));
         }
         return Err(RemoteDaemonEnsureError::EnsureRunning(

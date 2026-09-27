@@ -1564,10 +1564,7 @@ fn unconverged_refresh_failure(
 /// This is the failure cause reported for the exit-1 branch that previously
 /// shipped `failure: None` alongside every phase reporting `succeeded`
 /// (#15087).
-fn unconverged_readiness_message(
-    runner_id: &str,
-    readiness: &HomeboyRefreshReadiness,
-) -> String {
+fn unconverged_readiness_message(runner_id: &str, readiness: &HomeboyRefreshReadiness) -> String {
     let owners = if readiness.owners.is_empty() {
         String::new()
     } else {

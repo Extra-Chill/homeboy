@@ -2927,8 +2927,7 @@ mod tests {
     /// command that will refuse identically forever, and must preserve the
     /// exact rejection as durable evidence.
     #[test]
-    fn retiring_a_rejected_ensure_running_replacement_preserves_evidence_and_frees_the_operation()
-    {
+    fn retiring_a_rejected_ensure_running_replacement_preserves_evidence_and_frees_the_operation() {
         test_support::with_isolated_home(|_| {
             let first_operation = replacement_operation("runner-a").expect("operation");
             let command =

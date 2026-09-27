@@ -2479,7 +2479,10 @@ esac
             "the refused attempt must never report a started daemon"
         );
         assert_eq!(
-            rejected.failure_evidence.as_ref().map(|evidence| evidence.classification.as_str()),
+            rejected
+                .failure_evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.as_str()),
             Some("daemon_unleased_process_conflict"),
             "the real remote classification must survive the nonzero remote exit code, \
              not collapse into a generic daemon_bootstrap_failure: {:?}",
