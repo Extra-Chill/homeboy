@@ -107,6 +107,29 @@ pub(super) fn default_install_methods() -> InstallMethodsConfig {
 
 const BINARY_REPLACEMENT_MARKER: &str =
     "if [ -w \"$BIN_PATH\" ] || [ -w \"$(dirname \"$BIN_PATH\")\" ]; then";
+const BINARY_REPLACEABILITY_PREFLIGHT: &str = r#"# install unlinks an existing destination; parent write+search permissions govern replacement.
+EFFECTIVE_UID="$(id -u)"
+BIN_DIR="$(dirname "$BIN_PATH")"
+if [ -e "$BIN_PATH" ]; then
+  if stat -c '%u:%a' "$BIN_PATH" >/dev/null 2>&1; then
+    BIN_OWNER_MODE="$(stat -c '%u:%a' "$BIN_PATH")"
+  else
+    BIN_OWNER_MODE="$(stat -f '%u:%Lp' "$BIN_PATH" 2>/dev/null || printf 'unknown:unknown')"
+  fi
+else
+  BIN_OWNER_MODE="absent"
+fi
+if [ "$EFFECTIVE_UID" != 0 ] && { [ ! -w "$BIN_DIR" ] || [ ! -x "$BIN_DIR" ]; }; then
+  USE_SUDO=true
+else
+  USE_SUDO=false
+fi
+if [ "$USE_SUDO" = true ]; then
+  if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; then
+    echo "Cannot replace $BIN_PATH as effective UID $EFFECTIVE_UID (binary owner:mode $BIN_OWNER_MODE; parent is not replaceable, and non-interactive sudo is not authorized). Run the upgrade in an authorized administrative session, or install Homeboy in a directory owned and writable by its service user (for example, ~/.local/bin/homeboy). Changing ownership of the binary alone will not permit replacement." >&2
+    exit 1
+  fi
+fi"#;
 const BINARY_UPGRADE_BOOTSTRAP: &str = r#"# Keep the installed controller immutable until the staged candidate applies
 # its own read-only ownership admission. This lets a fixed candidate classify
 # durable records that a legacy controller cannot, without bypassing live work.
@@ -123,16 +146,21 @@ LEGACY_IDENTITY="$("$BIN_PATH" self identity 2>/dev/null || "$BIN_PATH" --versio
 "$TMP_DIR/homeboy" self upgrade-admission --legacy-identity "$LEGACY_IDENTITY" --target-version "$TARGET_VERSION" --selected-tag-or-artifact "$SELECTED_TAG_OR_ARTIFACT"
 TMP_BIN="$(dirname "$BIN_PATH")/.homeboy-upgrade.$$"
 
-if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then"#;
+if [ "$USE_SUDO" != true ]; then"#;
 
 fn bootstrap_binary_upgrade_command(command: &str) -> String {
     if command.contains("\"$TMP_DIR/homeboy\" self upgrade-admission") {
         return command.to_string();
     }
-    let Some(bootstrapped) = command
-        .contains(BINARY_REPLACEMENT_MARKER)
-        .then(|| command.replacen(BINARY_REPLACEMENT_MARKER, BINARY_UPGRADE_BOOTSTRAP, 1))
-    else {
+    let Some(bootstrapped) = command.contains(BINARY_REPLACEMENT_MARKER).then(|| {
+        command
+            .replacen(BINARY_REPLACEMENT_MARKER, BINARY_UPGRADE_BOOTSTRAP, 1)
+            .replacen(
+                "TMP_DIR=\"$(mktemp -d)\"",
+                &format!("{BINARY_REPLACEABILITY_PREFLIGHT}\nTMP_DIR=\"$(mktemp -d)\""),
+                1,
+            )
+    }) else {
         return command.to_string();
     };
     // The generic `install` substring occurs inside `sudo install`; rewrite the
@@ -245,13 +273,7 @@ mod tests {
 
     #[test]
     fn binary_upgrade_stages_candidate_admission_before_atomic_replacement() {
-        let installer = r#"cleanup() { rm -rf "$TMP_DIR"; }
-if [ -w "$BIN_PATH" ] || [ -w "$(dirname "$BIN_PATH")" ]; then
-  install -m 0755 homeboy "$BIN_PATH"
-else
-  sudo install -m 0755 homeboy "$BIN_PATH"
-fi"#;
-        let command = bootstrap_binary_upgrade_command(installer);
+        let command = default_binary_config().upgrade_command;
         let admission = command
             .find("\"$TMP_DIR/homeboy\" self upgrade-admission")
             .expect("candidate admission");
@@ -266,6 +288,108 @@ fi"#;
         assert!(command.contains("--selected-tag-or-artifact \"$SELECTED_TAG_OR_ARTIFACT\""));
         assert!(!command.contains("install -m 0755 homeboy \"$BIN_PATH\""));
         assert!(command.contains("sudo mv \"$TMP_BIN\" \"$BIN_PATH\""));
+        assert!(command.contains("EFFECTIVE_UID=\"$(id -u)\""));
+        assert!(command.contains("Cannot replace $BIN_PATH as effective UID"));
+        assert!(command.contains("sudo -n true"));
+        assert!(command.find("BIN_OWNER_MODE=").unwrap() < command.find("curl -fsSL").unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn effective_binary_upgrade_default_rejects_denied_sudo_before_download() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().expect("temporary fixture");
+        let tools = temp.path().join("tools");
+        let install_dir = temp.path().join("foreign-parent");
+        let evidence = temp.path().join("curl-called");
+        let sudo_evidence = temp.path().join("sudo-called");
+        fs::create_dir_all(&tools).expect("tools directory");
+        fs::create_dir_all(&install_dir).expect("install directory");
+
+        let installed = install_dir.join("homeboy");
+        fs::write(&installed, "#!/bin/sh\nexit 0\n").expect("writable binary");
+        let mut file_mode = fs::metadata(&installed)
+            .expect("binary metadata")
+            .permissions();
+        file_mode.set_mode(0o755);
+        fs::set_permissions(&installed, file_mode).expect("binary executable");
+        let mut dir_mode = fs::metadata(&install_dir)
+            .expect("directory metadata")
+            .permissions();
+        dir_mode.set_mode(0o555);
+        fs::set_permissions(&install_dir, dir_mode).expect("non-writable parent");
+
+        for utility in ["id", "stat", "dirname", "tr"] {
+            symlink(format!("/usr/bin/{utility}"), tools.join(utility))
+                .expect("link system utility");
+        }
+        fs::write(
+            tools.join("uname"),
+            "#!/bin/sh\ncase \"$1\" in -s) echo Linux;; -m) echo x86_64;; esac\n",
+        )
+        .expect("write uname fixture");
+        let mut mode = fs::metadata(tools.join("uname"))
+            .expect("uname metadata")
+            .permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(tools.join("uname"), mode).expect("make uname executable");
+        fs::write(
+            tools.join("curl"),
+            format!(
+                "#!/bin/sh\nprintf called > '{}'\nexit 1\n",
+                evidence.display()
+            ),
+        )
+        .expect("write curl fixture");
+        let mut mode = fs::metadata(tools.join("curl"))
+            .expect("curl metadata")
+            .permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(tools.join("curl"), mode).expect("make curl executable");
+        fs::write(
+            tools.join("sudo"),
+            format!(
+                "#!/bin/sh\nprintf called > '{}'\nexit 1\n",
+                sudo_evidence.display()
+            ),
+        )
+        .expect("write denied sudo fixture");
+        let mut mode = fs::metadata(tools.join("sudo"))
+            .expect("sudo metadata")
+            .permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(tools.join("sudo"), mode).expect("make sudo executable");
+
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(default_binary_config().upgrade_command)
+            .env(
+                "PATH",
+                format!("{}:{}", tools.display(), install_dir.display()),
+            )
+            .output()
+            .expect("run effective binary default command");
+
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Cannot replace"));
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("non-interactive sudo is not authorized"));
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("Changing ownership of the binary alone"));
+        assert!(
+            !evidence.exists(),
+            "download must not start before preflight"
+        );
+        assert!(
+            sudo_evidence.exists(),
+            "preflight must test sudo authorization"
+        );
+        assert_eq!(
+            fs::read_to_string(installed).expect("original binary"),
+            "#!/bin/sh\nexit 0\n"
+        );
     }
 
     #[test]
