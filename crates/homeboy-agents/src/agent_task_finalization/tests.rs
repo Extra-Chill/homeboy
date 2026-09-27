@@ -603,7 +603,9 @@ fn fork_head_binding_drift_carries_the_real_validation_reason() {
         "drift error must carry the specific validation reason instead of a generic mismatch notice, got: {error}"
     );
     assert!(
-        !error.message.contains("binding_error=binding tuple mismatch"),
+        !error
+            .message
+            .contains("binding_error=binding tuple mismatch"),
         "the literal placeholder must no longer appear, got: {error}"
     );
 }
