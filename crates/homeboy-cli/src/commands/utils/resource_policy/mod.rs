@@ -692,7 +692,14 @@ pub(crate) fn runner_admits_lab_dispatch(
     lab_readiness: Option<&LabRunnerReadiness>,
     required_lab_placement: bool,
 ) -> bool {
-    if !required_lab_placement && command.allows_warm_runner_coordination {
+    // A verified Cook's coordinator stays on the controller, but its provider
+    // attempt is eligible for Lab execution whenever the selected runner is
+    // admitted. Do not make that admission depend on unrelated controller
+    // pressure: preview and dispatch must agree on the runner evidence.
+    if !required_lab_placement
+        && command.allows_warm_runner_coordination
+        && command.label != "agent-task cook/run-plan/retry --run"
+    {
         return admits_warm_runner_coordination(command, resources, selected_runner, lab_readiness);
     }
     command.lab_offload_supported
@@ -2008,11 +2015,11 @@ mod tests {
             );
         }
 
-        // The exact same idle-controller inputs, without required placement
-        // (automatic/default selection), still require warm/hot pressure —
-        // this fix does not change opportunistic offload semantics.
+        // Automatic Cook selection also admits an available runner: only the
+        // controller-owned coordinator remains local, while provider execution
+        // can run remotely regardless of local pressure.
         let idle_resources = resources(ResourceRecommendation::Ok);
-        assert!(!runner_admits_lab_dispatch(
+        assert!(runner_admits_lab_dispatch(
             command,
             &idle_resources,
             Some("homeboy-lab"),
@@ -2074,6 +2081,38 @@ mod tests {
             &resources,
             Some("missing-lab"),
             Some(&ready),
+        ));
+    }
+
+    #[test]
+    fn automatic_cook_admits_connected_ready_runner_under_controller_pressure() {
+        let command = HotCommand {
+            label: "agent-task cook/run-plan/retry --run",
+            lab_offload_supported: true,
+            lab_offload_unsupported_reason: None,
+            allows_warm_runner_coordination: true,
+            offload_only_when_hot: false,
+        };
+        let ready = ready_lab();
+        for recommendation in [
+            ResourceRecommendation::Ok,
+            ResourceRecommendation::Warm,
+            ResourceRecommendation::Hot,
+        ] {
+            assert!(runner_admits_lab_dispatch(
+                command,
+                &resources(recommendation),
+                Some("homeboy-lab"),
+                Some(&ready),
+                false,
+            ), "automatic Cook must dispatch to admitted Lab at {recommendation:?} controller pressure");
+        }
+        assert!(!runner_admits_lab_dispatch(
+            command,
+            &resources(ResourceRecommendation::Hot),
+            Some("homeboy-lab"),
+            Some(&disconnected_lab()),
+            false,
         ));
     }
 
