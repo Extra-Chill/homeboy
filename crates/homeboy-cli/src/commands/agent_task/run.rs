@@ -215,6 +215,68 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
+fn cook_effective_plan_disclosure(plan: &AgentTaskPlan) -> String {
+    let budget = &plan.options.execution_budget;
+    let initial_route = plan.tasks.first().map(|task| {
+        let backend = task.executor.backend.as_str();
+        let model = task.executor.model.as_deref();
+        model.map_or_else(|| backend.to_string(), |model| format!("{backend}/{model}"))
+    });
+    let mut routes = Vec::new();
+    if let Some(rotation) = &plan.options.rotation {
+        if initial_route.is_none() {
+            routes.extend(rotation.entries.first().map(rotation_entry_label));
+        }
+        routes.extend(
+            rotation
+                .entries
+                .iter()
+                .skip(1)
+                .take(
+                    budget
+                        .max_provider_rotations
+                        .min(budget.max_provider_executions.saturating_sub(1))
+                        as usize,
+                )
+                .map(rotation_entry_label),
+        );
+    }
+    if let Some(initial_route) = initial_route {
+        routes.insert(0, initial_route);
+    }
+    let rotation = if routes.len() > 1 {
+        routes.join(" → ")
+    } else {
+        routes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "configured provider".to_string())
+    };
+    let retry_classes = if budget.max_provider_rotations > 0 {
+        "provider/transient/timeout/stalled/rate-limited/account-quota-billing-credentials"
+    } else {
+        "none"
+    };
+    format!(
+        "cook: effective plan: up to {} executions; rotation order: {}; rotates on {}; {} gate retries (same provider; rotations do not fund gates)",
+        budget.max_provider_executions,
+        rotation,
+        retry_classes,
+        budget.max_same_provider_retries,
+    )
+}
+
+fn rotation_entry_label(
+    entry: &homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry,
+) -> String {
+    match (entry.backend.as_deref(), entry.model.as_deref()) {
+        (Some(backend), Some(model)) => format!("{backend}/{model}"),
+        (Some(backend), None) => backend.to_string(),
+        (None, Some(model)) => model.to_string(),
+        (None, None) => "configured provider".to_string(),
+    }
+}
+
 /// Warn before a detached Cook becomes observable only through durable status.
 pub(crate) fn detached_cook_route_less_warning(
     resolution: &homeboy::core::notification_route::NotificationRouteResolution,
@@ -538,6 +600,7 @@ pub(crate) fn preview_cook(
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
+    eprintln!("{}", cook_effective_plan_disclosure(&plan));
     plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     preflight_preview_lab_provider_secret_env(&placement, &plan)?;
@@ -7671,6 +7734,27 @@ mod rotation_disclosure_tests {
         assert_eq!(
             cook_rotation_disclosure(&plan_with(2, 5, 5)),
             "cook: rotation: 1 fallback provider(s), up to 2 provider execution(s)"
+        );
+    }
+
+    #[test]
+    fn preview_effective_plan_shows_rotation_classes_and_gate_retries() {
+        let disclosure = cook_effective_plan_disclosure(&plan_with(3, 2, 2));
+
+        assert!(disclosure.contains("up to 3 executions"), "{disclosure}");
+        assert!(
+            disclosure.contains("fallback-model-0 → fallback-model-1"),
+            "{disclosure}"
+        );
+        assert!(
+            disclosure.contains(
+                "provider/transient/timeout/stalled/rate-limited/account-quota-billing-credentials"
+            ),
+            "{disclosure}"
+        );
+        assert!(
+            disclosure.contains("0 gate retries (same provider; rotations do not fund gates)"),
+            "{disclosure}"
         );
     }
 
