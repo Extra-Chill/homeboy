@@ -7270,9 +7270,16 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     assert_eq!(declaration.schema, "homeboy/agent-task-review-form/v1");
     assert_eq!(
         declaration.structural_schema["required"],
-        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+        serde_json::json!([
+            "pr_title",
+            "summary",
+            "what_changed",
+            "compatibility",
+            "used_for"
+        ])
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
+    assert!(request.instructions.contains("`pr_title`"));
     assert!(request.instructions.contains("A successful response"));
     // The review form does not replace controller-owned gate evidence, while
     // still allowing the agent to describe bounded diagnostic observations.
@@ -7398,7 +7405,13 @@ fn dispatched_prompt_allows_bounded_checks_without_authoritative_gate_claims() {
     );
     assert_eq!(
         declaration.structural_schema["required"],
-        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+        serde_json::json!([
+            "pr_title",
+            "summary",
+            "what_changed",
+            "compatibility",
+            "used_for"
+        ])
     );
 }
 
