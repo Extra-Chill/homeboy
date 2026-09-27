@@ -1380,6 +1380,7 @@ fn record_recipe_attempt_replacement_in_store_with_plan(
         run_id: replacement_run_id.to_string(),
         plan: replacement_plan.clone(),
     });
+    recipe.sensitive_mappings = canonical_sensitive_mappings(&recipe.attempts)?;
     validate_recipe(&recipe)?;
     store.persist_recipe(&recipe)?;
     Ok(recipe)
@@ -3225,6 +3226,19 @@ fn sensitive_mappings(plan: &AgentTaskPlan) -> Result<Vec<String>> {
     Ok(mappings)
 }
 
+fn canonical_sensitive_mappings(attempts: &[AgentTaskCookRecipeAttempt]) -> Result<Vec<String>> {
+    let mut mappings = attempts
+        .iter()
+        .map(|attempt| sensitive_mappings(&attempt.plan))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    mappings.sort();
+    mappings.dedup();
+    Ok(mappings)
+}
+
 fn continuation_claim_owner_pid(identity: &str) -> Option<u32> {
     identity.split('-').next()?.parse().ok()
 }
@@ -3629,6 +3643,28 @@ mod tests {
             .unwrap_err()
             .message
             .contains("sensitive mappings"));
+    }
+
+    #[test]
+    fn replacing_pre_provider_attempt_recomputes_sensitive_mapping_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let mut initial = recipe();
+        initial.cook_id = "replacement-mappings".into();
+        initial.attempts[0].run_id = "source-run".into();
+        store.persist_recipe(&initial).expect("initial recipe");
+
+        let mut replacement_plan = initial.attempts[0].plan.clone();
+        replacement_plan.tasks[0].executor.secret_env = vec!["NEW_TOKEN".into()];
+        let updated = record_recipe_attempt_replacement_in_store_with_plan(
+            &store,
+            "replacement-mappings",
+            "source-run",
+            "retry-run",
+            &replacement_plan,
+        )
+        .expect("replacement mapping projection is canonical");
+        assert_eq!(updated.sensitive_mappings, ["NEW_TOKEN", "TEST_TOKEN"]);
     }
 
     #[test]
