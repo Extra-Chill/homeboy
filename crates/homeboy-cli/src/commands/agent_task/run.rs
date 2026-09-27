@@ -3517,6 +3517,8 @@ mod preview_tests {
             let evidence = vec![AgentTaskProviderEvidenceInput {
                 id: "issue".to_string(),
                 source: source.path().display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }];
             validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
                 .expect("validate evidence");
@@ -8025,6 +8027,16 @@ pub(crate) fn admit_provider_evidence_inputs(
             ));
         }
         let source = admit_provider_evidence_source(&input.source)?;
+        if source.kind == ProviderEvidenceKind::File
+            && (!input.include.is_empty() || !input.exclude.is_empty())
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence include and exclude apply only to directories",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
         if !canonical_sources.insert(source.canonical_path.clone()) {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "provider-evidence",
@@ -8281,11 +8293,18 @@ fn is_projected_provider_evidence_path(
     projected_paths.contains(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderEvidenceKind {
+    File,
+    Directory,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdmittedProviderEvidenceSource {
     supplied_path: PathBuf,
     canonical_path: PathBuf,
     approved_root: Option<PathBuf>,
+    kind: ProviderEvidenceKind,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -8308,15 +8327,27 @@ fn admit_provider_evidence_source(
     let metadata = std::fs::symlink_metadata(&supplied_path).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
-            "provider evidence sources must be existing absolute regular files",
+            "provider evidence sources must be existing absolute regular files or directories",
             Some(format!("{source}: {error}")),
             None,
         )
     })?;
-    if !supplied_path.is_absolute() || !metadata.is_file() || metadata.file_type().is_symlink() {
+    let kind = if metadata.is_file() {
+        ProviderEvidenceKind::File
+    } else if metadata.is_dir() {
+        ProviderEvidenceKind::Directory
+    } else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
-            "provider evidence sources must be existing absolute regular files without symlinks",
+            "provider evidence sources must be existing absolute regular files or directories without symlinks",
+            Some(source.to_string()),
+            None,
+        ));
+    };
+    if !supplied_path.is_absolute() || metadata.file_type().is_symlink() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence sources must be existing absolute regular files or directories without symlinks",
             Some(source.to_string()),
             None,
         ));
@@ -8335,6 +8366,7 @@ fn admit_provider_evidence_source(
         approved_root: approved_macos_temporary_root(&supplied_path, &canonical_path),
         supplied_path,
         canonical_path,
+        kind,
         #[cfg(unix)]
         device: metadata.dev(),
         #[cfg(unix)]
@@ -8394,25 +8426,19 @@ fn verify_admitted_provider_evidence_source(
             None,
         )
     })?;
+    let kind_matches = match source.kind {
+        ProviderEvidenceKind::File => metadata.is_file(),
+        ProviderEvidenceKind::Directory => metadata.is_dir(),
+    };
     #[cfg(unix)]
-    {
+    let identity_matches = {
         use std::os::unix::fs::MetadataExt;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.dev() != source.device
-            || metadata.ino() != source.inode
-            || canonical != source.canonical_path
-        {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "provider-evidence",
-                "provider evidence source identity changed after validation",
-                Some(source.copy_path().display().to_string()),
-                None,
-            ));
-        }
-    }
+        metadata.dev() == source.device && metadata.ino() == source.inode
+    };
     #[cfg(not(unix))]
-    if !metadata.is_file()
+    let identity_matches = true;
+    if !kind_matches
+        || !identity_matches
         || metadata.file_type().is_symlink()
         || canonical != source.canonical_path
     {
@@ -8462,6 +8488,27 @@ fn provider_evidence_blob_path(store: &Path, digest: &str) -> PathBuf {
         .join(digest.trim_start_matches("sha256:"))
 }
 
+fn provider_evidence_tree_path(store: &Path, digest: &str) -> PathBuf {
+    store
+        .join("trees")
+        .join(digest.trim_start_matches("sha256:"))
+}
+
+fn directory_evidence_plan(
+    input: &AgentTaskProviderEvidenceInput,
+    source: &AdmittedProviderEvidenceSource,
+) -> homeboy::core::Result<super::provider_evidence::DirectoryEvidencePlan> {
+    verify_admitted_provider_evidence_source(source)?;
+    let plan = super::provider_evidence::plan_directory_evidence(
+        source.copy_path(),
+        &input.include,
+        &input.exclude,
+        &super::provider_evidence::DirectoryEvidenceLimits::production(MAX_PROVIDER_EVIDENCE_BYTES),
+    )?;
+    verify_admitted_provider_evidence_source(source)?;
+    Ok(plan)
+}
+
 pub(crate) fn projected_provider_evidence(
     inputs: &[AgentTaskProviderEvidenceInput],
     workspace: Option<&str>,
@@ -8487,6 +8534,21 @@ fn projected_provider_evidence_from_admitted(
     let mut projected = Vec::with_capacity(inputs.len());
     for (input, source) in inputs.iter().zip(admitted) {
         verify_admitted_provider_evidence_source(source)?;
+        if source.kind == ProviderEvidenceKind::Directory {
+            let plan = directory_evidence_plan(input, source)?;
+            projected.push(super::provider_evidence::directory_projection_value(
+                &input.id,
+                Path::new(&input.source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+                &provider_evidence_tree_path(store, &plan.digest),
+                &plan,
+                false,
+            ));
+            continue;
+        }
         let digest = homeboy_engine_primitives::content_hash::sha256_file(source.copy_path())?;
         projected.push(serde_json::json!({
             "id": input.id,
@@ -8502,7 +8564,7 @@ pub(crate) fn projected_provider_evidence_paths(
 ) -> std::collections::BTreeSet<String> {
     evidence
         .iter()
-        .filter_map(|input| input["path"].as_str().map(str::to_string))
+        .flat_map(|input| super::provider_evidence::projected_directory_member_paths(input))
         .collect()
 }
 
@@ -8537,6 +8599,27 @@ fn project_admitted_provider_evidence_inputs_at(
     let mut projected = Vec::with_capacity(inputs.len());
     for (input, source) in inputs.iter().zip(admitted) {
         verify_admitted_provider_evidence_source(source)?;
+        if source.kind == ProviderEvidenceKind::Directory {
+            let plan = directory_evidence_plan(input, source)?;
+            let destination = provider_evidence_tree_path(store, &plan.digest);
+            super::provider_evidence::copy_directory_evidence(
+                source.copy_path(),
+                &plan,
+                &destination,
+            )?;
+            projected.push(super::provider_evidence::directory_projection_value(
+                &input.id,
+                Path::new(&input.source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+                &destination,
+                &plan,
+                true,
+            ));
+            continue;
+        }
         let staging = store
             .join("staging")
             .join(format!("evidence-{}", uuid::Uuid::new_v4()));
@@ -9077,6 +9160,8 @@ mod provider_evidence_tests {
         let input = AgentTaskProviderEvidenceInput {
             id: "acceptance".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
@@ -9163,6 +9248,8 @@ mod provider_evidence_tests {
                 .expect("canonical source")
                 .display()
                 .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit fixture");
@@ -9351,6 +9438,8 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut prompt = Some(format!(
             "file://{} key={} [source]({}) '{}'",
@@ -9456,6 +9545,8 @@ let path = "/private/fenced-code.json";
             &[AgentTaskProviderEvidenceInput {
                 id: "source".to_string(),
                 source: link.display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             temp.path(),
             None,
@@ -9489,6 +9580,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: supplied_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         validate_provider_evidence_inputs(
@@ -9556,6 +9649,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: canonical_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let prompt_source = var_source.display().to_string();
 
@@ -9644,6 +9739,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: supplied_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let dotted = canonical_source
             .parent()
@@ -9677,6 +9774,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let projected =
@@ -9707,6 +9806,8 @@ let path = "/private/fenced-code.json";
             &[AgentTaskProviderEvidenceInput {
                 id: "source".to_string(),
                 source: linked_parent.join("source.json").display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             &workspace,
             None,
@@ -9769,6 +9870,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let admitted =
             admit_provider_evidence_inputs(&[input.clone()]).expect("validate and admit source");
@@ -9798,6 +9901,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut prompt = Some(format!("Read {}", source.display()));
         let admitted =
@@ -9821,18 +9926,155 @@ let path = "/private/fenced-code.json";
         });
     }
 
-    #[test]
-    fn rejects_non_regular_evidence_source() {
-        let temp = tempfile::tempdir().expect("temporary workspace");
-        let error = validate_provider_evidence_inputs(
-            &[AgentTaskProviderEvidenceInput {
-                id: "directory".to_string(),
-                source: temp.path().display().to_string(),
-            }],
-            None,
+    fn capture_directory() -> (tempfile::TempDir, AgentTaskProviderEvidenceInput) {
+        let temp = tempfile::tempdir().expect("capture");
+        std::fs::create_dir(temp.path().join("website")).expect("website");
+        std::fs::write(temp.path().join("website/index.html"), "<html>home</html>").expect("html");
+        std::fs::create_dir(temp.path().join("receipts")).expect("receipts");
+        std::fs::write(temp.path().join("receipts/note.txt"), "receipt").expect("receipt");
+        std::fs::create_dir(temp.path().join("screenshots")).expect("screenshots");
+        std::fs::write(
+            temp.path().join("screenshots/home.png"),
+            vec![
+                9u8;
+                (super::super::provider_evidence::DEFAULT_EVIDENCE_MEDIA_FILE_CAP_BYTES as usize)
+                    + 1
+            ],
         )
-        .expect_err("directory evidence is rejected");
-        assert!(error.message.contains("regular files"));
+        .expect("screenshot");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "capture".to_string(),
+            source: temp
+                .path()
+                .canonicalize()
+                .expect("canonical capture")
+                .display()
+                .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        (temp, input)
+    }
+
+    #[test]
+    fn preview_and_execution_project_the_same_directory_tree() {
+        let (_temp, input) = capture_directory();
+        let store = tempfile::tempdir().expect("store");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit directory");
+        let preview =
+            projected_provider_evidence_from_admitted(&[input.clone()], &admitted, store.path())
+                .expect("preview directory");
+        assert!(
+            !Path::new(preview[0]["path"].as_str().expect("preview path")).exists(),
+            "preview must not copy the capture"
+        );
+        let executed =
+            project_admitted_provider_evidence_inputs_at(&[input.clone()], &admitted, store.path())
+                .expect("execute directory projection");
+        for field in ["path", "sha256", "size_bytes", "transport", "entries"] {
+            assert_eq!(preview[0][field], executed[0][field], "{field}");
+        }
+        let root = PathBuf::from(executed[0]["path"].as_str().expect("path"));
+        assert!(root.join("website/index.html").is_file());
+        assert_eq!(
+            std::fs::read_to_string(root.join("website/index.html")).expect("html"),
+            "<html>home</html>"
+        );
+        assert!(root.join("receipts/note.txt").is_file());
+        assert!(
+            std::fs::metadata(&root)
+                .expect("projected root metadata")
+                .permissions()
+                .readonly(),
+            "projected directory is immutable"
+        );
+        assert!(
+            std::fs::metadata(root.join("website/index.html"))
+                .expect("projected file metadata")
+                .permissions()
+                .readonly(),
+            "projected files are immutable"
+        );
+        assert!(
+            !root.join("screenshots/home.png").exists(),
+            "huge screenshots stay out of the projection"
+        );
+        assert_eq!(
+            executed[0]["transport"],
+            homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT
+        );
+        assert!(executed[0]["omitted"]["count"].as_u64().unwrap_or(0) >= 1);
+        let mut prompt = Some(format!("Read {} before editing.", input.source));
+        let projected_paths = projected_provider_evidence_paths(&executed);
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input.clone()],
+            &admitted,
+            &executed,
+            &projected_paths,
+        )
+        .expect("rewrite directory prompt");
+        let rewritten = prompt.expect("rewritten");
+        assert!(rewritten.contains(root.to_str().expect("utf-8 root")));
+        assert!(!rewritten.contains(&input.source));
+        let retry =
+            project_admitted_provider_evidence_inputs_at(&[input.clone()], &admitted, store.path())
+                .expect("retry reuses the directory projection");
+        assert_eq!(retry[0]["path"], executed[0]["path"]);
+        assert_eq!(retry[0]["sha256"], executed[0]["sha256"]);
+        let mut permissions = std::fs::metadata(&root)
+            .expect("root metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&root, permissions).expect("simulate mutable store");
+        std::fs::write(root.join("unexpected.txt"), "injected")
+            .expect("simulate unexpected content-addressed store mutation");
+        let error = project_admitted_provider_evidence_inputs_at(&[input], &admitted, store.path())
+            .expect_err("content-addressed tree with extra files is rejected");
+        assert!(error.message.contains("storage is corrupt"));
+        for directory in [root.clone(), root.join("website"), root.join("receipts")] {
+            let mut permissions = std::fs::metadata(&directory)
+                .expect("directory metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(directory, permissions).expect("restore cleanup permissions");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_projection_rejects_a_selected_symlink_without_copying_outside() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("capture");
+        let outside = temp.path().join("secret.txt");
+        std::fs::write(&outside, "secret").expect("outside");
+        let website = temp.path().join("website");
+        std::fs::create_dir(&website).expect("website");
+        symlink(&outside, website.join("index.html")).expect("symlink evidence");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "capture".to_string(),
+            source: temp
+                .path()
+                .canonicalize()
+                .expect("canonical")
+                .display()
+                .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit");
+        let error = project_admitted_provider_evidence_inputs_at(
+            &[input],
+            &admitted,
+            &temp.path().join("store"),
+        )
+        .expect_err("symlink blocks projection");
+        assert!(error.message.contains("cannot follow symlinks"));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("untouched"),
+            "secret"
+        );
+        assert!(!temp.path().join("store/trees").exists());
     }
 
     #[cfg(unix)]
@@ -9855,6 +10097,8 @@ let path = "/private/fenced-code.json";
                 .expect("canonical source")
                 .display()
                 .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit source");
         let error = project_admitted_provider_evidence_inputs_at(&[input], &admitted, &store)

@@ -26,9 +26,15 @@ use super::super::super::review;
 pub struct AgentTaskProviderEvidenceInput {
     pub id: String,
     pub source: String,
+    /// Relative globs. Empty selects the default directory policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Relative globs removed after include selection. Exclude wins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
 }
 
-pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular-file path): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Each source is limited to 64 MiB.";
+pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular file or directory): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Optional `include` and `exclude` are relative globs for directories. Each file is limited to 64 MiB. A directory is one immutable projection that preserves relative paths and a tree digest; media files over 1 MiB are omitted unless included, and the selected tree must stay within 64 MiB.";
 
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
