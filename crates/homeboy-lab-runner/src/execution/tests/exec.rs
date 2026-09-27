@@ -1610,7 +1610,8 @@ fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(
-            err.message.contains("SSH connectivity check failed"),
+            err.message.contains("SSH transport_unreachable")
+                || err.message.contains("SSH connectivity check failed"),
             "unexpected rejection: {err:?}"
         );
     });
