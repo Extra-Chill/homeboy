@@ -502,9 +502,16 @@ pub(crate) fn resolve_promotion_gates(
         return Ok(gates.clone().into());
     }
     let supplied_gates = VerifyGateOptions::from(gates.clone());
+    // A durable recipe owns the gate commands and their execution policy. It
+    // is still safe to permit caller-supplied environment mappings: these
+    // repair machine-local toolchain/resource locations without replacing the
+    // immutable gate definition. HOME/XDG isolation remains recipe-owned.
+    let has_environment_source_overrides = !supplied_gates.gate_environment.preserve.is_empty();
+    let mut non_source_overrides = supplied_gates.clone();
+    non_source_overrides.gate_environment.preserve.clear();
     if gates.has_deterministic_gate()
         || !gates.input_sources.is_empty()
-        || supplied_gates != VerifyGateOptions::default()
+        || non_source_overrides != VerifyGateOptions::default()
     {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "durable_gate_reference",
@@ -584,14 +591,21 @@ pub(crate) fn resolve_promotion_gates(
             None,
         )
     })?;
-    serde_json::from_value(recipe.gate_policy).map_err(|error| {
-        homeboy::core::Error::validation_invalid_argument(
-            "cook_recipe.gate_policy",
-            format!("durable Cook recipe has an invalid gate policy: {error}"),
-            Some(recipe.cook_id),
-            None,
-        )
-    })
+    let mut policy: VerifyGateOptions =
+        serde_json::from_value(recipe.gate_policy).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "cook_recipe.gate_policy",
+                format!("durable Cook recipe has an invalid gate policy: {error}"),
+                Some(recipe.cook_id),
+                None,
+            )
+        })?;
+    if has_environment_source_overrides {
+        for (name, source) in supplied_gates.gate_environment.preserve {
+            policy.gate_environment.preserve.insert(name, source);
+        }
+    }
+    Ok(policy)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
