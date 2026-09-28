@@ -3271,13 +3271,25 @@ fn cook_finalization_options_with_stores_and_review_form(
         &path,
     )?;
     review_dossier.validate(&review_profile)?;
+    let form_title = if options.finalization.title.is_empty() {
+        Some(terminal_form_title(
+            lifecycle_store,
+            successful_run_id,
+            review_form,
+        )?)
+    } else {
+        None
+    };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
         head: options.finalization.head.clone(),
-        title: options.finalization.title.clone(),
+        title: form_title
+            .clone()
+            .unwrap_or_else(|| options.finalization.title.clone()),
+        cook_form_title: form_title,
         commit_message: options.finalization.commit_message.clone(),
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
@@ -3319,6 +3331,19 @@ fn cook_finalization_options_with_stores_and_review_form(
         draft_pr: options.finalization.draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
+}
+
+fn terminal_form_title(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    supplied: Option<&AgentTaskSuppliedReviewForm>,
+) -> Result<String> {
+    let form = match supplied {
+        Some(supplied) => supplied.form.clone(),
+        None => review_form_for_finalization_in_store(lifecycle_store, run_id)?,
+    };
+    form.validate()?;
+    Ok(form.pr_title)
 }
 
 /// Persist only a controller-validated manual preflight dossier for recovery.
@@ -4890,6 +4915,7 @@ fn manual_finalization_options(
         verified_base_sha,
         head,
         title: report.title,
+        cook_form_title: None,
         // An immutable recovered candidate must never reach commit mutation.
         commit_message: "recovered manual finalization".to_string(),
         gate_results: report.gate_results,
