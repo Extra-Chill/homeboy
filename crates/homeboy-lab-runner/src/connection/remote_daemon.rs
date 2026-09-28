@@ -1649,9 +1649,11 @@ mod tests {
     fn two_controllers_have_disjoint_daemon_stores_and_preserve_each_others_jobs() {
         let first_store = remote_daemon_state_dir("shared-runner", "controller-a");
         let second_store = remote_daemon_state_dir("shared-runner", "controller-b");
+        let first_scope = crate::connection::controller_scope_segment("controller-a");
+        let second_scope = crate::connection::controller_scope_segment("controller-b");
         assert_ne!(first_store, second_store);
-        assert!(first_store.ends_with("/controllers/controller-a/primary"));
-        assert!(second_store.ends_with("/controllers/controller-b/primary"));
+        assert!(first_store.ends_with(&format!("/controllers/{first_scope}/primary")));
+        assert!(second_store.ends_with(&format!("/controllers/{second_scope}/primary")));
         let first_status =
             format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon status");
         let second_start = format!("HOMEBOY_DAEMON_STATE_DIR=\"{second_store}\" /opt/homeboy daemon ensure-running --addr 127.0.0.1:0");
