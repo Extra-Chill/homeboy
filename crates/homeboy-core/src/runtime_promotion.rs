@@ -1097,6 +1097,13 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     pin_cook_generation_waiting(cook_id, COOK_ADMISSION_WAIT_TIMEOUT, || false, |_| {})
 }
 
+/// Acquire the Cook generation pin without waiting. A promotion owner is
+/// returned as a retryable admission error so the lifecycle layer can durably
+/// queue the same attempt and let the daemon retry it later.
+pub fn try_pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_generation_waiting(cook_id, Duration::ZERO, || false, |_| {})
+}
+
 /// Pin a cook generation without blocking indefinitely behind a promotion.
 ///
 /// The shared lock is deliberately acquired with `try_lock_shared`: callers
@@ -1204,6 +1211,21 @@ fn open_admission_lock(root: &Path) -> Result<fs::File> {
         .write(true)
         .open(root.join(ADMISSION_LOCK_FILE))
         .map_err(io("open runtime promotion admission"))
+}
+
+/// Non-blocking check used by daemon reconciliation before it claims Cook
+/// destination materialization. This deliberately does not publish a Cook
+/// generation pin: the process that actually starts execution owns that pin.
+/// `Some(owner)` means a live promotion currently owns exclusive admission.
+pub fn probe_cook_generation_admission() -> Result<Option<RuntimePromotionLeaseRecord>> {
+    let root = paths::runtime_promotion_dir()?;
+    fs::create_dir_all(&root).map_err(io("create runtime promotion directory"))?;
+    let admission_lock = open_admission_lock(&root)?;
+    match FileExt::try_lock_shared(&admission_lock) {
+        Ok(true) => Ok(None),
+        Ok(false) => admission_lock_owner(&root.join(LEASE_DIR)).map(Some),
+        Err(error) => Err(io("probe runtime promotion admission")(error)),
+    }
 }
 
 fn register_cook_admission_wait(
@@ -2575,6 +2597,23 @@ mod tests {
         let _lease = acquire("process promotion owner", "controller")
             .expect("process owner acquires promotion lease");
         std::thread::sleep(Duration::from_millis(250));
+    }
+
+    #[test]
+    fn nonblocking_cook_admission_probe_reconciles_a_dead_upgrade_owner() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = duplicate_cook_admission_owner();
+            let blocked = probe_cook_generation_admission()
+                .expect("probe active upgrade")
+                .expect("active upgrade blocks Cook admission");
+            assert_eq!(blocked.operation, "duplicate-wait owner");
+
+            owner.kill().expect("kill upgrade owner");
+            owner.wait().expect("reap upgrade owner");
+            assert!(probe_cook_generation_admission()
+                .expect("probe after owner death")
+                .is_none());
+        });
     }
 
     fn duplicate_cook_admission_owner() -> std::process::Child {

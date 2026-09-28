@@ -5063,6 +5063,104 @@ fn cook_runtime_admission_projects_waiting_owner_and_rejects_duplicate_resume() 
 }
 
 #[test]
+fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_release() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "materialized-runtime-admission-resume";
+        let dispatcher_calls = Arc::new(AtomicUsize::new(0));
+        let options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatcher_calls),
+            }),
+        );
+        let run_id = options.identity.initial_run_id.clone();
+        let mut promotion = runtime_admission_owner_process();
+
+        let deferred = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook defers without spending its provider attempt");
+        assert_eq!(
+            deferred.value.status, "queued",
+            "deferred Cook result: {deferred:?}"
+        );
+        assert_eq!(deferred.value.disposition, CookDisposition::InFlight);
+        assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 0);
+        let record = agent_task_lifecycle::exact_record(&run_id).expect("durable queued attempt");
+        assert_eq!(record.state, AgentTaskRunState::Queued);
+        assert_eq!(record.metadata["cook_runtime_admission"]["state"], "queued");
+        assert_eq!(record.metadata["cook_runtime_admission"]["fence"], 1);
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+
+        // A daemon tick/controller restart while the upgrade still owns the
+        // lock must not claim or dispatch this durable attempt.
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["cook_runtime_admission"]["next_attempt_at"] =
+                serde_json::json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("make restart tick due while upgrade remains held");
+        let waiting = crate::agent_task_service::reconcile_queued_retries_with(|_| {
+            panic!("do not dispatch while promotion remains locked")
+        })
+        .expect("queued attempt remains parked");
+        assert_eq!(waiting["claimed"], false, "{waiting}");
+        let still_queued = agent_task_lifecycle::exact_record(&run_id).expect("still queued");
+        assert_eq!(still_queued.state, AgentTaskRunState::Queued);
+
+        let release = homeboy_core::paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join("runtime-admission-test-release");
+        std::fs::write(release, b"release").expect("release short simulated upgrade");
+        promotion.wait().expect("upgrade owner exits");
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["cook_runtime_admission"]["next_attempt_at"] =
+                serde_json::json!("2000-01-01T00:00:00+00:00");
+        })
+        .expect("simulate next tick after short lock release");
+        let _restarted_lifecycle_store = test_lifecycle_store();
+        let expected_run_id = run_id.clone();
+        let ready = crate::agent_task_service::reconcile_queued_retries_with(|replay_run_id| {
+            assert_eq!(replay_run_id, expected_run_id);
+            crate::agent_task_service::run_next_with_cook_dispatcher(
+                Arc::new(ImmediateSuccessExecutor),
+                |_| {
+                    Ok(Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                        dispatches: Arc::clone(&dispatcher_calls),
+                    })))
+                },
+                None,
+            )
+            .map(|result| {
+                serde_json::json!({
+                    "claimed": result.queue_admission.inspected > 0,
+                    "skipped": result.skipped,
+                    "queue_admission": result.queue_admission,
+                })
+            })
+        })
+        .expect("daemon resumes exact materialized attempt after lock release");
+        assert_eq!(ready["claimed"], true, "{ready}");
+        assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 1);
+        let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
+        assert_eq!(resumed.run_id, run_id);
+        assert_eq!(resumed.metadata["provider_executions_consumed"], 0);
+        assert_eq!(resumed.state, AgentTaskRunState::Running);
+        assert!(resumed.metadata.get("queue_quarantine").is_none());
+        let recipe = load_recipe(cook_id).expect("reconstructed durable Cook recipe");
+        assert_eq!(recipe.attempts.len(), 1);
+        assert_eq!(recipe.attempts[0].run_id, run_id);
+        assert_eq!(recipe.attempts[0].plan.plan_id, cook_id);
+
+        // The queue claim is fenced by the normal queued-to-running lifecycle
+        // transition, so another controller tick cannot dispatch it again.
+        let duplicate = crate::agent_task_service::reconcile_queued_retries_with(|_| {
+            panic!("claimed same attempt cannot dispatch twice")
+        })
+        .expect("second tick is inert");
+        assert_eq!(duplicate["claimed"], false, "{duplicate}");
+        assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
 fn cook_runtime_admission_cancellation_stops_wait_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
