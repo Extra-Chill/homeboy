@@ -98,11 +98,6 @@ pub struct RunsDossierCommandHint {
     pub reason: String,
 }
 
-pub(crate) fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    runs_dossier_in_store(&store, run_id)
-}
-
 pub(crate) fn runs_dossier_in_store(
     store: &ObservationStore,
     run_id: &str,
