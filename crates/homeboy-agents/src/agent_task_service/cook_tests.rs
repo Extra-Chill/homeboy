@@ -7160,7 +7160,11 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     let store = CookRecipeStore::new(roots.clone());
     let lifecycle_store = AgentTaskLifecycleStore::new(roots);
     let cook_id = format!("concurrent-first-cook-{}", uuid::Uuid::new_v4());
-    let mut winner = batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let dispatcher = Arc::new(RecordingDetachedAttemptDispatcher {
+        dispatches: Arc::clone(&dispatches),
+    });
+    let mut winner = batch_cook_options(&cook_id, dispatcher.clone());
     winner.identity.initial_plan.plan_id = "creator-plan".to_string();
     let mut loser = winner.clone();
     loser.identity.initial_plan.plan_id = "loser-plan".to_string();
@@ -7199,7 +7203,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             .filter(|outcome| outcome.value.status == "in_flight")
             .count(),
         1,
-        "unexpected concurrent Cook statuses: {statuses:?}"
+        "unexpected concurrent Cook statuses: {statuses:?}; outcomes: {outcomes:#?}"
     );
     assert_eq!(
         outcomes
@@ -7241,6 +7245,14 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             .expect("creator plan remains immutable"),
         plan_before
     );
+    assert!(matches!(
+        plan_before.plan_id.as_str(),
+        "creator-plan" | "loser-plan"
+    ));
+    assert_eq!(
+        recipe.attempts[0].plan.plan_id, plan_before.plan_id,
+        "the recipe creator's immutable first plan must match the lifecycle plan"
+    );
     assert_eq!(
         agent_task_lifecycle::read_aggregate_in_store(
             &lifecycle_store,
@@ -7249,6 +7261,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
         .ok(),
         aggregate_before
     );
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     creator_options.identity.initial_run_id
 }
 

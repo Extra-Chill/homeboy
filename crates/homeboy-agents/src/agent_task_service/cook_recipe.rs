@@ -565,12 +565,14 @@ pub fn persist_initial_recipe_in_store(
     if store.recipe_exists(&recipe.cook_id) {
         let existing = store.load_recipe(&recipe.cook_id)?;
         if !recipe_existed_before_admission {
-            return Err(Error::validation_invalid_argument(
+            let mut error = Error::validation_invalid_argument(
                 "cook_recipe",
                 "concurrent Cook creation conflicts with the durable recipe",
                 Some(recipe.cook_id),
                 None,
-            ));
+            );
+            error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
+            return Err(error);
         }
         let mismatches = recipe_mismatch_fields(&existing, &recipe);
         let lifecycle_store =
@@ -629,12 +631,14 @@ pub fn persist_initial_recipe_in_store(
     if recipe_mismatch_fields(&winner, &recipe).is_empty() {
         return Ok(InitialRecipeMaterialization::reused(winner));
     }
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "cook_recipe",
         "concurrent Cook creation conflicts with the durable recipe",
         Some(recipe.cook_id),
         None,
-    ))
+    );
+    error.details["concurrent_cook_creation_loser"] = serde_json::Value::Bool(true);
+    Err(error)
 }
 
 fn persist_recipe_exclusively(

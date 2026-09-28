@@ -62,14 +62,14 @@ use super::cook_pre_execution::{
     terminal_executor_matches, with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion_in_store,
-    moving_base_recovery_report, next_moving_base_recovery,
-    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
-    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure_with_store,
-    CookReportInput, MovingBaseCookRecovery,
+    attempt_needs_execution_with_store, cook_report, cook_report_with_stores,
+    finalize_or_load_cook_pr, finalize_or_load_cook_pr_with_stores,
+    is_moving_base_finalization_error, moving_base_recovery_for_run_with_stores,
+    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
+    next_moving_base_recovery, persisted_promotion_for_attempt_in_store,
+    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -5822,6 +5822,31 @@ fn run_cook_reported(
     ) {
         Ok(result) => result,
         Err(mut error) => {
+            if error.details["concurrent_cook_creation_loser"] == Value::Bool(true) {
+                let mut report = cook_report_with_stores(
+                    Some(store),
+                    Some(lifecycle_store),
+                    CookReportInput {
+                        cook_id: failure_options.identity.cook_id.clone(),
+                        status: "durable_failure",
+                        disposition: CookDisposition::Terminal,
+                        attempts: Vec::new(),
+                        finalization: None,
+                        stop_reason: Some(format!(
+                            "another request already owns this Cook id; this request did not modify its durable plan: {}",
+                            error.message
+                        )),
+                        exit_code: 1,
+                        invocation_latest_run_id: None,
+                    },
+                );
+                // The collided identifier belongs to the elected creator. A
+                // loser may report the collision, but must not attach a
+                // controller failure to, reconcile, or otherwise terminalize
+                // the creator's lifecycle attempt.
+                report.value.failure_context = None;
+                return Ok(report);
+            }
             let admission_run_id = error
                 .details
                 .as_object_mut()
