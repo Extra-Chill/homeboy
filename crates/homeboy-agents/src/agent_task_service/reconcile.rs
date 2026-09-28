@@ -640,18 +640,55 @@ pub fn reconcile_queued_retries() -> Result<serde_json::Value> {
     })
 }
 
-fn reconcile_queued_retries_with(
+pub(crate) fn reconcile_queued_retries_with(
     replay: impl FnOnce(&str) -> Result<serde_json::Value>,
 ) -> Result<serde_json::Value> {
     let (mut records, _) = agent_task_lifecycle::read_all_records_with_health()?;
     records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    let now = chrono::Utc::now();
     let Some(record) = records.into_iter().find(|record| {
         record.state == agent_task_lifecycle::AgentTaskRunState::Queued
-            && record.metadata["retry_of"].is_string()
+            && (record.metadata["retry_of"].is_string()
+                || record.metadata["cook_runtime_admission"].is_object())
             && record.metadata.get("queue_quarantine").is_none()
+            && queued_retry_is_due(record, now)
     }) else {
         return Ok(serde_json::json!({ "claimed": false }));
     };
+
+    if record.metadata["cook_runtime_admission"].is_object() {
+        if let Some(owner) = homeboy_core::runtime_promotion::probe_cook_generation_admission()? {
+            let owner = serde_json::json!({
+                "pid": owner.pid,
+                "operation": owner.operation,
+                "operation_id": owner.operation_id,
+                "status_command": owner.status_command,
+                "target": owner.target,
+                "generation": owner.generation,
+            });
+            let _ = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
+                .mutate_record(&record.run_id, |current| {
+                    if current.state != agent_task_lifecycle::AgentTaskRunState::Queued
+                        || !current.metadata["cook_runtime_admission"].is_object()
+                    {
+                        return false;
+                    }
+                    current.metadata["cook_runtime_admission"]["owner"] = owner.clone();
+                    current.metadata["cook_runtime_admission"]["next_attempt_at"] =
+                        serde_json::json!(
+                            (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339()
+                        );
+                    current.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                    true
+                })?;
+            return Ok(serde_json::json!({
+                "claimed": false,
+                "run_id": record.run_id,
+                "state": "blocked_runtime_promotion",
+                "owner": owner,
+            }));
+        }
+    }
 
     let receipt = replay(&record.run_id)?;
     Ok(serde_json::json!({
@@ -659,6 +696,20 @@ fn reconcile_queued_retries_with(
         "run_id": record.run_id,
         "receipt": receipt,
     }))
+}
+
+fn queued_retry_is_due(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(next_attempt_at) =
+        record.metadata["cook_runtime_admission"]["next_attempt_at"].as_str()
+    else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(next_attempt_at)
+        .ok()
+        .is_none_or(|due| due.with_timezone(&chrono::Utc) <= now)
 }
 
 /// Advance reference-only Cook admissions from the daemon's serialized tick.
@@ -768,6 +819,37 @@ fn reconcile_unmaterialized_cook_admissions_with_process_identity(
         if !due || active_lease {
             continue;
         }
+        // Runtime promotion admission precedes destination materialization and
+        // runner replay. Probe without waiting or pinning so the serialized
+        // daemon tick stays short; the execution owner acquires its generation
+        // pin when it actually starts the Cook.
+        if let Some(owner) = homeboy_core::runtime_promotion::probe_cook_generation_admission()? {
+            let next_attempt_at = (now + chrono::Duration::seconds(2)).to_rfc3339();
+            let owner = serde_json::json!({
+                "pid": owner.pid,
+                "operation": owner.operation,
+                "operation_id": owner.operation_id,
+                "status_command": owner.status_command,
+                "target": owner.target,
+                "generation": owner.generation,
+            });
+            let _ = store.mutate_record(&record.run_id, |current| {
+                if current.state.is_terminal()
+                    || current.metadata["unmaterialized_cook_admission"]["state"]
+                        == "preparing_inputs"
+                {
+                    return false;
+                }
+                let admission = &mut current.metadata["unmaterialized_cook_admission"];
+                admission["state"] = serde_json::json!("blocked_runtime_promotion");
+                admission["runtime_promotion_owner"] = owner.clone();
+                admission["retry"]["next_attempt_at"] = serde_json::json!(next_attempt_at);
+                current.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                true
+            })?;
+            blocked += 1;
+            continue;
+        }
         considered += 1;
         let selection_key = admission_selection_cache_key(admission);
         let selection = selection_cache
@@ -803,6 +885,10 @@ fn reconcile_unmaterialized_cook_admissions_with_process_identity(
             }
             let attempts = admission["admission_attempts"].as_u64().unwrap_or(0) + 1;
             let max = admission["retry"]["max_attempts"].as_u64().unwrap_or(20);
+            admission
+                .as_object_mut()
+                .expect("unmaterialized admission object")
+                .remove("runtime_promotion_owner");
             admission["admission_attempts"] = serde_json::json!(attempts);
             if attempts >= max {
                 admission
@@ -1193,6 +1279,137 @@ mod tests {
     }
 
     #[test]
+    fn future_runtime_deferral_does_not_starve_a_ready_retry() {
+        with_isolated_home(|_| {
+            let plan = AgentTaskPlan::new("retry-fairness", Vec::new());
+            let deferred_id = "a-future-runtime-deferral";
+            agent_task_lifecycle::submit_plan(&plan, Some(deferred_id)).expect("deferred run");
+            agent_task_lifecycle::rewrite_record_for_test(deferred_id, |record| {
+                record.metadata["cook_runtime_admission"] = serde_json::json!({
+                    "schema": "homeboy/cook-runtime-admission/v1",
+                    "state": "queued",
+                    "fence": 1,
+                    "next_attempt_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                });
+            })
+            .expect("future deferral");
+
+            let source_id = "retry-source-ready";
+            let retry_id = "b-ready-retry";
+            agent_task_lifecycle::submit_plan(&plan, Some(source_id)).expect("retry source");
+            agent_task_lifecycle::rewrite_record_for_test(source_id, |record| {
+                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+            })
+            .expect("terminal retry source");
+            agent_task_lifecycle::submit_plan(&plan, Some(retry_id)).expect("queued retry");
+            agent_task_lifecycle::rewrite_record_for_test(retry_id, |record| {
+                record.metadata["retry_of"] = serde_json::json!(source_id);
+            })
+            .expect("retry reservation");
+
+            let replayed = std::cell::Cell::new(0usize);
+            let report = reconcile_queued_retries_with(|run_id| {
+                assert_eq!(run_id, retry_id, "skip the not-yet-due Cook deferral");
+                replayed.set(replayed.get() + 1);
+                Ok(serde_json::json!({ "claimed": true }))
+            })
+            .expect("ready retry proceeds despite earlier future Cook");
+            assert_eq!(report["claimed"], true, "{report}");
+            assert_eq!(report["run_id"], retry_id);
+            assert_eq!(replayed.get(), 1);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(deferred_id)
+                    .expect("future Cook remains queued")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+        });
+    }
+
+    #[test]
+    fn materialized_cook_runtime_deferral_replays_same_run_once_after_lock_release() {
+        with_isolated_home(|_| {
+            let run_id = "materialized-promotion-deferral";
+            let plan = AgentTaskPlan::new("materialized-promotion-deferral", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit Cook attempt");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(run_id);
+            })
+            .expect("bind durable Cook identity");
+            agent_task_lifecycle::mark_running(run_id).expect("start attempt owner");
+
+            let promotion =
+                homeboy_core::runtime_promotion::acquire("restart-held upgrade", "controller")
+                    .expect("upgrade owns admission");
+            assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                serde_json::json!({ "pid": std::process::id(), "operation": "restart-held upgrade" }),
+            )
+            .expect("durably defer same attempt"));
+            let queued = agent_task_lifecycle::exact_record(run_id).expect("queued same attempt");
+            assert_eq!(
+                queued.state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert_eq!(queued.metadata["cook_runtime_admission"]["fence"], 1);
+            assert_eq!(queued.metadata["provider_executions_consumed"], 0);
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_runtime_admission"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("make next daemon tick due while upgrade remains held");
+
+            // The controller tick restarts while the upgrade lock remains held;
+            // it must leave the same attempt parked and invoke no replay driver.
+            let blocked = reconcile_queued_retries_with(|_| {
+                panic!("do not replay while upgrade still owns admission")
+            })
+            .expect("held upgrade parks queued attempt");
+            assert_eq!(blocked["claimed"], false, "{blocked}");
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id)
+                    .expect("still queued")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+
+            drop(promotion);
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_runtime_admission"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("make the next daemon tick due after lock release");
+            let _restarted_store = test_lifecycle_store();
+            let replay_count = std::cell::Cell::new(0usize);
+            let replayed = reconcile_queued_retries_with(|replayed_run_id| {
+                assert_eq!(
+                    replayed_run_id, run_id,
+                    "same materialized attempt identity"
+                );
+                replay_count.set(replay_count.get() + 1);
+                agent_task_lifecycle::mark_running(replayed_run_id)?;
+                Ok(serde_json::json!({ "claimed": true, "provider_executions": 0 }))
+            })
+            .expect("daemon tick resumes after release");
+            assert_eq!(replayed["claimed"], true, "{replayed}");
+            assert_eq!(replay_count.get(), 1);
+            let after = agent_task_lifecycle::exact_record(run_id).expect("resumed same attempt");
+            assert_eq!(
+                after.state,
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert_eq!(after.metadata["provider_executions_consumed"], 0);
+            let duplicate = reconcile_queued_retries_with(|_| {
+                panic!("one fenced queue claim permits at most one replay")
+            })
+            .expect("subsequent daemon tick is inert");
+            assert_eq!(duplicate["claimed"], false, "{duplicate}");
+            assert_eq!(replay_count.get(), 1);
+        });
+    }
+
+    #[test]
     fn ordinary_rows_before_an_admission_do_not_consume_the_pass_limit() {
         with_isolated_home(|_| {
             for index in 0..32 {
@@ -1213,6 +1430,83 @@ mod tests {
             .expect("reconcile admission after ordinary rows");
             assert_eq!(report["replayed"], 1);
             assert_eq!(replayed.get(), 1);
+        });
+    }
+
+    #[test]
+    fn runtime_promotion_contention_parks_unmaterialized_cook_until_a_later_tick() {
+        with_isolated_home(|_| {
+            let run_id = "promotion-blocked-admission";
+            due_unmaterialized_admission(run_id);
+            let promotion = homeboy_core::runtime_promotion::acquire(
+                "short simulated controller upgrade",
+                "controller",
+            )
+            .expect("upgrade owns promotion admission");
+            let stage_calls = std::cell::Cell::new(0usize);
+            let first = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| {
+                    stage_calls.set(stage_calls.get() + 1);
+                    Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" }))
+                },
+                |_| {
+                    stage_calls.set(stage_calls.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker" }))
+                },
+            )
+            .expect("busy runtime admission is parked, not an error");
+            assert_eq!(first["blocked"], 1, "{first}");
+            assert_eq!(first["replayed"], 0, "{first}");
+            assert_eq!(stage_calls.get(), 0, "blocked Cook is not materialized");
+
+            let blocked = agent_task_lifecycle::exact_record(run_id).expect("blocked admission");
+            let admission = &blocked.metadata["unmaterialized_cook_admission"];
+            assert_eq!(admission["state"], "blocked_runtime_promotion");
+            assert_eq!(
+                admission["runtime_promotion_owner"]["operation"],
+                "short simulated controller upgrade"
+            );
+            assert_eq!(
+                admission["runtime_promotion_owner"]["pid"],
+                std::process::id()
+            );
+            assert_eq!(
+                admission["admission_attempts"], 0,
+                "promotion wait spends no admission retry budget"
+            );
+            assert!(admission["retry"]["next_attempt_at"].as_str().is_some());
+
+            drop(promotion);
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["unmaterialized_cook_admission"]["retry"]["next_attempt_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("make the parked admission due after lock release");
+            // A newly opened lifecycle store models the next daemon tick after
+            // owner restart; the durable Cook identity and retry budget persist.
+            let _restarted_store = test_lifecycle_store();
+            let second = reconcile_unmaterialized_cook_admissions_with(
+                None,
+                |_| Ok(serde_json::json!({ "state": "eligible", "runner_id": "lab" })),
+                |_| {
+                    stage_calls.set(stage_calls.get() + 1);
+                    Ok(serde_json::json!({ "worker_id": "worker" }))
+                },
+            )
+            .expect("next daemon tick replays after promotion release");
+            assert_eq!(second["replayed"], 1, "{second}");
+            assert_eq!(
+                stage_calls.get(),
+                1,
+                "destination replay happens exactly once"
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id)
+                    .expect("replayed Cook")
+                    .metadata["unmaterialized_cook_admission"]["admission_attempts"],
+                1
+            );
         });
     }
 

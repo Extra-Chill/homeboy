@@ -4023,6 +4023,64 @@ pub fn mark_running_in_store(
     .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
+/// Return a materialized Cook attempt to the durable queue when runtime
+/// promotion admission is unavailable before provider work begins. This keeps
+/// the attempt identity and provider budget intact; queued execution claims it
+/// through the normal fenced lifecycle transition on a later daemon tick.
+pub fn defer_cook_runtime_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let now = now_timestamp();
+    let deferred = lifecycle_store.mutate_record(&run_id, |record| {
+        if !matches!(
+            record.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) || record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .is_some_and(|consumed| consumed != 0)
+            || record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        {
+            return false;
+        }
+        let fence = record.metadata["cook_runtime_admission"]["fence"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1);
+        record.metadata["cook_runtime_admission"] = json!({
+            "schema": "homeboy/cook-runtime-admission/v1",
+            "state": "queued",
+            "fence": fence,
+            "owner": owner,
+            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "provider_executions_consumed": 0,
+        });
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Queued);
+        record.lifecycle.execution.started_at = None;
+        record.lifecycle.execution.finished_at = None;
+        for task in &mut record.tasks {
+            task.state = AgentTaskState::Queued;
+        }
+        for key in [
+            "runner_pid",
+            "runner_process_start_identity",
+            "runner_started_at",
+        ] {
+            record
+                .metadata
+                .as_object_mut()
+                .map(|metadata| metadata.remove(key));
+        }
+        true
+    })?;
+    Ok(deferred.is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderExecutionReservation {
     Acquired,

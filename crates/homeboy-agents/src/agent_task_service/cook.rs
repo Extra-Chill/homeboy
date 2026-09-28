@@ -704,6 +704,7 @@ fn report_cook_progress_with_activity(
     Ok(())
 }
 
+#[cfg(test)]
 fn admit_cook_runtime_generation(
     lifecycle_store: &AgentTaskLifecycleStore,
     durable_observer: Option<&CookProgressObserver<'_>>,
@@ -6759,13 +6760,55 @@ fn run_cook_spine(
     // the shared flock.
     let pin_run_id = options.identity.initial_run_id.clone();
     let pin_cook_id = options.identity.cook_id.clone();
-    let _runtime_generation = match admit_cook_runtime_generation(
-        lifecycle_store,
-        durable_observer,
-        &pin_cook_id,
+    let _runtime_generation = match homeboy_core::runtime_promotion::try_pin_cook_generation(
         &pin_run_id,
     ) {
         Ok(pin) => pin,
+        Err(error)
+            if error.code == homeboy_core::ErrorCode::RuntimePromotionWaitTimeout
+                && error.details["wait_stage"] == "os_lock"
+                && error.details["holder_pid"].as_u64().is_some() =>
+        {
+            let owner = serde_json::json!({
+                "pid": error.details["holder_pid"],
+                "operation": error.details["holder_operation"],
+                "operation_id": error.details["holder_operation_id"],
+                "status_command": error.details["holder_status_command"],
+                "target": error.details["target"],
+                "generation": error.details["holder_generation"],
+            });
+            if agent_task_lifecycle::defer_cook_runtime_admission_in_store(
+                lifecycle_store,
+                &pin_run_id,
+                owner,
+            )? {
+                let detail = format!(
+                    "queued before provider execution behind pid {} operation `{}`; daemon will retry runtime admission",
+                    error.details["holder_pid"],
+                    error.details["holder_operation"].as_str().unwrap_or("unknown"),
+                );
+                let _ = report_cook_progress(
+                    lifecycle_store,
+                    durable_observer,
+                    &pin_cook_id,
+                    &pin_run_id,
+                    "runtime_promotion_wait",
+                    1,
+                    Some(&detail),
+                );
+                return Ok(cook_report(CookReportInput {
+                    cook_id: pin_cook_id,
+                    status: CookStatus::Queued.as_str(),
+                    disposition: CookDisposition::InFlight,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(detail),
+                    exit_code: 0,
+                    invocation_latest_run_id: Some(&pin_run_id),
+                }));
+            }
+            return Err(error);
+        }
         Err(error)
             if lifecycle_store
                 .read_record(&pin_run_id)
