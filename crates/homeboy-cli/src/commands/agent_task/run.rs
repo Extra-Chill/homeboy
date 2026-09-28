@@ -8164,8 +8164,10 @@ fn validate_cook_provider_execution_plan(
 ) -> homeboy::core::Result<()> {
     let mut readiness_cache =
         homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
+    // A Lab-placed Cook proves provider readiness on the runner with the
+    // runner's credentials; controller-local credentials must not reject it.
     let selected_plan =
-        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
             &plan,
             &catalog,
             &mut readiness_cache,
