@@ -76,6 +76,8 @@ The provider prints `homeboy/ssh-checkout-deploy-result/v1` with:
 - `deploy` (the success pattern's named groups)
 - `failure` and `remediation` when a stage fails
 
+Remote checkout failures include the first 20 `git status --porcelain` path entries in `failure.paths` and in `failure.message`; if more paths are present, the message ends with `(and N more)`. The `remote_checkout_dirty` remediation identifies the remote path and host to inspect. Evidence contains paths only, never file contents.
+
 ## Tests
 
 ```sh

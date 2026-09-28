@@ -156,9 +156,27 @@ const reset = () => {
 	writeFileSync( join( remote, 'leftover.txt' ), 'uncommitted\n' );
 	const { result, attempts } = await provider( payload() );
 	assert.equal( result.failure.code, 'remote_checkout_dirty' );
+	assert.deepEqual( result.failure.paths, [ '?? leftover.txt' ] );
+	assert.match( result.failure.message, /\?\? leftover\.txt/ );
+	assert.match( result.remediation.join( ' ' ), new RegExp( `Inspect ${ remote } on build-host` ) );
 	assert.equal( remoteRef(), '' );
 	assert.equal( attempts, 0 );
 	rmSync( join( remote, 'leftover.txt' ) );
+}
+
+// Dirty-path evidence is bounded to the first 20 porcelain entries.
+{
+	const dirtyPaths = Array.from( { length: 21 }, ( _, index ) => `dirty-${ String( index + 1 ).padStart( 2, '0' ) }.txt` );
+	for ( const path of dirtyPaths ) {
+		writeFileSync( join( remote, path ), 'uncommitted\n' );
+	}
+	const { result } = await provider( payload() );
+	assert.equal( result.failure.code, 'remote_checkout_dirty' );
+	assert.deepEqual( result.failure.paths, dirtyPaths.slice( 0, 20 ).map( ( path ) => `?? ${ path }` ) );
+	assert.match( result.failure.message, /\(and 1 more\)$/ );
+	for ( const path of dirtyPaths ) {
+		rmSync( join( remote, path ) );
+	}
 }
 
 // A running deploy on the remote blocks a second one.

@@ -20,6 +20,7 @@ const HOST = /^[A-Za-z0-9._@-]+$/;
 const REF = /^refs\/heads\/[A-Za-z0-9._\/-]+$/;
 const BRANCH = /^[A-Za-z0-9._\/-]+$/;
 const OUTPUT_TAIL_LINES = 20;
+const MAX_PATHS = 20;
 
 class StageError extends Error {
 	constructor( stage, code, message, remediation = [] ) {
@@ -68,6 +69,9 @@ async function main() {
 			code: error.code || 'deployment_failed',
 			message: error.message,
 		};
+		if ( error.paths ) {
+			result.failure.paths = error.paths;
+		}
 		result.remediation.push( ...( error.remediation || [] ) );
 	}
 
@@ -171,15 +175,19 @@ async function verifyFreshness( contract, root ) {
 }
 
 async function remotePreflight( contract ) {
-	const { remote_path: path } = contract.target;
+	const { ssh_host: host, remote_path: path } = contract.target;
 	const status = await ssh( contract, `cd ${ quote( path ) } && git status --porcelain` );
 	if ( status.stdout.trim() !== '' ) {
-		throw new StageError(
+		const listing = boundedPaths( status.stdout );
+		const error = new StageError(
 			'remote_preflight',
 			'remote_checkout_dirty',
-			'The remote checkout has local changes, and its deploy would ship them.',
-			[ 'Inspect the remote working tree and commit, stash, or discard those changes deliberately before deploying.' ]
+			`The remote checkout has local changes: ${ listing.text }`,
+			[ `Inspect ${ path } on ${ host } and commit, stash, or discard those changes deliberately before deploying.` ]
 		);
+		// Keep the evidence bounded and limited to porcelain path entries.
+		error.paths = listing.paths;
+		throw error;
 	}
 	if ( contract.policy.running_probe ) {
 		const probe = await ssh( contract, `pgrep -af ${ quote( contract.policy.running_probe ) } | grep -v pgrep || true` );
@@ -208,11 +216,22 @@ async function syncRemote( contract, root ) {
 }
 
 async function assertRemoteAt( contract, stageId ) {
-	const { remote_path: path } = contract.target;
+	const { ssh_host: host, remote_path: path } = contract.target;
 	const state = await ssh( contract, `cd ${ quote( path ) } && git rev-parse HEAD && git status --porcelain` );
 	const [ head, ...changes ] = state.stdout.trim().split( '\n' );
-	if ( head !== contract.source.revision || changes.some( ( line ) => line.trim() !== '' ) ) {
-		throw new StageError( stageId, 'remote_not_at_revision', 'The remote checkout is not a clean checkout of the source revision.' );
+	const status = changes.filter( ( line ) => line.trim() !== '' ).join( '\n' );
+	if ( head !== contract.source.revision || status !== '' ) {
+		const listing = boundedPaths( status );
+		const details = [
+			head !== contract.source.revision ? `HEAD is ${ head }, expected ${ contract.source.revision }` : null,
+			status !== '' ? `local changes: ${ listing.text }` : null,
+		].filter( Boolean ).join( '; ' );
+		const error = new StageError( stageId, 'remote_not_at_revision', `The remote checkout is not a clean checkout of the source revision (${ details }).` );
+		if ( status !== '' ) {
+			error.paths = listing.paths;
+			error.remediation = [ `Inspect ${ path } on ${ host } and commit, stash, or discard those changes deliberately before deploying.` ];
+		}
+		throw error;
 	}
 }
 
@@ -293,6 +312,16 @@ function run( command, args, { cwd, timeout = 60000, env = {}, allowFailure = fa
 
 function tail( text, lines = OUTPUT_TAIL_LINES ) {
 	return String( text ).trimEnd().split( '\n' ).slice( -lines ).join( '\n' );
+}
+
+function boundedPaths( status ) {
+	const entries = String( status ).split( '\n' ).map( ( line ) => line.trimEnd() ).filter( ( line ) => line.trim() !== '' );
+	const paths = entries.slice( 0, MAX_PATHS );
+	const remaining = entries.length - paths.length;
+	return {
+		paths,
+		text: `${ paths.join( ', ' ) }${ remaining > 0 ? ` (and ${ remaining } more)` : '' }`,
+	};
 }
 
 function quote( value ) {
