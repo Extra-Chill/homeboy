@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.6] - 2026-09-28
+
+### Fixed
+- honor Cook progress while Lab binding is pending
+
 ## [0.396.5] - 2026-09-28
 
 ### Fixed
