@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.1] - 2026-09-28
+
+### Changed
+- remove unused ambient-store wrappers
+
+### Fixed
+- disclose deferred Cargo gate selection in preview
+- resume upgrade-blocked attempts from durable admission
+- scope retry staging idempotency to request
+
 ## [0.396.0] - 2026-09-28
 
 ### Added
