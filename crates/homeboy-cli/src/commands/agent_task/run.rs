@@ -601,7 +601,7 @@ pub(crate) fn preview_cook(
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
     eprintln!("{}", cook_effective_plan_disclosure(&plan));
-    plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
+    plan.metadata["gate_contract_validation"] = serde_json::to_value(&gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     preflight_preview_lab_provider_secret_env(&placement, &plan)?;
 
@@ -613,6 +613,8 @@ pub(crate) fn preview_cook(
     let mut resolved = cook_preview_resolved_request(&args, placement);
     resolved["base_preparation"] = provision["base_preparation"].clone();
     resolved["workspace"] = provision;
+    resolved["gate_contract_validation"] =
+        preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
     resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
@@ -743,6 +745,37 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
             "ai_tool": args.ai_tool,
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
+    })
+}
+
+fn preview_gate_contract_disclosure(
+    validation: &crate::commands::agent_task::gate_contract::GateContractValidation,
+    public_gates: &[String],
+) -> Value {
+    let mut entries = Vec::new();
+    let mut private_deferred = 0usize;
+    for gate in &validation.gates {
+        if gate.status != "selection_deferred" {
+            continue;
+        }
+        if !public_gates.iter().any(|public| public == &gate.command) {
+            private_deferred += 1;
+            continue;
+        }
+        entries.push(serde_json::json!({
+            "kind": gate.kind,
+            "status": gate.status,
+            "filter_interpretation": gate.filter_interpretation,
+            "filter": gate.filter,
+            "selected_count": gate.selected_count,
+            "selected_ids": gate.selected_ids,
+            "validation": gate.validation,
+        }));
+    }
+    serde_json::json!({
+        "schema": "homeboy/cook-preview-gate-validation/v1",
+        "deferred_public": entries,
+        "deferred_private_count": private_deferred,
     })
 }
 
@@ -10776,15 +10809,81 @@ fn explicit_local_retry_admission_refusal(
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_continuation_status, cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
-        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
-        project_preview_dirty_admission,
+        cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
+        cook_report_with_continuation, cook_resolved_policy_disclosure,
+        cook_review_form_timeout_disclosure, detached_cook_route_less_warning,
+        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
+        project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
+
+    #[test]
+    fn preview_result_render_discloses_public_exact_filter_and_withholds_private_gate() {
+        let validation = crate::commands::agent_task::gate_contract::GateContractValidation {
+            schema: "homeboy/gate-contract-validation/v1",
+            status: "valid",
+            gates: vec![
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test public::test_id -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("public::test_id".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test private-command-secret -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("private-command-secret".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+            ],
+        };
+        let mut resolved = serde_json::json!({
+            "placement": { "requested": "local" },
+            "provider": { "backend": "fixture", "model": "test-model" },
+            "workspace": { "path": "/tmp/worktree" },
+            "gates": { "public": 1, "private": 1 },
+        });
+        resolved["gate_contract_validation"] = preview_gate_contract_disclosure(
+            &validation,
+            &["cargo test public::test_id -- --exact".to_string()],
+        );
+        let preview = cook_preview_result(
+            resolved,
+            Vec::new(),
+            PreviewReplayArgv {
+                argv: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                requires: Vec::new(),
+            },
+            None,
+            None,
+        );
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+            &preview,
+        )
+        .expect("rendered preview summary");
+        assert!(summary.contains("filter `public::test_id` (exact)"));
+        assert!(summary.contains("test inventory unavailable without building test binaries"));
+        assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
+        assert!(!summary.contains("private-command-secret"));
+    }
 
     fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
         let mut argv = vec![

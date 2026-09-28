@@ -31,7 +31,13 @@ pub(crate) struct GateContractValidationEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_interpretation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<String>,
 }
 
 pub(crate) fn validate_gate_contracts(
@@ -92,10 +98,9 @@ pub(crate) fn validate_gate_contracts(
     })
 }
 
-/// Validate Cargo gate shape without executing Cargo. Test populations belong
-/// to the candidate checkout, so compiling the base during preview would both
-/// make preview unexpectedly expensive and reject tests the provider has not
-/// created yet. Runtime gate evidence performs the bounded population check.
+/// Validate Cargo gate shape without building test binaries. A preview may
+/// report focused selections as deferred when it has no trustworthy cached
+/// test inventory; runtime gate evidence remains authoritative.
 pub(crate) fn validate_cargo_gate_contracts(
     gates: impl IntoIterator<Item = String>,
     _workspace: Option<&Path>,
@@ -105,13 +110,22 @@ pub(crate) fn validate_cargo_gate_contracts(
         let Some(selection) = cargo_gate_shape(&command)? else {
             continue;
         };
+        let deferred_selection = selection.mode == "focused";
         entries.push(GateContractValidationEntry {
             command,
             kind: "cargo",
-            status: "shape_valid",
+            status: if deferred_selection {
+                "selection_deferred"
+            } else {
+                "shape_valid"
+            },
             mode: Some(selection.mode),
             filter_interpretation: Some(selection.filter_interpretation),
+            filter: selection.filter,
             selected_count: None,
+            selected_ids: None,
+            validation: deferred_selection
+                .then(|| "test_inventory_unavailable_without_build".to_string()),
         });
     }
     Ok(entries)
@@ -120,6 +134,7 @@ pub(crate) fn validate_cargo_gate_contracts(
 struct CargoSelection {
     mode: String,
     filter_interpretation: String,
+    filter: Option<String>,
 }
 
 fn cargo_gate_shape(command: &str) -> Result<Option<CargoSelection>> {
@@ -191,6 +206,7 @@ fn cargo_gate_shape(command: &str) -> Result<Option<CargoSelection>> {
     Ok(Some(CargoSelection {
         mode: if filter.is_some() { "focused" } else { "broad" }.to_string(),
         filter_interpretation: interpretation.to_string(),
+        filter,
     }))
 }
 
@@ -325,7 +341,10 @@ fn entry(command: String, kind: &'static str, status: &'static str) -> GateContr
         status,
         mode: None,
         filter_interpretation: None,
+        filter: None,
         selected_count: None,
+        selected_ids: None,
+        validation: None,
     }
 }
 
@@ -682,7 +701,7 @@ mod tests {
             entries[0].filter_interpretation.as_deref(),
             Some("candidate_resolved")
         );
-        assert_eq!(entries[0].status, "shape_valid");
+        assert_eq!(entries[0].status, "selection_deferred");
         assert_eq!(entries[0].selected_count, None);
 
         let exact = validate_cargo_gate_contracts(
@@ -691,6 +710,21 @@ mod tests {
         )
         .expect("exact gate shape");
         assert_eq!(exact[0].filter_interpretation.as_deref(), Some("exact"));
+        assert_eq!(exact[0].status, "selection_deferred");
+        assert_eq!(exact[0].selected_count, None);
+        assert_eq!(
+            exact[0].validation.as_deref(),
+            Some("test_inventory_unavailable_without_build")
+        );
+
+        let nonexistent = validate_cargo_gate_contracts(
+            ["cargo test -p fixture nonexistent::test_id -- --exact".to_string()],
+            None,
+        )
+        .expect("without a cached test inventory, preview defers rather than claiming success");
+        assert_eq!(nonexistent[0].status, "selection_deferred");
+        assert_eq!(nonexistent[0].selected_count, None);
+        assert_eq!(nonexistent[0].selected_ids, None);
     }
 
     #[test]
