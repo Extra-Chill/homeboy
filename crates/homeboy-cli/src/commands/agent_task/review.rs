@@ -1941,7 +1941,7 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
             "runtime_ids": runtime_ids,
         },
         "observed_at": chrono::Utc::now().to_rfc3339(),
-        "runner_scoped_command": "homeboy agent-task providers --runner <runner-id>",
+        "runner_scoped_command": "homeboy runner exec <runner-id> -- homeboy agent-task providers",
     })
 }
 

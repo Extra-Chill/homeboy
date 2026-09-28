@@ -1093,6 +1093,24 @@ impl CliRuntime {
             eprintln!("{error}");
             return std::process::ExitCode::from(2);
         }
+        if crate::commands::route::is_agent_task_providers_query(&normalized) {
+            if let Some(runner_id) = matches.get_one::<String>("runner") {
+                let error = crate::commands::route::runner_provider_query_requires_runner_exec(
+                    runner_id,
+                    &normalized,
+                );
+                output_runtime::emit_json_result_for_identity(
+                    Err(error),
+                    matches
+                        .get_one::<std::path::PathBuf>("output")
+                        .map(|path| path.to_string_lossy().to_string())
+                        .as_deref(),
+                    2,
+                    &command_identity_from_matches(&matches),
+                );
+                return std::process::ExitCode::from(2);
+            }
+        }
         self.run_matches(matches, normalized)
     }
 
@@ -1228,6 +1246,22 @@ impl CliRuntime {
                         .get_one::<String>("runner_workspace_root")
                         .map(String::as_str),
                 };
+                if crate::commands::route::is_agent_task_providers_query(&normalized) {
+                    if let Some(runner_id) = options.runner.as_deref() {
+                        let error =
+                            crate::commands::route::runner_provider_query_requires_runner_exec(
+                                runner_id,
+                                &normalized,
+                            );
+                        output_runtime::emit_json_result_for_identity(
+                            Err(error),
+                            output_file.as_deref(),
+                            2,
+                            &command_identity,
+                        );
+                        return std::process::ExitCode::from(2);
+                    }
+                }
                 if let Some(exit_code) = preflight_composed_lab_route(
                     &route,
                     &options,
@@ -5862,6 +5896,48 @@ mod tests {
                 !sentinel.exists(),
                 "Cook validation failures must precede ambient discovery"
             );
+        });
+    }
+
+    #[test]
+    fn runner_scoped_provider_query_refuses_before_creating_lab_offload() {
+        crate::test_support::with_isolated_home(|home| {
+            let output = home.path().join("provider-query-error.json");
+            let exit = CliRuntime::new().run_from_args(vec![
+                "homeboy".to_string(),
+                "--runner".to_string(),
+                "homeboy-lab".to_string(),
+                "--output".to_string(),
+                output.to_string_lossy().into_owned(),
+                "agent-task".to_string(),
+                "providers".to_string(),
+                "--backend".to_string(),
+                "opencode".to_string(),
+                "--model".to_string(),
+                "xai/grok-4.7".to_string(),
+                "--validate-readiness".to_string(),
+            ]);
+
+            assert_eq!(exit, std::process::ExitCode::from(2));
+            let result: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output).expect("synchronous provider query diagnostic"),
+            )
+            .expect("JSON command result");
+            assert!(!result["success"].as_bool().unwrap_or(true));
+            assert!(result["diagnostics"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("no offload was created")));
+            assert_eq!(
+                result["diagnostics"]["details"]["tried"][0],
+                "Run `homeboy runner exec homeboy-lab -- homeboy agent-task providers --backend opencode --model xai/grok-4.7 --validate-readiness` to query the selected runner directly."
+            );
+
+            let store = homeboy::core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            assert!(store
+                .list_runs_all(Default::default())
+                .expect("list runs")
+                .is_empty());
         });
     }
 

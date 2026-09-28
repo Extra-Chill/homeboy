@@ -652,6 +652,14 @@ pub(crate) fn route_composed_lab_command(
     output_file: Option<&str>,
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
 ) -> homeboy::core::Result<Option<i32>> {
+    if let Some(runner_id) = options.runner.as_deref() {
+        if is_agent_task_providers_query(normalized_args) {
+            return Err(runner_provider_query_requires_runner_exec(
+                runner_id,
+                normalized_args,
+            ));
+        }
+    }
     let Some(route_contract) = route.lab_route_contract() else {
         if options.placement == homeboy::cli_surface::Placement::Lab || options.runner.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -767,6 +775,73 @@ pub(crate) fn route_composed_lab_command(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+pub(crate) fn runner_provider_query_requires_runner_exec(
+    runner_id: &str,
+    normalized_args: &[String],
+) -> homeboy::core::Error {
+    let mut command = vec!["homeboy".to_string()];
+    let mut skip_value = false;
+    for argument in normalized_args.iter().skip(1) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(
+            argument.as_str(),
+            "--runner"
+                | "--placement"
+                | "--output"
+                | "--artifact-root"
+                | "--runner-env"
+                | "--runner-secret-env"
+                | "--lab-env-json"
+                | "--runner-workspace-root"
+        ) {
+            skip_value = true;
+            continue;
+        }
+        if argument.starts_with("--runner=")
+            || argument.starts_with("--placement=")
+            || argument.starts_with("--output=")
+            || argument.starts_with("--artifact-root=")
+            || argument.starts_with("--runner-env=")
+            || argument.starts_with("--runner-secret-env=")
+            || argument.starts_with("--lab-env-json=")
+            || argument.starts_with("--runner-workspace-root=")
+            || matches!(
+                argument.as_str(),
+                "--allow-dirty-lab-workspace"
+                    | "--skip-deps-hydration"
+                    | "--delete-workspace-on-failure"
+                    | "--wait"
+            )
+        {
+            continue;
+        }
+        command.push(argument.clone());
+    }
+    let replay = format!(
+        "homeboy runner exec {} -- {}",
+        homeboy::core::engine::shell::quote_arg(runner_id),
+        command
+            .iter()
+            .map(|argument| homeboy::core::engine::shell::quote_arg(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    homeboy::core::Error::validation_invalid_argument(
+        "runner",
+        "`agent-task providers --runner` cannot use durable Lab workspace staging; no offload was created. Query readiness through daemon-backed runner exec instead.",
+        Some(replay.clone()),
+        Some(vec![format!("Run `{replay}` to query the selected runner directly.")]),
+    )
+}
+
+pub(crate) fn is_agent_task_providers_query(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|window| window[0] == "agent-task" && window[1] == "providers")
 }
 
 fn composed_lab_job_overrides(
