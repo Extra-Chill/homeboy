@@ -995,9 +995,13 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         return Ok((value, i32::from(!success)));
     }
     let path = args.path.expect("clap requires --path without --recover");
+    let mut run_id = args
+        .run_id
+        .expect("clap requires --run-id without --recover");
     let mut verified_candidate_sha = None;
     let mut dependency_hydration = Vec::new();
     if !args.verify.is_empty() {
+        report_manual_verification_progress(&run_id, args.preflight, &args.verify)?;
         let verification = execute_manual_verification(&path, &args.verify)?;
         verified_candidate_sha = Some(verification.candidate_sha);
         dependency_hydration = verification.dependency_hydration;
@@ -1021,9 +1025,6 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             .map(|command| format!("{command}=>passes as recorded by Homeboy's deterministic gate"))
             .collect();
     }
-    let mut run_id = args
-        .run_id
-        .expect("clap requires --run-id without --recover");
     if args.manual_finalization {
         run_id = agent_task_service::prepare_manual_finalization_identity(&run_id)?;
     }
@@ -1196,6 +1197,34 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     );
 
     Ok((value, exit_code))
+}
+
+fn report_manual_verification_progress(
+    run_id: &str,
+    preflight: bool,
+    commands: &[String],
+) -> homeboy::core::Result<()> {
+    let message = manual_verification_progress_message(run_id, preflight, commands);
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "{message}")
+        .and_then(|_| stderr.flush())
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))
+}
+
+fn manual_verification_progress_message(
+    run_id: &str,
+    preflight: bool,
+    commands: &[String],
+) -> String {
+    let mode = if preflight {
+        "validation-only; declared gates WILL execute"
+    } else {
+        "publication flow; declared gates WILL execute"
+    };
+    let command_list = commands.join(" | ");
+    format!(
+        "finalize-pr operation={run_id} phase=manual-verification mode={mode} gates={command_list}; resume: `homeboy agent-task status {run_id}` or `homeboy agent-task finalize-pr --recover {run_id}`"
+    )
 }
 
 pub(crate) fn record_replacement_gate_proof(
@@ -3283,6 +3312,21 @@ mod tests {
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
     };
     use std::process::Command;
+
+    #[test]
+    fn manual_preflight_progress_identifies_executing_gates_and_replay_commands() {
+        let message = manual_verification_progress_message(
+            "manual-run-15181",
+            true,
+            &["npm test".to_string(), "npm run build".to_string()],
+        );
+        assert!(message.contains("operation=manual-run-15181"));
+        assert!(message.contains("phase=manual-verification"));
+        assert!(message.contains("validation-only; declared gates WILL execute"));
+        assert!(message.contains("gates=npm test | npm run build"));
+        assert!(message.contains("homeboy agent-task status manual-run-15181"));
+        assert!(message.contains("homeboy agent-task finalize-pr --recover manual-run-15181"));
+    }
 
     #[test]
     fn immutable_promotion_uri_selects_its_controller_run_and_artifact() {
