@@ -393,19 +393,23 @@ fn apply_component(
         }
         PreparedProviderInput::Repository(contract) => (contract.as_path(), false, None),
     };
-    let effect_id = EffectId(match observation.as_deref() {
-        Some(observation) => format!(
-            "deploy-provider:{}:{}:{}",
-            observation.run_id(),
-            project_id,
-            component.id
-        ),
-        None => format!(
-            "deploy-provider:manual:{}",
-            homeboy_engine_primitives::content_hash::sha256_hex(
-                format!("{project_id}:{extension}:{provider}:{}", component.id).as_bytes(),
-            )
-        ),
+    let effect_id = EffectId(if dry_run {
+        format!("deploy-provider:dry-run:{}", uuid::Uuid::new_v4())
+    } else {
+        match observation.as_deref() {
+            Some(observation) => format!(
+                "deploy-provider:{}:{}:{}",
+                observation.run_id(),
+                project_id,
+                component.id
+            ),
+            None => format!(
+                "deploy-provider:manual:{}",
+                homeboy_engine_primitives::content_hash::sha256_hex(
+                    format!("{project_id}:{extension}:{provider}:{}", component.id).as_bytes(),
+                )
+            ),
+        }
     });
     let status = provider_api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
         schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
@@ -887,7 +891,7 @@ mod tests {
         .expect("extension manifest");
         std::fs::write(
             extension.join("run.sh"),
-            "#!/bin/sh\nif [ \"$1\" = apply ]; then touch \"$HOMEBOY_COMPONENT_PATH/applied\"; fi\nprintf '%s' '{\"status\":\"checked\"}'\n",
+            "#!/bin/sh\nif [ \"$1\" = apply ]; then touch \"$HOMEBOY_COMPONENT_PATH/applied\"; fi\nif [ \"$1\" = check ]; then printf x >> \"$(dirname \"$0\")/check-count\"; fi\nprintf '%s' '{\"status\":\"checked\"}'\n",
         )
         .expect("provider script");
     }
@@ -932,6 +936,39 @@ mod tests {
                 "opaque"
             );
             assert!(!repository.path().join("applied").exists());
+        });
+    }
+
+    #[test]
+    fn consecutive_provider_dry_runs_execute_the_provider_each_time() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+            );
+            let project = provider_project(repository.path());
+            let mut config = DeployConfig::check_all_no_pull_head();
+            config.all = false;
+            config.check = false;
+            config.component_ids = vec!["fixture".to_string()];
+            config.dry_run = true;
+
+            run_if_configured("site", &project, &config, None)
+                .expect("first provider dry run")
+                .expect("provider-owned result");
+            run_if_configured("site", &project, &config, None)
+                .expect("second provider dry run")
+                .expect("provider-owned result");
+
+            assert_eq!(
+                std::fs::read_to_string(
+                    home.path()
+                        .join(".config/homeboy/extensions/fixture-provider/check-count")
+                )
+                .expect("provider invocation count"),
+                "xx"
+            );
         });
     }
 
