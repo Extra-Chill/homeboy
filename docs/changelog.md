@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.2] - 2026-09-28
+
+### Fixed
+- schedule Lab terminal continuation as durable controller work
+- prove merged PR ancestry before release convergence
+- retain live capacity despite delayed job projection
+
 ## [0.396.1] - 2026-09-28
 
 ### Changed
