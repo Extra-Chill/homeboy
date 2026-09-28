@@ -2446,7 +2446,17 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         )
     })?;
-    if candidate_fingerprint(path)? != expected {
+    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
+    let current = candidate_fingerprint(path)?;
+    if current != expected
+        && !is_exact_rebased_candidate(
+            path,
+            &expected,
+            &current,
+            &recovery.prior_verified_base,
+            &fresh_base,
+        )?
+    {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content",
@@ -2454,10 +2464,10 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         ));
     }
-    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
     apply_immutable_candidate_to_base(
         path,
         &expected,
+        &current,
         &recovery.prior_verified_base,
         &recovery.promotion.changed_files,
         &fresh_base,
@@ -2506,6 +2516,60 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     Ok(refreshed)
 }
 
+/// Accept an operator-rebased candidate only when its single commit is based on
+/// the newly observed base and its complete patch is byte-for-byte identical to
+/// the authenticated original candidate delta. This lets recovery survive a
+/// base fast-forward without treating arbitrary destination edits as authority.
+fn is_exact_rebased_candidate(
+    path: &str,
+    expected: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    current: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    prior_base: &str,
+    fresh_base: &str,
+) -> Result<bool> {
+    let (
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: expected,
+        },
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: current,
+        },
+    ) = (expected, current)
+    else {
+        return Ok(false);
+    };
+    if current.head == expected.head
+        || current.base != *fresh_base
+        || git_changed_files(path, fresh_base, &current.tree)?
+            != git_changed_files(path, prior_base, &expected.tree)?
+    {
+        return Ok(false);
+    }
+    let original = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            prior_base,
+            &expected.tree,
+        ],
+    )?;
+    let rebased = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            fresh_base,
+            &current.tree,
+        ],
+    )?;
+    Ok(original == rebased)
+}
+
 /// Re-materialize an authenticated dirty candidate on a newer base. The
 /// temporary index proves both applicability and candidate-owned file scope
 /// before the destination is reset, so intervening base changes never become a
@@ -2513,6 +2577,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
 fn apply_immutable_candidate_to_base(
     path: &str,
     candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    destination_candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
     prior_verified_base: &str,
     recorded_changed_files: &[String],
     fresh_base: &str,
@@ -2617,7 +2682,7 @@ fn apply_immutable_candidate_to_base(
             None,
         ));
     }
-    if &candidate_fingerprint(path)? != candidate {
+    if &candidate_fingerprint(path)? != destination_candidate {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination changed while projecting the authenticated candidate",
@@ -2887,6 +2952,7 @@ mod moving_base_tests {
         let error = apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
             &expected,
+            &expected,
             &git(&seed, &["rev-parse", "HEAD"]),
             &["candidate.txt".to_string()],
             &fresh_base,
@@ -2960,6 +3026,7 @@ mod moving_base_tests {
 
         apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
+            &candidate,
             &candidate,
             &prior_verified_base,
             &["committed.txt".to_string(), "dirty.txt".to_string()],

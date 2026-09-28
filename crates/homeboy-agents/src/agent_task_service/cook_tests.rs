@@ -4425,6 +4425,15 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         let claim = crate::agent_task_service::claim_continuation()
             .unwrap()
             .expect("durable moving-base continuation");
+        // Model an operator resolving the moving base by rebasing and
+        // committing the exact candidate before continuation is consumed.
+        git(&destination, &["reset", "--hard", &advanced_base]);
+        git(&destination, &["apply", patch.to_str().unwrap()]);
+        git(&destination, &["add", "src/lib.rs"]);
+        git(
+            &destination,
+            &["commit", "-m", "rebase candidate onto refreshed base"],
+        );
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
