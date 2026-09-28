@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.7] - 2026-09-28
+
+### Fixed
+- preserve first cancellation provenance
+- admit Lab-placed cooks against runner, not controller, credentials
+
 ## [0.396.6] - 2026-09-28
 
 ### Fixed
