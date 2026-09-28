@@ -75,6 +75,7 @@ const STATE_BOUND: usize = 64;
 const MESSAGE_BOUND: usize = 256;
 const GATE_BOUND: usize = 12;
 pub(crate) const REF_BOUND: usize = 32;
+const STATUS_ARTIFACT_REF_BOUND: usize = 12;
 const REGISTERED_REFERENCE_BOUND: usize = 100;
 const URI_BOUND: usize = 512;
 const EVENT_PAGE_BOUND: usize = 100;
@@ -5376,7 +5377,7 @@ pub fn project_record(
         resource.finished_at = record.updated_at.clone();
     }
     resource.evidence = evidence_refs(record);
-    resource.artifacts = artifact_refs(record);
+    resource.artifacts = compact_status_artifact_refs(artifact_refs(record));
     Ok(resource)
 }
 
@@ -6286,6 +6287,17 @@ fn artifact_refs(record: &AgentTaskRunRecord) -> Vec<ControlPlaneEvidenceRef> {
             }
         })
         .take(REF_BOUND)
+        .collect()
+}
+
+fn compact_status_artifact_refs(
+    artifacts: Vec<ControlPlaneEvidenceRef>,
+) -> Vec<ControlPlaneEvidenceRef> {
+    let mut seen = std::collections::HashSet::new();
+    artifacts
+        .into_iter()
+        .filter(|artifact| seen.insert(artifact.id.clone()))
+        .take(STATUS_ARTIFACT_REF_BOUND)
         .collect()
 }
 
@@ -8031,6 +8043,58 @@ mod tests {
     const AGENT_TASK_COOK: &str = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e";
     const AGENT_TASK_RUN: &str =
         "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
+
+    #[test]
+    fn default_status_payload_deduplicates_and_bounds_top_level_artifacts() {
+        let mut service = service();
+        let mut retry_rotation = snapshot(AGENT_TASK_RUN, None);
+        retry_rotation.record.artifact_refs = (0..20)
+            .map(|index| AgentTaskArtifactRef {
+                task_id: "cook-detached-6ef40d1a-7ea5-49be-9107-2f7ab7f762b3".to_string(),
+                kind: "transcript".to_string(),
+                uri: format!("artifact://retry-rotation/{}", index % 18),
+                role: Some("provider_output".to_string()),
+                label: None,
+                semantic_key: Some(format!("artifact-{}", index % 18)),
+                size_bytes: None,
+            })
+            .collect();
+        service
+            .lookup
+            .snapshots
+            .insert(AGENT_TASK_RUN.to_string(), retry_rotation.clone());
+        let resource = service
+            .run(&RunId::new(AGENT_TASK_RUN).expect("run id"))
+            .expect("control-plane status resource");
+        let payload = serde_json::to_value(resource).expect("serialized status payload");
+        let status_artifacts = payload["artifacts"].as_array().expect("status artifacts");
+        let ids = status_artifacts
+            .iter()
+            .map(|artifact| artifact["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(status_artifacts.len(), 12);
+        assert_eq!(ids.len(), 12);
+        assert_eq!(payload["schema"], CONTROL_PLANE_RUN_SCHEMA);
+        // Full evidence remains on the lifecycle record used by artifacts retrieval.
+        assert_eq!(retry_rotation.record.artifact_refs.len(), 20);
+        assert_eq!(
+            retry_rotation
+                .record
+                .artifact_refs
+                .iter()
+                .map(|artifact| artifact.semantic_key.as_deref().unwrap())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            18
+        );
+        let resolvable =
+            references_for_record(&retry_rotation.record, ControlPlaneReferenceType::Artifact)
+                .expect("full control-plane artifact reference list");
+        assert_eq!(resolvable.len(), 18);
+        assert!(resolvable
+            .iter()
+            .any(|reference| reference.uri == "artifact://retry-rotation/17"));
+    }
 
     fn interrupt_action_after_effect(
         service: &OrchestrationService<LifecycleStoreLookup>,
