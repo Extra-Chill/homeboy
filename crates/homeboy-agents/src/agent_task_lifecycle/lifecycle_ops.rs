@@ -4247,7 +4247,7 @@ pub fn record_cook_progress_in_store(
 
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
-pub(crate) fn record_cook_controller_failure(
+pub fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
@@ -5774,6 +5774,50 @@ fn reconcile_candidate_adoption_terminal_state_in_store(
     }
     set_run_state(record, AgentTaskRunState::Failed);
     Ok(true)
+}
+
+/// Admit terminal provider results to the durable Cook continuation queue.
+/// Called from the terminal Lab projection path so it does not depend on a
+/// later status read or explicit resume command.
+pub fn reconcile_terminal_cook_provider_result(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record(run_id)?;
+    if !record.state.is_terminal() {
+        return Ok(record);
+    }
+    let recipe_store =
+        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe = match record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .map(|cook_id| recipe_store.load_recipe(cook_id))
+        .transpose()?
+    {
+        Some(recipe) => recipe,
+        None => match recipe_store.load_recipe_for_attempt(run_id)? {
+            Some(recipe) => recipe,
+            // Terminal Lab runs are also used outside Cook. They have no
+            // continuation to enqueue and must leave their normal projection
+            // path untouched.
+            None => return Ok(record),
+        },
+    };
+    let cook_id = recipe.cook_id;
+    let enqueued = recipe_store.enqueue_terminal_continuation(&cook_id, run_id)?;
+    lifecycle_store.mutate_record(run_id, |stored| {
+        stored.ensure_metadata_object().insert(
+            "cook_continuation_scheduler".to_string(),
+            json!({
+                "status": if enqueued { "queued" } else { "already_queued_or_completed" },
+                "cook_id": cook_id,
+                "run_id": run_id,
+                "phase": "continuation",
+            }),
+        );
+        true
+    })?;
+    lifecycle_store.read_record(run_id)
 }
 
 pub fn reconcile_status_in_store(

@@ -8450,6 +8450,18 @@ fn run_cook_spine(
                     .as_str()
                     .unwrap_or("unknown")
                     .to_string();
+                if matches!(final_status.as_str(), "review_ready" | "draft_published") {
+                    let absorbed_source_run_id = promotion
+                        .provenance
+                        .pointer("/cook_follow_up/source_run_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&run_id);
+                    super::cook_recipe::complete_absorbed_review_form_follow_ups(
+                        store,
+                        lifecycle_store,
+                        absorbed_source_run_id,
+                    )?;
+                }
                 let exit_code =
                     if matches!(final_status.as_str(), "review_ready" | "draft_published") {
                         0

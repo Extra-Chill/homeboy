@@ -3990,9 +3990,12 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
                 .metadata["provider_executions_consumed"],
             1
         );
-        assert!(crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .is_none());
+        let remaining = crate::agent_task_service::claim_continuation().unwrap();
+        assert!(
+            remaining.is_none(),
+            "unexpected continuation for {:?}",
+            remaining.map(|claim| claim.continuation().clone())
+        );
         assert!(second.value.moving_base_recovery.is_none());
 
         // A rebase must not turn a failed declared gate into an attempted
@@ -11773,25 +11776,31 @@ fn strict_cross_cook_run_ownership_rejection_leaves_state_unchanged() {
 }
 
 #[test]
-fn strict_terminal_lab_cook_registration_projects_authority_after_unlock_idempotently() {
+fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resume() {
     homeboy_core::test_support::with_isolated_home(|_| {
         with_strict_config_lock(|| {
             let cook_id = "cook-strict-terminal-lab";
             let run_id = "cook-strict-terminal-lab-attempt";
-            let plan = batch_cook_options(
+            let mut options = batch_cook_options(
                 cook_id,
                 Arc::new(RecordingDetachedAttemptDispatcher {
                     dispatches: Arc::new(AtomicUsize::new(0)),
                 }),
-            )
-            .identity
-            .initial_plan;
+            );
+            options.identity.initial_run_id = run_id.to_string();
+            let plan = options.identity.initial_plan.clone();
+            let runner_job_id = "00000000-0000-0000-0000-000000000123";
+            let recipe_store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
+                .expect("Cook recipe store");
+            recipe_store
+                .persist_initial_recipe(&options)
+                .expect("persist recipe");
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit Lab attempt");
             agent_task_lifecycle::record_detached_lab_run(
                 agent_task_lifecycle::DetachedLabRunRecord {
                     run_id,
                     runner_id: "strict-terminal-lab",
-                    runner_job_id: "strict-terminal-job",
+                    runner_job_id,
                     remote_workspace: "/runner/strict-terminal-workspace",
                     remote_command: &["homeboy".to_string(), "agent-task".to_string()],
                 },
@@ -11809,8 +11818,63 @@ fn strict_terminal_lab_cook_registration_projects_authority_after_unlock_idempot
                 artifact_bindings: Vec::new(),
                 queue: Default::default(),
             };
-            agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
-                .expect("terminalize Lab attempt");
+            let job_id = uuid::Uuid::parse_str(runner_job_id).expect("runner job id");
+            let snapshot = homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                job: homeboy_core::api_jobs::Job {
+                    id: job_id,
+                    operation: "agent-task".to_string(),
+                    status: homeboy_core::api_jobs::JobStatus::Succeeded,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                    started_at_ms: Some(1),
+                    finished_at_ms: Some(2),
+                    event_count: 1,
+                    source_snapshot: None,
+                    path_materialization_plan: None,
+                    stale_reason: None,
+                    daemon_lease_id: None,
+                    target_runner_id: None,
+                    target_project_id: None,
+                    claim_id: None,
+                    claimed_by_runner_id: None,
+                    claimed_at_ms: None,
+                    claim_expires_at_ms: None,
+                    artifacts: Vec::new(),
+                    runner_job_projection: None,
+                },
+                events: vec![homeboy_core::api_jobs::JobEvent {
+                    sequence: 1,
+                    job_id,
+                    kind: homeboy_core::api_jobs::JobEventKind::Progress,
+                    timestamp_ms: 2,
+                    message: Some("terminal Cook aggregate".to_string()),
+                    data: Some(serde_json::json!({
+                        "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                        "identity": {
+                            "runner_id": "strict-terminal-lab",
+                            "runner_job_id": runner_job_id,
+                            "persisted_run_id": run_id,
+                            "run_id": run_id,
+                        },
+                        "aggregate": aggregate,
+                    })),
+                }],
+            };
+            assert!(
+                agent_task_lifecycle::project_terminal_runner_result_in_store(
+                    &test_lifecycle_store(),
+                    run_id,
+                    &snapshot,
+                )
+                .expect("project actual terminal runner snapshot")
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id)
+                    .expect("projected record")
+                    .state,
+                agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                "terminal Lab mirror projection must settle the lifecycle before enqueue"
+            );
 
             agent_task_lifecycle::record_cook_attempt_in_store(
                 &test_lifecycle_store(),
@@ -11819,11 +11883,21 @@ fn strict_terminal_lab_cook_registration_projects_authority_after_unlock_idempot
                 run_id,
             )
             .expect("register terminal Cook without lock reentry");
+            let reconciled = agent_task_lifecycle::reconcile_terminal_cook_provider_result(run_id)
+                .expect("provider projection enqueues continuation directly");
+            assert_eq!(reconciled.run_id, run_id);
+            assert!(
+                recipe_store
+                    .claim_continuation_for(cook_id, run_id)
+                    .expect("claim terminal continuation")
+                    .is_some(),
+                "terminal result is consumable without status/resume/read commands"
+            );
             let receipt = agent_task_lifecycle::resolve_workspace_terminal_authority(
                 run_id,
                 "strict-terminal-lab",
                 "/runner/strict-terminal-workspace",
-                Some("strict-terminal-job"),
+                Some(runner_job_id),
             )
             .expect("read terminal authority")
             .expect("authority projected after unlock");
@@ -11840,7 +11914,7 @@ fn strict_terminal_lab_cook_registration_projects_authority_after_unlock_idempot
                 run_id,
                 "strict-terminal-lab",
                 "/runner/strict-terminal-workspace",
-                Some("strict-terminal-job"),
+                Some(runner_job_id),
             )
             .expect("re-read terminal authority")
             .is_some());
@@ -14783,9 +14857,8 @@ fn repeated_provider_discovery_failures_exhaust_the_adoption_review_allowance() 
 }
 
 #[test]
-#[ignore = "homeboy#15003: the review-form-only follow-up's own terminal \
-continuation is never cleared once its outcome is absorbed by the historical \
-run's finalization, so claim_continuation() finds it pending afterward"]
+// #15003: the follow-up result is absorbed by the historical source
+// finalization, so its independent continuation must be retired.
 fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_without_redispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let dispatches = Arc::new(AtomicUsize::new(0));
@@ -14832,7 +14905,14 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
         );
         let claim = crate::agent_task_service::claim_continuation()
             .unwrap()
-            .expect("terminal detached follow-up queues continuation");
+            .expect("historical source continuation is pending");
+        assert_eq!(claim.continuation().run_id, fixture.run_id);
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&fixture.run_id)
+                .unwrap()
+                .metadata["cook_continuation"]["state"],
+            "claimed"
+        );
         let mut resumed_backend = CaptureBackend {
             hydrate_run_id: Some(fixture.run_id.clone()),
             ..Default::default()
@@ -14841,7 +14921,7 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             claim,
             |_| Ok(Some(dispatcher.clone())),
             |options| {
-                run_cook(CookContext {
+                let result = run_cook(CookContext {
                     side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
                         finalize_cook_pr_with_backend(
                             options,
@@ -14851,14 +14931,18 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
                         )
                     })),
                     ..CookContext::new(options, Arc::new(UnusedExecutor))
-                })
-                .map(|result| result.exit_code)
+                });
+                result.map(|result| result.exit_code)
             },
         )
         .expect("continuation consumes terminal follow-up");
 
         assert_eq!(exit_code, 0);
         assert!(resumed_backend.created);
+        assert_eq!(
+            resumed_backend.create_count, 1,
+            "historical finalization runs once"
+        );
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let carried = persisted_promotion_for_attempt(follow_up).unwrap().unwrap();
         assert_eq!(carried.source.run_id.as_deref(), Some(follow_up));
@@ -14866,9 +14950,22 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             carried.provenance["cook_follow_up"]["source_run_id"],
             fixture.run_id
         );
-        assert!(crate::agent_task_service::claim_continuation()
-            .unwrap()
-            .is_none());
+        let continuation_record = agent_task_lifecycle::exact_record(follow_up).unwrap();
+        assert_eq!(
+            continuation_record.metadata["cook_continuation"]["state"], "completed",
+            "historical follow-up was absorbed but its own queue entry remains: {:?}",
+            continuation_record.metadata["cook_continuation"]
+        );
+        assert_eq!(
+            continuation_record.metadata["cook_continuation"]["absorbed_by_run_id"],
+            fixture.run_id
+        );
+        let remaining = crate::agent_task_service::claim_continuation().unwrap();
+        assert!(
+            remaining.is_none(),
+            "unexpected continuation for {:?}",
+            remaining.map(|claim| claim.continuation().clone())
+        );
     });
 }
 
@@ -16289,6 +16386,7 @@ struct CaptureBackend {
     committed: bool,
     pushed: bool,
     created: bool,
+    create_count: usize,
     updated: bool,
     existing_pr: Option<AgentTaskPrRef>,
     merged_pr: Option<AgentTaskPrRef>,
@@ -16551,6 +16649,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
         self.created = true;
+        self.create_count += 1;
         self.body = body.to_string();
         Ok(AgentTaskPrRef {
             number: 8058,

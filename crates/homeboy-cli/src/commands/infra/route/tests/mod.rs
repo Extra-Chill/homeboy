@@ -3,6 +3,19 @@
 mod dispatch;
 mod handoff;
 
+#[test]
+fn terminal_cook_job_retry_epoch_changes_submission_key_but_keeps_active_fence() {
+    let first = terminal_cook_job_idempotency_keys("cook", "run", 0);
+    let retry = terminal_cook_job_idempotency_keys("cook", "run", 1);
+    assert_ne!(first.0, retry.0, "a retry must create a fresh durable job");
+    assert_eq!(first.1, retry.1, "concurrent jobs share one active fence");
+    assert_eq!(
+        first.1,
+        terminal_cook_job_idempotency_keys("cook", "follow-up", 0).1,
+        "follow-up attempts for the same Cook must not finalize concurrently"
+    );
+}
+
 use super::*;
 use homeboy::core::test_support::bounded_output;
 use std::fs;

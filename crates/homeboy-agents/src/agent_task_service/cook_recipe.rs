@@ -466,6 +466,7 @@ pub struct ClaimedCookContinuation {
     /// Durable home the claim was taken from, so a consuming store can reject a
     /// claim that belongs to a different data root.
     data_root: PathBuf,
+    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,13 +498,33 @@ impl ClaimedCookContinuation {
         self.transition(LifecycleContinuationTransition::Fail(diagnostic))
     }
 
-    fn transition(self, transition: LifecycleContinuationTransition<'_>) -> Result<()> {
-        transition_lifecycle_continuation(
+    fn transition(mut self, transition: LifecycleContinuationTransition<'_>) -> Result<()> {
+        let result = transition_lifecycle_continuation(
             &self.lifecycle_store,
             &self.continuation.run_id,
             &self.claim_identity,
             transition,
-        )
+        );
+        if result.is_ok() {
+            self.active = false;
+        }
+        result
+    }
+}
+
+impl Drop for ClaimedCookContinuation {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = transition_lifecycle_continuation(
+                &self.lifecycle_store,
+                &self.continuation.run_id,
+                &self.claim_identity,
+                LifecycleContinuationTransition::RetryWithDiagnostic(
+                    "Cook continuation worker exited before recording a result; retry scheduled",
+                ),
+            );
+            self.active = false;
+        }
     }
 }
 
@@ -1740,6 +1761,7 @@ const MAX_CONTINUATION_RETRIES: u32 = 3;
 enum LifecycleContinuationTransition<'a> {
     Complete,
     Retry,
+    RetryWithDiagnostic(&'a str),
     Fail(&'a str),
 }
 
@@ -1817,6 +1839,10 @@ fn enqueue_lifecycle_continuation(
             return false;
         }
         let now = agent_task_lifecycle::now_timestamp();
+        let previous_generation = lifecycle_continuation(record)
+            .and_then(|value| value.get("generation"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let mut value = serde_json::json!({
             "schema": LIFECYCLE_CONTINUATION_SCHEMA,
             "key": continuation.key,
@@ -1824,6 +1850,7 @@ fn enqueue_lifecycle_continuation(
             "run_id": continuation.run_id,
             "state": "pending",
             "retries": if rearm_failed { 0 } else { continuation.retries },
+            "generation": if rearm_failed { previous_generation.saturating_add(1) } else { previous_generation },
             "enqueued_at": now,
         });
         if rearm_failed {
@@ -2077,6 +2104,7 @@ fn claim_lifecycle_record(
         lifecycle_store: lifecycle_store.clone(),
         claim_identity,
         data_root: data_root.to_path_buf(),
+        active: true,
     }))
 }
 
@@ -2109,12 +2137,33 @@ fn transition_lifecycle_continuation(
                     .unwrap_or(0)
                     .saturating_add(1);
                 value["retries"] = serde_json::json!(retries);
+                value["generation"] =
+                    serde_json::json!(value["generation"].as_u64().unwrap_or(0).saturating_add(1));
                 if retries > MAX_CONTINUATION_RETRIES as u64 {
                     value["state"] = serde_json::json!("failed");
                     value["diagnostic"] =
                         serde_json::json!("cook continuation retry budget exhausted");
                 } else {
                     value["state"] = serde_json::json!("pending");
+                }
+            }
+            LifecycleContinuationTransition::RetryWithDiagnostic(diagnostic) => {
+                let retries = value
+                    .get("retries")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                value["retries"] = serde_json::json!(retries);
+                value["generation"] =
+                    serde_json::json!(value["generation"].as_u64().unwrap_or(0).saturating_add(1));
+                if retries > MAX_CONTINUATION_RETRIES as u64 {
+                    value["state"] = serde_json::json!("failed");
+                    value["diagnostic"] = serde_json::json!(
+                        "cook continuation retry budget exhausted after an abandoned worker"
+                    );
+                } else {
+                    value["state"] = serde_json::json!("pending");
+                    value["diagnostic"] = serde_json::json!(diagnostic);
                 }
             }
             LifecycleContinuationTransition::Fail(diagnostic) => {
@@ -2542,6 +2591,7 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
         lifecycle_store: lifecycle_store.clone(),
         claim_identity,
         data_root: store.data_root(),
+        active: true,
     }))
 }
 
@@ -2931,6 +2981,77 @@ pub fn consume_claimed_terminal_with_dispatcher(
     )
 }
 
+/// Complete terminal review-form follow-ups whose accepted outcome was
+/// absorbed by a successful historical-run finalization. This prevents the
+/// daemon from treating the same provider outcome as independent Cook work.
+pub(crate) fn complete_absorbed_review_form_follow_ups(
+    store: &CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    finalized_run_id: &str,
+) -> Result<()> {
+    let recipe = store
+        .load_recipe_for_attempt(finalized_run_id)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_continuation.finalization",
+                "finalized Cook attempt has no durable recipe",
+                Some(finalized_run_id.to_string()),
+                None,
+            )
+        })?;
+    for attempt in recipe.attempts {
+        if attempt.run_id == finalized_run_id {
+            continue;
+        }
+        let Ok(record) = lifecycle_store.read_record(&attempt.run_id) else {
+            continue;
+        };
+        if !record.state.is_terminal()
+            || record
+                .metadata
+                .pointer("/latest_promotion/provenance/cook_follow_up/kind")
+                .and_then(Value::as_str)
+                != Some("review_form_only")
+            || record
+                .metadata
+                .pointer("/latest_promotion/provenance/cook_follow_up/source_run_id")
+                .and_then(Value::as_str)
+                != Some(finalized_run_id)
+        {
+            continue;
+        }
+        lifecycle_store.mutate_record(&attempt.run_id, |stored| {
+            let continuation = stored
+                .ensure_metadata_object()
+                .get_mut(LIFECYCLE_CONTINUATION_KEY)
+                .and_then(Value::as_object_mut);
+            let Some(continuation) = continuation else {
+                return false;
+            };
+            if !matches!(
+                continuation.get("state").and_then(Value::as_str),
+                Some("pending" | "claimed")
+            ) {
+                return false;
+            }
+            continuation.insert("state".to_string(), serde_json::json!("completed"));
+            continuation.insert(
+                "absorbed_by_run_id".to_string(),
+                serde_json::json!(finalized_run_id),
+            );
+            continuation.insert(
+                "completed_at".to_string(),
+                serde_json::json!(agent_task_lifecycle::now_timestamp()),
+            );
+            continuation.remove("claim_identity");
+            continuation.remove("owner_pid");
+            stored.updated_at = Some(agent_task_lifecycle::now_timestamp());
+            true
+        })?;
+    }
+    Ok(())
+}
+
 fn consume_claimed_with_dispatcher_policy(
     store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
@@ -2940,6 +3061,15 @@ fn consume_claimed_with_dispatcher_policy(
 ) -> Result<i32> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
+    if lifecycle_store
+        .read_record(&claim.continuation().run_id)?
+        .metadata
+        .pointer("/cook_continuation/absorbed_by_run_id")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Ok(0);
+    }
     let recipe = match store.load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
@@ -3958,6 +4088,54 @@ mod tests {
         let options = observed.expect("terminal continuation reached normal cook boundary");
         assert_eq!(options.retry_policy.max_attempts, 1);
         assert_eq!(options.identity.initial_run_id, "run");
+        assert_eq!(
+            options.gates,
+            serde_json::from_value(recipe().gate_policy).unwrap()
+        );
+        assert!(
+            store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .is_none(),
+            "a claimed terminal continuation cannot be consumed twice"
+        );
+    }
+
+    #[test]
+    fn dropped_continuation_claim_is_retried_even_while_owner_process_remains_alive() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let claim = store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .expect("claim pending continuation");
+
+        // Models a panic or abandoned controller worker in the still-live
+        // daemon process: process-PID liveness alone cannot reclaim this claim.
+        drop(claim);
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
+        );
+        assert_eq!(
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root())
+                .read_record("run")
+                .unwrap()
+                .metadata["cook_continuation"]["diagnostic"],
+            "Cook continuation worker exited before recording a result; retry scheduled"
+        );
+        let retry_record =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root())
+                .read_record("run")
+                .unwrap();
+        assert_eq!(retry_record.metadata["cook_continuation"]["retries"], 1);
+        assert_eq!(retry_record.metadata["cook_continuation"]["generation"], 1);
+        assert!(store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
