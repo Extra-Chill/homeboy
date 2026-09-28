@@ -2236,17 +2236,17 @@ fn direct_daemon_fresh_live_job_suppresses_false_orphan_inference() {
 }
 
 #[test]
-fn daemon_count_divergence_reconciles_to_typed_owners_without_cancelling_them() {
+fn direct_daemon_count_remains_authoritative_when_typed_projection_lags() {
     let typed = vec![sample_active_job(Some("run-live"), "live runner job")];
 
-    assert_eq!(reconciled_active_job_count(typed.len(), Some(2)), 1);
+    assert_eq!(reconciled_active_job_count(typed.len(), Some(2)), 2);
     assert_eq!(typed.len(), 1);
     assert_eq!(typed[0].durable_run_id.as_deref(), Some("run-live"));
     assert_eq!(typed[0].status, JobStatus::Running);
 
-    // Once the known job exits, the stale freshness count cannot keep a
-    // synthetic owner around to block a safe daemon rotation.
-    assert_eq!(reconciled_active_job_count(0, Some(2)), 0);
+    // The direct daemon count is authoritative even when the ownership
+    // projection has not caught up; this conservatively retains capacity.
+    assert_eq!(reconciled_active_job_count(0, Some(2)), 2);
 }
 
 fn read_fixture_request_until(
