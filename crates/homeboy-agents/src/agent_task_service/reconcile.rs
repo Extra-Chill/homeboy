@@ -2211,6 +2211,55 @@ mod tests {
     }
 
     #[test]
+    fn fresh_cook_progress_prevents_fleet_cancellation_before_lab_job_binding() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "cook-pre-provider-heartbeat-independent-of-run-timestamp";
+            agent_task_lifecycle::submit_plan(
+                &AgentTaskPlan::new("controller-owned-before-lab-binding", Vec::new()),
+                Some(run_id),
+            )
+            .expect("submit Cook attempt");
+            let now = chrono::Utc::now();
+            let old = (now - chrono::Duration::minutes(31)).to_rfc3339();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["runner_id"] = serde_json::json!("fixture-lab");
+                record.metadata["cook_progress"] = serde_json::json!({
+                    "phase": "provider_start",
+                    "attempt": 1,
+                    "updated_at": now.to_rfc3339(),
+                });
+                // Runner-targeted progress can be newer than the run-level
+                // timestamp before a runner job id exists.
+                record.updated_at = Some(old.clone());
+            })
+            .expect("retain controller progress before Lab accepts the job");
+
+            let active = agent_task_lifecycle::exact_record(run_id).expect("queued Cook attempt");
+            assert!(active.has_fresh_controller_pre_provider_heartbeat());
+            let report = reconcile_stale_active_runs(false).expect("daemon watchdog pass");
+            assert_eq!(report.reconciled, 0, "{report:?}");
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id).unwrap().state,
+                agent_task_lifecycle::AgentTaskRunState::Queued,
+                "a live controller heartbeat must protect its unbound Lab attempt"
+            );
+
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_progress"]["updated_at"] = serde_json::json!(old);
+            })
+            .expect("expire controller heartbeat");
+            let expired = reconcile_stale_active_runs(false).expect("expired watchdog pass");
+            assert_eq!(expired.reconciled, 1, "{expired:?}");
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id).unwrap().state,
+                agent_task_lifecycle::AgentTaskRunState::Cancelled,
+                "an expired unbound attempt remains recoverable by the stale-run watchdog"
+            );
+        });
+    }
+
+    #[test]
     fn concurrent_planned_submissions_survive_delayed_runner_identity_publication() {
         use std::sync::{Arc, Barrier};
 
