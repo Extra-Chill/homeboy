@@ -862,6 +862,19 @@ fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
     }
+    if string_value(payload, &["owner", "kind"]) == Some("runner") {
+        let runner_id = string_value(payload, &["owner", "id"]);
+        if string_value(payload, &["state"]) == Some("running") {
+            return format!("homeboy agent-task status {run_id} --watch");
+        }
+        if string_value(payload, &["state"]) == Some("queued")
+            && string_value(payload, &["phase"]) == Some("retry")
+        {
+            if let Some(runner_id) = runner_id {
+                return format!("homeboy --runner {runner_id} agent-task run {run_id}");
+            }
+        }
+    }
     const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
     let Some(actions) = payload
         .pointer("/action_eligibility/actions")
@@ -2219,6 +2232,32 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
+    }
+
+    #[test]
+    fn queued_runner_proxy_status_recommends_runner_scoped_dispatch() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "exact-run-id",
+            "state": "queued",
+            "owner": { "id": "runner-7", "kind": "runner" },
+            "phase": "retry",
+            "action_eligibility": { "actions": [{
+                "action": "resume", "availability": "unavailable",
+                "reason": "runner-owned transport proxy must be continued by its owning runner"
+            }] },
+            "artifacts": []
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("Next: homeboy --runner runner-7 agent-task run exact-run-id\n"));
+
+        let live = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "exact-run-id",
+            "state": "running", "owner": { "id": "runner-7", "kind": "runner" },
+            "artifacts": []
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &live).unwrap();
+        assert!(summary.contains("Next: homeboy agent-task status exact-run-id --watch\n"));
     }
 
     #[test]
