@@ -9773,13 +9773,11 @@ pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<Str
 pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
     let identity = identity?;
     let component_id = identity.get("component_id").and_then(Value::as_str)?;
-    let requested_repository =
-        identity.get("provenance").and_then(Value::as_str) == Some("--repo:requested-repository");
     let component_registered = identity
         .get("component_registered")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if requested_repository || !component_registered || component_id.is_empty() {
+    if !component_registered || component_id.is_empty() {
         return None;
     }
     Some(component_id.to_string())

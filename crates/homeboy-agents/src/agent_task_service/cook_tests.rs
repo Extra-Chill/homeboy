@@ -28,6 +28,22 @@ use super::super::cook_promotion::{
     selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
     CookReportInput, MovingBaseCookRecovery,
 };
+
+#[test]
+fn admitted_component_identity_survives_explicit_repository_selection() {
+    let identity = serde_json::json!({
+        "repository_name": "blocks-engine",
+        "component_id": "blocks-engine",
+        "component_registered": true,
+        "provenance": "--repo:requested-repository"
+    });
+
+    assert_eq!(
+        super::super::cook::admitted_component_id(Some(&identity)),
+        Some("blocks-engine".to_string())
+    );
+}
+
 use super::super::cook_recipe::{
     load_recipe, persist_initial_recipe, set_initial_recipe_creation_barrier_for_test,
 };
