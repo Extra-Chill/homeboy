@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.0] - 2026-09-28
+
+### Added
+- author Cook PR titles in the review form
+- add cook convenience aliases
+
+### Fixed
+- bound retained storage filesystem inventory
+- bound duplicate artifacts in status
+- route queued Lab retries through runner owner
+- derive candidate-bound feedback defaults
+- no-op subtree replay on later source tree
+
 ## [0.395.4] - 2026-09-28
 
 ### Fixed
