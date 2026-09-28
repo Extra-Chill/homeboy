@@ -118,14 +118,12 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
             }],
         );
         plan.group_key = Some("blocks-engine".to_string());
-        plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "repository_name": "blocks-engine",
-            "component_id": "php-transformer",
-            "component_cwd": "packages/php-transformer"
-        });
-
-        bind_materialized_cook_component_workspace(&mut plan, repository.path())
-            .expect("bind deferred component workspace");
+        bind_materialized_cook_component_workspace(
+            &mut plan,
+            repository.path(),
+            Some("php-transformer"),
+        )
+        .expect("bind deferred component workspace");
 
         assert!(plan.tasks[0].workspace.root.is_none());
         assert_eq!(
@@ -147,7 +145,7 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
             "component_id": "removed-transformer",
             "provenance": "--repo:configured-component"
         });
-        let error = bind_materialized_cook_component_workspace(&mut stale, repository.path())
+        let error = bind_materialized_cook_component_workspace(&mut stale, repository.path(), None)
             .expect_err("stale component registration must fail closed");
         assert!(error.message.contains("no longer registered"));
 
@@ -158,7 +156,7 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
             "component_registered": false,
             "provenance": "--cwd:git-remote:origin"
         });
-        bind_materialized_cook_component_workspace(&mut unregistered, repository.path())
+        bind_materialized_cook_component_workspace(&mut unregistered, repository.path(), None)
             .expect("an attested standalone repository uses its root workspace");
     });
 }
@@ -19733,17 +19731,17 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
     });
 }
 
-/// Register two distinct components sharing one Git remote and a third,
-/// unrelated checkout with the identical remote. `resolve_effective(None, ...)`
-/// cannot disambiguate the checkout on its own — exactly the shared-repository
-/// ambiguity #14265 introduced a `--component` selector for, and #14725 fixes
-/// on Cook's own finalization and recovery routes.
+/// Register a repository-root component and a nested component sharing one
+/// Git remote, plus a separate checkout with the identical remote.
+/// `resolve_effective(None, ...)` cannot disambiguate either checkout — the
+/// overlapping-registration case Cook must carry its selected component
+/// through admission, gates, and finalization.
 fn register_shared_repository_components(home: &std::path::Path) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("fixture root");
-    let primary_a = dir.path().join("primary-a");
-    let primary_b = dir.path().join("primary-b");
+    let primary_a = dir.path().join("blocks-engine");
+    let primary_b = primary_a.join("packages/php-transformer");
     let checkout = dir.path().join("checkout");
-    for path in [&primary_a, &primary_b, &checkout] {
+    for path in [&primary_a, &checkout] {
         std::fs::create_dir_all(path).expect("checkout dir");
         homeboy_core::test_support::run_git_fixture_command(path, &["init", "-q"]);
         homeboy_core::test_support::run_git_fixture_command(
@@ -19756,9 +19754,13 @@ fn register_shared_repository_components(home: &std::path::Path) -> (tempfile::T
             ],
         );
     }
+    std::fs::create_dir_all(&primary_b).expect("nested component checkout");
     let registrations = home.join(".config/homeboy/components");
     std::fs::create_dir_all(&registrations).expect("component registrations");
-    for (id, path) in [("fixture-a", &primary_a), ("fixture-b", &primary_b)] {
+    for (id, path) in [
+        ("blocks-engine", &primary_a),
+        ("php-transformer", &primary_b),
+    ] {
         std::fs::write(
             registrations.join(format!("{id}.json")),
             serde_json::json!({
@@ -19812,7 +19814,7 @@ fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_id
         assert!(error
             .message
             .contains("matches multiple registered component configurations"));
-        assert!(error.message.contains("fixture-a, fixture-b"));
+        assert!(error.message.contains("blocks-engine, php-transformer"));
 
         // Fixed: Cook durably records the component it admitted the run
         // against, and finalization reuses that recorded identity instead of
@@ -19822,11 +19824,11 @@ fn cook_promotion_finalization_resolves_review_profile_via_recorded_component_id
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.identity.initial_run_id = run_id.to_string();
         options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
-        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "component_id": "fixture-a",
-            "component_registered": true,
-            "provenance": "--cwd:git-remote:origin",
-        });
+        // The controller's selected component can be carried in the gate
+        // environment without repository-identity metadata (as with an
+        // explicit --repo selection). Finalization must preserve it instead
+        // of inferring from the overlapping checkout path.
+        options.gates.gate_environment.admitted_component_id = Some("php-transformer".to_string());
         persist_initial_recipe(&options).expect("persist recipe");
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
             .expect("submit run");
@@ -19856,7 +19858,7 @@ fn cook_promotion_recovery_reuses_recorded_component_identity_after_gate_failure
         options.identity.initial_run_id = run_id.to_string();
         options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "component_id": "fixture-a",
+            "component_id": "blocks-engine",
             "component_registered": true,
             "provenance": "--cwd:git-remote:origin",
         });
@@ -19925,7 +19927,7 @@ fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_
         // recovery route has no recorded identity to reuse, matching a
         // pre-existing durable record that predates this fix.
         options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
-            "component_id": "fixture-a",
+            "component_id": "blocks-engine",
             "component_registered": true,
             "provenance": "--cwd:git-remote:origin",
         });
@@ -19988,7 +19990,7 @@ fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_
         let recovered = recover_cook_pr_with_backend_and_review_form(
             run_id,
             None,
-            Some("fixture-a"),
+            Some("blocks-engine"),
             Vec::new(),
             true,
             &mut publish_backend,

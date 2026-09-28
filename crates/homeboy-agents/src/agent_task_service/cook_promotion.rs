@@ -3265,11 +3265,15 @@ fn cook_finalization_options_with_stores_and_review_form(
     // admitted the run against, so finalization must reuse that identity
     // rather than re-deriving it ambiguously from the bare worktree path
     // (#14725).
-    let review_profile = resolve_review_profile(
-        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
-            .as_deref(),
-        &path,
-    )?;
+    let recorded_component_id =
+        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
+    let selected_component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .as_deref()
+        .or(recorded_component_id.as_deref());
+    let review_profile = resolve_review_profile(selected_component_id, &path)?;
     review_dossier.validate(&review_profile)?;
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
