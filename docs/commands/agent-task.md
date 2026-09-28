@@ -1218,6 +1218,17 @@ missing-`--backend` error instead of failing with the same precondition (#12569)
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
 
+Provider queries pinned to a runner must use the daemon-backed runner command,
+which does not require durable workspace staging:
+
+```sh
+homeboy runner exec <runner-id> -- homeboy agent-task providers --backend <backend> --validate-readiness
+```
+
+The returned provider catalog is observed on that runner. A disconnected or
+stale runner fails runner-exec admission; controller-local readiness is never
+used as a substitute.
+
 `dispatchability.checks.credentials.status` distinguishes `missing`, `present`,
 `unverified`, `verified`, `unusable`, and `not_required`. Readable credential
 material is only `present`: a revoked or expired provider-owned credential stays
