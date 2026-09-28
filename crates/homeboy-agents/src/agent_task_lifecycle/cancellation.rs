@@ -303,16 +303,15 @@ pub(crate) fn cancel_exact_run_in_store(
                 "cancel_reason".to_string(),
                 json!(reason.unwrap_or("cancel requested")),
             );
-            metadata.insert(
-                "cancellation_provenance".to_string(),
-                json!({
+            // A prior runner cancellation may already have emitted run.cancelled
+            // while this record was still running. Its keyed event is immutable.
+            metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
                     "actor": "controller",
                     "cause": "operator_requested",
                     "reason": reason.unwrap_or("cancel requested"),
                     "timestamp": cancelled_at,
                     "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
-                }),
-            );
+                }));
             if let Some(service_cleanup) = service_cleanup.clone() {
                 metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
             }
@@ -825,16 +824,15 @@ fn cancel_resolved_run_in_store(
             "cancel_reason".to_string(),
             json!(reason.unwrap_or("cancel requested")),
         );
-        metadata.insert(
-            "cancellation_provenance".to_string(),
-            json!({
+        // Keep the first provenance payload bound to the canonical event key;
+        // cancel_reason records this operator request independently.
+        metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
                 "actor": "controller",
                 "cause": "operator_requested",
                 "reason": reason.unwrap_or("cancel requested"),
                 "timestamp": cancelled_at,
                 "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
-            }),
-        );
+            }));
         if detached_handoff_parent {
             metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
                 json!("cancelled");
