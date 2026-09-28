@@ -400,17 +400,19 @@ impl DeploymentProviderApi {
         };
         let evidence =
             provider_evidence(&execution.output.stdout, &execution.output.stderr, provider);
+        let error = (execution.exit_code != 0).then(|| {
+            if provider.layered_input.is_some() {
+                layered_failure_error(&evidence)
+                    .unwrap_or_else(|| "Deployment provider failed".to_string())
+            } else {
+                format!("{}{}", execution.output.stdout, execution.output.stderr)
+            }
+        });
 
         let result = ExtensionApiDeploymentProviderResult {
             exit_code: execution.exit_code,
             evidence,
-            error: (execution.exit_code != 0).then(|| {
-                if provider.layered_input.is_some() {
-                    "Deployment provider failed".to_string()
-                } else {
-                    format!("{}{}", execution.output.stdout, execution.output.stderr)
-                }
-            }),
+            error,
         };
         if let Err(error) = terminalize_provider_effect(request, &lease, result.clone()) {
             return submit_failure(request, internal_failure(error.to_string()));
@@ -622,6 +624,32 @@ fn provider_evidence(
             value.get("schema").and_then(serde_json::Value::as_str) == Some(expected_schema)
         })
         .unwrap_or_else(|| serde_json::json!({ "status": "opaque" }))
+}
+
+fn layered_failure_error(evidence: &serde_json::Value) -> Option<String> {
+    let failure = evidence.get("failure")?.as_object()?;
+    let message = failure.get("message")?.as_str()?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let stage = failure
+        .get("stage")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let code = failure
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let location = match (stage, code) {
+        (Some(stage), Some(code)) => format!(" at {stage} ({code})"),
+        (Some(stage), None) => format!(" at {stage}"),
+        (None, Some(code)) => format!(" ({code})"),
+        (None, None) => String::new(),
+    };
+    Some(format!(
+        "Deployment provider failed{location}: {}",
+        message.chars().take(1000).collect::<String>()
+    ))
 }
 
 fn diagnostic(
@@ -1035,6 +1063,29 @@ mod tests {
     use homeboy_extension_contract::api::v1::{
         ExtensionApiDeploymentProviderResolveRequest, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
     };
+
+    #[test]
+    fn structured_layered_failure_is_operator_facing() {
+        let evidence = serde_json::json!({
+            "failure": {
+                "stage": "remote_preflight",
+                "code": "remote_checkout_dirty",
+                "message": "The remote checkout has local changes."
+            }
+        });
+        assert_eq!(
+            layered_failure_error(&evidence).as_deref(),
+            Some("Deployment provider failed at remote_preflight (remote_checkout_dirty): The remote checkout has local changes.")
+        );
+    }
+
+    #[test]
+    fn opaque_layered_failure_has_no_untrusted_cause() {
+        assert_eq!(
+            layered_failure_error(&serde_json::json!({"status": "opaque"})),
+            None
+        );
+    }
 
     fn write_extension(id: &str, providers: serde_json::Value, script: &str) {
         let extension = crate::paths::extensions()

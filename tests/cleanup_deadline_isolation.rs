@@ -93,6 +93,48 @@ fn retained_storage_hang_returns_a_bounded_typed_continuation() {
     assert!(!fixture.survivor.exists());
 }
 
+#[test]
+fn controller_scratch_timeout_in_primary_category_set_is_typed_and_resumable() {
+    let fixture = CleanupHangFixture::new();
+    let started = Instant::now();
+    let output = fixture.run(&[
+        "cleanup",
+        "--include",
+        "controller-scratch,runtime-tmp,terminal-runs",
+        "--limit",
+        "100",
+    ]);
+
+    assert!(started.elapsed() < Duration::from_secs(15), "{output:#}");
+    let categories = output["data"]["categories"]
+        .as_array()
+        .expect("cleanup categories");
+    let scratch = categories
+        .iter()
+        .find(|category| category["category"] == "controller_scratch")
+        .expect("controller-scratch category");
+    assert_eq!(scratch["outcome"], "timed_out", "{output:#}");
+    assert_eq!(scratch["failure"]["code"], "cleanup.category_timeout");
+    assert_eq!(scratch["inventory_completeness"], "partial");
+    assert_eq!(
+        scratch["continuation_command"],
+        "homeboy cleanup --include controller-scratch --limit 100"
+    );
+    assert!(
+        scratch["estimated_bytes"].as_u64().is_some(),
+        "partial byte estimate is present"
+    );
+    assert!(categories
+        .iter()
+        .any(|category| category["category"] == "runtime_tmp"));
+    assert!(categories
+        .iter()
+        .any(|category| category["category"] == "terminal_runs"));
+
+    fixture.release_descendant();
+    assert!(!fixture.survivor.exists());
+}
+
 struct CleanupHangFixture {
     root: tempfile::TempDir,
     script: PathBuf,
@@ -111,7 +153,7 @@ impl CleanupHangFixture {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> '{}'\ncase \"$1\" in\n  repo_artifacts|retained_storage)\n    (while [ ! -f '{}' ]; do sleep 0.01; done; touch '{}') &\n    while :; do sleep 1; done\n    ;;\nesac\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> '{}'\ncase \"$1\" in\n  repo_artifacts|retained_storage|controller_scratch)\n    (while [ ! -f '{}' ]; do sleep 0.01; done; touch '{}') &\n    while :; do sleep 1; done\n    ;;\nesac\n",
                 invoked.display(),
                 release.display(),
                 survivor.display(),

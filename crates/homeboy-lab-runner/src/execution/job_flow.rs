@@ -346,6 +346,36 @@ where
         flow.run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
+    if !flow.run_id_owns_generic_exec {
+        if let Some(run_id) = flow.run_id.as_deref() {
+            if homeboy_agents::agent_task_lifecycle::run_record_exists(run_id)? {
+                // Observation mirroring persists Lab evidence, but does not
+                // advance the agent-task lifecycle record. Project the exact
+                // terminal snapshot first; otherwise the following enqueue
+                // observes the still-running record and silently skips it.
+                homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+                    run_id,
+                    &terminal_snapshot,
+                )?;
+                if let Err(error) =
+                    homeboy_agents::agent_task_lifecycle::reconcile_terminal_cook_provider_result(
+                        run_id,
+                    )
+                {
+                    let diagnostic = serde_json::json!({
+                        "phase": "controller",
+                        "reason_code": error.code.as_str(),
+                        "message": error.message,
+                    });
+                    let _ = homeboy_agents::agent_task_lifecycle::record_cook_controller_failure(
+                        run_id,
+                        &diagnostic,
+                    );
+                    return Err(error);
+                }
+            }
+        }
+    }
     // A detached handoff wrapper is only the transport owner. Once the
     // runner has mirrored the terminal result, that nested run owns the
     // operator-visible outcome and its notification.

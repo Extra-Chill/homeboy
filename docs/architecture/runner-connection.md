@@ -62,11 +62,13 @@ controller then never starts, replaces, rotates, or retires the remote daemon.
 
 `homeboy runner service install <runner-id>` requires an idle runner. It:
 
-1. Writes `~/.config/systemd/user/homeboy-runner-<id>.service`. The unit runs
-   `homeboy daemon serve --addr 127.0.0.1:0` from the stable link
-   `~/.local/share/homeboy/runner-service/<id>/homeboy`, in the runner's
-   existing `daemon-generations/<id>/primary` state directory, with
-   `Restart=always`.
+1. Writes `~/.config/systemd/user/homeboy-runner-<id>-<controller>.service`.
+   The unit runs `homeboy daemon serve --addr 127.0.0.1:0` from the controller's
+   stable link `~/.local/share/homeboy/runner-service/<id>/controllers/<controller>/homeboy`,
+   in `daemon-generations/<id>/controllers/<controller>/primary`, with
+   `Restart=always`. The controller scope is a readable sanitized prefix plus
+   the full SHA-256 of the raw controller ID, shared by service names, binary
+   slots, and daemon-generation paths so sanitized IDs cannot alias.
 2. Stops the idle controller-started daemon so the unit takes the daemon owner
    lock, and stops idle generation daemons left by earlier rotation.
 3. Waits for the unit's lease, then marks the runner `service_managed`.
@@ -85,6 +87,16 @@ For a service-managed runner:
 
 The service needs systemd user lingering on the runner host
 (`loginctl enable-linger`) so the unit keeps running without a login session.
+
+Older releases used the unsuffixed `homeboy-runner-<id>.service`, shared binary
+link, and `daemon-generations/<id>/primary`; the intermediate controller-scoped
+scheme also used sanitized IDs without a hash. New installs never overwrite,
+stop, or adopt either legacy unit name/path. Such a unit may continue owning jobs
+while controllers move to hash-scoped units. Retire a legacy unit only after an
+operator verifies its exact unit and lease and confirms that it has no active
+jobs. Then stop and disable that specific unit; remove its unit file, binary
+link, or state directory only when no remaining controller depends on them.
+Do not use the new controller-scoped service commands to perform legacy cleanup.
 
 ## Unreachable recorded host
 

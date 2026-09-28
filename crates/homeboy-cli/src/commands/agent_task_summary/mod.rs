@@ -766,6 +766,41 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
             homeboy::core::engine::shell::quote_args(&replay)
         ),
     ];
+    if let Some(deferred) = resolved
+        .pointer("/gate_contract_validation/deferred_public")
+        .and_then(Value::as_array)
+    {
+        for gate in deferred {
+            let kind = gate.get("kind").and_then(Value::as_str).unwrap_or("gate");
+            let filter = gate
+                .get("filter")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let interpretation = gate
+                .get("filter_interpretation")
+                .and_then(Value::as_str)
+                .unwrap_or("focused");
+            let reason = match gate.get("validation").and_then(Value::as_str) {
+                Some("test_inventory_unavailable_without_build") => {
+                    "test inventory unavailable without building test binaries"
+                }
+                Some(other) => other,
+                None => "selection not verified",
+            };
+            lines.push(format!(
+                "Gate selection deferred: {kind} filter `{filter}` ({interpretation}) — {reason}"
+            ));
+        }
+    }
+    let deferred_private = resolved
+        .pointer("/gate_contract_validation/deferred_private_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if deferred_private > 0 {
+        lines.push(format!(
+            "Private gate selections deferred: {deferred_private} (details withheld)"
+        ));
+    }
     if let Some(failure) = payload.pointer("/failure/message").and_then(Value::as_str) {
         lines.push(format!("Blocked: {failure}"));
     }
@@ -861,6 +896,19 @@ fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     {
         let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
         return format!("homeboy agent-task cook-continue {cook_id}");
+    }
+    if string_value(payload, &["owner", "kind"]) == Some("runner") {
+        let runner_id = string_value(payload, &["owner", "id"]);
+        if string_value(payload, &["state"]) == Some("running") {
+            return format!("homeboy agent-task status {run_id} --watch");
+        }
+        if string_value(payload, &["state"]) == Some("queued")
+            && string_value(payload, &["phase"]) == Some("retry")
+        {
+            if let Some(runner_id) = runner_id {
+                return format!("homeboy --runner {runner_id} agent-task run {run_id}");
+            }
+        }
     }
     const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
     let Some(actions) = payload
@@ -1218,6 +1266,39 @@ mod tests {
             render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
             Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
         );
+    }
+
+    #[test]
+    fn cook_preview_summary_exposes_deferred_exact_gate_without_private_details() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "local" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": { "public": 1, "private": 1 },
+                "gate_contract_validation": {
+                    "schema": "homeboy/cook-preview-gate-validation/v1",
+                    "deferred_public": [{
+                        "kind": "cargo",
+                        "status": "selection_deferred",
+                        "filter_interpretation": "exact",
+                        "filter": "commands::agent_task::gate_contract::tests::preview_validates_cargo_shape_without_compiling_the_workspace",
+                        "validation": "test_inventory_unavailable_without_build"
+                    }],
+                    "deferred_private_count": 1
+                }
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
+            .expect("cook preview summary");
+        assert!(summary.contains(
+            "Gate selection deferred: cargo filter `commands::agent_task::gate_contract::tests::preview_validates_cargo_shape_without_compiling_the_workspace` (exact) — test inventory unavailable without building test binaries"
+        ));
+        assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
+        assert!(!summary.contains("private-command-secret"));
     }
 
     /// #14729: preview must report the *resolved* placement, not the
@@ -2219,6 +2300,32 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
         assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
+    }
+
+    #[test]
+    fn queued_runner_proxy_status_recommends_runner_scoped_dispatch() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "exact-run-id",
+            "state": "queued",
+            "owner": { "id": "runner-7", "kind": "runner" },
+            "phase": "retry",
+            "action_eligibility": { "actions": [{
+                "action": "resume", "availability": "unavailable",
+                "reason": "runner-owned transport proxy must be continued by its owning runner"
+            }] },
+            "artifacts": []
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("Next: homeboy --runner runner-7 agent-task run exact-run-id\n"));
+
+        let live = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "exact-run-id",
+            "state": "running", "owner": { "id": "runner-7", "kind": "runner" },
+            "artifacts": []
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &live).unwrap();
+        assert!(summary.contains("Next: homeboy agent-task status exact-run-id --watch\n"));
     }
 
     #[test]

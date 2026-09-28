@@ -1150,6 +1150,7 @@ mod tests {
                         },
                     ],
                     verification: None,
+                    verification_kind: None,
                 }),
                 bootstrap_provenance: None,
                 rollback: None,
