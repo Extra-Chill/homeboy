@@ -110,6 +110,24 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
 }
 ```
 
+Layered deployment providers may include structured failure evidence in the
+result:
+
+```json
+{
+  "failure": {
+    "stage": "remote_preflight",
+    "code": "remote_checkout_dirty",
+    "message": "The remote checkout has local changes."
+  },
+  "remediation": ["Inspect and clean the remote working tree."]
+}
+```
+
+These optional, schema-validated fields remain under
+`results[].deployment_provider`. Core also surfaces `failure.message` in the
+result error and promotes `remediation` strings to envelope diagnostic hints.
+
 Notes:
 
 - `deploy_reason` is omitted when not applicable.
