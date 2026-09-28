@@ -1127,6 +1127,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         verified_base_sha: args.verified_base_sha,
         head: args.head,
         title,
+        cook_form_title: None,
         commit_message,
         gate_results,
         normalized_gate_results,

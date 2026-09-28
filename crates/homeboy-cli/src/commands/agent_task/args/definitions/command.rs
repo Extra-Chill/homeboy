@@ -314,7 +314,7 @@ pub struct CookContinueArgs {
 pub struct CookFeedbackArgs {
     /// Durable Cook ID receiving the review.
     pub cook_id: String,
-    /// Reviewed commit, artifact, or other durable candidate identity.
+    /// Reviewed commit, artifact, or other durable candidate identity (defaults to the Cook's unique selected candidate).
     #[arg(long, value_name = "IDENTITY")]
     pub candidate: Option<String>,
     /// Inline Markdown feedback.
@@ -332,7 +332,7 @@ pub struct CookFeedbackArgs {
     /// Source label retained with the finding.
     #[arg(long, default_value = "review")]
     pub source: String,
-    /// Stable retry key. Reusing it returns the original durable finding.
+    /// Stable retry key. Defaults to a deterministic key derived from the candidate and normalized feedback.
     #[arg(long)]
     pub idempotency_key: Option<String>,
     /// Read the durable feedback ledger instead of submitting a finding.

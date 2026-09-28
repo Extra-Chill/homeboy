@@ -291,6 +291,7 @@ fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
 /// finalization (which now sources reviewer prose from the form).
 fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
     crate::agent_task_review_dossier::AiFilledReviewForm {
+        pr_title: "Guard the reload render path".to_string(),
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],
         compatibility: "Internal-only change; no compatibility impact.".to_string(),
@@ -7285,9 +7286,16 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     assert_eq!(declaration.schema, "homeboy/agent-task-review-form/v1");
     assert_eq!(
         declaration.structural_schema["required"],
-        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+        serde_json::json!([
+            "pr_title",
+            "summary",
+            "what_changed",
+            "compatibility",
+            "used_for"
+        ])
     );
     assert!(request.instructions.contains("reviewer-facing PR dossier"));
+    assert!(request.instructions.contains("`pr_title`"));
     assert!(request.instructions.contains("A successful response"));
     // The review form does not replace controller-owned gate evidence, while
     // still allowing the agent to describe bounded diagnostic observations.
@@ -7413,7 +7421,13 @@ fn dispatched_prompt_allows_bounded_checks_without_authoritative_gate_claims() {
     );
     assert_eq!(
         declaration.structural_schema["required"],
-        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+        serde_json::json!([
+            "pr_title",
+            "summary",
+            "what_changed",
+            "compatibility",
+            "used_for"
+        ])
     );
 }
 
@@ -19285,6 +19299,7 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     options.identity.initial_run_id = run_id.to_string();
     options.identity.initial_plan.tasks[0].executor.model = Some("split-root-model".to_string());
+    options.finalization.title.clear(); // prompt-only Cook: title comes from the form
 
     // The durable recipe lineage is promotion's recipe half; seed it only in the
     // recipe root.
@@ -19325,6 +19340,11 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
     assert_eq!(
         finalization_options.review_dossier.ai_assistance.model,
         "split-root-model"
+    );
+    assert_eq!(finalization_options.title, test_review_form().pr_title);
+    assert_eq!(
+        finalization_options.cook_form_title,
+        Some(test_review_form().pr_title)
     );
 
     let mut backend = CaptureBackend {

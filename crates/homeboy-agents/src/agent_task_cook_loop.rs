@@ -1914,6 +1914,7 @@ mod tests {
 
     fn valid_review_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
+            pr_title: "Guard the reload render path".to_string(),
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],
             compatibility: "Internal only; no compatibility impact.".to_string(),
