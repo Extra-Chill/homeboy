@@ -169,6 +169,20 @@ systemctl --user enable {unit}"#,
     )
 }
 
+fn repoint_script_for(
+    runner_id: &str,
+    controller_id: &str,
+    binary: &str,
+    startup_token: &str,
+) -> String {
+    let unit = service_unit_name_for(runner_id, controller_id);
+    format!(
+        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}",
+        point = point_binary_script_for(runner_id, controller_id, binary),
+        write_unit = write_unit_script_for(runner_id, controller_id, startup_token),
+    )
+}
+
 /// Stop every idle generation daemon left by controller-managed rotation.
 /// `daemon stop` refuses a daemon with active jobs, so busy generations stay.
 fn retire_generations_script(runner_id: &str, homeboy: &str) -> String {
@@ -379,12 +393,7 @@ pub(crate) fn repoint_and_restart(
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
-        &format!(
-            "set -eu\n{point}\n{write_unit}\nsystemctl --user restart {unit}",
-            point = point_binary_script(runner_id, binary),
-            write_unit = write_unit_script(runner_id, &startup_token),
-            unit = service_unit_name(runner_id),
-        ),
+        &repoint_script_for(runner_id, &controller_id(), binary, &startup_token),
         "restarting the runner service",
     )?;
     Ok(())
@@ -731,15 +740,11 @@ mod tests {
 
         let b_replacement = home.path().join("homeboy-b-refreshed");
         std::fs::write(&b_replacement, "B refreshed binary").unwrap();
-        let repoint = format!(
-            "set -eu\n{}\n{}\nsystemctl --user restart {}",
-            point_binary_script_for(
-                "homeboy-lab",
-                "controller-b",
-                &b_replacement.display().to_string()
-            ),
-            write_unit_script_for("homeboy-lab", "controller-b", "token-b-refresh"),
-            b_unit
+        let repoint = repoint_script_for(
+            "homeboy-lab",
+            "controller-b",
+            &b_replacement.display().to_string(),
+            "token-b-refresh",
         );
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
@@ -767,7 +772,9 @@ mod tests {
             "B reconnect leaves A's active lease/job fixture unchanged"
         );
         let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert!(commands.contains(&format!("enable {b_unit}")));
         assert!(commands.contains(&format!("restart {b_unit}")));
+        assert!(!commands.contains(&format!("enable {a_unit}")));
         assert!(!commands.contains(&format!("restart {a_unit}")));
     }
 
@@ -922,5 +929,53 @@ mod tests {
             "cat > \"$unit_dir/{}.tmp\"",
             service_unit_name("homeboy-lab")
         )));
+    }
+
+    #[test]
+    fn repoint_migration_enables_and_restarts_only_the_scoped_unit() {
+        let home = tempfile::tempdir().expect("home");
+        let scoped = service_unit_name_for("homeboy-lab", "controller-b");
+        let legacy = "homeboy-runner-homeboy-lab.service";
+        let unit_dir = home.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let legacy_path = unit_dir.join(legacy);
+        std::fs::write(&legacy_path, "legacy unit owned elsewhere\n").unwrap();
+
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let systemctl = bin_dir.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let binary = home.path().join("homeboy-new");
+        std::fs::write(&binary, "new binary").unwrap();
+        let script = repoint_script_for(
+            "homeboy-lab",
+            "controller-b",
+            &binary.display().to_string(),
+            "migration-token",
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(unit_dir.join(&scoped).exists());
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).unwrap(),
+            "legacy unit owned elsewhere\n"
+        );
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert!(commands.contains(&format!("enable {scoped}")));
+        assert!(commands.contains(&format!("restart {scoped}")));
+        assert!(!commands.contains(legacy));
     }
 }
