@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.396.3] - 2026-09-28
+
+### Fixed
+- recover exact rebased candidate
+- preserve provider failure over harvest error
+- retain cancellation response and explicit component
+- reject staged runner provider query
+
 ## [0.396.2] - 2026-09-28
 
 ### Fixed
