@@ -4734,7 +4734,9 @@ pub(crate) fn compact_aggregate_summary(
         "failure_classification": outcome.get("failure_classification"),
         "timestamps": compact_fields(outcome, &["created_at", "updated_at", "timestamp", "finished_at"]),
         "artifacts": compact_items(outcome.get("artifacts"), &["schema", "id", "kind", "name", "path", "url", "sha256", "size_bytes"]),
+        "artifacts_omitted": compact_duplicate_count(outcome.get("artifacts")),
         "evidence_refs": compact_items(outcome.get("evidence_refs"), &["schema", "kind", "uri", "created_at", "timestamp"]),
+        "evidence_refs_omitted": compact_duplicate_count(outcome.get("evidence_refs")),
     })).collect::<Vec<_>>();
     let mut summary = json!({
         "schema": full.get("schema"),
@@ -5407,18 +5409,39 @@ fn queued_runner_ownership_diagnostic(
 }
 
 fn compact_items(value: Option<&Value>, fields: &[&str]) -> Value {
+    let mut identities = std::collections::HashSet::new();
+    let items = value.and_then(Value::as_array).into_iter().flatten();
     Value::Array(
-        value
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .take(COMPACT_REF_LIMIT)
-                    .map(|item| compact_fields(item, fields))
-                    .collect()
+        items
+            .filter(|item| {
+                compact_identity(item).is_none_or(|identity| identities.insert(identity))
             })
-            .unwrap_or_default(),
+            .take(COMPACT_REF_LIMIT)
+            .map(|item| compact_fields(item, fields))
+            .collect(),
     )
+}
+
+fn compact_duplicate_count(value: Option<&Value>) -> usize {
+    let mut identities = std::collections::HashSet::new();
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(compact_identity)
+        .filter(|identity| !identities.insert(identity.clone()))
+        .count()
+}
+
+fn compact_identity(item: &Value) -> Option<String> {
+    item.get("id")
+        .and_then(Value::as_str)
+        .map(|id| format!("id:{id}"))
+        .or_else(|| {
+            item.get("uri")
+                .and_then(Value::as_str)
+                .map(|uri| format!("uri:{uri}"))
+        })
 }
 
 fn compact_fields(value: &Value, fields: &[&str]) -> Value {
@@ -6047,6 +6070,28 @@ fn diagnose_next_commands(
 mod tests {
     use super::*;
     use homeboy::core::Error;
+
+    #[test]
+    fn compact_status_deduplicates_retry_rotation_artifacts_by_identity() {
+        // A retry can rotate providers while replaying the same durable refs.
+        let repeated_retry_fixture = json!([
+            {"id":"transcript-1","kind":"transcript","path":"retry-1/transcript"},
+            {"id":"patch-1","kind":"patch","path":"retry-1/patch"},
+            {"id":"transcript-1","kind":"transcript","path":"retry-2/transcript"},
+            {"id":"patch-1","kind":"patch","path":"retry-2/patch"},
+            {"id":"progress-1","kind":"progress","path":"retry-2/progress"},
+        ]);
+
+        let compact = compact_items(Some(&repeated_retry_fixture), &["id", "kind", "path"]);
+        assert_eq!(compact.as_array().unwrap().len(), 3);
+        assert_eq!(compact_duplicate_count(Some(&repeated_retry_fixture)), 2);
+        // Full evidence remains available from the unmodified source through
+        // `agent-task artifacts`; compacting is a presentation-only projection.
+        assert_eq!(repeated_retry_fixture.as_array().unwrap().len(), 5);
+        assert_eq!(compact[0]["id"], "transcript-1");
+        assert_eq!(compact[1]["id"], "patch-1");
+        assert_eq!(compact[2]["id"], "progress-1");
+    }
 
     #[test]
     fn typed_provider_timeout_precedes_unparsed_provider_stream_error() {
