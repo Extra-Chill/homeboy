@@ -187,6 +187,11 @@ impl ExecutionOwner {
         if self.teardown_complete {
             return Err(io::Error::other("execution owner cleanup did not complete"));
         }
+        // Keep macOS ancestry identities current while the workload runs. A
+        // descendant can call setsid and later be reparented, so discovering
+        // only at teardown is inherently racy if its parent exits first.
+        #[cfg(all(unix, not(target_os = "linux")))]
+        self.guard.observe_owned_processes(self.identity.root_pid)?;
         match self.guard.try_wait_outcome(&mut self.child, self.identity) {
             Ok(Some(outcome)) => Ok(Some(self.record_terminal(outcome))),
             Ok(None) => Ok(None),
@@ -643,12 +648,20 @@ impl ControllerChildGuard {
         identity: ExecutionIdentity,
     ) -> io::Result<ExecutionOutcome> {
         let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
-        self.request_drain(identity.wait_pid)?;
-        match reap_child_until(child, deadline) {
-            Ok(status) => self.outcome_after_wait(status, identity),
-            Err(error) => Err(io::Error::other(format!(
-                "execution owner did not complete drain: {error}"
-            ))),
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let status = self.terminate_and_reap(child, deadline)?;
+            return self.outcome_after_wait(status, identity);
+        }
+        #[cfg(any(target_os = "linux", not(unix)))]
+        {
+            self.request_drain(identity.wait_pid)?;
+            match reap_child_until(child, deadline) {
+                Ok(status) => self.outcome_after_wait(status, identity),
+                Err(error) => Err(io::Error::other(format!(
+                    "execution owner did not complete drain: {error}"
+                ))),
+            }
         }
     }
 
@@ -2729,32 +2742,25 @@ fn terminate_owned_processes_and_reap(
     let mut owned = owned_processes
         .lock()
         .map_err(|_| io::Error::other("owned process identity lock poisoned"))?;
-    signal_process_group(root_pid, libc::SIGTERM)?;
+    // A timed-out installer may have mutation work queued behind a TERM
+    // handler or grace period. Once the caller has chosen to drain the tree,
+    // stop every identity-checked member immediately rather than giving an
+    // escaped process time to alter the target before escalation.
+    signal_process_group(root_pid, libc::SIGKILL)?;
     let mut status = child.try_wait()?;
     if !wait_for_owned_process_exit(
         child,
         root_pid,
         &mut owned,
-        PROCESS_TREE_TERM_GRACE,
-        libc::SIGTERM,
+        PROCESS_TREE_KILL_GRACE,
+        libc::SIGKILL,
         &mut status,
         adopted,
     )? {
-        signal_process_group(root_pid, libc::SIGKILL)?;
-        if !wait_for_owned_process_exit(
-            child,
-            root_pid,
-            &mut owned,
-            PROCESS_TREE_KILL_GRACE,
-            libc::SIGKILL,
-            &mut status,
-            adopted,
-        )? {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("owned process tree {root_pid} remained alive after SIGKILL"),
-            ));
-        }
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("owned process tree {root_pid} remained alive after SIGKILL"),
+        ));
     }
     status.map(Ok).unwrap_or_else(|| child.wait())
 }
