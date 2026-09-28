@@ -2906,7 +2906,9 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             .execution_budget
             .deadline_unix_ms = Some(deadline_unix_ms);
     }
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    // Lab placement proves provider readiness on the runner with the runner's
+    // credentials (#15198); only local placement is admitted live here.
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
         &options.identity.initial_plan,
         catalog,
         readiness_cache,

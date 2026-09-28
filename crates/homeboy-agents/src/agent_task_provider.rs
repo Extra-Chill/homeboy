@@ -95,6 +95,8 @@ pub use credential_readiness::{
     AgentTaskProviderCredentialRequirement, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
 pub use dispatchability::{
+    admit_plan_provider_dispatchability_for_placement,
+    admit_plan_provider_dispatchability_for_runner_ownership,
     admit_plan_provider_dispatchability_with_providers, evaluate_provider_capacity_with_config,
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_cache,
     evaluate_provider_dispatchability_with_config,
@@ -102,7 +104,8 @@ pub use dispatchability::{
     preflight_plan_provider_dispatchability_without_runtime_with_providers,
     preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
-    provider_runtime_readiness_cache_identity_for_plan, AgentTaskProviderConfigurationDiagnosis,
+    provider_readiness_is_runner_owned, provider_runtime_readiness_cache_identity_for_plan,
+    AgentTaskProviderConfigurationDiagnosis,
     AgentTaskProviderCredentialStatus, AgentTaskProviderDispatchability,
     AgentTaskProviderDispatchabilityCheck, AgentTaskProviderDispatchabilityChecks,
     AgentTaskProviderDispatchabilityCredentialCheck, AgentTaskProviderLiveInferenceReadiness,
