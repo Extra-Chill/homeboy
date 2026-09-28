@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission;
 use homeboy_core::api_jobs::{
@@ -42,6 +43,22 @@ const ADMISSION_WAKE_RUNNING: u8 = 1;
 const ADMISSION_WAKE_PENDING: u8 = 2;
 static ADMISSION_WAKE_STATE: LazyLock<Arc<AtomicU8>> =
     LazyLock::new(|| Arc::new(AtomicU8::new(ADMISSION_WAKE_IDLE)));
+
+/// Collision-resistant, bounded path/unit component for controller ownership.
+/// Keep this shared by every direct-SSH and service-managed daemon location.
+pub(super) fn controller_scope_segment(controller_id: &str) -> String {
+    let prefix = paths::sanitize_path_segment(controller_id)
+        .chars()
+        .take(24)
+        .collect::<String>();
+    let prefix = if prefix.is_empty() {
+        "controller"
+    } else {
+        &prefix
+    };
+    let digest = format!("{:x}", Sha256::digest(controller_id.as_bytes()));
+    format!("{prefix}-{digest}")
+}
 
 fn wake_unmaterialized_admission_reconciliation() -> bool {
     wake_unmaterialized_admission_reconciliation_with(
@@ -414,7 +431,7 @@ pub(crate) fn rotate_daemon_generation_in_roots(
         generation
     };
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let controller_segment = homeboy_core::paths::sanitize_path_segment(&controller_id());
+    let controller_segment = controller_scope_segment(&controller_id());
     let state_dir = format!(
         "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
     );
