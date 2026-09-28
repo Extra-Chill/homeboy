@@ -2361,9 +2361,21 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
         .find(|generation| generation.admission_owner)
         .filter(|generation| generation.active_job_count_authoritative)
         .map(|generation| generation.live_job_count());
+    let delayed_live_projection = active_job_count > 0
+        && authoritative_live_count == Some(0)
+        && generation_owners.iter().any(|owner| {
+            generation_inventory.iter().any(|generation| {
+                generation.admission_owner
+                    && generation.generation == owner.generation
+                    && !owner.job_ids.is_empty()
+            })
+        });
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(_)) if authoritative_live_count.is_some_and(|count| count != active_job_count) => {
+        (None, Some(_))
+            if authoritative_live_count.is_some_and(|count| count != active_job_count)
+                && !delayed_live_projection =>
+        {
             Some(RunnerActiveJobError {
                 code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
@@ -2912,17 +2924,13 @@ fn should_infer_child_run_orphans(
     direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
 }
 
-/// Reconcile a freshness count with the daemon's typed `/jobs` snapshot.
-///
-/// The probes are separate requests, so a completed job can make the count
-/// stale between them. Only the typed snapshot supplies inspectable owners.
+/// Select the daemon's direct count when available. `/jobs` supplies ownership
+/// details, but its controller-facing projection can lag a live daemon job.
 fn reconciled_active_job_count(
     typed_job_count: usize,
     daemon_active_count: Option<usize>,
 ) -> usize {
-    daemon_active_count
-        .filter(|count| *count == typed_job_count)
-        .unwrap_or(typed_job_count)
+    daemon_active_count.unwrap_or(typed_job_count)
 }
 
 /// [`active_jobs_before_daemon_replacement`] against an injected root.
