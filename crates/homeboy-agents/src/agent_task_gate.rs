@@ -6355,6 +6355,109 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn declared_environment_probe_checks_external_browser_cache_before_suite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_mutex();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let host_home = tempfile::tempdir().expect("host home");
+        let browser_cache = host_home.path().join(".cache/browser-fixture");
+        fs::create_dir_all(&browser_cache).expect("browser cache");
+        fs::write(
+            host_home.path().join(".npmrc"),
+            "//registry.invalid/:_authToken=secret",
+        )
+        .expect("host credential fixture");
+        let browser = browser_cache.join("chromium");
+        fs::write(&browser, "#!/bin/sh\nprintf 'Chromium 128.4\\n'\n").expect("browser fixture");
+        let mut permissions = fs::metadata(&browser)
+            .expect("browser metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&browser, permissions).expect("executable browser");
+        let expected_version = browser_cache.join("expected-version");
+        fs::write(&expected_version, "Chromium 128.4\n").expect("expected browser version");
+        fs::write(workspace.path().join("suite-ran"), "absent").expect("suite sentinel");
+        let candidate_fingerprint =
+            Sha256::digest(fs::read(workspace.path().join("suite-ran")).expect("suite sentinel"));
+        let _environment = EnvVarGuard::set(&[("HOME", host_home.path())]);
+        let policy = AgentTaskGateEnvironmentPolicy {
+            preserve: BTreeMap::from([(
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                "HOME/.cache/browser-fixture".to_string(),
+            )]),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let requirement = AgentTaskGateToolchainRequirement {
+            command: "sh".to_string(),
+            probe_arguments: vec![
+                "-c".to_string(),
+                r#"test -x "$PLAYWRIGHT_BROWSERS_PATH/chromium" && test "$(cat "$PLAYWRIGHT_BROWSERS_PATH/expected-version")" = "$("$PLAYWRIGHT_BROWSERS_PATH/chromium" --version)" && test ! -e "$HOME/.npmrc""#.to_string(),
+            ],
+        };
+
+        let missing_cache = tempfile::tempdir().expect("missing cache home");
+        let _missing_home = EnvVarGuard::set(&[("HOME", missing_cache.path())]);
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            std::slice::from_ref(&requirement),
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("missing mapped browser cache must stop before suite execution");
+        assert!(error
+            .to_string()
+            .contains("gate toolchain preflight failed"));
+        assert!(error.details["toolchain_preflight"]["remediation"]
+            .as_str()
+            .expect("structured remediation")
+            .contains("--gate-env-from"));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("suite-ran")).expect("suite sentinel"),
+            "absent"
+        );
+
+        // Repoint the declared host source to the installed cache. The child
+        // sees the deliberate mapping and isolated HOME, not host credentials.
+        let _installed_home = EnvVarGuard::set(&[("HOME", host_home.path())]);
+        preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            std::slice::from_ref(&requirement),
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect("installed executable with exact expected version passes");
+
+        fs::write(&expected_version, "Chromium 128.5\n").expect("mismatched version");
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[requirement],
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("mismatched browser version must fail preflight");
+        assert!(error
+            .to_string()
+            .contains("gate toolchain preflight failed"));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("suite-ran")).expect("suite sentinel"),
+            "absent"
+        );
+        assert_eq!(
+            Sha256::digest(fs::read(workspace.path().join("suite-ran")).expect("suite sentinel")),
+            candidate_fingerprint
+        );
+        assert!(!workspace.path().join(".npmrc").exists());
+    }
+
     /// Toolchain preflight is declared, never inferred. A gate command is a
     /// shell program: its first token can be a builtin, a provider-owned alias,
     /// or part of a compound expression, so probing it as an executable would
