@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn squash_merge_proof_uses_actual_git_ancestry_and_rejects_older_target() {
         let dir = tempfile::tempdir().expect("git fixture");
-        git(dir.path(), &["init", "--quiet"]);
+        git(dir.path(), &["init", "--quiet", "--initial-branch=main"]);
         git(
             dir.path(),
             &["config", "user.email", "homeboy@example.test"],

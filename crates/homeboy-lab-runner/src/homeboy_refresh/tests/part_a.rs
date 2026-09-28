@@ -96,7 +96,7 @@ fn ancestry_exec_output(exit_code: i32) -> RunnerExecOutput {
 fn linear_commit_fixture() -> (tempfile::TempDir, String, String) {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -746,7 +746,7 @@ fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_
 {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -858,7 +858,7 @@ fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_
 fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -960,7 +960,7 @@ fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
 fn rollback_evidence_excludes_unrelated_authorities() {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -1089,7 +1089,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     .expect("write core build identity consumer");
 
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.name", "Homeboy Test"],
         vec!["config", "user.email", "homeboy@example.test"],
     ] {
@@ -1238,7 +1238,7 @@ fn managed_slot_materialization_publishes_verified_select_authority() {
     std::fs::create_dir_all(&source).expect("source directory");
     std::fs::create_dir_all(&tools).expect("tool directory");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.name", "Homeboy Test"],
         vec!["config", "user.email", "homeboy@example.test"],
     ] {
@@ -2326,7 +2326,7 @@ fn validate_refresh_promotion_blocks_unrelated_diverged_history_without_pr() {
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
-    git(&["init", "--quiet"]);
+    git(&["init", "--quiet", "--initial-branch=main"]);
     git(&["config", "user.email", "homeboy@example.test"]);
     git(&["config", "user.name", "Homeboy Test"]);
     std::fs::write(fixture.path().join("file"), "base\n").expect("base");
@@ -2417,7 +2417,7 @@ fn promotion_validation_accepts_squash_integrated_installed_pr_on_probe_failure(
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     };
-    git(&["init", "--quiet"]);
+    git(&["init", "--quiet", "--initial-branch=main"]);
     git(&["config", "user.email", "homeboy@example.test"]);
     git(&["config", "user.name", "Homeboy Test"]);
     std::fs::write(fixture.path().join("file"), "base\n").expect("base");
