@@ -30,6 +30,29 @@ TMP_BIN="$BIN_DIR/.homeboy-upgrade.$$"
 cleanup() { rm -f "$TMP_BIN"; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
+# GNU install replaces an existing destination by unlinking it first. The
+# relevant permission is therefore write+search on its parent, not write on
+# the binary itself. Select the privilege path before downloading any assets.
+EFFECTIVE_UID="$(id -u)"
+if [ -e "$BIN_PATH" ]; then
+  if stat -c '%u:%a' "$BIN_PATH" >/dev/null 2>&1; then
+    BIN_OWNER_MODE="$(stat -c '%u:%a' "$BIN_PATH")"
+  else
+    BIN_OWNER_MODE="$(stat -f '%u:%Lp' "$BIN_PATH" 2>/dev/null || printf 'unknown:unknown')"
+  fi
+else
+  BIN_OWNER_MODE="absent"
+fi
+if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" = true ] || [ ! -w "$BIN_DIR" ] || [ ! -x "$BIN_DIR" ]; then
+  USE_SUDO=true
+else
+  USE_SUDO=false
+fi
+if [ "$USE_SUDO" = true ] && ! command -v sudo >/dev/null 2>&1; then
+  echo "Cannot replace $BIN_PATH as effective UID $EFFECTIVE_UID (binary owner:mode $BIN_OWNER_MODE; parent is not replaceable). Run the installer with sudo, or install to a directory your service user owns (for example, HOMEBOY_INSTALL_PATH=\$HOME/.local/bin/homeboy)." >&2
+  exit 1
+fi
+
 curl -fsSL "${BASE_URL}/${ASSET}" -o "${TMP_DIR}/${ASSET}"
 curl -fsSL "${BASE_URL}/${ASSET}.sha256" -o "${TMP_DIR}/${ASSET}.sha256"
 if command -v sha256sum >/dev/null 2>&1; then
@@ -113,7 +136,7 @@ if [ -n "$TARGET_VERSION" ]; then
 fi
 "$EXTRACTED_BIN" "$@"
 
-if [ "${HOMEBOY_INSTALL_USE_SUDO:-false}" != true ] && { [ -w "$BIN_PATH" ] || [ -w "$BIN_DIR" ]; }; then
+if [ "$USE_SUDO" != true ]; then
   install -m 0755 "$EXTRACTED_BIN" "$TMP_BIN"
   mv "$TMP_BIN" "$BIN_PATH"
 else

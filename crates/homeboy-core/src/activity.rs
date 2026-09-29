@@ -136,7 +136,13 @@ pub fn activity_report_filtered(
     for item in agent_task_items {
         collector.insert(item);
     }
-    worktrees::collect(&mut collector, filter)?;
+    let exact_task = filter.task_url.is_some();
+    // An exact tracker identity selects executing work; enumerating open
+    // worktree inventory is unrelated to that answer and can block on provider
+    // discovery. Keep the inventory source for unfiltered activity reports.
+    if !exact_task {
+        worktrees::collect(&mut collector, filter)?;
+    }
     // Match authoritative agent-task identities first. Other sources often
     // carry only durable run/job references; inserting them unfiltered lets the
     // collector join those projections before the canonical selector runs.
@@ -146,16 +152,24 @@ pub fn activity_report_filtered(
         &ActivityFilter::default(),
         !filter.is_empty(),
     )?;
-    daemon_jobs::collect(&mut collector, &ActivityFilter::default())?;
+    // Daemon jobs and runner sessions have no indexed tracker identity. Do not
+    // enumerate/probe those inventories for an exact tracker lookup.
+    if !exact_task {
+        daemon_jobs::collect(&mut collector, &ActivityFilter::default())?;
+    }
     // Runner federation is last on purpose: every controller-local source is
     // already collected before any remote probe is attempted, so the remote
     // bound can only ever add to a complete local answer — it can never delay
     // or lose one.
-    let federation = runner_sessions::collect(
-        &mut collector,
-        options.federate_runners,
-        &ActivityFilter::default(),
-    );
+    let federation: ActivityRunnerFederation = if !exact_task {
+        runner_sessions::collect(
+            &mut collector,
+            options.federate_runners,
+            &ActivityFilter::default(),
+        )
+    } else {
+        Default::default()
+    };
     let collection_limit = if scope == ActivityScope::ActiveRecent {
         limit.saturating_add(DEFAULT_STALE_PROJECTION_WINDOW)
     } else {
@@ -1293,6 +1307,27 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].id, matching.id);
         });
+    }
+
+    #[test]
+    fn exact_task_lookup_skips_unrelated_runner_and_resource_inventories() {
+        let report = activity_report_filtered(
+            ActivityScope::ActiveRecent,
+            5,
+            ActivityOptions {
+                federate_runners: true,
+            },
+            &ActivityFilter {
+                task_url: Some("https://github.com/Extra-Chill/wp-coding-agents/issues/629".into()),
+                ..Default::default()
+            },
+            "runs.list_active",
+        )
+        .expect("filtered activity lookup");
+
+        assert!(report.items.is_empty());
+        assert!(report.runner_federation.runners.is_empty());
+        assert!(!report.partial);
     }
 
     #[test]

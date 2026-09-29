@@ -882,6 +882,31 @@ impl AgentTaskLifecycleStore {
         claim_cook_notification_in_store(self, cook_id, marker)
     }
 
+    pub fn claim_cook_started_notification(&self, cook_id: &str) -> Result<bool> {
+        if cook_id.trim().is_empty() {
+            return Ok(false);
+        }
+        claim_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller"}),
+        )
+    }
+
+    pub fn confirm_cook_started_notification(&self, cook_id: &str) -> Result<()> {
+        confirm_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller", "state": "delivered"}),
+        )
+    }
+
+    pub fn release_cook_started_notification_claim(&self, cook_id: &str) -> Result<()> {
+        release_cook_notification_event_claim_in_store(self, cook_id, "notification-started")
+    }
+
     /// Commit a confirmed terminal delivery beside this store's own Cook index.
     pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
         confirm_cook_notification_in_store(self, cook_id, marker)
@@ -2389,13 +2414,22 @@ pub(super) fn claim_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<bool> {
+    claim_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn claim_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<bool> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     if delivered_path.exists() {
         return Ok(false);
     }
-    let path = delivered_path.with_file_name("notification-claim.json");
+    let path = delivered_path.with_file_name(format!("{event}-claim.json"));
     if path.exists() {
         let stale = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -2451,9 +2485,18 @@ pub(super) fn confirm_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<()> {
+    confirm_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn confirm_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<()> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
 }
 
@@ -2469,9 +2512,17 @@ pub(super) fn release_cook_notification_claim_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
+    release_cook_notification_event_claim_in_store(store, cook_id, "notification")
+}
+
+fn release_cook_notification_event_claim_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+) -> Result<()> {
     let path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification-claim.json");
+        .with_file_name(format!("{event}-claim.json"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

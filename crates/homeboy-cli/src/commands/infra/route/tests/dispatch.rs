@@ -3,6 +3,55 @@
 use super::*;
 
 #[test]
+fn runner_provider_query_refuses_durable_staging_with_runner_exec_replay() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--model".to_string(),
+            "xai/grok-4.7".to_string(),
+            "--validate-readiness".to_string(),
+        ],
+    );
+
+    assert!(error.message.contains("no offload was created"));
+    assert!(error.message.contains("runner exec"));
+    assert_eq!(
+        error.details["tried"][0],
+        "Run `homeboy runner exec homeboy-lab -- homeboy agent-task providers --backend opencode --model xai/grok-4.7 --validate-readiness` to query the selected runner directly."
+    );
+}
+
+#[test]
+fn runner_provider_query_replay_does_not_forward_controller_runner_environment() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--runner-env".to_string(),
+            "TOKEN=secret-value".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+        ],
+    );
+
+    let replay = error.details["id"].as_str().expect("replay command");
+    assert!(replay.contains("homeboy agent-task providers --backend opencode"));
+    assert!(!replay.contains("TOKEN"));
+    assert!(!replay.contains("secret-value"));
+}
+
+#[test]
 fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
     assert!(placement_outcome_target(None, None).is_none());
 }

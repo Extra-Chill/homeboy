@@ -2384,3 +2384,151 @@ fn unleased_candidate_reconciliation_requires_a_negotiated_contract() {
         .expect_err("typed capability absence requires upgrade");
     assert!(error.contains("must be upgraded"));
 }
+
+/// #15087: the remote refuses the very first `ensure-running` attempt with
+/// `daemon_unleased_process_conflict` (a live daemon it cannot prove it owns
+/// already holds the store — e.g. a supervised process that respawned
+/// between the status probe and this call). That refusal must:
+///   1. still be reported as itself (not flattened into a generic
+///      `daemon_bootstrap_failure`, even though the remote CLI's own error
+///      convention exits nonzero — #15087 fix in `remote_daemon_ensure_running`);
+///   2. retire the journaled replacement operation it wrote before crossing
+///      the remote mutation boundary, so the pending authority does not
+///      outlive an authoritative, non-retryable refusal; and
+///   3. let a subsequent plain `runner connect` mint a fresh operation id and
+///      succeed, rather than replaying the exact doomed command forever.
+#[cfg(unix)]
+#[test]
+fn rejected_ensure_running_refusal_is_retired_before_plain_connect_retries() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let marker = home.path().join("ensure-running-attempted");
+        let generation_count = home.path().join("daemon-generations");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let endpoint = std::thread::spawn(move || {
+            for _ in 0..16 {
+                let (mut stream, _) = listener.accept().expect("endpoint request");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-b","pid":4242,"active_jobs":0},"pid":4242}"#
+                } else {
+                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-b"}}"#
+                };
+                stream
+                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                    .expect("endpoint response");
+            }
+        });
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon ensure-running")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+    elif [ -f "{marker}" ]; then
+      printf '%s' '1' > "{generation_count}"
+      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+    else
+      touch "{marker}"
+      printf '%s\n' '{{"success":false,"error":{{"code":"internal.unexpected","message":"daemon lease is absent or stale while foreground daemon candidates remain live; refusing replacement without an authoritative lease","details":{{"classification":"daemon_unleased_process_conflict","state_path":"/tmp/state.json","candidates":[],"candidate_count":0,"candidates_truncated":false,"safe_next_action":"Run homeboy daemon status and reconcile only a daemon whose PID, binary identity, durable-store path, and startup token are all attributable to this state directory."}}}}}}'
+      exit 2
+    fi
+    ;;
+esac
+"#,
+                marker = marker.display(),
+                address = address,
+                generation_count = generation_count.display(),
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({ "id": "local-runner", "kind": "ssh", "homeboy_path": daemon })
+                .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        let (rejected, exit_code) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("rejected ensure-running result");
+        assert_eq!(exit_code, 20);
+        assert!(marker.exists(), "the shim recorded exactly one attempt");
+        assert!(
+            !generation_count.exists(),
+            "the refused attempt must never report a started daemon"
+        );
+        assert_eq!(
+            rejected
+                .failure_evidence
+                .as_ref()
+                .map(|evidence| evidence.classification.as_str()),
+            Some("daemon_unleased_process_conflict"),
+            "the real remote classification must survive the nonzero remote exit code, \
+             not collapse into a generic daemon_bootstrap_failure: {:?}",
+            rejected.failure_message
+        );
+
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("local-runner");
+        assert!(!journal_dir.join("pending-replacement.json").exists());
+        let operation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
+                .expect("replacement operation"),
+        )
+        .expect("replacement operation JSON");
+        assert!(
+            operation["kind"].is_null(),
+            "the doomed operation must be retired, not left pending: {operation}"
+        );
+        assert!(operation["replay_command"].is_null());
+        let evidence = std::fs::read_dir(journal_dir.join("rejected-replacements"))
+            .expect("rejection evidence")
+            .next()
+            .expect("one rejection evidence")
+            .expect("evidence entry");
+        let evidence: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(evidence.path()).expect("read rejection evidence"),
+        )
+        .expect("rejection evidence JSON");
+        assert_eq!(evidence["kind"], "ensure-running");
+
+        let (connected, exit_code) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("plain connect result");
+        assert_eq!(
+            exit_code, 0,
+            "a fresh operation id must let the retry succeed: {:?}",
+            connected.failure_message
+        );
+        assert!(connected.connected);
+        assert_eq!(connected.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            std::fs::read_to_string(&generation_count).expect("start count"),
+            "1",
+            "the retry must mint exactly one fresh daemon, not replay the refused attempt"
+        );
+        drop(endpoint);
+    });
+}

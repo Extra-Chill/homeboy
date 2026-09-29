@@ -2733,7 +2733,17 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         )
     })?;
-    if candidate_fingerprint(path)? != expected {
+    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
+    let current = candidate_fingerprint(path)?;
+    if current != expected
+        && !is_exact_rebased_candidate(
+            path,
+            &expected,
+            &current,
+            &recovery.prior_verified_base,
+            &fresh_base,
+        )?
+    {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content",
@@ -2741,10 +2751,10 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         ));
     }
-    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
     apply_immutable_candidate_to_base(
         path,
         &expected,
+        &current,
         &recovery.prior_verified_base,
         &recovery.promotion.changed_files,
         &fresh_base,
@@ -2793,6 +2803,60 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     Ok(refreshed)
 }
 
+/// Accept an operator-rebased candidate only when its single commit is based on
+/// the newly observed base and its complete patch is byte-for-byte identical to
+/// the authenticated original candidate delta. This lets recovery survive a
+/// base fast-forward without treating arbitrary destination edits as authority.
+fn is_exact_rebased_candidate(
+    path: &str,
+    expected: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    current: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    prior_base: &str,
+    fresh_base: &str,
+) -> Result<bool> {
+    let (
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: expected,
+        },
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: current,
+        },
+    ) = (expected, current)
+    else {
+        return Ok(false);
+    };
+    if current.head == expected.head
+        || current.base != *fresh_base
+        || git_changed_files(path, fresh_base, &current.tree)?
+            != git_changed_files(path, prior_base, &expected.tree)?
+    {
+        return Ok(false);
+    }
+    let original = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            prior_base,
+            &expected.tree,
+        ],
+    )?;
+    let rebased = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            fresh_base,
+            &current.tree,
+        ],
+    )?;
+    Ok(original == rebased)
+}
+
 /// Re-materialize an authenticated dirty candidate on a newer base. The
 /// temporary index proves both applicability and candidate-owned file scope
 /// before the destination is reset, so intervening base changes never become a
@@ -2800,6 +2864,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
 fn apply_immutable_candidate_to_base(
     path: &str,
     candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    destination_candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
     prior_verified_base: &str,
     recorded_changed_files: &[String],
     fresh_base: &str,
@@ -2904,7 +2969,7 @@ fn apply_immutable_candidate_to_base(
             None,
         ));
     }
-    if &candidate_fingerprint(path)? != candidate {
+    if &candidate_fingerprint(path)? != destination_candidate {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination changed while projecting the authenticated candidate",
@@ -3174,6 +3239,7 @@ mod moving_base_tests {
         let error = apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
             &expected,
+            &expected,
             &git(&seed, &["rev-parse", "HEAD"]),
             &["candidate.txt".to_string()],
             &fresh_base,
@@ -3247,6 +3313,7 @@ mod moving_base_tests {
 
         apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
+            &candidate,
             &candidate,
             &prior_verified_base,
             &["committed.txt".to_string(), "dirty.txt".to_string()],
@@ -3558,13 +3625,25 @@ fn cook_finalization_options_with_stores_and_review_form(
         &path,
     )?;
     review_dossier.validate(&review_profile)?;
+    let form_title = if options.finalization.title.is_empty() {
+        Some(terminal_form_title(
+            lifecycle_store,
+            successful_run_id,
+            review_form,
+        )?)
+    } else {
+        None
+    };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
         head: options.finalization.head.clone(),
-        title: options.finalization.title.clone(),
+        title: form_title
+            .clone()
+            .unwrap_or_else(|| options.finalization.title.clone()),
+        cook_form_title: form_title,
         commit_message: options.finalization.commit_message.clone(),
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
@@ -3606,6 +3685,19 @@ fn cook_finalization_options_with_stores_and_review_form(
         draft_pr: options.finalization.draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
+}
+
+fn terminal_form_title(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    supplied: Option<&AgentTaskSuppliedReviewForm>,
+) -> Result<String> {
+    let form = match supplied {
+        Some(supplied) => supplied.form.clone(),
+        None => review_form_for_finalization_in_store(lifecycle_store, run_id)?,
+    };
+    form.validate()?;
+    Ok(form.pr_title)
 }
 
 /// Persist only a controller-validated manual preflight dossier for recovery.
@@ -5177,6 +5269,7 @@ fn manual_finalization_options(
         verified_base_sha,
         head,
         title: report.title,
+        cook_form_title: None,
         // An immutable recovered candidate must never reach commit mutation.
         commit_message: "recovered manual finalization".to_string(),
         gate_results: report.gate_results,

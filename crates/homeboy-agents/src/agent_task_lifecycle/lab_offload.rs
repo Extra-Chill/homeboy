@@ -477,6 +477,53 @@ pub fn record_lab_staging_controller_failure_in_store(
     Ok(record)
 }
 
+/// Persist bounded parse evidence on the canonical run record so status and
+/// diagnose can recover it independently of the controller job's lifetime.
+pub fn record_lab_staging_json_error(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    phase: &str,
+    attachment_kind: &str,
+    error: &Error,
+) -> Result<()> {
+    let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
+    let parse = error
+        .details
+        .get("json_parse")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let attachment = error
+        .details
+        .get("attachment")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let diagnostic = json!({
+        "schema": "homeboy/lab-staging-diagnostic/v1",
+        "phase": phase,
+        "cause": "json_parse",
+        "field": serde_json::Value::Null,
+        "field_status": "unknown",
+        "attachment_kind": attachment_kind,
+        "attachment": attachment,
+        "parse": parse,
+    });
+    let metadata = record.ensure_metadata_object();
+    if let Some(existing) = metadata.get("lab_staging_diagnostic") {
+        if existing == &diagnostic {
+            return Ok(());
+        }
+        return Err(Error::validation_invalid_argument(
+            "lab_staging_diagnostic",
+            "a different Lab staging diagnostic is already authoritative for this run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    metadata.insert("lab_staging_diagnostic".to_string(), diagnostic);
+    record.updated_at = Some(now_timestamp());
+    lifecycle_store.write_record(&record)
+}
+
 fn record_lab_offload_phase_metadata(
     metadata: &mut serde_json::Map<String, Value>,
     phase: &str,

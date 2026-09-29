@@ -10,22 +10,29 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
     if args.status {
         return Ok((store.status_value(&args.cook_id)?, 0));
     }
-    let candidate = args.candidate.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
+    let selection = homeboy::agents::agent_task_service::select_cook_candidate(&args.cook_id)?;
+    if selection.incomplete || selection.run_id.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
             "candidate",
-            "--candidate is required when submitting feedback",
+            "Cook candidate selection is incomplete; inspect `agent-task status` and retry",
+            Some(serde_json::to_string(&selection).unwrap_or_default()),
             None,
-            None,
-        )
-    })?;
-    let idempotency_key = args.idempotency_key.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "idempotency-key",
-            "--idempotency-key is required when submitting feedback",
-            None,
-            None,
-        )
-    })?;
+        ));
+    }
+    let selected_identity = homeboy::agents::agent_task_lifecycle::exact_record(&selection.run_id)
+        .ok()
+        .and_then(|record| homeboy::agents::agent_task_feedback::candidate_identity(&record));
+    let candidate = match args.candidate {
+        Some(candidate) => candidate,
+        None => selected_identity.clone().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "candidate",
+                "could not derive a canonical candidate identity; pass --candidate explicitly",
+                Some(serde_json::to_string(&selection).unwrap_or_default()),
+                None,
+            )
+        })?,
+    };
     let text = match (args.text, args.file, args.stdin) {
         (Some(text), None, false) => text,
         (None, Some(path), false) => std::fs::read_to_string(&path)
@@ -46,12 +53,31 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
             ))
         }
     };
+    let normalized_text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let idempotency_key = args.idempotency_key.unwrap_or_else(|| {
+        let material = serde_json::json!({
+            "schema": "homeboy/cook-feedback-idempotency/v1",
+            "cook_id": args.cook_id,
+            "candidate": candidate,
+            "author": args.author,
+            "source": args.source,
+            "text": normalized_text,
+        });
+        format!(
+            "feedback-{}",
+            homeboy_engine_primitives::content_hash::sha256_hex(
+                serde_json::to_string(&material)
+                    .unwrap_or_default()
+                    .as_bytes()
+            )
+        )
+    });
     let (feedback, created) = store.submit(
         &args.cook_id,
         &candidate,
         &args.author,
         &args.source,
-        &text,
+        &normalized_text,
         &idempotency_key,
     )?;
     let recipe_store =

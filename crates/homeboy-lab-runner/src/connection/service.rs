@@ -42,30 +42,49 @@ pub struct RunnerServiceReport {
 }
 
 pub(crate) fn service_unit_name(runner_id: &str) -> String {
+    service_unit_name_for(runner_id, &controller_id())
+}
+
+fn service_unit_name_for(runner_id: &str, controller_id: &str) -> String {
     format!(
-        "homeboy-runner-{}.service",
-        paths::sanitize_path_segment(runner_id)
+        "homeboy-runner-{}-{}.service",
+        paths::sanitize_path_segment(runner_id),
+        super::controller_scope_segment(controller_id)
     )
 }
 
 /// The stable binary link the unit executes, relative to `$HOME`.
-fn service_binary_link(runner_id: &str) -> String {
+fn service_binary_link_for(runner_id: &str, controller_id: &str) -> String {
     format!(
-        ".local/share/homeboy/runner-service/{}/homeboy",
-        paths::sanitize_path_segment(runner_id)
+        ".local/share/homeboy/runner-service/{}/controllers/{}/homeboy",
+        paths::sanitize_path_segment(runner_id),
+        super::controller_scope_segment(controller_id)
     )
 }
 
 /// The daemon state directory, relative to `$HOME`. It is the directory the
 /// read-only `daemon status` probe already inspects for this runner.
 fn service_state_dir(runner_id: &str) -> String {
+    service_state_dir_for(runner_id, &controller_id())
+}
+
+fn service_state_dir_for(runner_id: &str, controller_id: &str) -> String {
     format!(
-        ".config/homeboy/daemon-generations/{}/primary",
-        paths::sanitize_path_segment(runner_id)
+        ".config/homeboy/daemon-generations/{}/controllers/{}/primary",
+        paths::sanitize_path_segment(runner_id),
+        super::controller_scope_segment(controller_id)
     )
 }
 
-pub(crate) fn render_service_unit(runner_id: &str) -> String {
+fn controller_segment() -> String {
+    super::controller_scope_segment(&controller_id())
+}
+
+pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> String {
+    render_service_unit_for(runner_id, &controller_id(), startup_token)
+}
+
+fn render_service_unit_for(runner_id: &str, controller_id: &str, startup_token: &str) -> String {
     format!(
         r#"[Unit]
 Description=Homeboy runner daemon ({runner_id})
@@ -74,6 +93,7 @@ After=network-online.target
 [Service]
 Type=simple
 Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{state_dir}
+Environment={token_env}={startup_token}
 Environment=PATH={path}
 ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
 Restart=always
@@ -83,38 +103,83 @@ TimeoutStopSec=30s
 [Install]
 WantedBy=default.target
 "#,
-        state_dir = service_state_dir(runner_id),
+        state_dir = service_state_dir_for(runner_id, controller_id),
+        token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
         path = SERVICE_PATH,
-        link = service_binary_link(runner_id),
+        link = service_binary_link_for(runner_id, controller_id),
     )
 }
 
 /// Atomically point the unit's binary link at `binary`.
 pub(crate) fn point_binary_script(runner_id: &str, binary: &str) -> String {
+    point_binary_script_for(runner_id, &controller_id(), binary)
+}
+
+fn point_binary_script_for(runner_id: &str, controller_id: &str, binary: &str) -> String {
     format!(
         r#"link="$HOME/{link}"
 mkdir -p "$(dirname "$link")"
 ln -sfn {binary} "$link.next"
 mv -f "$link.next" "$link""#,
-        link = service_binary_link(runner_id),
+        link = service_binary_link_for(runner_id, controller_id),
         binary = shell::quote_arg(binary),
     )
 }
 
-pub(crate) fn install_script(runner_id: &str, binary: &str) -> String {
-    let unit = service_unit_name(runner_id);
+/// Write the rendered unit and reload systemd's view of it. Shared by
+/// install (which also enables and starts the unit for the first time) and
+/// repoint-and-restart (which only needs the file on disk to be current
+/// before its own restart), so a repoint always carries the daemon's startup
+/// token even when the unit predates this being rendered (#15087).
+fn write_unit_script(runner_id: &str, startup_token: &str) -> String {
+    write_unit_script_for(runner_id, &controller_id(), startup_token)
+}
+
+fn write_unit_script_for(runner_id: &str, controller_id: &str, startup_token: &str) -> String {
+    let unit = service_unit_name_for(runner_id, controller_id);
     format!(
-        r#"set -eu
-{point}
-unit_dir="$HOME/.config/systemd/user"
+        r#"unit_dir="$HOME/.config/systemd/user"
 mkdir -p "$unit_dir"
 cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 {unit_text}HOMEBOY_UNIT
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
-systemctl --user daemon-reload
+systemctl --user daemon-reload"#,
+        unit_text = render_service_unit_for(runner_id, controller_id, startup_token),
+    )
+}
+
+pub(crate) fn install_script(runner_id: &str, binary: &str, startup_token: &str) -> String {
+    install_script_for(runner_id, &controller_id(), binary, startup_token)
+}
+
+fn install_script_for(
+    runner_id: &str,
+    controller_id: &str,
+    binary: &str,
+    startup_token: &str,
+) -> String {
+    let unit = service_unit_name_for(runner_id, controller_id);
+    format!(
+        r#"set -eu
+{point}
+{write_unit}
 systemctl --user enable {unit}"#,
-        point = point_binary_script(runner_id, binary),
-        unit_text = render_service_unit(runner_id),
+        point = point_binary_script_for(runner_id, controller_id, binary),
+        write_unit = write_unit_script_for(runner_id, controller_id, startup_token),
+    )
+}
+
+fn repoint_script_for(
+    runner_id: &str,
+    controller_id: &str,
+    binary: &str,
+    startup_token: &str,
+) -> String {
+    let unit = service_unit_name_for(runner_id, controller_id);
+    format!(
+        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}",
+        point = point_binary_script_for(runner_id, controller_id, binary),
+        write_unit = write_unit_script_for(runner_id, controller_id, startup_token),
     )
 }
 
@@ -122,7 +187,7 @@ systemctl --user enable {unit}"#,
 /// `daemon stop` refuses a daemon with active jobs, so busy generations stay.
 fn retire_generations_script(runner_id: &str, homeboy: &str) -> String {
     format!(
-        r#"for dir in "$HOME/.config/homeboy/daemon-generations/{segment}"/*/; do
+        r#"for dir in "$HOME/.config/homeboy/daemon-generations/{segment}/controllers/{controller}"/*/; do
   dir="${{dir%/}}"
   [ "$(basename "$dir")" = primary ] && continue
   if out=$(HOMEBOY_DAEMON_STATE_DIR="$dir" {homeboy} daemon stop 2>/dev/null) \
@@ -131,6 +196,7 @@ fn retire_generations_script(runner_id: &str, homeboy: &str) -> String {
   fi
 done"#,
         segment = paths::sanitize_path_segment(runner_id),
+        controller = controller_segment(),
         homeboy = shell::quote_arg(homeboy),
     )
 }
@@ -260,7 +326,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
 
     run_remote(
         client,
-        &install_script(runner_id, homeboy),
+        &install_script(runner_id, homeboy, &uuid::Uuid::new_v4().to_string()),
         "writing the runner service unit",
     )?;
     let retired_generations = run_remote(
@@ -313,19 +379,21 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
 /// Point the service at `binary` and restart it. Callers first prove the
 /// runner is idle (or explicitly force the restart), because restarting the
 /// unit stops the daemon's child processes.
+///
+/// The unit file is rewritten (not just the binary link) on every repoint, so
+/// a unit installed before the daemon's startup token was rendered self-heals
+/// here rather than staying stuck with the empty token an older install left
+/// behind (#15087).
 pub(crate) fn repoint_and_restart(
     roots: &paths::PathRoots,
     runner_id: &str,
     binary: &str,
 ) -> Result<()> {
     let target = service_target(roots, runner_id)?;
+    let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
-        &format!(
-            "set -eu\n{}\nsystemctl --user restart {}",
-            point_binary_script(runner_id, binary),
-            service_unit_name(runner_id)
-        ),
+        &repoint_script_for(runner_id, &controller_id(), binary, &startup_token),
         "restarting the runner service",
     )?;
     Ok(())
@@ -500,22 +568,51 @@ pub(crate) fn detach_service_runner(runner_id: &str) -> Result<RunnerDisconnectR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn unit_runs_serve_from_the_stable_link_in_the_runner_state_dir() {
-        let unit = render_service_unit("homeboy-lab");
+        let unit = render_service_unit("homeboy-lab", "test-startup-token");
+        assert!(unit.contains(&format!(
+            "ExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/controllers/{}/homeboy daemon serve --addr 127.0.0.1:0",
+            controller_segment()
+        )));
         assert!(unit.contains(
-            "ExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/homeboy daemon serve --addr 127.0.0.1:0"
-        ));
-        assert!(unit.contains(
-            "Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/daemon-generations/homeboy-lab/primary"
+            &format!("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/daemon-generations/homeboy-lab/controllers/{}/primary", controller_segment())
         ));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(
             service_unit_name("homeboy-lab"),
-            "homeboy-runner-homeboy-lab.service"
+            format!(
+                "homeboy-runner-homeboy-lab-{}.service",
+                controller_segment()
+            )
         );
+    }
+
+    /// The service-owned daemon must publish an attributable startup token in
+    /// its own lease. Without this, `daemon status`/`ensure-running`/
+    /// `reconcile-unleased-candidates` can never tell this process apart from
+    /// an unrelated foreground `daemon serve`, and every controller operation
+    /// that inspects ownership fails closed (#15087).
+    #[test]
+    fn unit_carries_the_daemon_startup_token_env_var() {
+        let unit = render_service_unit("homeboy-lab", "a-fresh-token");
+        assert!(unit.contains(&format!(
+            "Environment={}=a-fresh-token",
+            paths::DAEMON_STARTUP_TOKEN_ENV
+        )));
+    }
+
+    #[test]
+    fn each_install_and_repoint_gets_its_own_fresh_startup_token() {
+        let first = render_service_unit("homeboy-lab", "token-a");
+        let second = render_service_unit("homeboy-lab", "token-b");
+        assert!(first.contains("token-a"));
+        assert!(!first.contains("token-b"));
+        assert!(second.contains("token-b"));
+        assert!(!second.contains("token-a"));
     }
 
     #[test]
@@ -540,19 +637,240 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let link = home
-                .path()
-                .join(".local/share/homeboy/runner-service/homeboy-lab/homeboy");
+            let link = home.path().join(format!(
+                ".local/share/homeboy/runner-service/homeboy-lab/controllers/{}/homeboy",
+                controller_segment()
+            ));
             assert_eq!(std::fs::read_link(&link).unwrap(), *binary);
         }
     }
 
     #[test]
+    fn installing_controller_b_touches_only_b_service_binary_and_state() {
+        let home = tempfile::tempdir().expect("shared runner home");
+        let a_unit = service_unit_name_for("homeboy-lab", "controller-a");
+        let b_unit = service_unit_name_for("homeboy-lab", "controller-b");
+        let unit_dir = home.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let a_unit_path = unit_dir.join(&a_unit);
+        std::fs::write(&a_unit_path, "A unit remains active\n").unwrap();
+
+        let a_binary = home.path().join("homeboy-a");
+        let b_binary = home.path().join("homeboy-b");
+        std::fs::write(&a_binary, "A binary").unwrap();
+        std::fs::write(&b_binary, "B binary").unwrap();
+        let a_link = home
+            .path()
+            .join(service_binary_link_for("homeboy-lab", "controller-a"));
+        std::fs::create_dir_all(a_link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&a_binary, &a_link).unwrap();
+
+        let a_state = home
+            .path()
+            .join(service_state_dir_for("homeboy-lab", "controller-a"));
+        std::fs::create_dir_all(&a_state).unwrap();
+        std::fs::write(a_state.join("state.json"), r#"{"lease_id":"lease-a"}"#).unwrap();
+        std::fs::write(a_state.join("jobs.json"), r#"{"job":"active-a"}"#).unwrap();
+        let a_state_before = std::fs::read_dir(&a_state)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+
+        // systemctl is a harmless fixture: it records only the requested unit
+        // names and never contacts a host or stops a service.
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let systemctl = bin_dir.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\n",
+        )
+        .unwrap();
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&systemctl, permissions).unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(install_script_for(
+                "homeboy-lab",
+                "controller-b",
+                &b_binary.display().to_string(),
+                "token-b",
+            ))
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let b_unit_path = unit_dir.join(&b_unit);
+        let b_link = home
+            .path()
+            .join(service_binary_link_for("homeboy-lab", "controller-b"));
+        assert!(b_unit_path.exists());
+        assert_eq!(std::fs::read_link(&b_link).unwrap(), b_binary);
+        assert_eq!(
+            std::fs::read(&a_unit_path).unwrap(),
+            b"A unit remains active\n"
+        );
+        assert_eq!(std::fs::read_link(&a_link).unwrap(), a_binary);
+        let a_state_after = std::fs::read_dir(&a_state)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            a_state_after, a_state_before,
+            "A's lease and active-job state are untouched"
+        );
+
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert!(commands.contains(&format!("enable {b_unit}")));
+        assert!(!commands.contains(&a_unit));
+        let b_rendered = std::fs::read_to_string(b_unit_path).unwrap();
+        assert!(b_rendered.contains(&format!(
+            "HOMEBOY_DAEMON_STATE_DIR=%h/{}",
+            service_state_dir_for("homeboy-lab", "controller-b")
+        )));
+        assert!(!b_rendered.contains(&service_state_dir_for("homeboy-lab", "controller-a")));
+
+        let b_replacement = home.path().join("homeboy-b-refreshed");
+        std::fs::write(&b_replacement, "B refreshed binary").unwrap();
+        let repoint = repoint_script_for(
+            "homeboy-lab",
+            "controller-b",
+            &b_replacement.display().to_string(),
+            "token-b-refresh",
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(repoint)
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_link(&b_link).unwrap(), b_replacement);
+        assert_eq!(std::fs::read_link(&a_link).unwrap(), a_binary);
+        assert_eq!(
+            std::fs::read(&a_unit_path).unwrap(),
+            b"A unit remains active\n"
+        );
+        let a_state_after_repoint = std::fs::read_dir(&a_state)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            a_state_after_repoint, a_state_before,
+            "B reconnect leaves A's active lease/job fixture unchanged"
+        );
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert!(commands.contains(&format!("enable {b_unit}")));
+        assert!(commands.contains(&format!("restart {b_unit}")));
+        assert!(!commands.contains(&format!("enable {a_unit}")));
+        assert!(!commands.contains(&format!("restart {a_unit}")));
+    }
+
+    #[test]
+    fn service_paths_and_unit_names_compose_sanitized_runner_and_controller_ids() {
+        let a = ("runner-a", "controller-a");
+        let b = ("runner-a", "controller-b");
+        assert_eq!(
+            service_unit_name_for(a.0, a.1),
+            format!(
+                "homeboy-runner-runner-a-{}.service",
+                super::super::controller_scope_segment(a.1)
+            )
+        );
+        assert_eq!(
+            service_binary_link_for(a.0, a.1),
+            format!(
+                ".local/share/homeboy/runner-service/runner-a/controllers/{}/homeboy",
+                super::super::controller_scope_segment(a.1)
+            )
+        );
+        assert_eq!(
+            service_state_dir_for(a.0, a.1),
+            format!(
+                ".config/homeboy/daemon-generations/runner-a/controllers/{}/primary",
+                super::super::controller_scope_segment(a.1)
+            )
+        );
+        assert_ne!(
+            service_unit_name_for(a.0, a.1),
+            service_unit_name_for(b.0, b.1)
+        );
+        assert_ne!(
+            service_binary_link_for(a.0, a.1),
+            service_binary_link_for(b.0, b.1)
+        );
+        assert_ne!(
+            service_state_dir_for(a.0, a.1),
+            service_state_dir_for(b.0, b.1)
+        );
+        assert_eq!(
+            service_unit_name_for("runner/a", "controller b"),
+            format!(
+                "homeboy-runner-runner_a-{}.service",
+                super::super::controller_scope_segment("controller b")
+            )
+        );
+    }
+
+    #[test]
+    fn controller_scope_hash_disambiguates_sanitized_collisions_and_bounds_unit_names() {
+        let first = "a/b-controller";
+        let second = "a_b-controller";
+        assert_eq!(
+            paths::sanitize_path_segment(first),
+            paths::sanitize_path_segment(second)
+        );
+        let first_scope = super::super::controller_scope_segment(first);
+        let second_scope = super::super::controller_scope_segment(second);
+        assert_ne!(first_scope, second_scope);
+        assert_ne!(
+            service_unit_name_for("homeboy-lab", first),
+            service_unit_name_for("homeboy-lab", second)
+        );
+        assert_ne!(
+            service_binary_link_for("homeboy-lab", first),
+            service_binary_link_for("homeboy-lab", second)
+        );
+        assert_ne!(
+            service_state_dir_for("homeboy-lab", first),
+            service_state_dir_for("homeboy-lab", second)
+        );
+
+        let long_id = "controller/identity/".repeat(128);
+        let segment = super::super::controller_scope_segment(&long_id);
+        let unit = service_unit_name_for("homeboy-lab", &long_id);
+        assert_eq!(segment.len(), 24 + 1 + 64);
+        assert!(
+            unit.len() < 255,
+            "systemd unit filename exceeds budget: {}",
+            unit.len()
+        );
+        let readable_prefix = paths::sanitize_path_segment(&long_id)
+            .chars()
+            .take(24)
+            .collect::<String>();
+        assert!(segment.starts_with(&format!("{readable_prefix}-")));
+    }
+
+    #[test]
     fn retire_script_reports_only_generations_it_actually_stopped() {
         let home = tempfile::tempdir().expect("home");
-        let generations = home
-            .path()
-            .join(".config/homeboy/daemon-generations/homeboy-lab");
+        let generations = home.path().join(format!(
+            ".config/homeboy/daemon-generations/homeboy-lab/controllers/{}/",
+            controller_segment()
+        ));
         for name in ["primary", "live", "idle"] {
             std::fs::create_dir_all(generations.join(name)).unwrap();
         }
@@ -586,10 +904,78 @@ mod tests {
 
     #[test]
     fn install_script_writes_the_rendered_unit_verbatim() {
-        let script = install_script("homeboy-lab", "/opt/homeboy");
+        let script = install_script("homeboy-lab", "/opt/homeboy", "install-token");
         let start = script.find("<<'HOMEBOY_UNIT'\n").unwrap() + "<<'HOMEBOY_UNIT'\n".len();
         let end = script.find("HOMEBOY_UNIT\nmv").unwrap();
-        assert_eq!(&script[start..end], render_service_unit("homeboy-lab"));
-        assert!(script.ends_with("systemctl --user enable homeboy-runner-homeboy-lab.service"));
+        assert_eq!(
+            &script[start..end],
+            render_service_unit("homeboy-lab", "install-token")
+        );
+        assert!(script.ends_with(&format!(
+            "systemctl --user enable {}",
+            service_unit_name("homeboy-lab")
+        )));
+    }
+
+    /// Repoint-and-restart must rewrite the unit (not just the binary link),
+    /// so a unit installed before the startup token existed self-heals to
+    /// carry one the next time refresh restarts it (#15087).
+    #[test]
+    fn repoint_script_rewrites_the_unit_with_a_fresh_token() {
+        let write_unit = write_unit_script("homeboy-lab", "repoint-token");
+        assert!(write_unit.contains("repoint-token"));
+        assert!(write_unit.contains("systemctl --user daemon-reload"));
+        assert!(write_unit.contains(&format!(
+            "cat > \"$unit_dir/{}.tmp\"",
+            service_unit_name("homeboy-lab")
+        )));
+    }
+
+    #[test]
+    fn repoint_migration_enables_and_restarts_only_the_scoped_unit() {
+        let home = tempfile::tempdir().expect("home");
+        let scoped = service_unit_name_for("homeboy-lab", "controller-b");
+        let legacy = "homeboy-runner-homeboy-lab.service";
+        let unit_dir = home.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        let legacy_path = unit_dir.join(legacy);
+        std::fs::write(&legacy_path, "legacy unit owned elsewhere\n").unwrap();
+
+        let bin_dir = home.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let systemctl = bin_dir.join("systemctl");
+        std::fs::write(
+            &systemctl,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let binary = home.path().join("homeboy-new");
+        std::fs::write(&binary, "new binary").unwrap();
+        let script = repoint_script_for(
+            "homeboy-lab",
+            "controller-b",
+            &binary.display().to_string(),
+            "migration-token",
+        );
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(unit_dir.join(&scoped).exists());
+        assert_eq!(
+            std::fs::read_to_string(&legacy_path).unwrap(),
+            "legacy unit owned elsewhere\n"
+        );
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert!(commands.contains(&format!("enable {scoped}")));
+        assert!(commands.contains(&format!("restart {scoped}")));
+        assert!(!commands.contains(legacy));
     }
 }

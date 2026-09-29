@@ -87,7 +87,7 @@ fn providers_output_declares_the_scope_it_observed() {
         assert!(scope["runtime_source"]["total"].is_number());
         assert_eq!(
             scope["runner_scoped_command"],
-            "homeboy agent-task providers --runner <runner-id>"
+            "homeboy runner exec <runner-id> -- homeboy agent-task providers"
         );
 
         // Additive only: the pre-existing `scope` object keeps its meaning for

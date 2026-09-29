@@ -170,6 +170,7 @@ pub enum ErrorCode {
     StorageExhausted,
 
     InternalIoError,
+    ReleaseDeadlineExceeded,
     InternalJsonError,
     InternalUnexpected,
 }
@@ -239,6 +240,7 @@ impl ErrorCode {
             ErrorCode::StorageExhausted => "storage.exhausted",
 
             ErrorCode::InternalIoError => "internal.io_error",
+            ErrorCode::ReleaseDeadlineExceeded => "release_deadline_exceeded",
             ErrorCode::InternalJsonError => "internal.json_error",
             ErrorCode::InternalUnexpected => "internal.unexpected",
         }
@@ -299,6 +301,7 @@ impl ErrorCode {
             "resource.capacity_reserve" => Self::ResourceCapacityReserve,
             "storage.exhausted" => Self::StorageExhausted,
             "internal.io_error" => Self::InternalIoError,
+            "release_deadline_exceeded" => Self::ReleaseDeadlineExceeded,
             "internal.json_error" => Self::InternalJsonError,
             "internal.unexpected" => Self::InternalUnexpected,
             _ => return None,
@@ -1625,6 +1628,23 @@ impl Error {
         let details = to_details(InternalIoErrorDetails { error, context });
 
         Self::new(ErrorCode::InternalIoError, "IO error", details)
+    }
+
+    pub fn release_deadline_exceeded(
+        message: impl Into<String>,
+        stage: impl Into<String>,
+        deadline_secs: u64,
+    ) -> Self {
+        Self::new(
+            ErrorCode::ReleaseDeadlineExceeded,
+            "Release stalled",
+            serde_json::json!({
+                "error": message.into(),
+                "stage": stage.into(),
+                "deadline_secs": deadline_secs,
+                "recovery": "Increase HOMEBOY_RELEASE_DEADLINE_SECS if this stage legitimately needs longer."
+            }),
+        )
     }
 
     pub fn internal_json(error: impl Into<String>, context: Option<String>) -> Self {

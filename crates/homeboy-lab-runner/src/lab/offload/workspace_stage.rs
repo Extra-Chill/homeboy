@@ -803,6 +803,34 @@ fn materialize_agent_task_evidence_inputs_on_runner(
         })?;
         let remote =
             runner_provider_evidence_path(&source, &canonical, remote_cwd, &declared.sha256)?;
+        if declared.transport
+            == homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT
+        {
+            let uploads = plan_lab_directory_evidence(&canonical, &remote, &declared)?;
+            transfer.ensure_directory(&remote)?;
+            for upload in &uploads {
+                let parent = upload
+                    .remote_path
+                    .rsplit_once('/')
+                    .map_or("/", |(parent, _)| parent);
+                transfer.ensure_directory(parent)?;
+                transfer.upload_private_evidence_atomic(
+                    &upload.local_path.display().to_string(),
+                    &upload.remote_path,
+                    upload
+                        .sha256
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&upload.sha256),
+                    upload.size_bytes,
+                )?;
+            }
+            entries.push(workspace_mapping_entry_for_materialized_file(
+                "provider_evidence",
+                canonical.display().to_string(),
+                remote,
+            ));
+            continue;
+        }
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
         transfer.ensure_directory(parent)?;
         transfer.upload_private_evidence_atomic(
@@ -822,6 +850,10 @@ fn materialize_agent_task_evidence_inputs_on_runner(
     }
     Ok(entries)
 }
+
+const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PROVIDER_EVIDENCE_DIRECTORY_ENTRIES: usize = 8_192;
+const MAX_PROVIDER_EVIDENCE_DIRECTORY_DEPTH: usize = 24;
 
 fn runner_provider_evidence_path(
     source: &Path,
@@ -856,6 +888,237 @@ struct DeclaredProviderEvidence {
     sha256: String,
     size_bytes: u64,
     artifact_digest: String,
+    transport: String,
+    entries: Vec<DeclaredDirectoryEvidenceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredDirectoryEvidenceEntry {
+    relative_path: String,
+    sha256: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LabDirectoryEvidenceUpload {
+    local_path: PathBuf,
+    remote_path: String,
+    sha256: String,
+    size_bytes: u64,
+}
+
+fn plan_lab_directory_evidence(
+    local_root: &Path,
+    remote_root: &str,
+    declared: &DeclaredProviderEvidence,
+) -> Result<Vec<LabDirectoryEvidenceUpload>> {
+    use homeboy_engine_primitives::content_hash::{
+        directory_evidence_entry_record, directory_evidence_tree_digest,
+        is_safe_evidence_relative_path,
+    };
+    if declared.entries.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence is missing its relative-path manifest",
+            Some(local_root.display().to_string()),
+            None,
+        ));
+    }
+    if declared.entries.len() > MAX_PROVIDER_EVIDENCE_DIRECTORY_ENTRIES {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence exceeds the projection entry limit",
+            Some(format!(
+                "entries={} limit={MAX_PROVIDER_EVIDENCE_DIRECTORY_ENTRIES}",
+                declared.entries.len()
+            )),
+            None,
+        ));
+    }
+    if declared.size_bytes > MAX_PROVIDER_EVIDENCE_BYTES
+        || declared
+            .entries
+            .iter()
+            .any(|entry| entry.size_bytes > MAX_PROVIDER_EVIDENCE_BYTES)
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            format!(
+                "Lab directory evidence is {} bytes; the projection limit is {MAX_PROVIDER_EVIDENCE_BYTES} bytes",
+                declared.size_bytes
+            ),
+            Some(local_root.display().to_string()),
+            Some(vec![
+                "Exclude large screenshots or narrow include before retrying the same Cook projection."
+                    .to_string(),
+            ]),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(local_root).map_err(|error| {
+        Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence is unavailable on the controller",
+            Some(format!("{}: {error}", local_root.display())),
+            None,
+        )
+    })?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence must be a real directory",
+            Some(local_root.display().to_string()),
+            None,
+        ));
+    }
+    let canonical_root = local_root.canonicalize().map_err(|error| {
+        Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence could not be canonicalized",
+            Some(format!("{}: {error}", local_root.display())),
+            None,
+        )
+    })?;
+    if canonical_root != local_root {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence root changed after projection",
+            Some(local_root.display().to_string()),
+            None,
+        ));
+    }
+    let mut records = Vec::with_capacity(declared.entries.len());
+    let mut uploads = Vec::with_capacity(declared.entries.len());
+    let mut total = 0u64;
+    let mut seen_paths = std::collections::BTreeSet::new();
+    for entry in &declared.entries {
+        if !is_safe_evidence_relative_path(&entry.relative_path)
+            || entry.relative_path.split('/').count() > MAX_PROVIDER_EVIDENCE_DIRECTORY_DEPTH
+            || !seen_paths.insert(entry.relative_path.as_str())
+        {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence path is not safe to project",
+                Some(entry.relative_path.clone()),
+                None,
+            ));
+        }
+        let mut local = local_root.to_path_buf();
+        let mut components = entry.relative_path.split('/').peekable();
+        while let Some(component) = components.next() {
+            local.push(component);
+            let component_metadata = std::fs::symlink_metadata(&local).map_err(|error| {
+                Error::validation_invalid_argument(
+                    "provider_evidence",
+                    "Lab directory evidence path is unavailable",
+                    Some(format!("{}: {error}", local.display())),
+                    None,
+                )
+            })?;
+            if component_metadata.file_type().is_symlink()
+                || (components.peek().is_some() && !component_metadata.is_dir())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "provider_evidence",
+                    "Lab directory evidence cannot traverse symlinks or non-directory components",
+                    Some(entry.relative_path.clone()),
+                    None,
+                ));
+            }
+        }
+        let canonical_file = local.canonicalize().map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence file could not be canonicalized",
+                Some(format!("{}: {error}", local.display())),
+                None,
+            )
+        })?;
+        if canonical_file != local || !canonical_file.starts_with(&canonical_root) {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence cannot traverse symlinks",
+                Some(entry.relative_path.clone()),
+                None,
+            ));
+        }
+        let file_metadata = std::fs::symlink_metadata(&local).map_err(|error| {
+            Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence file is unavailable",
+                Some(format!("{}: {error}", local.display())),
+                None,
+            )
+        })?;
+        if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence cannot follow symlinks",
+                Some(entry.relative_path.clone()),
+                None,
+            ));
+        }
+        if file_metadata.len() != entry.size_bytes {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence file size no longer matches its projection",
+                Some(entry.relative_path.clone()),
+                None,
+            ));
+        }
+        total = total.checked_add(entry.size_bytes).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence size overflows its projection budget",
+                Some(local_root.display().to_string()),
+                None,
+            )
+        })?;
+        if total > MAX_PROVIDER_EVIDENCE_BYTES {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                format!("Lab directory evidence exceeds the {MAX_PROVIDER_EVIDENCE_BYTES}-byte projection limit"),
+                Some(local_root.display().to_string()),
+                None,
+            ));
+        }
+        let actual = homeboy_engine_primitives::content_hash::sha256_file(&local)?;
+        let expected = entry.sha256.trim_start_matches("sha256:");
+        if actual != expected {
+            return Err(Error::validation_invalid_argument(
+                "provider_evidence",
+                "Lab directory evidence file digest no longer matches its projection",
+                Some(entry.relative_path.clone()),
+                None,
+            ));
+        }
+        records.push(directory_evidence_entry_record(
+            &entry.relative_path,
+            &entry.sha256,
+            entry.size_bytes,
+        ));
+        uploads.push(LabDirectoryEvidenceUpload {
+            local_path: local,
+            remote_path: format!(
+                "{}/{}",
+                remote_root.trim_end_matches('/'),
+                entry.relative_path
+            ),
+            sha256: entry.sha256.clone(),
+            size_bytes: entry.size_bytes,
+        });
+    }
+    if total != declared.size_bytes
+        || directory_evidence_tree_digest(&records) != declared.sha256
+        || declared.artifact_digest != declared.sha256
+    {
+        return Err(Error::validation_invalid_argument(
+            "provider_evidence",
+            "Lab directory evidence digest does not match its relative-path manifest",
+            Some(local_root.display().to_string()),
+            None,
+        ));
+    }
+    Ok(uploads)
 }
 
 fn declared_agent_task_evidence_inputs(
@@ -906,12 +1169,34 @@ fn declared_agent_task_evidence_inputs(
                         .and_then(|artifact| artifact.get("digest"))
                         .and_then(serde_json::Value::as_str),
                 ) {
+                    let entries = input
+                        .get("entries")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    Some(DeclaredDirectoryEvidenceEntry {
+                                        relative_path: entry.get("path")?.as_str()?.to_string(),
+                                        sha256: entry.get("sha256")?.as_str()?.to_string(),
+                                        size_bytes: entry.get("size_bytes")?.as_u64()?,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     paths.insert(
                         path.to_string(),
                         DeclaredProviderEvidence {
                             sha256: sha256.to_string(),
                             size_bytes,
                             artifact_digest: artifact_digest.to_string(),
+                            transport: input
+                                .get("transport")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("content-addressed-blob/v1")
+                                .to_string(),
+                            entries,
                         },
                     );
                 }
@@ -1400,6 +1685,8 @@ mod tests {
                     sha256: "sha256:abc".to_string(),
                     size_bytes: 4_194_304,
                     artifact_digest: "sha256:abc".to_string(),
+                    transport: "content-addressed-blob/v1".to_string(),
+                    entries: Vec::new(),
                 }
             )])
         );
@@ -1423,6 +1710,8 @@ mod tests {
                     sha256: "sha256:def".to_string(),
                     size_bytes: 3,
                     artifact_digest: "sha256:def".to_string(),
+                    transport: "content-addressed-blob/v1".to_string(),
+                    entries: Vec::new(),
                 }
             )])
         );
@@ -1447,6 +1736,134 @@ mod tests {
             "sha256:../escape",
         )
         .is_err());
+    }
+
+    #[test]
+    fn lab_directory_evidence_preserves_relative_paths_and_rejects_symlinks() {
+        use homeboy_engine_primitives::content_hash::{
+            directory_evidence_entry_record, directory_evidence_tree_digest,
+            PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT,
+        };
+        let temp = tempfile::tempdir().expect("projected capture");
+        let website = temp.path().join("website");
+        std::fs::create_dir(&website).expect("website");
+        std::fs::write(website.join("index.html"), "<html>").expect("html");
+        let html_sha = format!(
+            "sha256:{}",
+            homeboy_engine_primitives::content_hash::sha256_file(&website.join("index.html"))
+                .expect("hash")
+        );
+        let entries = vec![DeclaredDirectoryEvidenceEntry {
+            relative_path: "website/index.html".to_string(),
+            sha256: html_sha.clone(),
+            size_bytes: 6,
+        }];
+        let digest = directory_evidence_tree_digest([directory_evidence_entry_record(
+            "website/index.html",
+            &html_sha,
+            6,
+        )]);
+        let declared = DeclaredProviderEvidence {
+            sha256: digest.clone(),
+            size_bytes: 6,
+            artifact_digest: digest.clone(),
+            transport: PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT.to_string(),
+            entries: entries.clone(),
+        };
+        let remote = runner_provider_evidence_path(
+            Path::new("/controller/candidate"),
+            temp.path(),
+            "/runner/candidate",
+            &digest,
+        )
+        .expect("remote directory root");
+        let uploads = plan_lab_directory_evidence(temp.path(), &remote, &declared)
+            .expect("plan lab directory");
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(
+            uploads[0].remote_path,
+            format!("{remote}/website/index.html")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&uploads[0].local_path).expect("local html"),
+            "<html>"
+        );
+        let dispatch_args = vec![
+            "homeboy".to_string(),
+            format!(
+                "--attempt-plan={}",
+                serde_json::json!({
+                    "tasks": [{
+                        "executor": {"config": {"evidence_inputs": [{
+                            "id": "capture",
+                            "path": remote.clone(),
+                            "sha256": digest.clone(),
+                            "size_bytes": 6,
+                            "transport": PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT,
+                            "artifact": {"digest": digest.clone(), "size_bytes": 6, "kind": "directory"},
+                            "entries": [{"path": "website/index.html", "sha256": html_sha.clone(), "size_bytes": 6}]
+                        }]}}
+                    }]
+                })
+            ),
+        ];
+        let parsed = declared_agent_task_evidence_inputs(&dispatch_args);
+        let staged = parsed
+            .get(&remote)
+            .expect("Lab discovers directory reference");
+        assert_eq!(staged.transport, PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT);
+        assert_eq!(staged.entries, entries);
+        assert_eq!(
+            plan_lab_directory_evidence(temp.path(), &remote, staged)
+                .expect("Lab validates discovered plan")[0]
+                .remote_path,
+            format!("{remote}/website/index.html")
+        );
+
+        let mut escaped = declared.clone();
+        escaped.entries[0].relative_path = "../secret.html".to_string();
+        assert!(plan_lab_directory_evidence(temp.path(), &remote, &escaped)
+            .expect_err("path traversal")
+            .message
+            .contains("not safe"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = temp.path().join("outside.txt");
+            std::fs::write(&outside, "secret").expect("outside");
+            symlink(&outside, website.join("linked.html")).expect("symlink");
+            let linked_sha = format!(
+                "sha256:{}",
+                homeboy_engine_primitives::content_hash::sha256_hex(b"secret")
+            );
+            let mut linked = declared.clone();
+            linked.entries.push(DeclaredDirectoryEvidenceEntry {
+                relative_path: "website/linked.html".to_string(),
+                sha256: linked_sha,
+                size_bytes: 6,
+            });
+            let error = plan_lab_directory_evidence(temp.path(), &remote, &linked)
+                .expect_err("symlink rejected");
+            assert!(error.message.contains("symlink"));
+            assert_eq!(
+                std::fs::read_to_string(&outside).expect("untouched"),
+                "secret"
+            );
+        }
+
+        let mut over_budget = declared.clone();
+        over_budget.size_bytes = MAX_PROVIDER_EVIDENCE_BYTES + 1;
+        let error = plan_lab_directory_evidence(temp.path(), &remote, &over_budget)
+            .expect_err("over-budget lab projection");
+        assert!(error.message.contains("projection limit"));
+        assert_eq!(
+            error.details["tried"]
+                .as_array()
+                .expect("remediation")
+                .len(),
+            1
+        );
     }
 
     #[test]

@@ -30,6 +30,8 @@ struct MockBackend {
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
     existing_pr: Option<AgentTaskPrRef>,
+    existing_title: Option<String>,
+    last_title: Option<String>,
     merged_pr: Option<AgentTaskPrRef>,
     create_error: bool,
     push_error: bool,
@@ -304,6 +306,10 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         Ok(self.merged_pr.clone())
     }
 
+    fn open_pr_title(&mut self, _path: &str, _number: u64) -> Result<Option<String>> {
+        Ok(self.existing_title.clone())
+    }
+
     fn verify_remote_candidate(
         &mut self,
         _path: &str,
@@ -336,7 +342,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _path: &str,
         _base: &str,
         _head: &str,
-        _title: &str,
+        title: &str,
         body: &str,
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
@@ -344,6 +350,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             return Err(Error::git_command_failed("gh pr create failed"));
         }
         self.created = true;
+        self.last_title = Some(title.to_string());
         self.created_draft = draft;
         self.create_calls += 1;
         self.last_body = body.to_string();
@@ -358,10 +365,11 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         &mut self,
         _path: &str,
         number: u64,
-        _title: &str,
+        title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
         self.updated = true;
+        self.last_title = Some(title.to_string());
         self.last_body = body.to_string();
         Ok(AgentTaskPrRef {
             number,
@@ -572,6 +580,45 @@ fn finalization_rejects_candidate_remote_pr_and_fork_binding_mismatches() {
 }
 
 #[test]
+fn fork_head_binding_drift_carries_the_real_validation_reason() {
+    // Regression test for #15108: the drift error used to report the fixed
+    // literal "binding tuple mismatch" no matter why the binding failed,
+    // which gave the operator no way to tell a genuine cross-repository (fork)
+    // head from a SHA race. It must now surface
+    // `validate_publication_binding`'s actual reason.
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "candidate-sha".to_string(),
+            pr_head_sha: "candidate-sha".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            // A real cross-repository (fork) head: same SHAs, different owner.
+            head_repository: "contributor/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("a fork PR head must still be refused");
+
+    assert!(
+        error.message.contains(
+            "binding_error=publication binding must record the candidate tree, exact changed files, and a same-repository PR head"
+        ),
+        "drift error must carry the specific validation reason instead of a generic mismatch notice, got: {error}"
+    );
+    assert!(
+        !error
+            .message
+            .contains("binding_error=binding tuple mismatch"),
+        "the literal placeholder must no longer appear, got: {error}"
+    );
+}
+
+#[test]
 fn finalization_refuses_remote_drift_immediately_before_pr_mutation() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -662,6 +709,57 @@ fn post_mutation_drift_quarantines_existing_ready_pr_as_draft() {
     assert!(error
         .message
         .contains("cleanup_state=existing_pr_converted_to_draft"));
+}
+
+#[test]
+fn cook_form_title_fresh_and_existing_pr_precedence() {
+    let form_title = "Require a specific Cook review title";
+    let mut fresh = MockBackend {
+        changed_files: vec!["src/lib.rs".into()],
+        ..Default::default()
+    };
+    let mut request = options();
+    request.title = form_title.into();
+    request.cook_form_title = Some(form_title.into());
+    request.draft_pr = true;
+    finalize_pr_with_backend(request.clone(), &mut fresh).unwrap();
+    assert_eq!(fresh.last_title.as_deref(), Some(form_title));
+
+    for (existing_title, expected) in [
+        ("Cook homeboy", form_title),
+        (
+            "Operator-edited specific title",
+            "Operator-edited specific title",
+        ),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".into()],
+            existing_pr: Some(AgentTaskPrRef {
+                number: 77,
+                url: "https://github.com/Extra-Chill/homeboy/pull/77".into(),
+                is_draft: true,
+            }),
+            existing_title: Some(existing_title.into()),
+            ..Default::default()
+        };
+        finalize_pr_with_backend(request.clone(), &mut backend).unwrap();
+        assert_eq!(backend.last_title.as_deref(), Some(expected));
+    }
+
+    request.title = "Explicit --title".into();
+    request.cook_form_title = None;
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".into()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".into(),
+            is_draft: true,
+        }),
+        existing_title: Some("Operator-edited specific title".into()),
+        ..Default::default()
+    };
+    finalize_pr_with_backend(request, &mut backend).unwrap();
+    assert_eq!(backend.last_title.as_deref(), Some("Explicit --title"));
 }
 
 #[test]
@@ -1133,6 +1231,47 @@ fn recovers_a_merged_pr_without_republishing() {
     assert!(report.finalization_outcome.published);
     assert!(!backend.created && !backend.updated);
     assert_eq!(backend.publication_binding_calls, 1);
+}
+
+#[test]
+fn merged_pr_recovery_refuses_a_fork_binding_with_the_real_validation_reason() {
+    // Same regression as #15108, but on the already-merged recovery path
+    // (no new PR is created, so there is nothing to quarantine): the binding
+    // failure reason must still reach the operator instead of being silently
+    // discarded.
+    let mut backend = MockBackend {
+        candidate_state: Some(AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["src/lib.rs".to_string()],
+            push_required: false,
+        }),
+        merged_pr: Some(AgentTaskPrRef {
+            number: 76,
+            url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
+            is_draft: false,
+        }),
+        publication_binding: Some(AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: "candidate-sha".to_string(),
+            pr_head_sha: "candidate-sha".to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "contributor/homeboy".to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        }),
+        ..Default::default()
+    };
+
+    let error = finalize_pr_with_backend(options(), &mut backend)
+        .expect_err("a fork PR head must still be refused");
+
+    assert!(!backend.created && !backend.updated);
+    assert_eq!(backend.quarantine_calls, 0, "no PR mutation was performed");
+    assert!(
+        error.message.contains(
+            "binding_error=publication binding must record the candidate tree, exact changed files, and a same-repository PR head"
+        ),
+        "drift error must carry the specific validation reason, got: {error}"
+    );
 }
 
 #[test]
@@ -2165,6 +2304,103 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
         assert!(finalize_pr_with_backend(rejected_options, &mut rejected_backend).is_err());
         assert!(!rejected_backend.committed);
     }
+}
+
+#[test]
+fn durable_finalization_accepts_successful_retry_with_failed_attempt_history() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.provider_runtime.insert(
+        0,
+        ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "lab".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({
+                "evidence_source": "durable_provider_execution",
+                "attempt": 0,
+                "model": "openai/gpt-5.6-terra"
+            }),
+        },
+    );
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("successful canonical retry receipt admits publication");
+
+    assert_eq!(report.status, "review_ready");
+    assert!(backend.created);
+}
+
+#[test]
+fn durable_finalization_rejects_stale_success_when_latest_producer_failed_or_gates_are_red() {
+    for gates_green in [true, false] {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+        if !gates_green {
+            gate_proof.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+        }
+        let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+        lifecycle.provider_runtime.push(ProviderRuntimeLifecycle {
+            task_id: "task".to_string(),
+            backend: "lab".to_string(),
+            state: ProviderRuntimeState::Failed,
+            stream_uri: None,
+            external_runtime_ids: Vec::new(),
+            metadata: json!({
+                "evidence_source": "durable_provider_execution",
+                "attempt": 1,
+                "model": "openai/gpt-5.6-terra"
+            }),
+        });
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(lifecycle),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+        assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+        assert!(!backend.created && !backend.committed && !backend.pushed);
+    }
+}
+
+#[test]
+fn durable_finalization_preserves_authenticated_partial_provider_recovery() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.execution.state = RunExecutionState::PartialFailure;
+    lifecycle.provider_runtime[0].metadata["evidence_source"] = json!("durable_provider_execution");
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    let report = finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("authenticated all-successful provider recovery remains eligible");
+
+    assert_eq!(report.status, "review_ready");
+    assert!(backend.created);
 }
 
 #[test]
@@ -3230,6 +3466,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
         verified_base_sha: Some("verified-base".to_string()),
         head: None,
         title: "Cook issue #3678".to_string(),
+        cook_form_title: None,
         commit_message: "finalize cook loop PR plumbing".to_string(),
         gate_results,
         normalized_gate_results,
