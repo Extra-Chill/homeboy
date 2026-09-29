@@ -6335,6 +6335,15 @@ fn run_cook_spine(
             "materialized Cook lifecycle record does not match its initial run id",
         ));
     }
+    // Snapshot before report_cook_progress overwrites the phase. Older Cooks
+    // have no started notification marker, so a continuation must not label a
+    // previously running or completed attempt as newly started.
+    let previously_started = materialized_run
+        .metadata
+        .get("cook_progress")
+        .and_then(|progress| progress.get("phase"))
+        .and_then(Value::as_str)
+        .is_some_and(|phase| phase != "durable_identity");
     report_cook_progress(
         lifecycle_store,
         durable_observer,
@@ -6353,6 +6362,7 @@ fn run_cook_spine(
         &options.finalization.base,
         options.retry_policy.max_attempts,
         &options.ai_disclosure.ai_tool,
+        previously_started,
     );
     // Canonicalization and native-worktree discovery can block on provider
     // runtime state. The recipe and lifecycle attempt above must therefore own

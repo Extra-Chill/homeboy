@@ -268,7 +268,32 @@ pub(crate) fn cook_started(
     base: &str,
     max_attempts: u32,
     provider: &str,
+    previously_started: bool,
 ) {
+    // Re-entry through an existing recipe reaches this boundary too. Claim by
+    // Cook identity, not attempt or recipe creation: a crash before delivery
+    // may retry, but a delivered (or queued) start must not be announced again.
+    let Some(route) = effective_route(run_id) else {
+        return;
+    };
+    let Ok(lifecycle_store) =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    else {
+        return;
+    };
+    if !lifecycle_store
+        .claim_cook_started_notification(cook_id)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    // Cooks admitted before the started marker existed may already have sent
+    // this announcement. A later durable progress phase proves the Cook passed
+    // the start boundary; seed its marker instead of waking its old thread.
+    if previously_started {
+        let _ = lifecycle_store.confirm_cook_started_notification(cook_id);
+        return;
+    }
     let payload = started_payload(
         cook_id,
         run_id,
@@ -278,12 +303,25 @@ pub(crate) fn cook_started(
         max_attempts,
         provider,
     );
-    deliver(
-        NotifyEvent::lifecycle(NotifyEventKind::Started, cook_id, "started")
-            .with_title(format!("cook started — {title}"))
-            .with_payload(payload),
-        run_id,
+    let event = NotifyEvent::lifecycle(NotifyEventKind::Started, cook_id, "started")
+        .with_title(format!("cook started — {title}"))
+        .with_payload(payload);
+    let dispatch = notify_outbox::dispatch_with_outbox(
+        &event.with_route(Some(&route)),
+        Some(NotifyOnceMarker::new(
+            COOK_SUBJECT_KIND,
+            cook_id,
+            "cook-started",
+        )),
     );
+    match dispatch.disposition {
+        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
+            let _ = lifecycle_store.confirm_cook_started_notification(cook_id);
+        }
+        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
+            let _ = lifecycle_store.release_cook_started_notification_claim(cook_id);
+        }
+    }
 }
 
 fn retry_payload(
