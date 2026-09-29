@@ -132,11 +132,24 @@ fi
 run_single_test() {
   local id="$1"
   local log
+  local package kind binary test_name
   log="$(mktemp)"
   local ok=1
+  # Homeboy's Rust inventory identity is package::kind::binary::test. Parse
+  # the complete identity before invoking either runner; never let a malformed
+  # identity degrade into a broad or zero-test run.
+  if [[ ! "${id}" =~ ^([^:]+)::([^:]+)::([^:]+)::(.+)$ ]]; then
+    rm -f "${log}"
+    echo "::warning::Differential gate retry: malformed Rust test identity '${id}'; it was not retried." >&2
+    return 1
+  fi
+  package="${BASH_REMATCH[1]}"
+  kind="${BASH_REMATCH[2]}"
+  binary="${BASH_REMATCH[3]}"
+  test_name="${BASH_REMATCH[4]}"
   case "${mode}" in
     nextest)
-      if (cd "${workspace}" && cargo nextest run -E "test(=${id})") >"${log}" 2>&1; then
+      if (cd "${workspace}" && cargo nextest run -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
         grep -Eq '1 tests? run: 1 passed' "${log}" && ok=0
       fi
       ;;
@@ -145,11 +158,25 @@ run_single_test() {
       # doctests: a Homeboy test identity is never a doctest path, and
       # letting doctests run here would fail the retry for reasons that
       # have nothing to do with the identity being retried.
-      if (cd "${workspace}" && cargo test --tests -- --exact "${id}") >"${log}" 2>&1; then
+      local target_args=()
+      case "${kind}" in
+        lib) target_args+=(--lib) ;;
+        bin) target_args+=(--bin "${binary}") ;;
+        test) target_args+=(--test "${binary}") ;;
+        *) rm -f "${log}"; echo "::warning::Differential gate retry: unsupported Rust test kind '${kind}' in '${id}'." >&2; return 1 ;;
+      esac
+      if (cd "${workspace}" && cargo test -p "${package}" "${target_args[@]}" -- --exact "${test_name}") >"${log}" 2>&1; then
         grep -Eq '(^| )1 passed(;| )' "${log}" && ok=0
       fi
       ;;
   esac
+  if [ "${ok}" -ne 0 ]; then
+    if grep -Eiq '0 tests? run|no tests (to run|matched)' "${log}"; then
+      echo "::warning::Differential gate retry: identity '${id}' selected zero tests; it remains introduced (check the test identity and runner filter)." >&2
+    elif ! grep -Eq '1 tests? run:|(^| )1 (passed|failed)(;| )' "${log}"; then
+      echo "::warning::Differential gate retry: identity '${id}' did not execute exactly one test; it remains introduced." >&2
+    fi
+  fi
   rm -f "${log}"
   return "${ok}"
 }

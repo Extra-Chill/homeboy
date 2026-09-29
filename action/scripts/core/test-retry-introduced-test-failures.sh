@@ -139,6 +139,9 @@ esac
 # mechanism a real nextest install uses.
 fake_nextest_dir="${tmp}/fake-nextest"
 mkdir -p "${fake_nextest_dir}"
+id_flaky='fixture::lib::fixture::id_flaky'
+id_stuck='fixture::lib::fixture::id_stuck'
+id_other='fixture::lib::fixture::id_other'
 state_dir="${tmp}/state"
 mkdir -p "${state_dir}"
 cat > "${fake_nextest_dir}/cargo-nextest" <<'FAKE'
@@ -146,7 +149,11 @@ cat > "${fake_nextest_dir}/cargo-nextest" <<'FAKE'
 id=""
 for arg in "$@"; do
   case "${arg}" in
-    test\(=*\)) id="${arg#test(=}"; id="${id%)}" ;;
+    *)
+      if [[ "${arg}" == *'package(=fixture)'* && "${arg}" == *'kind(=lib)'* && "${arg}" == *'binary(=fixture)'* && "${arg}" =~ test\(=([^\)]*)\) ]]; then
+        id="${BASH_REMATCH[1]}"
+      fi
+      ;;
   esac
 done
 case "${id}" in
@@ -177,29 +184,29 @@ chmod +x "${fake_nextest_dir}/cargo-nextest"
 
 reset_fixtures
 rm -f "${state_dir}"/*.count
-write_outcomes "${current_dir}" 'review test' nextest id_flaky id_stuck -- id_flaky id_stuck id_other
-write_outcomes "${base_dir}" 'review test' nextest -- id_other
+write_outcomes "${current_dir}" 'review test' nextest "${id_flaky}" "${id_stuck}" -- "${id_flaky}" "${id_stuck}" "${id_other}"
+write_outcomes "${base_dir}" 'review test' nextest -- "${id_other}"
 RETRY_TEST_STATE_DIR="${state_dir}" run_retry "${fake_nextest_dir}" MAX_RETRIES=2 >/dev/null 2>&1 || true
 output="$(RETRY_TEST_STATE_DIR="${state_dir}" COMMAND='review test' CURRENT_DIR="${current_dir}" BASE_DIR="${base_dir}" WORKSPACE="${workspace}" PATH="${fake_nextest_dir}:${PATH}" MAX_RETRIES=2 bash "${RETRY_SCRIPT}" 2>&1)"
-assert_equals '{"flaky":["id_flaky"],"still_failing":["id_stuck"]}' \
+assert_equals "{\"flaky\":[\"${id_flaky}\"],\"still_failing\":[\"${id_stuck}\"]}" \
   "$(sidecar '{flaky,still_failing}')" \
   "a flaky nextest identity is excluded and a consistently-failing one is not"
 case "${output}" in
-  *"::warning::"*"flaky"*"id_flaky"*) printf 'PASS: the flaky identity is announced by name\n' ;;
-  *) printf 'FAIL: flaky announcement missing id_flaky\n%s\n' "${output}"; exit 1 ;;
+  *"::warning::"*"flaky"*"${id_flaky}"*) printf 'PASS: the flaky identity is announced by name\n' ;;
+  *) printf 'FAIL: flaky announcement missing identity\n%s\n' "${output}"; exit 1 ;;
 esac
 case "${output}" in
-  *"::warning::"*"remain introduced"*"id_stuck"*) printf 'PASS: the still-failing identity is announced by name\n' ;;
-  *) printf 'FAIL: still-failing announcement missing id_stuck\n%s\n' "${output}"; exit 1 ;;
+  *"::warning::"*"remain introduced"*"${id_stuck}"*) printf 'PASS: the still-failing identity is announced by name\n' ;;
+  *) printf 'FAIL: still-failing announcement missing identity\n%s\n' "${output}"; exit 1 ;;
 esac
 
 # --- nextest: every identity fails every attempt -> none excluded -----------
 reset_fixtures
 rm -f "${state_dir}"/*.count
-write_outcomes "${current_dir}" 'review test' nextest id_stuck -- id_stuck id_other
-write_outcomes "${base_dir}" 'review test' nextest -- id_other
+write_outcomes "${current_dir}" 'review test' nextest "${id_stuck}" -- "${id_stuck}" "${id_other}"
+write_outcomes "${base_dir}" 'review test' nextest -- "${id_other}"
 RETRY_TEST_STATE_DIR="${state_dir}" run_retry "${fake_nextest_dir}" MAX_RETRIES=2 >/dev/null 2>&1 || true
-assert_equals '{"flaky":[],"still_failing":["id_stuck"]}' \
+assert_equals "{\"flaky\":[],\"still_failing\":[\"${id_stuck}\"]}" \
   "$(sidecar '{flaky,still_failing}')" \
   "a consistently failing identity is never classified flaky"
 
@@ -230,15 +237,48 @@ mod tests {
 EOF
 
 reset_fixtures
-write_outcomes "${current_dir}" 'review test' 'cargo test' tests::ok tests::bad -- tests::ok tests::bad tests::other
-write_outcomes "${base_dir}" 'review test' 'cargo test' -- tests::other
+full_cargo_ok='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::ok'
+full_cargo_bad='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::bad'
+full_cargo_other='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::other'
+write_outcomes "${current_dir}" 'review test' 'cargo test' "${full_cargo_ok}" "${full_cargo_bad}" -- "${full_cargo_ok}" "${full_cargo_bad}" "${full_cargo_other}"
+write_outcomes "${base_dir}" 'review test' 'cargo test' -- "${full_cargo_other}"
 output="$(run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
-assert_equals '{"flaky":["tests::ok"],"still_failing":["tests::bad"]}' \
+assert_equals "{\"flaky\":[\"${full_cargo_ok}\"],\"still_failing\":[\"${full_cargo_bad}\"]}" \
   "$(sidecar '{flaky,still_failing}')" \
   "cargo test fallback correctly classifies a real passing test as flaky and a real failing test as introduced"
 case "${output}" in
-  *"tests::ok"*) printf 'PASS: cargo test path announces the flaky identity\n' ;;
-  *) printf 'FAIL: cargo test path did not announce tests::ok\n%s\n' "${output}"; exit 1 ;;
+  *"${full_cargo_ok}"*) printf 'PASS: cargo test path announces the flaky identity\n' ;;
+  *) printf 'FAIL: cargo test path did not announce the passing full identity\n%s\n' "${output}"; exit 1 ;;
 esac
+
+# --- nextest: real package::kind::binary::test identity ----------------------
+# This is deliberately a real nextest run against the fixture crate, proving
+# that the complete Homeboy identity selects and executes its one target test.
+if command -v cargo-nextest >/dev/null 2>&1; then
+  reset_fixtures
+  full_ok='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::ok'
+  full_bad='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::bad'
+  write_outcomes "${current_dir}" 'review test' nextest "${full_ok}" -- "${full_ok}" "${full_bad}"
+  write_outcomes "${base_dir}" 'review test' nextest -- "${full_ok}" "${full_bad}"
+  output="$(PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
+  assert_equals "[\"${full_ok}\"]" "$(sidecar '.flaky')" \
+    "real nextest executes the exact full Homeboy Rust identity"
+  case "${output}" in
+    *"${full_ok}"*) printf 'PASS: real nextest retry records the selected identity\n' ;;
+    *) printf 'FAIL: real nextest retry did not report the selected identity\n%s\n' "${output}"; exit 1 ;;
+  esac
+
+  reset_fixtures
+  full_missing='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::missing'
+  write_outcomes "${current_dir}" 'review test' nextest "${full_missing}" -- "${full_missing}"
+  write_outcomes "${base_dir}" 'review test' nextest -- "${full_missing}"
+  output="$(PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
+  assert_equals "[\"${full_missing}\"]" "$(sidecar '.still_failing')" \
+    "a zero-match nextest retry remains a blocking test identity"
+  case "${output}" in
+    *"selected zero tests"*"${full_missing}"*|*"${full_missing}"*"selected zero tests"*) printf 'PASS: zero-test selection is diagnosed explicitly\n' ;;
+    *) printf 'FAIL: zero-match retry has no explicit diagnostic\n%s\n' "${output}"; exit 1 ;;
+  esac
+fi
 
 printf 'All retry-introduced-test-failures checks passed.\n'
