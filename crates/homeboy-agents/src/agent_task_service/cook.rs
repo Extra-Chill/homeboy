@@ -516,7 +516,12 @@ fn claim_pre_artifact_interruption_retry_with_stores(
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
             };
             if replace_semantic_attempt {
-                recipe_store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
+                recipe_store.record_recipe_attempt_replacement_with_plan(
+                    cook_id,
+                    run_id,
+                    &next_run_id,
+                    plan,
+                )?;
             } else {
                 recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
             }
@@ -2906,7 +2911,9 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             .execution_budget
             .deadline_unix_ms = Some(deadline_unix_ms);
     }
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    // Lab placement proves provider readiness on the runner with the runner's
+    // credentials (#15198); only local placement is admitted live here.
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
         &options.identity.initial_plan,
         catalog,
         readiness_cache,
@@ -4137,7 +4144,12 @@ pub(crate) fn dispatch_cook_follow_up(
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        recipe_store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        recipe_store.record_recipe_attempt_replacement_with_plan(
+            cook_id,
+            &replaced_run_id,
+            &next_run_id,
+            &follow_up_plan,
+        )?;
     } else {
         recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
@@ -6333,6 +6345,15 @@ fn run_cook_spine(
             "materialized Cook lifecycle record does not match its initial run id",
         ));
     }
+    // Snapshot before report_cook_progress overwrites the phase. Older Cooks
+    // have no started notification marker, so a continuation must not label a
+    // previously running or completed attempt as newly started.
+    let previously_started = materialized_run
+        .metadata
+        .get("cook_progress")
+        .and_then(|progress| progress.get("phase"))
+        .and_then(Value::as_str)
+        .is_some_and(|phase| phase != "durable_identity");
     report_cook_progress(
         lifecycle_store,
         durable_observer,
@@ -6351,6 +6372,7 @@ fn run_cook_spine(
         &options.finalization.base,
         options.retry_policy.max_attempts,
         &options.ai_disclosure.ai_tool,
+        previously_started,
     );
     // Canonicalization and native-worktree discovery can block on provider
     // runtime state. The recipe and lifecycle attempt above must therefore own

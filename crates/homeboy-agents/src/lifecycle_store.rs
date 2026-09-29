@@ -882,6 +882,31 @@ impl AgentTaskLifecycleStore {
         claim_cook_notification_in_store(self, cook_id, marker)
     }
 
+    pub fn claim_cook_started_notification(&self, cook_id: &str) -> Result<bool> {
+        if cook_id.trim().is_empty() {
+            return Ok(false);
+        }
+        claim_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller"}),
+        )
+    }
+
+    pub fn confirm_cook_started_notification(&self, cook_id: &str) -> Result<()> {
+        confirm_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller", "state": "delivered"}),
+        )
+    }
+
+    pub fn release_cook_started_notification_claim(&self, cook_id: &str) -> Result<()> {
+        release_cook_notification_event_claim_in_store(self, cook_id, "notification-started")
+    }
+
     /// Commit a confirmed terminal delivery beside this store's own Cook index.
     pub fn confirm_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<()> {
         confirm_cook_notification_in_store(self, cook_id, marker)
@@ -1861,30 +1886,9 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         ))
     })?;
     drop(store);
-    if let Some(attempt) = attempt
-        .as_ref()
-        .filter(|attempt| attempt.state.is_terminal())
-    {
-        let status_label = serde_json::to_value(attempt.state)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| "failed".to_string());
-        let exit_code = if matches!(
-            attempt.state,
-            AgentTaskRunState::Succeeded | AgentTaskRunState::Cancelled
-        ) {
-            0
-        } else {
-            1
-        };
-        crate::agent_task_notify::notify_detached_cook_terminal(
-            lifecycle_store,
-            &record.run_id,
-            &attempt.run_id,
-            &status_label,
-            exit_code,
-        );
-    }
+    // The attempt's terminal state is raw provider evidence. Cook still owns
+    // promotion gates and PR finalization; only its terminal report may consume
+    // the Cook-level notification claim.
     refresh_cook_parent_observation(lifecycle_store, &record)?;
     record_from_run(&committed)
 }
@@ -2389,13 +2393,22 @@ pub(super) fn claim_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<bool> {
+    claim_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn claim_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<bool> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     if delivered_path.exists() {
         return Ok(false);
     }
-    let path = delivered_path.with_file_name("notification-claim.json");
+    let path = delivered_path.with_file_name(format!("{event}-claim.json"));
     if path.exists() {
         let stale = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -2451,9 +2464,18 @@ pub(super) fn confirm_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<()> {
+    confirm_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn confirm_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<()> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
 }
 
@@ -2469,9 +2491,17 @@ pub(super) fn release_cook_notification_claim_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
+    release_cook_notification_event_claim_in_store(store, cook_id, "notification")
+}
+
+fn release_cook_notification_event_claim_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+) -> Result<()> {
     let path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification-claim.json");
+        .with_file_name(format!("{event}-claim.json"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
