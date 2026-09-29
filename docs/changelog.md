@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.2] - 2026-09-29
+
+### Changed
+- delete retired detach-after-handoff shim
+
+### Fixed
+- treat an untracked primary manifest as machine-local config
+- recover timed-out Cook candidates by ID
+
 ## [0.398.1] - 2026-09-29
 
 ### Fixed
