@@ -1949,6 +1949,77 @@ fn daemon_exec_request_failed_error_surfaces_payload_detail() {
 }
 
 #[test]
+fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
+    // `internal.io_error` always carries the literal message "IO error"; the
+    // real OS error and failing operation live only in `details` (the daemon's
+    // `error_response` body). The controller must not reduce it to "IO error".
+    let envelope = DaemonEnvelope {
+        success: false,
+        data: None,
+        error: Some(serde_json::json!({
+            "error": "internal.io_error",
+            "message": "IO error",
+            "details": {
+                "error": "No such file or directory (os error 2)",
+                "context": "read /home/lab/.config/homeboy/secrets/opencode-openai-access"
+            },
+            "hints": []
+        })),
+    };
+    let err = daemon_exec_request_failed_error("lab", 500, &envelope);
+    assert!(err.message.contains("internal.io_error: IO error"), "{}", err.message);
+    assert!(
+        err.message.contains("No such file or directory (os error 2)"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("read /home/lab/.config/homeboy/secrets/opencode-openai-access"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn daemon_exec_request_failed_error_bounds_and_ignores_non_text_details() {
+    let long = "x".repeat(5_000);
+    let bounded = daemon_exec_request_failed_error(
+        "lab",
+        500,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": "internal.io_error",
+                "message": "IO error",
+                "details": { "error": long }
+            })),
+        },
+    );
+    assert!(bounded.message.chars().count() < 1_000, "detail must be bounded");
+    assert!(bounded.message.ends_with("…)"), "{}", bounded.message);
+
+    let structured = daemon_exec_request_failed_error(
+        "lab",
+        400,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": "validation.invalid_argument",
+                "message": "bad cwd",
+                "details": { "field": "cwd", "id": 7 }
+            })),
+        },
+    );
+    assert_eq!(
+        structured.message,
+        "daemon exec request failed: validation.invalid_argument: bad cwd"
+    );
+}
+
+#[test]
 fn terminal_lab_result_transport_error_preserves_recovery_ids() {
     let runner = ssh_runner();
     let job_id =
