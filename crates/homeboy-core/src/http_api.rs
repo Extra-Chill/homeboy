@@ -98,11 +98,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         }
         (HttpMethod::Get, ["v1", "control-plane", "capacity"]) => {
             Ok(HttpEndpoint::ControlPlaneCapacity {
-                query: crate::control_plane::CapacityQuery {
-                    backend: query_value(path, "backend"),
-                    selector: query_value(path, "selector"),
-                    model: query_value(path, "model"),
-                },
+                query: read_resource_query(path),
             })
         }
         (HttpMethod::Get, ["v1", "control-plane", "missions"]) => {
@@ -514,7 +510,7 @@ where
         HttpEndpoint::ControlPlaneCapacity { query } => {
             return control_plane_ok(
                 endpoint.clone(),
-                crate::control_plane::capacity_snapshot(query)?,
+                crate::control_plane::read_resource("capacity", query)?,
             );
         }
         HttpEndpoint::ControlPlaneRunActions { id } => {
@@ -2682,6 +2678,18 @@ fn reconciled_stale_status_note(run: &RunRecord) -> Option<String> {
 
 fn query_value(path: &str, key: &str) -> Option<String> {
     query_values(path, key).into_iter().next()
+}
+
+fn read_resource_query(path: &str) -> Value {
+    let mut query = serde_json::Map::new();
+    if let Ok(url) = reqwest::Url::parse(&format!("http://localhost{path}")) {
+        for (key, value) in url.query_pairs() {
+            if !value.is_empty() {
+                query.insert(key.into_owned(), Value::String(value.into_owned()));
+            }
+        }
+    }
+    Value::Object(query)
 }
 
 fn query_values(path: &str, key: &str) -> Vec<String> {

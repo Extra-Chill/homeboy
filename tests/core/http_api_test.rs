@@ -1123,13 +1123,14 @@ fn capacity_http_reads_shared_cached_resource_without_opening_observation_store(
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FixtureCapacity(std::sync::Arc<AtomicUsize>);
-    impl crate::control_plane::CapacitySnapshotProvider for FixtureCapacity {
-        fn snapshot(
-            &self,
-            query: &crate::control_plane::CapacityQuery,
-        ) -> crate::Result<serde_json::Value> {
-            assert_eq!(query.backend.as_deref(), Some("fixture-13697"));
-            assert_eq!(query.model.as_deref(), Some("test-model"));
+    impl crate::control_plane::ControlPlaneReadResourceProvider for FixtureCapacity {
+        fn resource_type(&self) -> &'static str {
+            "capacity"
+        }
+
+        fn read(&self, query: &serde_json::Value) -> crate::Result<serde_json::Value> {
+            assert_eq!(query["backend"], "fixture-13697");
+            assert_eq!(query["model"], "test-model");
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(serde_json::json!({
                 "schema": "homeboy/agent-task-capacity/v1",
@@ -1140,9 +1141,9 @@ fn capacity_http_reads_shared_cached_resource_without_opening_observation_store(
         }
     }
     let calls = std::sync::Arc::new(AtomicUsize::new(0));
-    crate::control_plane::register_capacity_snapshot_provider(std::sync::Arc::new(
-        FixtureCapacity(calls.clone()),
-    ));
+    crate::control_plane::register_read_resource_provider(std::sync::Arc::new(FixtureCapacity(
+        calls.clone(),
+    )));
     let query = "/v1/control-plane/capacity?backend=fixture-13697&model=test-model";
     let first = http_api::handle(HttpApiRequest {
         method: HttpMethod::Get,

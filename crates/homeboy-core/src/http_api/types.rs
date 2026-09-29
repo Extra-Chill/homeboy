@@ -76,7 +76,7 @@ pub enum HttpEndpoint {
     },
     ControlPlaneCapabilities,
     ControlPlaneCapacity {
-        query: crate::control_plane::CapacityQuery,
+        query: Value,
     },
     ControlPlaneMissions {
         request: homeboy_control_plane_contract::ControlPlaneMissionListRequest,
