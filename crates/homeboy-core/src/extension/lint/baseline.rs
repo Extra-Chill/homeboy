@@ -655,7 +655,10 @@ mod tests {
         assert!(load_baseline_for_scope(dir.path(), Some(&scoped)).is_none());
 
         // Git-base measurement found nothing, so everything looks new.
-        let current = vec![lint_finding("a", "style", "a"), lint_finding("b", "style", "b")];
+        let current = vec![
+            lint_finding("a", "style", "a"),
+            lint_finding("b", "style", "b"),
+        ];
         let comparison = compare_against_findings(&current, &[]);
         assert_eq!(comparison.new_items.len(), 2);
 
@@ -672,7 +675,10 @@ mod tests {
         save_baseline(dir.path(), "legacy", &[lint_finding("a", "style", "a")])
             .expect("save baseline");
 
-        let current = vec![lint_finding("a", "style", "a"), lint_finding("z", "style", "z")];
+        let current = vec![
+            lint_finding("a", "style", "a"),
+            lint_finding("z", "style", "z"),
+        ];
         let comparison = exclude_stored_known(
             compare_against_findings(&current, &[]),
             &stored_known_fingerprints(dir.path()),
