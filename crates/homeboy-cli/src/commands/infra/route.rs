@@ -783,7 +783,10 @@ pub(crate) fn runner_provider_query_requires_runner_exec(
 ) -> homeboy::core::Error {
     let mut command = vec!["homeboy".to_string()];
     let mut skip_value = false;
-    for argument in normalized_args.iter().skip(1) {
+    for argument in crate::command_capability::homeboy_owned_args(normalized_args)
+        .iter()
+        .skip(1)
+    {
         if skip_value {
             skip_value = false;
             continue;
@@ -2512,6 +2515,12 @@ pub(crate) fn register_unmaterialized_cook_replay_driver() {
             TerminalCookWorkHandler,
         ))
         .expect("register terminal Cook continuation work handler");
+        homeboy::core::daemon::orchestration::register_work_intent_scheduler(
+            "terminal-cook-continuation",
+            1,
+            Arc::new(homeboy::core::daemon::orchestration::schedule_terminal_cook_continuation),
+        )
+        .expect("register terminal Cook work intent scheduler");
     });
 }
 

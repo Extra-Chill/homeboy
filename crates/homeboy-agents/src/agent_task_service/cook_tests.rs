@@ -717,41 +717,6 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
 }
 
 #[test]
-fn malformed_continuation_does_not_head_of_line_block_run_next() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let queue = homeboy_core::paths::homeboy_data()
-            .expect("data path")
-            .join("agent-task-cook-continuations");
-        std::fs::create_dir_all(&queue).expect("continuation queue");
-        std::fs::write(queue.join("000-malformed.pending"), "not JSON")
-            .expect("malformed continuation persisted");
-        agent_task_lifecycle::submit_plan(
-            &batch_cook_options(
-                "run-next-after-malformed-continuation",
-                Arc::new(AcceptedDetachedAttemptDispatcher),
-            )
-            .identity
-            .initial_plan,
-            Some("run-next-after-malformed-continuation"),
-        )
-        .expect("eligible work queued");
-
-        let result = super::super::run_next_with_cook_dispatcher(
-            Arc::new(ImmediateSuccessExecutor),
-            |_| Ok(None),
-            None,
-        )
-        .expect("malformed continuation is skipped");
-
-        assert_eq!(
-            result.value.expect("eligible aggregate").plan_id,
-            "run-next-after-malformed-continuation"
-        );
-        assert!(queue.join("000-malformed.malformed").is_file());
-    });
-}
-
-#[test]
 fn durable_cook_inspection_reports_an_unsupported_run_schema() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
@@ -3146,6 +3111,17 @@ fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempote
         )
         .unwrap()
         .unwrap();
+        let mut stale_plan = options.identity.initial_plan.clone();
+        stale_plan.metadata["captured_base"] = serde_json::json!("observed in another controller");
+        let replayed_with_stale_plan = claim_pre_artifact_interruption_retry(
+            &options.identity.cook_id,
+            1,
+            &run_id,
+            &stale_plan,
+        )
+        .expect("completed claim uses durable receipt over a changed caller plan")
+        .expect("same successor");
+        assert_eq!(replayed_with_stale_plan, resumed);
         assert!(results.iter().flatten().all(|result| result == &resumed));
         assert_eq!(resumed.0, 2);
         let recipe = super::super::load_recipe(&options.identity.cook_id).unwrap();
@@ -12050,20 +12026,39 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                     .metadata["cook_continuation"]["state"],
                 "pending"
             );
+            let accepted_before_ack = std::cell::Cell::new(0);
+            let lost_ack = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+                assert_eq!(intent.run_id, run_id);
+                accepted_before_ack.set(accepted_before_ack.get() + 1);
+                Err(homeboy_core::Error::internal_unexpected(
+                    "daemon stopped after accepting WorkJob before ACK",
+                ))
+            })
+            .expect_err("unacknowledged intent remains visible after daemon interruption");
+            assert!(lost_ack.message.contains("before ACK"));
+            assert_eq!(accepted_before_ack.get(), 1);
             let scheduled = std::cell::Cell::new(0);
-            let recovery =
-                super::super::reconcile::reconcile_terminal_cook_continuations_with(|request| {
-                    scheduled.set(scheduled.get() + 1);
-                    assert_eq!(request["cook_id"], cook_id);
-                    assert_eq!(request["run_id"], run_id);
-                    assert_eq!(request["generation"], 0);
-                    Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
-                })
-                .expect("daemon recovers durable pending work after interrupted event submission");
+            let recovery = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+                scheduled.set(scheduled.get() + 1);
+                let request = &intent.payload;
+                assert_eq!(request["cook_id"], cook_id);
+                assert_eq!(request["run_id"], run_id);
+                assert_eq!(request["generation"], 0);
+                assert_eq!(intent.run_id, run_id);
+                Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
+            })
+            .expect("daemon recovers durable pending work after interrupted event submission");
             assert_eq!(recovery["scheduled"], true);
             let reconciled = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
             assert_eq!(reconciled.run_id, run_id);
             assert_eq!(scheduled.get(), 1);
+            assert_eq!(
+                homeboy_core::daemon::orchestration::drain_work_intents_with(|_| {
+                    panic!("an acknowledged intent must not schedule a second job")
+                })
+                .expect("ACK settles indexed intent")["scheduled"],
+                false
+            );
             let claim = recipe_store
                 .claim_continuation_for(cook_id, run_id)
                 .expect("claim terminal continuation")

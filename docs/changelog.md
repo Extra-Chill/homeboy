@@ -4,6 +4,35 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.12] - 2026-09-29
+
+### Fixed
+- trust completed retry receipt over stale plan copy
+
+## [0.397.11] - 2026-09-29
+
+### Changed
+- synchronize active loop cancellation across daemon boundaries
+
+### Fixed
+- keep runner-exec terminal replays in observation store
+- identify generic runner-exec observation ownership
+- align post-sidecar tests and run deletion contract
+
+## [0.397.10] - 2026-09-29
+
+### Changed
+- remove obsolete continuation sidecar importer
+- recover terminal work from indexed intents
+
+### Fixed
+- surface runner resource-guard stops as typed blockers
+
+## [0.397.9] - 2026-09-29
+
+### Changed
+- remove unused recovery wrappers
+
 ## [0.397.8] - 2026-09-29
 
 ### Changed

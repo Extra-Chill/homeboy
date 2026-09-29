@@ -5931,6 +5931,20 @@ fn blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
             retry: None,
         });
     }
+    if matches!(
+        record.state,
+        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
+    ) {
+        if let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(&record.metadata) {
+            return Some(ControlPlaneBlocker {
+                code: Some(stop.violation.blocker_code()),
+                message: redacted_bounded(&stop.violation.observed_summary(), MESSAGE_BOUND),
+                state: None,
+                reason: Some(redacted_bounded(&stop.violation.remedy(), MESSAGE_BOUND)),
+                retry: None,
+            });
+        }
+    }
     if let Some(failure) = record.metadata.get("pre_execution_failure") {
         if let Some(message) = failure
             .get("message")
@@ -7744,13 +7758,11 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let submission = crate::agent_task_service::loop_work_job_execution_submission(
-                loop_id,
-                &record.updated_at,
-                json!({}),
-                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
-            )
-            .expect("build loop work submission");
+            let marker = tempfile::tempdir().expect("provider marker directory");
+            let started = marker.path().join("started");
+            let submission =
+                crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
+                    .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7761,8 +7773,11 @@ mod loop_control_plane_tests {
             let job = client.submit(submission).expect("submit work");
             let job_id = job.id.to_string();
             client.start(&job_id).expect("start work");
+            crate::agent_task_service::await_active_loop_stop_test_provider(loop_id, &started);
             let active = client.status(&job_id).expect("active status");
-            assert!(matches!(active.status.as_str(), "queued" | "running"));
+            assert_eq!(active.status.as_str(), "running");
+            let mut record = crate::agent_task_loop_controller::load_controller(loop_id)
+                .expect("reload active controller");
             record.metadata["work_job"] = json!({
                 "schema": "homeboy/agent-task-loop-work-ref/v1",
                 "job_id": job_id,
@@ -7777,6 +7792,7 @@ mod loop_control_plane_tests {
                 ControlPlaneActionOutcome::Succeeded
             );
             assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
@@ -7792,13 +7808,11 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-http-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let submission = crate::agent_task_service::loop_work_job_execution_submission(
-                loop_id,
-                &record.updated_at,
-                json!({}),
-                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
-            )
-            .expect("build loop work submission");
+            let marker = tempfile::tempdir().expect("provider marker directory");
+            let started = marker.path().join("started");
+            let submission =
+                crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
+                    .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7809,7 +7823,17 @@ mod loop_control_plane_tests {
             let job = client.submit(submission).expect("submit work");
             let job_id = job.id.to_string();
             client.start(&job_id).expect("start work");
-            let _ = client.status(&job_id).expect("active status");
+            crate::agent_task_service::await_active_loop_stop_test_provider(loop_id, &started);
+            assert_eq!(
+                client
+                    .status(&job_id)
+                    .expect("active status")
+                    .status
+                    .as_str(),
+                "running"
+            );
+            let mut record = crate::agent_task_loop_controller::load_controller(loop_id)
+                .expect("reload active controller");
             record.metadata["work_job"] = json!({
                 "schema": "homeboy/agent-task-loop-work-ref/v1",
                 "job_id": job_id,
@@ -7843,6 +7867,7 @@ mod loop_control_plane_tests {
             .expect("HTTP stop action");
             assert_eq!(response.status, 200);
             assert_eq!(response.body["resource"]["outcome"], "succeeded");
+            crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
@@ -10972,6 +10997,55 @@ mod tests {
             .expect_err("missing");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn project_record_names_a_runner_resource_guard_stop() {
+        let mut failed = record(AGENT_TASK_RUN);
+        failed.state = AgentTaskRunState::Failed;
+        failed
+            .metadata
+            .as_object_mut()
+            .expect("metadata")
+            .remove("cook_controller_failure");
+        let rss_bytes: u64 = 13_173_456_896;
+        let rss_limit_bytes: u64 = 17_179_869_184;
+        failed.metadata["runner_job_events"] = json!([{
+            "kind": "result",
+            "data": {
+                "exit_code": 1,
+                "metrics": {
+                    "guard_violation": {
+                        "reason": "process_count_limit_exceeded",
+                        "message": "runner job resource guard stopped process tree after rss_bytes=13173456896, process_count=141; limits rss_bytes=17179869184, process_count=128",
+                        "rss_bytes": rss_bytes,
+                        "rss_limit_bytes": rss_limit_bytes,
+                        "process_count": 141,
+                        "process_count_limit": 128
+                    }
+                }
+            }
+        }]);
+
+        let resource = project_record(&failed, None).expect("project guard stop");
+        let blocker = resource.blocker.expect("typed blocker");
+        assert_eq!(
+            blocker.code.as_deref(),
+            Some("resource_guard.process_count_limit_exceeded")
+        );
+        assert!(blocker.message.contains("141"), "{}", blocker.message);
+        assert!(blocker.message.contains("128"), "{}", blocker.message);
+        let resume = resource
+            .action_eligibility
+            .expect("eligibility")
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
     }
 
     #[test]

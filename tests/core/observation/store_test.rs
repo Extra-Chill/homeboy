@@ -91,9 +91,8 @@ mod store_init_tests {
         assert!(status.exists);
         assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
-        // 12 historical tables plus control_plane_resources and
-        // control_plane_resource_aliases, which own canonical action identity.
-        assert_eq!(status.table_count, 14);
+        // 12 historical tables, two resource projections, and the work outbox.
+        assert_eq!(status.table_count, 15);
     }
 
     #[test]
@@ -109,7 +108,7 @@ mod store_init_tests {
         assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
         // Reasserted after a second initialization: the control-plane resource
         // tables are created once and idempotent re-init adds nothing.
-        assert_eq!(status.table_count, 14);
+        assert_eq!(status.table_count, 15);
     }
 
     #[test]
@@ -732,6 +731,75 @@ fn sample_import_run(id: &str) -> RunRecord {
             }
         }),
     }
+}
+
+#[test]
+fn work_intent_commits_atomically_with_run_and_ack_replays_after_restart() {
+    use crate::observation::WorkIntent;
+
+    let context = HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut run = sample_import_run("work-intent-atomic-run");
+    run.status = "running".to_string();
+    run.finished_at = None;
+    let intent = WorkIntent {
+        id: "work-intent-atomic-run:terminal:0".to_string(),
+        run_id: run.id.clone(),
+        kind: "terminal-cook-continuation".to_string(),
+        version: 1,
+        payload: serde_json::json!({"run_id": run.id, "generation": 0}),
+    };
+    store
+        .upsert_imported_run_with_events_and_intents(&run, true, None, None, &[], &[intent.clone()])
+        .expect("commit source and intent");
+    assert_eq!(
+        store.next_pending_work_intent().expect("pending"),
+        Some(intent.clone())
+    );
+    let mut conflicting = intent.clone();
+    conflicting.payload["generation"] = serde_json::json!(99);
+    let mut changed_run = run.clone();
+    changed_run.metadata_json = serde_json::json!({"must_not_commit": true});
+    assert!(store
+        .upsert_imported_run_with_events_and_intents(
+            &changed_run,
+            true,
+            None,
+            None,
+            &[],
+            &[conflicting]
+        )
+        .is_err());
+    assert_eq!(
+        store.get_run(&run.id).unwrap().unwrap().metadata_json,
+        run.metadata_json,
+        "conflicting intent rolls back source run write"
+    );
+    drop(store);
+
+    let restarted = ObservationStore::open_initialized_in_roots(&roots).expect("restart");
+    assert_eq!(
+        restarted.next_pending_work_intent().unwrap(),
+        Some(intent.clone())
+    );
+    // Simulate daemon acceptance followed by a crash before ACK. The same
+    // stable id is replayed to the daemon, which returns its original job.
+    let receipt = serde_json::json!({"scheduled": true, "job_id": "same-durable-job"});
+    assert_eq!(
+        restarted.next_pending_work_intent().unwrap().unwrap().id,
+        intent.id
+    );
+    restarted
+        .acknowledge_work_intent(&intent.id, &receipt)
+        .expect("ACK");
+    restarted
+        .acknowledge_work_intent(&intent.id, &receipt)
+        .expect("ACK replay");
+    assert!(restarted.next_pending_work_intent().unwrap().is_none());
+    assert!(restarted
+        .acknowledge_work_intent(&intent.id, &serde_json::json!({"job_id":"different"}))
+        .is_err());
 }
 
 #[test]
