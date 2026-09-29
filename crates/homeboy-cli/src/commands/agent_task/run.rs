@@ -655,11 +655,30 @@ fn preflight_preview_lab_provider_secret_env(
     let Some(runner_id) = placement.get("selected_runner").and_then(Value::as_str) else {
         return Ok(());
     };
-    if homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+    let required = homeboy::runner::agent_task_runner_provider_secret_env_names(plan);
+    if required.is_empty() {
         return Ok(());
     }
-    let runner = homeboy::runner::load(runner_id)?;
-    homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(runner_id, &runner, plan)
+    let inventory = homeboy::runner::runner_secret_identity_inventory(runner_id)?;
+    let missing = required
+        .into_iter()
+        .filter(|name| !inventory.identities.contains(name))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "secret-env",
+        format!(
+            "selected Lab runner `{runner_id}` is missing required secret identity reference(s): {}",
+            missing.join(", ")
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Configure these names in the selected runner's secret_env map before Cook dispatch.".to_string(),
+            format!("Inspect redacted references with `homeboy runner env {runner_id}`."),
+        ]),
+    ))
 }
 
 fn preview_staging_component(
@@ -7401,6 +7420,17 @@ fn run_preflight_cook_execution(
         serde_json::to_value(gate_contract_validation)
             .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     resolve_cook_execution_budget(&args, &mut initial_plan)?;
+    if let Some(preflight) = homeboy::core::parsed_command_preflight::captured_result() {
+        if preflight.placement.selected
+            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        {
+            let placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": preflight.selected_runner_id,
+            });
+            preflight_preview_lab_provider_secret_env(&placement, &initial_plan)?;
+        }
+    }
     if !no_progress {
         eprintln!(
             "{}",
