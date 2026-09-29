@@ -13,6 +13,7 @@ mod helpers;
 mod runs;
 mod schema;
 mod triage_items;
+mod work_intents;
 
 use super::context::RunContext;
 pub use super::context::{
@@ -40,6 +41,7 @@ pub use control_plane_events::{
     PreparedControlPlaneEventAppend, CONTROL_PLANE_EVENT_RETENTION_LIMIT,
 };
 pub use runs::{DEFAULT_RUN_PAGE_LIMIT, MAX_EXHAUSTIVE_RUN_ROWS, MAX_RUN_PAGE_LIMIT};
+pub use work_intents::WorkIntent;
 
 pub(crate) use helpers::*;
 

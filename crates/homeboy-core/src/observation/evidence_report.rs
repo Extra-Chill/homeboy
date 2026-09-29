@@ -974,14 +974,29 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
         .get("error")
         .and_then(|value| value.as_str())
         .map(str::to_string);
+    let mut hints = string_array(metadata.get("hints"));
+    let failed = matches!(run.status.as_str(), "fail" | "failed" | "error" | "stale");
+    let guard = failed
+        .then(|| homeboy_runner_contract::find_resource_guard_stop(metadata))
+        .flatten();
+    let (exit_code, error) = if let Some(stop) = guard.as_ref() {
+        let error = Some(stop.violation.operator_message());
+        let remedy = stop.violation.remedy();
+        if !hints.iter().any(|hint| hint == &remedy) {
+            hints.push(remedy);
+        }
+        (exit_code.or(stop.exit_code), error)
+    } else {
+        (exit_code, error)
+    };
     EvidenceFailureSummary {
-        failed: matches!(run.status.as_str(), "fail" | "failed" | "error" | "stale"),
+        failed,
         status: run.status.clone(),
         exit_code,
         error,
         failure: metadata.get("failure").cloned().unwrap_or(Value::Null),
         gate_failures: string_array(metadata.get("gate_failures")),
-        hints: string_array(metadata.get("hints")),
+        hints,
         child_command_failures: child_command_failures(metadata),
         diagnostic: None,
         runner_failure: metadata
@@ -1976,6 +1991,56 @@ mod tests {
                 .expect("child diagnostic")
                 .target,
             "homeboy://run/child-failure/artifact/diagnostic"
+        );
+    }
+
+    #[test]
+    fn evidence_names_a_runner_resource_guard_stop() {
+        let mut run = sample_run();
+        run.status = "failed".to_string();
+        let rss_bytes: u64 = 13_173_456_896;
+        let rss_limit_bytes: u64 = 17_179_869_184;
+        run.metadata_json = serde_json::json!({
+            "agent_task_run": {
+                "metadata": {
+                    "runner_job_events": [{
+                        "kind": "result",
+                        "data": {
+                            "exit_code": 1,
+                            "metrics": {
+                                "guard_violation": {
+                                    "reason": "process_count_limit_exceeded",
+                                    "message": "runner job resource guard stopped process tree after rss_bytes=13173456896, process_count=141; limits rss_bytes=17179869184, process_count=128",
+                                    "rss_bytes": rss_bytes,
+                                    "rss_limit_bytes": rss_limit_bytes,
+                                    "process_count": 141,
+                                    "process_count_limit": 128
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+
+        let failure = evidence_failure_summary(&run);
+
+        assert_eq!(failure.failed, true);
+        assert_eq!(failure.exit_code, Some(1));
+        let error = failure.error.expect("guard stop must name the cause");
+        assert!(
+            error.contains("resource_guard.process_count_limit_exceeded"),
+            "{error}"
+        );
+        assert!(error.contains("141"), "{error}");
+        assert!(error.contains("128"), "{error}");
+        assert!(
+            failure
+                .hints
+                .iter()
+                .any(|hint| hint.contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")),
+            "{:?}",
+            failure.hints
         );
     }
 }

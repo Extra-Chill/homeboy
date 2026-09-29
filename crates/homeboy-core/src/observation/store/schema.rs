@@ -435,6 +435,29 @@ const MIGRATIONS: &[Migration] = &[
             ON control_plane_resource_aliases(resource_type, resource_id);
         "#,
     },
+    Migration {
+        // A domain's pending work and its lifecycle record must be committed
+        // together. The daemon drains this indexed outbox into its separate
+        // durable job store; idempotent submission closes the ACK crash window.
+        version: 25,
+        sql: r#"
+        CREATE TABLE IF NOT EXISTS control_plane_work_intents (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            receipt_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(run_id) REFERENCES runs(id) ON DELETE CASCADE,
+            CHECK(state IN ('pending', 'submitted')),
+            CHECK(version > 0)
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_plane_work_intents_pending
+            ON control_plane_work_intents(created_at, id) WHERE state = 'pending';
+        "#,
+    },
 ];
 
 /// The schema version a freshly initialized store lands on.

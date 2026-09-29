@@ -13,9 +13,50 @@
 //! Every method returns rather than panics, and each is invoked separately by
 //! the tick so one failing mechanism cannot stop the others.
 
+use crate::observation::{ObservationStore, WorkIntent};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::Result;
+
+type WorkIntentSchedulers =
+    Mutex<HashMap<(String, u32), Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>>>;
+
+fn work_intent_schedulers() -> &'static WorkIntentSchedulers {
+    static SCHEDULERS: OnceLock<WorkIntentSchedulers> = OnceLock::new();
+    SCHEDULERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Domains register their typed scheduling action; the outbox owns replay.
+pub fn register_work_intent_scheduler(
+    kind: &str,
+    version: u32,
+    schedule: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>,
+) -> Result<()> {
+    if kind.trim().is_empty() || version == 0 {
+        return Err(crate::Error::validation_invalid_argument(
+            "work_intent",
+            "require a work type and version",
+            None,
+            None,
+        ));
+    }
+    let mut registry = work_intent_schedulers()
+        .lock()
+        .expect("work intent schedulers lock");
+    let key = (kind.to_string(), version);
+    if registry.contains_key(&key) {
+        return Err(crate::Error::validation_invalid_argument(
+            "work_intent",
+            "work scheduler already registered",
+            Some(kind.to_string()),
+            None,
+        ));
+    }
+    registry.insert(key, schedule);
+    Ok(())
+}
 
 /// Agent-task orchestration the daemon drives on a timer.
 pub trait OrchestrationDriver: Send + Sync {
@@ -32,9 +73,6 @@ pub trait OrchestrationDriver: Send + Sync {
 
     /// Resume one durable queued retry whose reservation survived its launcher.
     fn reconcile_queued_retries(&self) -> Result<Value>;
-
-    /// Consume at most one durable terminal Cook continuation per tick.
-    fn reconcile_terminal_cook_continuations(&self) -> Result<Value>;
 
     /// Reconcile durable controller waits from locally observable evidence.
     /// External-event waits must remain open until their event or declared
@@ -106,10 +144,6 @@ impl OrchestrationDriver for NoopOrchestrationDriver {
         Ok(Value::Null)
     }
 
-    fn reconcile_terminal_cook_continuations(&self) -> Result<Value> {
-        Ok(Value::Null)
-    }
-
     fn reconcile_waiting_controllers(&self) -> Result<Value> {
         Ok(Value::Null)
     }
@@ -178,8 +212,43 @@ pub fn reconcile_queued_retries() -> Result<Value> {
     active_driver().reconcile_queued_retries()
 }
 
-pub fn reconcile_terminal_cook_continuations() -> Result<Value> {
-    active_driver().reconcile_terminal_cook_continuations()
+/// Drain one indexed intent. The source lifecycle write and intent share a
+/// SQLite transaction; the daemon job submission has its own idempotent key.
+/// A crash after submission but before ACK replays the same job on restart.
+pub fn drain_work_intents() -> Result<Value> {
+    drain_work_intents_with(|intent| {
+        let schedule = work_intent_schedulers()
+            .lock()
+            .expect("work intent schedulers lock")
+            .get(&(intent.kind.clone(), intent.version))
+            .cloned()
+            .ok_or_else(|| {
+                crate::Error::validation_invalid_argument(
+                    "work_intent.kind",
+                    "no scheduler registered for work intent",
+                    Some(intent.kind.clone()),
+                    None,
+                )
+            })?;
+        schedule(&intent.payload)
+    })
+}
+
+pub fn drain_work_intents_with(
+    schedule: impl FnOnce(&WorkIntent) -> Result<Value>,
+) -> Result<Value> {
+    let store = ObservationStore::open_initialized()?;
+    let Some(intent) = store.next_pending_work_intent()? else {
+        return Ok(serde_json::json!({"scheduled": false}));
+    };
+    let receipt = schedule(&intent)?;
+    if receipt["scheduled"] != true || receipt["job_id"].as_str().is_none_or(str::is_empty) {
+        return Err(crate::Error::internal_unexpected(
+            "work intent scheduling returned no durable job receipt",
+        ));
+    }
+    store.acknowledge_work_intent(&intent.id, &receipt)?;
+    Ok(receipt)
 }
 
 pub fn schedule_terminal_cook_continuation(request: &Value) -> Result<Value> {
