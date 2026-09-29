@@ -9,6 +9,7 @@ fn dependency_output() -> RunnerValidationDependencySyncOutput {
         role: "validation_dependency".to_string(),
         local_path: "/Users/dev/Developer/shared-runtime".to_string(),
         remote_path: "/srv/_lab_workspaces/shared-runtime".to_string(),
+        prepare_cache: None,
     }
 }
 
