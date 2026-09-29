@@ -1151,7 +1151,49 @@ fn reviewer_text(value: &str) -> String {
 }
 
 pub fn reviewer_runnable_command(value: &str) -> bool {
-    !value.trim().is_empty() && !contains_operator_only_reference(value)
+    !value.trim().is_empty()
+        && reviewer_safe_command(value).is_some()
+        && !contains_operator_only_reference(&reviewer_safe_command(value).unwrap_or_default())
+}
+
+/// Build a reviewer command from durable gate source without exposing local
+/// absolute paths. Inline environment values become references to the same
+/// variable, which reviewers can set for their own environment.
+pub fn reviewer_safe_command(value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    let mut changed = false;
+    let command = value
+        .split_whitespace()
+        .map(|token| {
+            let Some((name, assigned)) = token.split_once('=') else {
+                return token.to_string();
+            };
+            if name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_')
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+                && (assigned.starts_with('/') || assigned.starts_with("~/"))
+            {
+                changed = true;
+                format!("{name}=\"${{{name}}}\"")
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if contains_operator_only_reference(&command) {
+        None
+    } else if changed || !contains_operator_only_reference(value) {
+        Some(command)
+    } else {
+        None
+    }
 }
 
 fn contains_operator_only_reference(value: &str) -> bool {
@@ -2219,6 +2261,22 @@ mod tests {
             url: Some("https://example.com/evidence?token=secret".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn reviewer_safe_command_redacts_inline_local_paths_as_environment_references() {
+        let original = "STATIC_SITE_IMPORTER_WP_ROOT=/Users/chris/wp cargo test importer";
+        let safe = reviewer_safe_command(original).expect("safe reviewer equivalent");
+        assert_eq!(
+            safe,
+            "STATIC_SITE_IMPORTER_WP_ROOT=\"${STATIC_SITE_IMPORTER_WP_ROOT}\" cargo test importer"
+        );
+        assert!(!safe.contains("/Users"));
+        assert!(reviewer_runnable_command(&safe));
+        assert!(reviewer_runnable_command(original));
+        assert!(reviewer_safe_command("root=/private/repo").is_none());
+        assert!(reviewer_safe_command("path=~/workspace").is_none());
+        assert!(reviewer_safe_command("cargo test --token secret").is_none());
     }
 
     #[test]

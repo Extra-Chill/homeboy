@@ -431,9 +431,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     } else {
         None
     };
-    let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
+    let existing = backend.find_open_pr(
+        options.component_id.as_deref(),
+        &options.path,
+        &options.base,
+        &head,
+    )?;
     if let (Some(form_title), Some(pr)) = (&options.cook_form_title, &existing) {
-        if let Some(existing_title) = backend.open_pr_title(&options.path, pr.number)? {
+        if let Some(existing_title) =
+            backend.open_pr_title(options.component_id.as_deref(), &options.path, pr.number)?
+        {
             if !existing_title.trim().is_empty()
                 && !existing_title.starts_with("Cook ")
                 && existing_title != *form_title
@@ -443,7 +450,12 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
     }
     if existing.is_none() {
-        if let Some(merged) = backend.find_merged_pr(&options.path, &options.base, &head)? {
+        if let Some(merged) = backend.find_merged_pr(
+            options.component_id.as_deref(),
+            &options.path,
+            &options.base,
+            &head,
+        )? {
             let observed_remote_sha =
                 backend.verify_remote_candidate(&options.path, &head, commit_sha)?;
             if observed_remote_sha != commit_sha {
@@ -549,8 +561,13 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
         Some(existing) => {
-            let updated =
-                backend.update_pr(&options.path, existing.number, &options.title, &body)?;
+            let updated = backend.update_pr(
+                options.component_id.as_deref(),
+                &options.path,
+                existing.number,
+                &options.title,
+                &body,
+            )?;
             if existing.is_draft && !options.draft_pr {
                 ready_transitioned = true;
                 ("ready", backend.mark_pr_ready(&options.path, &updated)?)
@@ -561,6 +578,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         None => (
             "created",
             backend.create_pr(
+                options.component_id.as_deref(),
                 &options.path,
                 &options.base,
                 &head,

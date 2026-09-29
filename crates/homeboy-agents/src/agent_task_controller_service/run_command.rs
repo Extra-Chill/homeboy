@@ -24,6 +24,24 @@ pub(super) fn execute_run_command_action(
     request: &Value,
 ) -> Result<(Value, i32)> {
     let request = hydrate_consumed_artifacts(record, request);
+    let missing_dependencies = consumed_artifact_ids(&request)
+        .into_iter()
+        .filter(|artifact_id| find_controller_artifact(record, artifact_id).is_none())
+        .collect::<Vec<_>>();
+    if !missing_dependencies.is_empty() {
+        return Ok((
+            serde_json::json!({
+                "mode": "run_command",
+                "status": "failed",
+                "diagnostics": [{
+                    "code": "required_artifact_dependency_missing",
+                    "message": format!("required artifact dependencies are missing: {}", missing_dependencies.join(", ")),
+                    "details": { "artifact_ids": missing_dependencies }
+                }]
+            }),
+            1,
+        ));
+    }
     let request = request_with_required_workflow_artifacts(record, &request);
     let execution = request.get("execution").unwrap_or(&Value::Null);
     let command = required_string(execution, "command")?;

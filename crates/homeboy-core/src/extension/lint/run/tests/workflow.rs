@@ -479,6 +479,95 @@ exit 1
 }
 
 #[test]
+fn changed_since_gate_treats_full_scope_stored_baseline_findings_as_known() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "homeboy@example.com"]);
+        run_git(&["config", "user.name", "Homeboy Test"]);
+        std::fs::write(source.path().join("legacy.php"), "<?php // base\n").expect("base source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "base"]);
+        run_git(&["branch", "release-tag"]);
+        std::fs::write(source.path().join("legacy.php"), "<?php // candidate\n")
+            .expect("candidate source");
+        run_git(&["add", "."]);
+        run_git(&["commit", "-q", "-m", "candidate"]);
+
+        // The full-scope baseline records the standing finding under the
+        // full-scope key, which a changed-scope run cannot address by key.
+        let full = crate::extension::lint::baseline::LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["phpcs".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        let standing = homeboy_core::finding::HomeboyFinding::builder("phpcs", "standing warning")
+            .fingerprint("standing")
+            .build();
+        crate::extension::lint::baseline::save_baseline_for_scope(
+            source.path(),
+            "fixture",
+            &[standing],
+            Some(&full),
+        )
+        .expect("save full-scope baseline");
+
+        // The linter reports the standing finding only on the candidate
+        // tree, mirroring a git-base measurement that finds nothing.
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+if grep -q candidate "$HOMEBOY_LINT_GLOB"; then
+  printf '[{"tool":"phpcs","message":"standing warning","fingerprint":"standing","file":"legacy.php"},{"tool":"phpcs","message":"introduced","fingerprint":"introduced","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+else
+  printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+fi
+printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 1
+"#,
+        );
+        let mut args = lint_args();
+        args.changed_since = Some("release-tag".to_string());
+        args.precomputed_changed_files = Some(vec!["legacy.php".to_string()]);
+        let result = run_main_lint_workflow(
+            &component,
+            source.path(),
+            args,
+            &RunDir::create().expect("run dir"),
+        )
+        .expect("workflow result");
+
+        let comparison = result.baseline_comparison.expect("baseline comparison");
+        let new: Vec<_> = comparison
+            .new_items
+            .iter()
+            .map(|item| item.fingerprint.as_str())
+            .collect();
+        // Only the genuinely new finding survives; the stored one is known.
+        assert_eq!(new, vec!["introduced"]);
+        assert!(comparison.drift_increased);
+    });
+}
+
+#[test]
 fn unavailable_changed_since_baseline_does_not_suppress_matching_stored_findings() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");

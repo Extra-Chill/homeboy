@@ -85,7 +85,30 @@ where
             } else {
                 Vec::new()
             };
-            if missing_required_artifacts.is_empty() {
+            let execution_diagnostics = execution
+                .get("diagnostics")
+                .and_then(Value::as_array)
+                .map(|diagnostics| {
+                    diagnostics
+                        .iter()
+                        .filter_map(|diagnostic| {
+                            serde_json::from_value::<AgentTaskLoopActionDiagnostic>(
+                                diagnostic.clone(),
+                            )
+                            .ok()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !execution_diagnostics.is_empty() {
+                exit_code = 1;
+                fail_controller_action_with_diagnostics(
+                    record,
+                    action_id,
+                    execution_diagnostics,
+                    &execution,
+                )?;
+            } else if missing_required_artifacts.is_empty() {
                 complete_controller_action(record, action_id, &execution, exit_code)?;
             } else {
                 exit_code = 1;

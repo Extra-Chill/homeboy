@@ -63,6 +63,7 @@ struct MockBackend {
     quarantine_calls: u8,
     candidate_validation_calls: u8,
     rooted_candidate_validation_calls: u8,
+    component_ids: Vec<Option<String>>,
 }
 
 impl MockBackend {
@@ -289,24 +290,34 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
 
     fn find_open_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
+        self.component_ids.push(_component_id.map(str::to_string));
         self.pr_lookup_complete = true;
         Ok(self.existing_pr.clone())
     }
 
     fn find_merged_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
+        self.component_ids.push(_component_id.map(str::to_string));
         Ok(self.merged_pr.clone())
     }
 
-    fn open_pr_title(&mut self, _path: &str, _number: u64) -> Result<Option<String>> {
+    fn open_pr_title(
+        &mut self,
+        _component_id: Option<&str>,
+        _path: &str,
+        _number: u64,
+    ) -> Result<Option<String>> {
+        self.component_ids.push(_component_id.map(str::to_string));
         Ok(self.existing_title.clone())
     }
 
@@ -339,6 +350,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
 
     fn create_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
@@ -346,6 +358,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         body: &str,
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
+        self.component_ids.push(_component_id.map(str::to_string));
         if self.create_error {
             return Err(Error::git_command_failed("gh pr create failed"));
         }
@@ -363,11 +376,13 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
 
     fn update_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         number: u64,
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
+        self.component_ids.push(_component_id.map(str::to_string));
         self.updated = true;
         self.last_title = Some(title.to_string());
         self.last_body = body.to_string();
@@ -1195,13 +1210,22 @@ fn updates_existing_pr_for_same_branch() {
         ..Default::default()
     };
 
-    let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
+    let mut finalization_options = options();
+    finalization_options.component_id = Some("admitted-component".to_string());
+    let report = finalize_pr_with_backend(finalization_options, &mut backend).expect("finalized");
 
     assert_eq!(report.status, "review_ready");
     assert_eq!(report.pr_action, "updated");
     assert_eq!(report.pr_number, Some(77));
     assert!(backend.updated);
     assert!(!backend.created);
+    assert_eq!(
+        backend.component_ids,
+        vec![
+            Some("admitted-component".to_string()),
+            Some("admitted-component".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -2241,6 +2265,7 @@ fn durable_finalization_publishes_clean_synced_recovered_candidate() {
     };
     let mut finalization_options = options();
     finalization_options.manual_finalization = false;
+    finalization_options.component_id = Some("admitted-component".to_string());
     finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
@@ -2267,6 +2292,7 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
     };
     let mut finalization_options = options();
     finalization_options.manual_finalization = false;
+    finalization_options.component_id = Some("admitted-component".to_string());
     finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
@@ -2275,6 +2301,14 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
     assert_eq!(report.pr_action, "created");
     assert!(backend.committed && backend.pushed && backend.created);
     assert_eq!(backend.create_calls, 1);
+    assert_eq!(
+        backend.component_ids,
+        vec![
+            Some("admitted-component".to_string()),
+            Some("admitted-component".to_string()),
+            Some("admitted-component".to_string()),
+        ]
+    );
     assert_eq!(
         report.evidence.lifecycle.as_ref().unwrap().provider_runtime[0].metadata["evidence_source"],
         "canonical_executor_outcome"
@@ -3461,6 +3495,7 @@ fn options() -> AgentTaskPrFinalizationOptions {
 
     AgentTaskPrFinalizationOptions {
         path: "/repo".to_string(),
+        component_id: None,
         run_id: "cook-3678".to_string(),
         base: "main".to_string(),
         verified_base_sha: Some("verified-base".to_string()),
