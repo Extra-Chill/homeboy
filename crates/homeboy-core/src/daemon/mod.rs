@@ -1949,7 +1949,7 @@ fn orchestration_tick_loop(
             let _ = orchestration::reconcile_queued_retries();
         });
         isolated_tick(|| {
-            let _ = orchestration::reconcile_terminal_cook_continuations();
+            let _ = orchestration::drain_work_intents();
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_waiting_controllers();

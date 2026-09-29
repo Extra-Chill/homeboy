@@ -2512,6 +2512,12 @@ pub(crate) fn register_unmaterialized_cook_replay_driver() {
             TerminalCookWorkHandler,
         ))
         .expect("register terminal Cook continuation work handler");
+        homeboy::core::daemon::orchestration::register_work_intent_scheduler(
+            "terminal-cook-continuation",
+            1,
+            Arc::new(homeboy::core::daemon::orchestration::schedule_terminal_cook_continuation),
+        )
+        .expect("register terminal Cook work intent scheduler");
     });
 }
 
