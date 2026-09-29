@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use homeboy_agents::agent_task_lifecycle::RunnerContinuationSubmission;
 use homeboy_core::api_jobs::{
@@ -42,6 +43,22 @@ const ADMISSION_WAKE_RUNNING: u8 = 1;
 const ADMISSION_WAKE_PENDING: u8 = 2;
 static ADMISSION_WAKE_STATE: LazyLock<Arc<AtomicU8>> =
     LazyLock::new(|| Arc::new(AtomicU8::new(ADMISSION_WAKE_IDLE)));
+
+/// Collision-resistant, bounded path/unit component for controller ownership.
+/// Keep this shared by every direct-SSH and service-managed daemon location.
+pub(super) fn controller_scope_segment(controller_id: &str) -> String {
+    let prefix = paths::sanitize_path_segment(controller_id)
+        .chars()
+        .take(24)
+        .collect::<String>();
+    let prefix = if prefix.is_empty() {
+        "controller"
+    } else {
+        &prefix
+    };
+    let digest = format!("{:x}", Sha256::digest(controller_id.as_bytes()));
+    format!("{prefix}-{digest}")
+}
 
 fn wake_unmaterialized_admission_reconciliation() -> bool {
     wake_unmaterialized_admission_reconciliation_with(
@@ -414,8 +431,10 @@ pub(crate) fn rotate_daemon_generation_in_roots(
         generation
     };
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let state_dir =
-        format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/{generation}");
+    let controller_segment = controller_scope_segment(&controller_id());
+    let state_dir = format!(
+        "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
+    );
     let command = format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} daemon ensure-running --addr 127.0.0.1:0",
         shell::quote_arg(candidate_homeboy),
@@ -757,6 +776,12 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
         recorded_endpoint,
         live_lease_expectation,
     } = options;
+    // A service-managed runner owns its daemon, so attaching replaces no
+    // runtime state and takes no promotion lease. Waiting on that lease would
+    // block every reconnect behind any running Cook's generation pin.
+    if load_in_roots(roots, runner_id)?.settings.service_managed {
+        return service::connect_service_runner(roots, runner_id);
+    }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
     // different configured executable halfway through the transaction.
@@ -778,21 +803,37 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
 
     let ssh_probe = client.execute_with_timeout("true", REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !ssh_probe.success {
-        return Ok(failed_connect(
+        let fallback = bounded_remote_failure_message("SSH connectivity check", &ssh_probe);
+        let detail = if ssh_probe.stderr.trim().is_empty() {
+            fallback.clone()
+        } else {
+            ssh_probe.stderr.clone()
+        };
+        return Ok(remote_connect_failure(
             runner_id,
             session_path,
+            &server_id,
+            &server.host,
+            ssh_probe.exit_code,
+            &detail,
             RunnerFailureKind::SshFailure,
-            bounded_remote_failure_message("SSH connectivity check", &ssh_probe),
+            fallback,
         ));
     }
 
     let identity = remote_homeboy_identity(&client, homeboy);
     let Ok(identity) = identity else {
-        return Ok(failed_connect(
+        let message = identity.err().unwrap();
+        let detail = message.clone();
+        return Ok(remote_connect_failure(
             runner_id,
             session_path,
+            &server_id,
+            &server.host,
+            -1,
+            &detail,
             RunnerFailureKind::MissingRemoteHomeboy,
-            identity.err().unwrap(),
+            message,
         ));
     };
     let version = identity.version.clone();
@@ -941,6 +982,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                     super::generation_store::retire_rejected_state_loss_replacement(
                         runner_id, &output,
                     )?;
+                } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
+                    super::generation_store::retire_rejected_ensure_running_replacement(
+                        runner_id,
+                        output.exit_code,
+                        output.timed_out,
+                        &output.stdout,
+                        &output.stderr,
+                    )?;
                 }
                 return Ok(failed_connect(
                     runner_id,
@@ -984,6 +1033,14 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
                 if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
                     super::generation_store::retire_rejected_state_loss_replacement(
                         runner_id, &output,
+                    )?;
+                } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
+                    super::generation_store::retire_rejected_ensure_running_replacement(
+                        runner_id,
+                        output.exit_code,
+                        output.timed_out,
+                        &output.stdout,
+                        &output.stderr,
                     )?;
                 }
                 return Ok(failed_connect(
@@ -1396,6 +1453,25 @@ fn connect_with_orphan_adoption_and_live_lease_in_roots(
     };
     let Ok(daemon) = daemon else {
         let error = daemon.err().expect("failed daemon connection has an error");
+        let classification = error.details.get("classification").and_then(Value::as_str);
+        // `daemon_unleased_process_conflict` on the *first* ensure-running
+        // attempt journaled the exact command this operation id names before
+        // crossing the remote mutation boundary. The remote's refusal is
+        // authoritative, not a lost response, so replaying that same command
+        // on the next connect would refuse identically forever — the stale
+        // pending replacement operation #15087 reported as never clearing.
+        if classification == Some("daemon_unleased_process_conflict") {
+            // Best-effort: the journal write above always precedes this exact
+            // remote call, so the pending operation should match, but this
+            // cleanup must never mask the real failure being reported below.
+            let _ = super::generation_store::retire_rejected_ensure_running_replacement(
+                runner_id,
+                1,
+                false,
+                "",
+                &error.message,
+            );
+        }
         let failure_evidence_ref = error
             .details
             .get("failure_evidence_ref")
@@ -1906,6 +1982,34 @@ fn is_terminal_state_loss_refusal(output: &homeboy_core::server::CommandOutput) 
     matches!(code, Some(code) if code.starts_with("validation.") || code.starts_with("policy."))
 }
 
+/// `daemon_unleased_process_conflict` is the remote authoritatively refusing
+/// this exact journaled operation id because a live process it cannot prove
+/// it owns already holds the store (see `refuse_unleased_process_conflict` in
+/// homeboy-core). That is not a lost response worth replaying — the same
+/// command will refuse identically forever, which is exactly how #15087's
+/// stale pending replacement operation kept replaying on every subsequent
+/// `runner connect`/`refresh-homeboy --reconnect`.
+fn is_terminal_ensure_running_refusal(output: &homeboy_core::server::CommandOutput) -> bool {
+    if output.timed_out {
+        return false;
+    }
+    let Ok(envelope) = parse_envelope(&output.stdout) else {
+        return false;
+    };
+    if envelope.success {
+        return false;
+    }
+    ensure_running_refusal_classification(envelope.error.as_ref())
+        == Some("daemon_unleased_process_conflict")
+}
+
+fn ensure_running_refusal_classification(error: Option<&Value>) -> Option<&str> {
+    error
+        .and_then(|error| error.get("details"))
+        .and_then(|details| details.get("classification"))
+        .and_then(Value::as_str)
+}
+
 fn remote_state_loss_recovery_command(
     homeboy: &str,
     lease_id: &str,
@@ -2257,9 +2361,21 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
         .find(|generation| generation.admission_owner)
         .filter(|generation| generation.active_job_count_authoritative)
         .map(|generation| generation.live_job_count());
+    let delayed_live_projection = active_job_count > 0
+        && authoritative_live_count == Some(0)
+        && generation_owners.iter().any(|owner| {
+            generation_inventory.iter().any(|generation| {
+                generation.admission_owner
+                    && generation.generation == owner.generation
+                    && !owner.job_ids.is_empty()
+            })
+        });
     let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
         (Some(error), _) => Some(error),
-        (None, Some(_)) if authoritative_live_count.is_some_and(|count| count != active_job_count) => {
+        (None, Some(_))
+            if authoritative_live_count.is_some_and(|count| count != active_job_count)
+                && !delayed_live_projection =>
+        {
             Some(RunnerActiveJobError {
                 code: "retained_active_job_count_inconsistent".to_string(),
                 message: format!(
@@ -2808,17 +2924,13 @@ fn should_infer_child_run_orphans(
     direct_daemon_active_jobs.is_none_or(|count| typed_active_jobs >= count)
 }
 
-/// Reconcile a freshness count with the daemon's typed `/jobs` snapshot.
-///
-/// The probes are separate requests, so a completed job can make the count
-/// stale between them. Only the typed snapshot supplies inspectable owners.
+/// Select the daemon's direct count when available. `/jobs` supplies ownership
+/// details, but its controller-facing projection can lag a live daemon job.
 fn reconciled_active_job_count(
     typed_job_count: usize,
     daemon_active_count: Option<usize>,
 ) -> usize {
-    daemon_active_count
-        .filter(|count| *count == typed_job_count)
-        .unwrap_or(typed_job_count)
+    daemon_active_count.unwrap_or(typed_job_count)
 }
 
 /// [`active_jobs_before_daemon_replacement`] against an injected root.
@@ -4245,9 +4357,14 @@ mod status_read_purity_tests {
 }
 
 mod remote_daemon;
+mod service;
 mod session_store;
 
 use remote_daemon::*;
+pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_service;
+pub use service::{
+    install as install_runner_service, service_status as runner_service_status, RunnerServiceReport,
+};
 use session_store::*;
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 

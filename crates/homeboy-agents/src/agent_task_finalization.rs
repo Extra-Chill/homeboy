@@ -432,6 +432,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         None
     };
     let existing = backend.find_open_pr(&options.path, &options.base, &head)?;
+    if let (Some(form_title), Some(pr)) = (&options.cook_form_title, &existing) {
+        if let Some(existing_title) = backend.open_pr_title(&options.path, pr.number)? {
+            if !existing_title.trim().is_empty()
+                && !existing_title.starts_with("Cook ")
+                && existing_title != *form_title
+            {
+                options.title = existing_title;
+            }
+        }
+    }
     if existing.is_none() {
         if let Some(merged) = backend.find_merged_pr(&options.path, &options.base, &head)? {
             let observed_remote_sha =
@@ -452,13 +462,15 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &changed_files,
                 &merged,
             )?;
-            if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files)
-            {
-                return Err(publication_drift_error(
-                    commit_sha,
-                    &binding.remote_sha,
-                    Some(&binding.pr_head_sha),
-                    "no PR mutation performed",
+            if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+                return Err(append_binding_error(
+                    publication_drift_error(
+                        commit_sha,
+                        &binding.remote_sha,
+                        Some(&binding.pr_head_sha),
+                        "no PR mutation performed",
+                    ),
+                    binding_validation_reason(&error),
                 ));
             }
             return Ok(report(
@@ -588,7 +600,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     };
-    if let Err(_error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+    if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
         return Err(publication_drift_with_cleanup_error(
             backend,
             &options.path,
@@ -597,7 +609,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &binding.remote_sha,
             Some(&binding.pr_head_sha),
             quarantine_capability,
-            "binding tuple mismatch",
+            binding_validation_reason(&error),
         ));
     }
 
@@ -1181,6 +1193,20 @@ pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Resul
     Ok(())
 }
 
+/// `validate_publication_binding`'s errors are built with
+/// `Error::validation_invalid_argument("publication_binding", ...)`, whose
+/// `message` bakes in a `"Invalid argument 'publication_binding': "` prefix.
+/// Call sites that fold that reason into a drift error already name the
+/// `publication_binding` field themselves, so this strips the redundant
+/// prefix and returns just the specific reason (for example, "a
+/// same-repository PR head").
+fn binding_validation_reason(error: &Error) -> &str {
+    error
+        .message
+        .strip_prefix("Invalid argument 'publication_binding': ")
+        .unwrap_or(&error.message)
+}
+
 fn validate_publication_binding(
     binding: &AgentTaskPublicationBinding,
     candidate_sha: &str,
@@ -1306,11 +1332,19 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
         observed_pr_head_sha,
         &cleanup,
     );
+    append_binding_error(drift, binding_error)
+}
+
+/// Carries `validate_publication_binding`'s specific failure reason (for
+/// example, "same-repository PR head" or "candidate SHA...must match")
+/// forward onto a drift error, so operators can see which field differed
+/// instead of a generic mismatch notice.
+fn append_binding_error(error: Error, binding_error: &str) -> Error {
     Error::validation_invalid_argument(
         "publication_binding",
         format!(
             "{}; binding_error={}",
-            drift.message,
+            error.message,
             bounded_publication_diagnostic(binding_error)
         ),
         None,
@@ -1474,40 +1508,52 @@ fn validate_durable_publication_eligibility(
     promotion: &AgentTaskPromotionReport,
 ) -> Result<DurablePublicationEligibility> {
     use homeboy_core::run_lifecycle_record::{ProviderRuntimeState, RunExecutionState};
-    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
-        && lifecycle
-            .provider_runtime
-            .iter()
-            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
-    let producing_runtime = lifecycle.provider_runtime.iter().find(|runtime| {
-        runtime.task_id == promotion.source.task_id
-            && runtime.state == ProviderRuntimeState::Succeeded
-    });
+    let producing_runtime = lifecycle
+        .provider_runtime
+        .iter()
+        .rev()
+        .find(|runtime| runtime.task_id == promotion.source.task_id);
+    let producing_runtime_succeeded =
+        producing_runtime.is_some_and(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
     let fingerprinted_candidate = matches!(
         serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionCandidate>(
             promotion.provenance["candidate"].clone(),
         ),
         Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
     );
-    let successful_fallback_produced_candidate = lifecycle.execution.state
+    // Retry history is durable and intentionally retains failed attempts. It
+    // must not veto publication when the canonical receipt for the task that
+    // produced this promoted candidate records a successful attempt. Bind that
+    // receipt to a fingerprinted candidate and green applied promotion; do not
+    // infer success from the aggregate or promotion alone.
+    let successful_provider_produced_candidate = lifecycle.execution.state
         == RunExecutionState::Succeeded
-        && producing_runtime.is_some()
-        && fingerprinted_candidate;
-    if (all_provider_runtimes_succeeded || successful_fallback_produced_candidate)
-        && (lifecycle.execution.state == RunExecutionState::Succeeded
-            // `CandidateRecoverable` and `PartialRecoverable` were folded into
-            // `PartialFailure` before #6761, so they reached this check as
-            // `PartialFailure` and were eligible. They are listed explicitly
-            // now to keep that behavior — splitting the projection must not
-            // quietly narrow durable-publication eligibility.
-            || (matches!(
-                lifecycle.execution.state,
-                RunExecutionState::PartialFailure
-                    | RunExecutionState::CandidateRecoverable
-                    | RunExecutionState::PartialRecoverable
-            ) && lifecycle.provider_runtime.iter().all(|runtime| {
-                runtime.metadata["evidence_source"] == "durable_provider_execution"
-            })))
+        && producing_runtime_succeeded
+        && fingerprinted_candidate
+        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        && !promotion.gate_results.is_empty()
+        && promotion
+            .gate_results
+            .iter()
+            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
+        && lifecycle
+            .provider_runtime
+            .iter()
+            .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
+    let authenticated_partial_provider_recovery = matches!(
+        lifecycle.execution.state,
+        RunExecutionState::PartialFailure
+            | RunExecutionState::CandidateRecoverable
+            | RunExecutionState::PartialRecoverable
+    ) && all_provider_runtimes_succeeded
+        && lifecycle
+            .provider_runtime
+            .iter()
+            .all(|runtime| runtime.metadata["evidence_source"] == "durable_provider_execution");
+    if (lifecycle.execution.state == RunExecutionState::Succeeded
+        && (all_provider_runtimes_succeeded || successful_provider_produced_candidate))
+        || authenticated_partial_provider_recovery
     {
         return Ok(DurablePublicationEligibility::ProviderRun);
     }

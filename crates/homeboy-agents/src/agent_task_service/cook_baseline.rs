@@ -300,12 +300,22 @@ pub(crate) fn materialize_follow_up_baseline_in_root(
 /// Replay unresolved failed gates against the immutable verified base. This is
 /// controller work, not provider remediation: callers persist the resulting
 /// promotion before evaluating Cook feedback.
+fn replay_gate_policy(
+    environment: &crate::agent_task_gate::AgentTaskGateEnvironment,
+    component_id: Option<&str>,
+) -> crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+    let mut policy = environment.replay_policy();
+    policy.admitted_component_id = component_id.map(str::to_string);
+    policy
+}
+
 pub(crate) fn compare_gate_failures_to_verified_base(
     promotion: &mut AgentTaskPromotionReport,
     repository_root: &std::path::Path,
     gate_workspace: &std::path::Path,
     base_sha: &str,
     timeout: std::time::Duration,
+    component_id: Option<&str>,
     mut checkpoint: impl FnMut(usize, usize) -> Result<()>,
 ) -> Result<()> {
     if !promotion.status.gate_failed() {
@@ -396,7 +406,10 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                 None,
             ));
         }
-        homeboy_core::hygiene::materialize_worktree_dependencies(&baseline_gate_workspace)?;
+        homeboy_core::hygiene::materialize_worktree_dependencies_for_component(
+            &baseline_gate_workspace,
+            component_id,
+        )?;
         let mut compared = 0;
         for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
             if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some() {
@@ -436,7 +449,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             gate.reveal_policy,
                             &runtime.context().tmp_dir,
                             timeout,
-                            &gate.environment.replay_policy(),
+                            &replay_gate_policy(&gate.environment, component_id),
                             &package_artifacts,
                         )
                     }
@@ -448,7 +461,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             gate.visibility,
                             gate.reveal_policy,
                             &runtime.context().tmp_dir,
-                            &gate.environment.replay_policy(),
+                            &replay_gate_policy(&gate.environment, component_id),
                             &package_artifacts,
                         )
                     }
@@ -993,6 +1006,7 @@ mod tests {
                 temp.path(),
                 &base,
                 timeout,
+                None,
                 |_compared, _total| Ok(()),
             );
 
@@ -1078,6 +1092,7 @@ mod tests {
             temp.path(),
             &base,
             std::time::Duration::from_secs(1),
+            None,
             |_compared, _total| Ok(()),
         )
         .expect("baseline comparison");
@@ -1167,6 +1182,7 @@ mod tests {
             temp.path(),
             &base,
             std::time::Duration::from_secs(5),
+            None,
             |_compared, _total| Ok(()),
         )
         .expect("typed baseline replay");

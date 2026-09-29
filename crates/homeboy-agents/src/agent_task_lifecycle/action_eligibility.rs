@@ -219,6 +219,20 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
     }
     match record.state {
         AgentTaskRunState::Queued => {
+            if super::is_transport_proxy(record)
+                || (record.runner_id().is_some()
+                    && record
+                        .metadata
+                        .get("phase")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("retry"))
+            {
+                return unavailable(if record.runner_job_id().is_some() {
+                    "runner-owned transport proxy has a live job; watch or reconcile the runner job instead of dispatching again"
+                } else {
+                    "runner-owned transport proxy must be continued by its owning runner; use the runner-scoped agent-task run command instead of resume"
+                });
+            }
             if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
                 let state = admission["state"].as_str().unwrap_or("queued");
                 if state == "exhausted" {
@@ -450,6 +464,31 @@ mod tests {
         assert!(!resume
             .reason
             .contains("automatic admission retry is scheduled"));
+    }
+
+    #[test]
+    fn queued_runner_proxy_retry_is_not_resumable_but_local_queue_is() {
+        let mut proxy = record(AgentTaskRunState::Queued, false);
+        proxy.metadata["kind"] = serde_json::json!("lab_offload_controller_proxy");
+        proxy.metadata["runner_id"] = serde_json::json!("runner-7");
+        proxy.metadata["phase"] = serde_json::json!("retry");
+
+        let resume = lifecycle_action_eligibility(&proxy, None)
+            .actions
+            .into_iter()
+            .find(|action| action.action == ControlPlaneAction::Resume)
+            .expect("resume action");
+        assert_eq!(
+            resume.availability,
+            ControlPlaneActionAvailability::Unavailable
+        );
+        assert!(resume.reason.contains("owning runner"));
+
+        let local = lifecycle_action_eligibility(&record(AgentTaskRunState::Queued, false), None);
+        assert_eq!(
+            decision(&local, ControlPlaneAction::Resume),
+            ControlPlaneActionAvailability::Available
+        );
     }
 
     #[test]

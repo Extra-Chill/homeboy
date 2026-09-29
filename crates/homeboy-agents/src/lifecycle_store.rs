@@ -554,14 +554,39 @@ impl AgentTaskLifecycleStore {
             )
         })?;
         let path = self.aggregate_path(&record.run_id);
-        let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
-        serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        let raw = String::from_utf8(raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        Ok((raw, path))
+        // The canonical local aggregate.json is the controller-owned, exact-bytes
+        // source (c138e12162) and stays preferred whenever it exists. But a run's
+        // record can outlive that file — retention sweeps, or a controller crash
+        // between writing the record and materializing the file — leaving the
+        // durable record pointing at an aggregate that genuinely is not on this
+        // installation's disk. Falling back to the SQLite-backed observation
+        // mirror in that case only, rather than propagating a plain IO error,
+        // keeps this accessor resolving whatever local evidence still exists
+        // instead of spelunking `record.aggregate_path`'s stored string, which
+        // may itself name a foreign installation's path (#7505).
+        match fs::metadata(&path) {
+            Ok(_) => {
+                let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
+                serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                let raw = String::from_utf8(raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let aggregate = self.read_aggregate_readonly(&record.run_id)?;
+                let raw = serde_json::to_string(&aggregate).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) => Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            )),
+        }
     }
 
     pub fn operation_claim(
@@ -855,6 +880,31 @@ impl AgentTaskLifecycleStore {
     /// ambient one.
     pub fn claim_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<bool> {
         claim_cook_notification_in_store(self, cook_id, marker)
+    }
+
+    pub fn claim_cook_started_notification(&self, cook_id: &str) -> Result<bool> {
+        if cook_id.trim().is_empty() {
+            return Ok(false);
+        }
+        claim_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller"}),
+        )
+    }
+
+    pub fn confirm_cook_started_notification(&self, cook_id: &str) -> Result<()> {
+        confirm_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller", "state": "delivered"}),
+        )
+    }
+
+    pub fn release_cook_started_notification_claim(&self, cook_id: &str) -> Result<()> {
+        release_cook_notification_event_claim_in_store(self, cook_id, "notification-started")
     }
 
     /// Commit a confirmed terminal delivery beside this store's own Cook index.
@@ -1780,13 +1830,39 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     if !preserve_terminal {
         metadata_json["agent_task_aggregate"] = Value::Null;
     }
+    let attempt = redirected_cook_attempt(lifecycle_store, &record);
+    let redirected = record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
+        && record.metadata["detached_cook_handoff"]["state"] == "redirected";
+    let status = if redirected {
+        attempt
+            .as_ref()
+            .map(|attempt| run_status(attempt.state).to_string())
+            .unwrap_or_else(|| RunStatus::Running.as_str().to_string())
+    } else {
+        run_status(record.state).to_string()
+    };
+    // A redirected handoff parent is admission bookkeeping. Its observation
+    // status is the latest attempt, and it stays non-terminal until that
+    // attempt is — otherwise indexing the attempt looks like a pass and
+    // consumes the completion notification.
+    let finished_at = if status == RunStatus::Running.as_str() {
+        None
+    } else {
+        terminal_finished_at(&record)
+    };
+    if let Some(attempt) = attempt.as_ref() {
+        metadata_json["cook_attempt"] = json!({
+            "run_id": attempt.run_id,
+            "state": serde_json::to_value(attempt.state).unwrap_or(Value::Null),
+        });
+    }
     let projected = RunRecord {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
         component_id: plan_id_component(&record),
         started_at: record.submitted_at.clone(),
-        finished_at: terminal_finished_at(&record),
-        status: run_status(record.state).to_string(),
+        finished_at,
+        status,
         command: Some("homeboy agent-task".to_string()),
         cwd: None,
         homeboy_version,
@@ -1809,7 +1885,93 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             record.run_id
         ))
     })?;
+    drop(store);
+    if let Some(attempt) = attempt
+        .as_ref()
+        .filter(|attempt| attempt.state.is_terminal())
+    {
+        let status_label = serde_json::to_value(attempt.state)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "failed".to_string());
+        let exit_code = if matches!(
+            attempt.state,
+            AgentTaskRunState::Succeeded | AgentTaskRunState::Cancelled
+        ) {
+            0
+        } else {
+            1
+        };
+        crate::agent_task_notify::notify_detached_cook_terminal(
+            lifecycle_store,
+            &record.run_id,
+            &attempt.run_id,
+            &status_label,
+            exit_code,
+        );
+    }
+    refresh_cook_parent_observation(lifecycle_store, &record)?;
     record_from_run(&committed)
+}
+
+/// Latest attempt behind a redirected Cook handoff parent.
+///
+/// The parent row is the id Cook prints. Its lifecycle state is terminal so an
+/// exit observer cannot fail the placeholder after the attempt is indexed, but
+/// that bookkeeping success is not the Cook outcome.
+fn redirected_cook_attempt(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Option<AgentTaskRunRecord> {
+    let handoff = &record.metadata["detached_cook_handoff"];
+    if handoff["cook_id"] != record.run_id || handoff["state"] != "redirected" {
+        return None;
+    }
+    let attempt_id = handoff["attempt_run_id"].as_str()?;
+    lifecycle_store
+        .read_record_without_historical_import(attempt_id)
+        .ok()
+}
+
+fn refresh_cook_parent_observation(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    attempt: &AgentTaskRunRecord,
+) -> Result<()> {
+    std::thread_local! {
+        static DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+    if DEPTH.with(|depth| depth.get()) > 0 {
+        return Ok(());
+    }
+    let Some(cook_id) = attempt.metadata.get("cook_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if cook_id == attempt.run_id {
+        return Ok(());
+    }
+    let Ok(index) = lifecycle_store.read_cook_index(cook_id) else {
+        return Ok(());
+    };
+    if index.latest_run_id != attempt.run_id {
+        return Ok(());
+    }
+    let Ok(parent) = lifecycle_store.read_record_without_historical_import(cook_id) else {
+        return Ok(());
+    };
+    if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
+        return Ok(());
+    }
+    let aggregate = read_mirrored_aggregate_in_store(lifecycle_store, cook_id)?;
+    struct RefreshDepth;
+    impl Drop for RefreshDepth {
+        fn drop(&mut self) {
+            DEPTH.with(|depth| depth.set(0));
+        }
+    }
+    DEPTH.with(|depth| depth.set(1));
+    let _guard = RefreshDepth;
+    write_record_with_aggregate_without_workspace_authority(lifecycle_store, &parent, aggregate)?;
+    Ok(())
 }
 
 /// Rebuild one record's projection without disturbing Cook alias ownership.
@@ -2252,13 +2414,22 @@ pub(super) fn claim_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<bool> {
+    claim_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn claim_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<bool> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     if delivered_path.exists() {
         return Ok(false);
     }
-    let path = delivered_path.with_file_name("notification-claim.json");
+    let path = delivered_path.with_file_name(format!("{event}-claim.json"));
     if path.exists() {
         let stale = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -2314,9 +2485,18 @@ pub(super) fn confirm_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<()> {
+    confirm_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn confirm_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<()> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
 }
 
@@ -2332,9 +2512,17 @@ pub(super) fn release_cook_notification_claim_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
+    release_cook_notification_event_claim_in_store(store, cook_id, "notification")
+}
+
+fn release_cook_notification_event_claim_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+) -> Result<()> {
     let path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification-claim.json");
+        .with_file_name(format!("{event}-claim.json"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

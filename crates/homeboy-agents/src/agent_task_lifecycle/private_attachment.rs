@@ -261,8 +261,26 @@ pub fn load_private_run_attachment<T: Serialize + DeserializeOwned>(
         ));
     }
     let contents = fs::read_to_string(&path).map_err(io_error("read private attachment"))?;
-    let attachment: PrivateRunAttachment<T> = serde_json::from_str(&contents)
-        .map_err(|_| Error::internal_json("parse private attachment", None))?;
+    let attachment: PrivateRunAttachment<T> = serde_json::from_str(&contents).map_err(|error| {
+        let mut diagnostic = Error::internal_json("parse private attachment", None);
+        // Retain parser location/type only. Never retain the input, serde's
+        // message (which may include offending values), or the filesystem path.
+        diagnostic.details["json_parse"] = serde_json::json!({
+            "category": match error.classify() {
+                serde_json::error::Category::Io => "io",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "data",
+                serde_json::error::Category::Eof => "eof",
+            },
+            "line": error.line(),
+            "column": error.column(),
+        });
+        diagnostic.details["attachment"] = serde_json::json!({
+            "kind": kind,
+            "run_id": run_id,
+        });
+        diagnostic
+    })?;
     validate(&attachment, &run_id, kind)?;
     Ok(attachment)
 }

@@ -301,6 +301,10 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// managed-execution policy for the gate workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_cargo_target: Option<bool>,
+    /// Component identity recorded at Cook admission. Gate resolution uses this
+    /// instead of re-deriving a component from the worktree path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_component_id: Option<String>,
     /// Selected extension sources are copied under the isolated HOME. Gates
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
@@ -371,6 +375,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             isolate_xdg: true,
             hydrate_rust_cache: true,
             shared_cargo_target: None,
+            admitted_component_id: None,
             extension_inputs: Vec::new(),
         }
     }
@@ -528,6 +533,16 @@ pub(crate) fn hydrate_gate_dependency_roots_with_policy(
     workspace: &str,
     policy: &homeboy_core::deps::DependencyHydrationPolicy,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    hydrate_gate_dependency_roots_for_component(checkout, enabled, workspace, policy, None)
+}
+
+pub(crate) fn hydrate_gate_dependency_roots_for_component(
+    checkout: &Path,
+    enabled: bool,
+    workspace: &str,
+    policy: &homeboy_core::deps::DependencyHydrationPolicy,
+    component_id: Option<&str>,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     if !enabled {
         return Ok(Vec::new());
     }
@@ -566,8 +581,12 @@ pub(crate) fn hydrate_gate_dependency_roots_with_policy(
             .display()
             .to_string();
         let relative = if relative.is_empty() { "." } else { &relative };
-        let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies(
-            &candidate, workspace, relative, policy,
+        let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies_for_component(
+            &candidate,
+            workspace,
+            relative,
+            policy,
+            component_id,
         )?;
         let failed = outcomes
             .iter()
@@ -841,6 +860,7 @@ impl AgentTaskGateEnvironment {
                 .any(|variable| XDG_ENV_VARS.contains(&variable.name.as_str())),
             hydrate_rust_cache: true,
             shared_cargo_target: self.cargo_target.as_ref().map(|_| true),
+            admitted_component_id: None,
             extension_inputs: self
                 .extension_inputs
                 .iter()
@@ -2217,6 +2237,7 @@ struct SelectedGateEnvironment {
     report: AgentTaskGateEnvironment,
     values: BTreeMap<String, String>,
     hydrate_rust_cache: bool,
+    admitted_component_id: Option<String>,
     _cargo_target: Option<homeboy_core::cleanup::ManagedCargoTarget>,
     _scratch: Option<tempfile::TempDir>,
 }
@@ -2380,10 +2401,15 @@ impl SelectedGateEnvironment {
     }
 
     fn configure_cargo_target(&mut self, cwd: &Path, override_enabled: Option<bool>) -> Result<()> {
+        let admitted_component_id = self.admitted_component_id.clone();
         let enabled = override_enabled.unwrap_or_else(|| {
-            homeboy_core::component::resolve_effective(None, Some(&cwd.to_string_lossy()), None)
-                .map(|component| component.managed_execution.shared_cargo_target)
-                .unwrap_or(false)
+            homeboy_core::component::resolve_effective(
+                admitted_component_id.as_deref(),
+                Some(&cwd.to_string_lossy()),
+                None,
+            )
+            .map(|component| component.managed_execution.shared_cargo_target)
+            .unwrap_or(false)
         });
         if !enabled {
             return Ok(());
@@ -3020,6 +3046,7 @@ fn selected_gate_environment(
         report,
         values,
         hydrate_rust_cache: policy.hydrate_rust_cache,
+        admitted_component_id: policy.admitted_component_id.clone(),
         _cargo_target: None,
         _scratch: scratch,
     })
@@ -6221,6 +6248,7 @@ mod tests {
             isolate_xdg: false,
             hydrate_rust_cache: true,
             shared_cargo_target: Some(false),
+            admitted_component_id: None,
             extension_inputs: Vec::new(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
@@ -6325,6 +6353,109 @@ mod tests {
             error.details["package_artifact_readiness"]["remediation"]["action"],
             "refresh_fixture_resource"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_environment_probe_checks_external_browser_cache_before_suite() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_mutex();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let host_home = tempfile::tempdir().expect("host home");
+        let browser_cache = host_home.path().join(".cache/browser-fixture");
+        fs::create_dir_all(&browser_cache).expect("browser cache");
+        fs::write(
+            host_home.path().join(".npmrc"),
+            "//registry.invalid/:_authToken=secret",
+        )
+        .expect("host credential fixture");
+        let browser = browser_cache.join("chromium");
+        fs::write(&browser, "#!/bin/sh\nprintf 'Chromium 128.4\\n'\n").expect("browser fixture");
+        let mut permissions = fs::metadata(&browser)
+            .expect("browser metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&browser, permissions).expect("executable browser");
+        let expected_version = browser_cache.join("expected-version");
+        fs::write(&expected_version, "Chromium 128.4\n").expect("expected browser version");
+        fs::write(workspace.path().join("suite-ran"), "absent").expect("suite sentinel");
+        let candidate_fingerprint =
+            Sha256::digest(fs::read(workspace.path().join("suite-ran")).expect("suite sentinel"));
+        let _environment = EnvVarGuard::set(&[("HOME", host_home.path())]);
+        let policy = AgentTaskGateEnvironmentPolicy {
+            preserve: BTreeMap::from([(
+                "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                "HOME/.cache/browser-fixture".to_string(),
+            )]),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let requirement = AgentTaskGateToolchainRequirement {
+            command: "sh".to_string(),
+            probe_arguments: vec![
+                "-c".to_string(),
+                r#"test -x "$PLAYWRIGHT_BROWSERS_PATH/chromium" && test "$(cat "$PLAYWRIGHT_BROWSERS_PATH/expected-version")" = "$("$PLAYWRIGHT_BROWSERS_PATH/chromium" --version)" && test ! -e "$HOME/.npmrc""#.to_string(),
+            ],
+        };
+
+        let missing_cache = tempfile::tempdir().expect("missing cache home");
+        let _missing_home = EnvVarGuard::set(&[("HOME", missing_cache.path())]);
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            std::slice::from_ref(&requirement),
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("missing mapped browser cache must stop before suite execution");
+        assert!(error
+            .to_string()
+            .contains("gate toolchain preflight failed"));
+        assert!(error.details["toolchain_preflight"]["remediation"]
+            .as_str()
+            .expect("structured remediation")
+            .contains("--gate-env-from"));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("suite-ran")).expect("suite sentinel"),
+            "absent"
+        );
+
+        // Repoint the declared host source to the installed cache. The child
+        // sees the deliberate mapping and isolated HOME, not host credentials.
+        let _installed_home = EnvVarGuard::set(&[("HOME", host_home.path())]);
+        preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            std::slice::from_ref(&requirement),
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect("installed executable with exact expected version passes");
+
+        fs::write(&expected_version, "Chromium 128.5\n").expect("mismatched version");
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[requirement],
+            &[],
+            None,
+            Duration::from_secs(10),
+        )
+        .expect_err("mismatched browser version must fail preflight");
+        assert!(error
+            .to_string()
+            .contains("gate toolchain preflight failed"));
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("suite-ran")).expect("suite sentinel"),
+            "absent"
+        );
+        assert_eq!(
+            Sha256::digest(fs::read(workspace.path().join("suite-ran")).expect("suite sentinel")),
+            candidate_fingerprint
+        );
+        assert!(!workspace.path().join(".npmrc").exists());
     }
 
     /// Toolchain preflight is declared, never inferred. A gate command is a

@@ -10,6 +10,60 @@ use super::*;
 use uuid::Uuid;
 
 #[test]
+fn terminal_controller_job_releases_active_key_for_next_retry_epoch() {
+    let store = JobStore::default();
+    let active_key = "terminal-cook:cook-1:run-1";
+    let submit_epoch = |epoch: u32| {
+        let request = json!({ "cook_id": "cook-1", "run_id": "run-1", "retry_epoch": epoch });
+        let outcome = store
+            .admit_controller_job(
+                "controller.agent-task-cook-terminal-continuation".to_string(),
+                format!("terminal-cook:cook-1:run-1:retry-{epoch}"),
+                ControllerJobState {
+                    job_type: "agent-task-cook-terminal-continuation".to_string(),
+                    version: 1,
+                    request: request.clone(),
+                    public_request: request.clone(),
+                    request_digest: crate::daemon::hex_digest(&request).unwrap(),
+                    active_idempotency_key: Some(active_key.to_string()),
+                    linked_durable_run_id: Some("run-1".to_string()),
+                    checkpoint: None,
+                    cancellation_requested: false,
+                    cancellation_reason: None,
+                    execution_claim_id: None,
+                    recovery_attempted: false,
+                },
+            )
+            .expect("admit retry epoch");
+        match outcome {
+            ControllerJobSubmissionOutcome::Submitted(id) => id,
+            ControllerJobSubmissionOutcome::Existing(job) => job.id,
+        }
+    };
+
+    let first = submit_epoch(0);
+    assert_eq!(submit_epoch(0), first, "duplicate tick reuses active job");
+    store
+        .start_controller_execution(first)
+        .expect("start first controller job");
+    store
+        .fail_controller_error(first, "fixture worker failed".to_string(), json!({}))
+        .expect("terminalize first controller job as failed");
+    assert_eq!(store.get(first).unwrap().status, JobStatus::Failed);
+
+    let retry = submit_epoch(1);
+    assert_ne!(
+        retry, first,
+        "a new retry epoch gets a distinct durable job"
+    );
+    assert_eq!(
+        submit_epoch(1),
+        retry,
+        "duplicate retry tick reuses the new job"
+    );
+}
+
+#[test]
 fn remote_runner_submission_lookup_is_non_mutating() {
     let store = JobStore::default();
     let missing = store.lookup_remote_runner_submission("missing-key");

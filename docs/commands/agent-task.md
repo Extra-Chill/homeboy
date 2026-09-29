@@ -488,6 +488,23 @@ homeboy agent-task cook \
   --prompt @task.txt
 ```
 
+For a caller-owned existing checkout, `cook` already accepts its path directly
+with `--cwd` (also `--dir`); it does not re-materialize that checkout. Use
+`--prompt @task.md` (also `--prompt-file @task.md`) to snapshot a prompt file and
+`--model` to prefer a route. An explicit model normally pins execution, so add
+`--allow-provider-rotation` to enable the configured fallback chain. The ordinary
+Cook durable run is then inspectable with `agent-task status`, `watch`, and
+`logs`:
+
+```bash
+homeboy agent-task cook --dir /path/to/existing-worktree \
+  --prompt-file @task.md --model openai/gpt-5.6-terra \
+  --allow-provider-rotation --no-finalize
+```
+
+Cook snapshots the prompt once for the durable plan; provider rotations retry
+that same task against the same destination checkout.
+
 Use `agent-task fanout cook-batch` only when there are multiple independent
 issues that should each get separate worktree materialization, branch/PR
 metadata, and fanout status collation.
@@ -1200,6 +1217,17 @@ readiness is reported, not propagated, so this sweep answers `agent-task cook`'s
 missing-`--backend` error instead of failing with the same precondition (#12569).
 A supplied `--backend` still fails fast: that query names one backend and has no
 fuller picture to report.
+
+Provider queries pinned to a runner must use the daemon-backed runner command,
+which does not require durable workspace staging:
+
+```sh
+homeboy runner exec <runner-id> -- homeboy agent-task providers --backend <backend> --validate-readiness
+```
+
+The returned provider catalog is observed on that runner. A disconnected or
+stale runner fails runner-exec admission; controller-local readiness is never
+used as a substitute.
 
 `dispatchability.checks.credentials.status` distinguishes `missing`, `present`,
 `unverified`, `verified`, `unusable`, and `not_required`. Readable credential

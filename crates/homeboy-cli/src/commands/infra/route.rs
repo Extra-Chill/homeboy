@@ -503,7 +503,7 @@ pub(crate) fn route_after_parse_with_provenance(
     );
     // Lab routing carries the durable plan opaquely as JSON (core does not
     // depend on the agent-task subsystem); serialize the selected typed plan.
-    let durable_agent_task_plan = run_handoff
+    let durable_plan = run_handoff
         .as_ref()
         .map(|handoff| &handoff.plan)
         .or_else(|| {
@@ -516,7 +516,9 @@ pub(crate) fn route_after_parse_with_provenance(
             generic_detached_handoff
                 .as_ref()
                 .map(|handoff| &handoff.plan)
-        })
+        });
+    let durable_agent_task_plan = durable_plan
+        .as_ref()
         .map(|plan| {
             serde_json::to_value(plan).map_err(|error| {
                 Error::internal_json(
@@ -535,6 +537,15 @@ pub(crate) fn route_after_parse_with_provenance(
                 .filter(|handoff| handoff.replays_generic_command)
                 .map(|handoff| handoff.run_id.as_str())
         });
+
+    if let (Some(runner_id), Some(plan)) = (route_runner_id, durable_plan) {
+        if !homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+            let runner = homeboy::runner::load(runner_id)?;
+            homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(
+                runner_id, &runner, plan,
+            )?;
+        }
+    }
 
     let outcome = lab_routing::dispatch_lab_offload(
         LabRoutingRequest {
@@ -641,6 +652,14 @@ pub(crate) fn route_composed_lab_command(
     output_file: Option<&str>,
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
 ) -> homeboy::core::Result<Option<i32>> {
+    if let Some(runner_id) = options.runner.as_deref() {
+        if is_agent_task_providers_query(normalized_args) {
+            return Err(runner_provider_query_requires_runner_exec(
+                runner_id,
+                normalized_args,
+            ));
+        }
+    }
     let Some(route_contract) = route.lab_route_contract() else {
         if options.placement == homeboy::cli_surface::Placement::Lab || options.runner.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -756,6 +775,73 @@ pub(crate) fn route_composed_lab_command(
             Ok(Some(output.exit_code))
         }
     }
+}
+
+pub(crate) fn runner_provider_query_requires_runner_exec(
+    runner_id: &str,
+    normalized_args: &[String],
+) -> homeboy::core::Error {
+    let mut command = vec!["homeboy".to_string()];
+    let mut skip_value = false;
+    for argument in normalized_args.iter().skip(1) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(
+            argument.as_str(),
+            "--runner"
+                | "--placement"
+                | "--output"
+                | "--artifact-root"
+                | "--runner-env"
+                | "--runner-secret-env"
+                | "--lab-env-json"
+                | "--runner-workspace-root"
+        ) {
+            skip_value = true;
+            continue;
+        }
+        if argument.starts_with("--runner=")
+            || argument.starts_with("--placement=")
+            || argument.starts_with("--output=")
+            || argument.starts_with("--artifact-root=")
+            || argument.starts_with("--runner-env=")
+            || argument.starts_with("--runner-secret-env=")
+            || argument.starts_with("--lab-env-json=")
+            || argument.starts_with("--runner-workspace-root=")
+            || matches!(
+                argument.as_str(),
+                "--allow-dirty-lab-workspace"
+                    | "--skip-deps-hydration"
+                    | "--delete-workspace-on-failure"
+                    | "--wait"
+            )
+        {
+            continue;
+        }
+        command.push(argument.clone());
+    }
+    let replay = format!(
+        "homeboy runner exec {} -- {}",
+        homeboy::core::engine::shell::quote_arg(runner_id),
+        command
+            .iter()
+            .map(|argument| homeboy::core::engine::shell::quote_arg(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    homeboy::core::Error::validation_invalid_argument(
+        "runner",
+        "`agent-task providers --runner` cannot use durable Lab workspace staging; no offload was created. Query readiness through daemon-backed runner exec instead.",
+        Some(replay.clone()),
+        Some(vec![format!("Run `{replay}` to query the selected runner directly.")]),
+    )
+}
+
+pub(crate) fn is_agent_task_providers_query(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|window| window[0] == "agent-task" && window[1] == "providers")
 }
 
 fn composed_lab_job_overrides(
@@ -1054,6 +1140,13 @@ fn admit_unmaterialized_cook(
     };
     let resolved = crate::commands::agent_task::run::resolve_cook_destination(*cook.clone())?;
     crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
+    // Run every check the replay worker will run, including model-override
+    // confirmation, before any admission record is persisted (#15009). A
+    // queued Lab admission has no TTY to prompt against, so a submission that
+    // needs `--acknowledge-model-override` is refused here, named, at submit
+    // time — not admitted only to fail the same deterministic check on every
+    // bounded replay attempt for the next hour.
+    crate::commands::agent_task::run::require_model_override_acknowledgement_for_cook(&resolved)?;
     let mut replay_args = normalized_args.to_vec();
     crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
         &mut replay_args,
@@ -1905,6 +1998,59 @@ struct CliCookAdmissionReplayDriver;
 #[derive(Debug)]
 struct CliQueuedRetryReplayDriver;
 
+#[derive(Debug)]
+struct CliTerminalCookContinuationDriver;
+
+const TERMINAL_COOK_JOB_TYPE: &str = "agent-task-cook-terminal-continuation";
+const TERMINAL_COOK_JOB_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalCookJobRequest {
+    schema: String,
+    cook_id: String,
+    run_id: String,
+    #[serde(default)]
+    generation: u64,
+}
+
+fn terminal_cook_job_idempotency_keys(
+    cook_id: &str,
+    run_id: &str,
+    generation: u64,
+) -> (String, String) {
+    (
+        format!("terminal-cook:{cook_id}:{run_id}:generation-{generation}"),
+        format!("terminal-cook:{cook_id}"),
+    )
+}
+
+fn parse_terminal_cook_job(
+    request: &serde_json::Value,
+) -> homeboy::core::Result<TerminalCookJobRequest> {
+    let parsed: TerminalCookJobRequest =
+        serde_json::from_value(request.clone()).map_err(|error| {
+            Error::validation_invalid_argument(
+                "terminal_cook_continuation",
+                format!("invalid terminal Cook continuation request: {error}"),
+                None,
+                None,
+            )
+        })?;
+    if parsed.schema != "homeboy/terminal-cook-continuation-request/v1"
+        || parsed.cook_id.trim().is_empty()
+        || parsed.run_id.trim().is_empty()
+    {
+        return Err(Error::validation_invalid_argument(
+            "terminal_cook_continuation",
+            "terminal Cook continuation request has an invalid schema or identity",
+            None,
+            None,
+        ));
+    }
+    Ok(parsed)
+}
+
 impl homeboy::core::daemon::orchestration::QueuedRetryReplayDriver for CliQueuedRetryReplayDriver {
     fn replay(&self, run_id: &str) -> homeboy::core::Result<serde_json::Value> {
         let scoped_run_ids = HashSet::from([run_id.to_string()]);
@@ -1924,9 +2070,137 @@ impl homeboy::core::daemon::orchestration::QueuedRetryReplayDriver for CliQueued
     }
 }
 
+impl homeboy::core::daemon::controller_job_driver::ControllerJobDriver
+    for CliTerminalCookContinuationDriver
+{
+    fn job_type(&self) -> &'static str {
+        TERMINAL_COOK_JOB_TYPE
+    }
+
+    fn version(&self) -> u32 {
+        TERMINAL_COOK_JOB_VERSION
+    }
+
+    fn public_request(
+        &self,
+        request: &serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        let parsed = parse_terminal_cook_job(request)?;
+        Ok(serde_json::json!({ "cook_id": parsed.cook_id, "run_id": parsed.run_id }))
+    }
+
+    fn public_progress(
+        &self,
+        progress: &serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        Ok(progress.clone())
+    }
+
+    fn public_result(
+        &self,
+        result: &serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        Ok(result.clone())
+    }
+
+    fn public_error(
+        &self,
+        error: &homeboy::core::Error,
+    ) -> homeboy::core::daemon::controller_job_driver::ControllerJobPublicError {
+        homeboy::core::daemon::controller_job_driver::ControllerJobPublicError {
+            message: "terminal Cook continuation failed; inspect the linked run lifecycle record"
+                .to_string(),
+            data: serde_json::json!({ "code": error.code.as_str() }),
+        }
+    }
+
+    fn validate_secret_references(&self, request: &serde_json::Value) -> homeboy::core::Result<()> {
+        parse_terminal_cook_job(request).map(|_| ())
+    }
+
+    fn linked_durable_run_id(&self, request: &serde_json::Value) -> Option<String> {
+        parse_terminal_cook_job(request)
+            .ok()
+            .map(|request| request.run_id)
+    }
+
+    fn execute(
+        &self,
+        request: serde_json::Value,
+        job: homeboy::core::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        if job.is_cancelled() {
+            return Err(Error::validation_invalid_argument(
+                "terminal_cook_continuation",
+                "terminal Cook continuation job was cancelled before execution",
+                None,
+                None,
+            ));
+        }
+        let request = parse_terminal_cook_job(&request)?;
+        let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
+        let Some(claim) = store.claim_continuation_for(&request.cook_id, &request.run_id)? else {
+            return Ok(serde_json::json!({ "claimed": false, "completed": true }));
+        };
+        let exit_code =
+            crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
+                claim,
+                crate::commands::route::reconstruct_cook_attempt_dispatcher,
+                |options| {
+                    let executor = Arc::new(
+                    crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+                );
+                    crate::agents::agent_task_service::CookService::run(
+                    options,
+                    crate::agents::agent_task_service::CookRuntime::production(
+                        executor,
+                        &store,
+                        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                    ),
+                    crate::agents::agent_task_service::CookMode::ContinueTerminal,
+                )
+                .map(|result| result.exit_code)
+                },
+            )?;
+        if exit_code != 0 {
+            return Err(Error::internal_unexpected(format!(
+                "terminal Cook continuation exited with status {exit_code}"
+            )));
+        }
+        Ok(serde_json::json!({
+            "claimed": true,
+            "cook_id": request.cook_id,
+            "run_id": request.run_id,
+            "exit_code": exit_code,
+        }))
+    }
+
+    fn cancel(&self, _prepared: &serde_json::Value) -> homeboy::core::Result<()> {
+        Ok(())
+    }
+}
+
 impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     for CliCookAdmissionReplayDriver
 {
+    fn schedule_terminal_continuation(
+        &self,
+        request: &serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        let parsed = parse_terminal_cook_job(request)?;
+        let (key, active_key) =
+            terminal_cook_job_idempotency_keys(&parsed.cook_id, &parsed.run_id, parsed.generation);
+        let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
+        let job = client.submit(serde_json::json!({
+            "type": TERMINAL_COOK_JOB_TYPE,
+            "version": TERMINAL_COOK_JOB_VERSION,
+            "idempotency_key": key,
+            "active_idempotency_key": active_key,
+            "request": request,
+        }))?;
+        Ok(serde_json::json!({ "scheduled": true, "job_id": job.id.to_string() }))
+    }
+
     fn select_runner(
         &self,
         request: &serde_json::Value,
@@ -2037,7 +2311,13 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
             )
         })?;
         let worker_pid = child.id();
-        supervise_replay_worker(intent.cook_id.clone(), fence, token.to_string(), child);
+        supervise_replay_worker(
+            intent.cook_id.clone(),
+            fence,
+            token.to_string(),
+            worker_log.clone(),
+            child,
+        );
         Ok(serde_json::json!({
             "schema": "homeboy/unmaterialized-cook-replay-receipt/v1",
             "worker_pid": worker_pid,
@@ -2047,18 +2327,56 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
     }
 }
 
+/// Terminalize a replay claim with its worker's real deterministic failure
+/// instead of the generic release-and-requeue path, when one is available and
+/// not itself marked retryable (#15009). Bounded admission retries exist for
+/// genuinely transient conditions (a runner that dropped between selection
+/// and dispatch, a busy observation store); a deterministic validation
+/// failure — missing model-override acknowledgement, an invalid gate, a bad
+/// argument — fails identically on every attempt and must not consume the
+/// hour-long retry budget only to be reported as a generic "runner shortage"
+/// once exhausted.
 fn supervise_replay_worker(
     cook_id: String,
     fence: u64,
     token: String,
+    worker_log: PathBuf,
     mut child: std::process::Child,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let _ = child.wait();
+        let diagnostic = local_detach::detached_child_diagnostic(&worker_log);
+        if let Some(reason) = deterministic_replay_worker_failure(diagnostic) {
+            if agent_task_lifecycle::fail_unmaterialized_cook_replay_claim_after_worker_exit(
+                &cook_id, fence, &token, &reason,
+            )
+            .unwrap_or(false)
+            {
+                return;
+            }
+        }
         let _ = agent_task_lifecycle::release_unmaterialized_cook_replay_claim_after_worker_exit(
             &cook_id, fence, &token,
         );
     })
+}
+
+/// Classify a replay worker's exit diagnostic (#15009): `Some(message)` only
+/// for a typed failure that is *not* itself marked retryable, so the caller
+/// terminalizes the admission with the worker's real message instead of
+/// requeuing it. A missing/unparsable diagnostic (worker crash, oom-kill, a
+/// log the bounded capture could not read) and an explicitly `retryable: true`
+/// diagnostic both return `None` and fall through to the existing
+/// release-and-requeue path — retrying is still correct for anything that
+/// is not a known deterministic failure.
+fn deterministic_replay_worker_failure(
+    diagnostic: Result<serde_json::Value, &'static str>,
+) -> Option<String> {
+    let diagnostic = diagnostic.ok()?;
+    if diagnostic["retryable"].as_bool() == Some(true) {
+        return None;
+    }
+    diagnostic["message"].as_str().map(str::to_string)
 }
 
 fn validate_replay_intent(
@@ -2135,6 +2453,13 @@ pub(crate) fn register_unmaterialized_cook_replay_driver() {
     homeboy::core::daemon::orchestration::register_queued_retry_replay_driver(Arc::new(
         CliQueuedRetryReplayDriver,
     ));
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        homeboy::core::daemon::controller_job_driver::register_controller_job_driver(Arc::new(
+            CliTerminalCookContinuationDriver,
+        ))
+        .expect("register terminal Cook continuation controller job driver");
+    });
 }
 
 fn unmaterialized_admission_state(

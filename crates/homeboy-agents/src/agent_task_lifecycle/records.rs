@@ -965,7 +965,27 @@ impl AgentTaskRunRecord {
     /// is fresh. Once runner submission begins, runner identity remains the
     /// fail-closed ownership boundary.
     pub(crate) fn has_fresh_controller_pre_provider_heartbeat(&self) -> bool {
-        self.is_controller_pre_provider_phase() && self.has_fresh_update()
+        if !self.is_controller_pre_provider_phase() {
+            return false;
+        }
+        // Once a Lab target is selected, progress heartbeats may advance
+        // without bumping the run-level timestamp. The controller still owns
+        // this phase until the runner job identity is durably bound.
+        let Some(progress_updated_at) = self
+            .metadata
+            .pointer("/cook_progress/updated_at")
+            .and_then(Value::as_str)
+        else {
+            return self.has_fresh_update();
+        };
+        chrono::DateTime::parse_from_rfc3339(progress_updated_at)
+            .ok()
+            .is_some_and(|updated_at| {
+                chrono::Utc::now()
+                    .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
+                    .num_minutes()
+                    < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
+            })
     }
 
     /// A run is runner-backed when its durable record carries a runner id or

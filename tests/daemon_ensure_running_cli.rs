@@ -2,6 +2,7 @@ use std::fs;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+use homeboy_core::api_jobs::{JobStatus, JobStore};
 use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
 
 #[test]
@@ -37,6 +38,96 @@ fn ensure_running_observes_the_isolated_daemon_startup_lease() {
         String::from_utf8_lossy(&stop_output.stdout),
         String::from_utf8_lossy(&stop_output.stderr),
     );
+}
+
+#[test]
+fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
+    let context = HermeticTestContext::new();
+    let runner_root = context
+        .config_dir()
+        .join("daemon-generations/shared-runner/controllers");
+    let first_dir = runner_root.join("controller-a/primary");
+    let second_dir = runner_root.join("controller-b/primary");
+
+    let mut first_ensure = context.command(TestBinary::HomeboyFixture);
+    first_ensure
+        .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &first_dir)
+        .args(["daemon", "ensure-running"]);
+    let first_output = bounded_output(first_ensure);
+    assert!(
+        first_output.status.success(),
+        "controller A ensure-running failed: {}",
+        String::from_utf8_lossy(&first_output.stderr),
+    );
+    let first_state_path = first_dir.join("state.json");
+    let first_state_bytes = fs::read(&first_state_path).expect("controller A lease exists");
+    let first_state: serde_json::Value =
+        serde_json::from_slice(&first_state_bytes).expect("controller A lease is JSON");
+    let first_jobs_path = first_dir.join("jobs.json");
+    let first_jobs = JobStore::open_without_reconciliation(&first_jobs_path)
+        .expect("open controller A durable jobs store");
+    let active_job = first_jobs.create("controller-a-active-job");
+    let active_job = first_jobs.start(active_job.id).expect("start durable job");
+    assert_eq!(active_job.status, JobStatus::Running);
+    let first_jobs_before = fs::read(&first_jobs_path).expect("controller A jobs store exists");
+
+    let mut second_ensure = context.command(TestBinary::HomeboyFixture);
+    second_ensure
+        .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &second_dir)
+        .args(["daemon", "ensure-running"]);
+    let second_output = bounded_output(second_ensure);
+    assert!(
+        second_output.status.success(),
+        "controller B must start in its own namespace despite A's live daemon: stdout={} stderr={}",
+        String::from_utf8_lossy(&second_output.stdout),
+        String::from_utf8_lossy(&second_output.stderr),
+    );
+
+    let mut first_status = context.command(TestBinary::HomeboyFixture);
+    first_status
+        .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &first_dir)
+        .args(["daemon", "status"]);
+    let first_status_output = bounded_output(first_status);
+    assert!(
+        first_status_output.status.success(),
+        "controller A status failed after B connected: {}",
+        String::from_utf8_lossy(&first_status_output.stderr),
+    );
+    let second_state: serde_json::Value = serde_json::from_slice(
+        &fs::read(second_dir.join("state.json")).expect("controller B lease exists"),
+    )
+    .expect("controller B lease is JSON");
+    assert_ne!(first_state["pid"], second_state["pid"]);
+    assert_ne!(first_state["lease_id"], second_state["lease_id"]);
+    assert_eq!(
+        fs::read(&first_state_path).expect("controller A lease remains"),
+        first_state_bytes,
+    );
+    assert_eq!(
+        fs::read(&first_jobs_path).expect("controller A jobs store remains"),
+        first_jobs_before,
+        "controller B startup must not reconcile or rewrite controller A's jobs"
+    );
+    assert_eq!(
+        JobStore::open_without_reconciliation(&first_jobs_path)
+            .expect("reopen controller A jobs store")
+            .get(active_job.id)
+            .expect("controller A active job remains")
+            .status,
+        JobStatus::Running
+    );
+
+    for state_dir in [&second_dir, &first_dir] {
+        let mut stop = context.command(TestBinary::HomeboyFixture);
+        stop.env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, state_dir)
+            .args(["daemon", "stop"]);
+        let output = bounded_output(stop);
+        assert!(
+            output.status.success(),
+            "isolated daemon stop failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 #[test]

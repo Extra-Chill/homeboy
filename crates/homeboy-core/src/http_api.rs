@@ -266,6 +266,14 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["jobs", id, "events"]) => Ok(HttpEndpoint::JobEvents {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Get, ["jobs", id, "watch"]) => Ok(HttpEndpoint::JobWatch {
+            id: (*id).to_string(),
+            request: {
+                let mut request = job_watch_request(path)?;
+                request.job_id = (*id).to_string();
+                request
+            },
+        }),
         (HttpMethod::Post, ["jobs", id, "cancel"]) => Ok(HttpEndpoint::JobCancel {
             id: (*id).to_string(),
         }),
@@ -334,6 +342,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /jobs".to_string(),
                 "GET /jobs/:id".to_string(),
                 "GET /jobs/:id/events".to_string(),
+                "GET /jobs/:id/watch".to_string(),
                 "POST /jobs/:id/cancel".to_string(),
                 "GET /tools".to_string(),
                 "GET /tools/:id".to_string(),
@@ -362,10 +371,30 @@ pub fn handle_with_jobs_and_runner<R>(
 where
     R: AnalysisJobRunner,
 {
+    handle_with_jobs_runner_and_context(
+        request,
+        job_store,
+        analysis_runner,
+        &crate::control_plane::ControlPlaneInvocationContext::default(),
+    )
+}
+
+/// Execute a routed HTTP API request with the caller's control-plane services.
+/// Daemon connections pass their job service so loop status and stop do not
+/// open a second transport back into the same process.
+pub fn handle_with_jobs_runner_and_context<R>(
+    request: HttpApiRequest,
+    job_store: &JobStore,
+    analysis_runner: R,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
+) -> Result<HttpApiResponse>
+where
+    R: AnalysisJobRunner,
+{
     let endpoint = route(request.method, &request.path)?;
     match &endpoint {
         HttpEndpoint::ControlPlaneRun { id } => {
-            return control_plane_run_response(endpoint.clone(), id);
+            return control_plane_run_response(endpoint.clone(), id, context);
         }
         HttpEndpoint::ControlPlaneRunReferences { id, reference_type } => {
             return control_plane_references_response(endpoint.clone(), id, *reference_type);
@@ -473,7 +502,12 @@ where
             return control_plane_capabilities_response();
         }
         HttpEndpoint::ControlPlaneRunActions { id } => {
-            return control_plane_action_response(endpoint.clone(), id, request.body.as_ref());
+            return control_plane_action_response(
+                endpoint.clone(),
+                id,
+                request.body.as_ref(),
+                context,
+            );
         }
         HttpEndpoint::ResourceTopology { root } => {
             return topology_response(endpoint.clone(), root.clone());
@@ -681,6 +715,18 @@ where
             "job_id": id,
             "events": job_store.events(parse_job_id(id)?)?,
         }),
+        HttpEndpoint::JobWatch { id, request } => {
+            // The SSH tunnel is this surface's trust boundary, so the local
+            // reader resolves through the shared watch service with no
+            // runner-bound ownership restriction — the same rule the
+            // neighbouring job reads use (#13881 step 2).
+            let response = crate::daemon::runner_watch::watch_job(job_store, request, None)?;
+            json!({
+                "command": "api.jobs.watch",
+                "job_id": id,
+                "response": response,
+            })
+        }
         HttpEndpoint::JobCancel { id } => {
             let job_id = parse_job_id(id)?;
             json!({
@@ -1111,8 +1157,12 @@ fn control_plane_submission_response(
     }
 }
 
-fn control_plane_run_response(endpoint: HttpEndpoint, run_id: &str) -> Result<HttpApiResponse> {
-    match control_plane_run(run_id) {
+fn control_plane_run_response(
+    endpoint: HttpEndpoint,
+    run_id: &str,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
+) -> Result<HttpApiResponse> {
+    match control_plane_run(run_id, context) {
         Ok(resource) => control_plane_ok(endpoint, resource),
         Err(error) => control_plane_err(endpoint, error),
     }
@@ -1190,6 +1240,7 @@ fn control_plane_action_response(
     endpoint: HttpEndpoint,
     run_id: &str,
     body: Option<&Value>,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
 ) -> Result<HttpApiResponse> {
     let result = body
         .cloned()
@@ -1209,13 +1260,8 @@ fn control_plane_action_response(
             })
         })
         .and_then(|request| {
-            control_plane_run_id(run_id).and_then(|run_id| {
-                crate::control_plane::execute_action(
-                    &run_id,
-                    &request,
-                    &crate::control_plane::ControlPlaneInvocationContext::default(),
-                )
-            })
+            control_plane_run_id(run_id)
+                .and_then(|run_id| crate::control_plane::execute_action(&run_id, &request, context))
         });
     match result {
         Ok(acknowledgement) => control_plane_ok(endpoint, acknowledgement),
@@ -1225,12 +1271,13 @@ fn control_plane_action_response(
 
 fn control_plane_run(
     run_id: &str,
+    context: &crate::control_plane::ControlPlaneInvocationContext,
 ) -> std::result::Result<
     homeboy_control_plane_contract::ControlPlaneRun,
     homeboy_control_plane_contract::ControlPlaneError,
 > {
     let run_id = control_plane_run_id(run_id)?;
-    crate::control_plane::run(&run_id)
+    crate::control_plane::run_with_context(&run_id, context)
 }
 
 fn control_plane_run_id(
@@ -2071,6 +2118,32 @@ fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> {
             Some(run_id.to_string()),
             None,
         )
+    })
+}
+
+/// Parse a read-only `GET /jobs/:id/watch` query into the versioned Runner
+/// API watch request. `after_sequence` defaults to 0 and `limit` is optional;
+/// the schema and API version are pinned to Runner API v1 by construction.
+fn job_watch_request(path: &str) -> Result<homeboy_runner_contract::RunnerApiWatchRequest> {
+    let after_sequence = match query_value(path, "after_sequence") {
+        Some(value) => value.parse::<u64>().map_err(|error| {
+            Error::validation_invalid_argument("after_sequence", error.to_string(), None, None)
+        })?,
+        None => 0,
+    };
+    let limit = match query_value(path, "limit") {
+        Some(value) => Some(value.parse::<u32>().map_err(|error| {
+            Error::validation_invalid_argument("limit", error.to_string(), None, None)
+        })?),
+        None => None,
+    };
+    Ok(homeboy_runner_contract::RunnerApiWatchRequest {
+        schema: homeboy_runner_contract::RUNNER_API_WATCH_REQUEST_SCHEMA.to_string(),
+        api_version: homeboy_runner_contract::RUNNER_API_V1,
+        runner_id: String::new(),
+        job_id: String::new(),
+        after_sequence,
+        limit,
     })
 }
 

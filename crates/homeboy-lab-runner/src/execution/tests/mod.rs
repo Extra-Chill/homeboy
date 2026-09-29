@@ -16,6 +16,7 @@ mod policy;
 mod prepare;
 mod redaction;
 mod secret_source;
+mod watch;
 
 pub(crate) use crate::test_support::ssh_runner;
 pub(super) fn local_runner(workspace_root: String) -> Runner {

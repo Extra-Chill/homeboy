@@ -824,6 +824,7 @@ fn refresh_failure_summary(failure: Option<&Value>) -> Value {
     serde_json::json!({
         "exit_code": failure.get("exit_code").and_then(Value::as_i64),
         "verification": failure.get("verification").and_then(Value::as_str).map(bounded_refresh_text),
+        "verification_kind": failure.get("verification_kind").and_then(Value::as_str).map(bounded_refresh_text),
         "job_id": failure.get("job_id").and_then(Value::as_str).map(bounded_refresh_text),
         "mirror_run_id": failure.get("mirror_run_id").and_then(Value::as_str).map(bounded_refresh_text),
     })
@@ -1695,7 +1696,7 @@ mod tests {
             "daemon_refreshed": false,
             "reconnect_required": true,
             "phase_summary": (0..100).map(|_| serde_json::json!({ "name": "materialize", "status": "failed", "exit_code": 1 })).collect::<Vec<_>>(),
-            "failure": { "exit_code": 1, "stdout": "x".repeat(512 * 1024), "stderr": "y".repeat(512 * 1024) },
+            "failure": { "exit_code": 1, "verification_kind": "history_diverged", "verification": "GitHub API unavailable", "stdout": "x".repeat(512 * 1024), "stderr": "y".repeat(512 * 1024) },
             "plan": { "script": "z".repeat(512 * 1024) },
             "artifacts": {
                 "run_id": "run-1",
@@ -1711,6 +1712,8 @@ mod tests {
         );
         assert!(!String::from_utf8_lossy(&rendered).contains(&"x".repeat(512)));
         assert_eq!(bounded["artifacts"]["run_id"], "run-1");
+        assert_eq!(bounded["failure"]["verification_kind"], "history_diverged");
+        assert_eq!(bounded["failure"]["verification"], "GitHub API unavailable");
 
         let run = CommandRun::from_command_stdout_result("runner", Ok(bounded), 1)
             .with_output_file_result(Ok(payload.clone()));

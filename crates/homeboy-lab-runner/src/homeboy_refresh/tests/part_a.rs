@@ -96,7 +96,7 @@ fn ancestry_exec_output(exit_code: i32) -> RunnerExecOutput {
 fn linear_commit_fixture() -> (tempfile::TempDir, String, String) {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -689,6 +689,7 @@ fn materialization_preflight_resolves_abbreviated_reachable_authorities_and_refu
             false,
             authorities,
         );
+        assert!(script.contains("HOMEBOY_REFRESH_AUTHORITY_UNRESOLVED"));
         let guard = script
             .split_once("mkdir -p \"$(dirname \"$dir\")\"")
             .expect("materialization script has a preflight boundary")
@@ -711,6 +712,19 @@ fn materialization_preflight_resolves_abbreviated_reachable_authorities_and_refu
     assert!(
         String::from_utf8_lossy(&downgrade.stderr).contains("Refusing Homeboy runner downgrade")
     );
+
+    // Unadvertised installed PR heads can fail object fetch before the
+    // post-build GitHub provenance verifier runs. Defer only that unknown
+    // comparison; a proven ancestry rollback above remains blocked.
+    let orphan_authority = "f".repeat(40);
+    let unresolved = preflight(&new, &[&orphan_authority]);
+    assert!(
+        unresolved.status.success(),
+        "unavailable authority should defer to promotion validation: {}",
+        String::from_utf8_lossy(&unresolved.stderr)
+    );
+    assert!(String::from_utf8_lossy(&unresolved.stderr)
+        .contains("HOMEBOY_REFRESH_AUTHORITY_UNRESOLVED"));
 }
 
 #[test]
@@ -732,7 +746,7 @@ fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_
 {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -844,7 +858,7 @@ fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_
 fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -946,7 +960,7 @@ fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
 fn rollback_evidence_excludes_unrelated_authorities() {
     let fixture = tempfile::tempdir().expect("git fixture");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.email", "homeboy@example.test"],
         vec!["config", "user.name", "Homeboy Test"],
     ] {
@@ -1075,7 +1089,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     .expect("write core build identity consumer");
 
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.name", "Homeboy Test"],
         vec!["config", "user.email", "homeboy@example.test"],
     ] {
@@ -1224,7 +1238,7 @@ fn managed_slot_materialization_publishes_verified_select_authority() {
     std::fs::create_dir_all(&source).expect("source directory");
     std::fs::create_dir_all(&tools).expect("tool directory");
     for args in [
-        vec!["init", "--quiet"],
+        vec!["init", "--quiet", "--initial-branch=main"],
         vec!["config", "user.name", "Homeboy Test"],
         vec!["config", "user.email", "homeboy@example.test"],
     ] {
@@ -2206,7 +2220,7 @@ fn fatal_ancestry_executor_output_retains_parent_actionable_refs() {
         })
         .expect("executor output is retained for classification");
     assert_eq!(probe.exit_code, 128);
-    assert!(!probe.is_ancestor);
+    assert_eq!(probe.relation, None);
     let phase = refresh_ancestry_phase(&probe.execution);
     assert_eq!(
         vec![phase],
@@ -2287,13 +2301,349 @@ fn remote_forward_upgrade_uses_runner_owned_ancestry_evidence() {
                     Ok((ancestry_exec_output(exit_code), exit_code))
                 },
             )
-            .map(|result| result.is_ancestor)
+            .map(|result| matches!(result.relation, Some(RefreshHistoryRelation::Rollback)))
         },
     )
     .expect("forward upgrade is accepted");
 
     assert!(accepted.is_none());
-    assert_eq!(probes, 1);
+    assert_eq!(probes, 2);
+}
+
+#[test]
+fn validate_refresh_promotion_blocks_unrelated_diverged_history_without_pr() {
+    let fixture = tempfile::tempdir().expect("diverged git fixture");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .output()
+            .expect("git fixture command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    git(&["config", "user.email", "homeboy@example.test"]);
+    git(&["config", "user.name", "Homeboy Test"]);
+    std::fs::write(fixture.path().join("file"), "base\n").expect("base");
+    git(&["add", "file"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    git(&["checkout", "--quiet", "-b", "pr-head"]);
+    std::fs::write(fixture.path().join("file"), "installed PR\n").expect("PR head");
+    git(&["commit", "--quiet", "-am", "installed PR"]);
+    let installed = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "--quiet", "main"]);
+    std::fs::write(fixture.path().join("file"), "unrelated candidate\n").expect("candidate");
+    git(&["commit", "--quiet", "-am", "unrelated candidate"]);
+    let candidate = git(&["rev-parse", "HEAD"]);
+    let plan = history_plan("materialize");
+
+    let error = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":candidate}}),
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(installed.clone()),
+            configured_selected: None,
+        },
+        |older, newer| {
+            let comparison = runner_commits_are_ancestral_with(
+                &plan,
+                Some(fixture.path().to_str().unwrap()),
+                older,
+                newer,
+                false,
+                |runner_id, options| {
+                    assert_eq!(runner_id, "lab");
+                    let output = Command::new(&options.command[0])
+                        .args(&options.command[1..])
+                        .output()
+                        .expect("both ancestry probes execute");
+                    let exit_code = output.status.code().unwrap_or(128);
+                    Ok((ancestry_exec_output(exit_code), exit_code))
+                },
+            )?;
+            assert_eq!(comparison.relation, Some(RefreshHistoryRelation::Diverged));
+            promotion_ancestry_decision(&plan, &comparison, || {
+                let cause = github_integration::associated_merge_commit(
+                    "https://github.com/Extra-Chill/homeboy.git",
+                    newer,
+                    |_| Ok("[]".to_string()),
+                )
+                .expect_err("unrelated installed commit has no merged PR");
+                Err(history_diverged_error(&plan, &cause))
+            })
+        },
+    )
+    .expect_err("unrelated diverged history must be blocked");
+    assert_eq!(error.details["field"], "history_diverged");
+    assert!(error.message.contains("no merged PR"));
+}
+
+fn history_plan(mode: &str) -> HomeboyBinaryRefreshPlan {
+    HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: mode.to_string(),
+        source: Some("https://github.com/Extra-Chill/homeboy.git".to_string()),
+        git_ref: Some("main".to_string()),
+        target_dir: Some("/runner/homeboy".to_string()),
+        binary_path: "/runner/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    }
+}
+
+#[test]
+fn promotion_validation_accepts_squash_integrated_installed_pr_on_probe_failure() {
+    const INSTALLED_PR_HEAD: &str = "fdc76d461388c5fca38b2a3743fdb33487347cef";
+    const RELEASE_COMMIT: &str = "5f1d10cc341e385fc9a3e2b16be40f654dea1ece";
+    let fixture = tempfile::tempdir().expect("git fixture");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .output()
+            .expect("git fixture command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(&["init", "--quiet", "--initial-branch=main"]);
+    git(&["config", "user.email", "homeboy@example.test"]);
+    git(&["config", "user.name", "Homeboy Test"]);
+    std::fs::write(fixture.path().join("file"), "base\n").expect("base");
+    git(&["add", "file"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "--quiet", "-b", "pr"]);
+    std::fs::write(fixture.path().join("file"), "feature\n").expect("feature");
+    git(&["commit", "--quiet", "-am", "feature"]);
+    git(&["checkout", "--quiet", "main"]);
+    std::fs::write(fixture.path().join("file"), "feature\n").expect("squashed change");
+    git(&["commit", "--quiet", "-am", "squash #15058"]);
+    let merge_commit = git(&["rev-parse", "HEAD"]);
+    std::fs::write(fixture.path().join("release"), "v0.391.2\n").expect("release");
+    git(&["add", "release"]);
+    git(&["commit", "--quiet", "-m", "release v0.391.2"]);
+    let release_in_fixture = git(&["rev-parse", "HEAD"]);
+
+    let plan = history_plan("materialize");
+    let accepted = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":RELEASE_COMMIT}}),
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(INSTALLED_PR_HEAD.to_string()),
+            configured_selected: None,
+        },
+        |candidate, installed| {
+            let failed_probe = RefreshAncestryExecution {
+                execution: ancestry_exec_output(128),
+                relation: Some(RefreshHistoryRelation::Diverged),
+                exit_code: 1,
+            };
+            promotion_ancestry_decision(&plan, &failed_probe, || {
+                assert_eq!(candidate, RELEASE_COMMIT);
+                assert_eq!(installed, INSTALLED_PR_HEAD);
+                github_integration::proves_forward(
+                    "https://github.com/Extra-Chill/homeboy.git",
+                    installed,
+                    candidate,
+                    |url| {
+                        assert!(url.contains(INSTALLED_PR_HEAD));
+                        Ok(format!(
+                            r#"[{{"merged_at":"2026-09-25T11:26:31Z","merge_commit_sha":"{merge_commit}","base":{{"repo":{{"full_name":"Extra-Chill/homeboy"}}}}}}]"#
+                        ))
+                    },
+                    |merge, destination| {
+                        assert_eq!(destination, RELEASE_COMMIT);
+                        let output = Command::new("git")
+                            .args(["-C", fixture.path().to_str().unwrap(), "merge-base", "--is-ancestor", merge, &release_in_fixture])
+                            .status()
+                            .expect("git DAG proof");
+                        Ok(output.success())
+                    },
+                )
+                .map_err(|error| Error::internal_unexpected(error))
+            })
+        },
+    )
+    .expect("merged PR integration proves forward convergence");
+    assert!(accepted.is_none());
+    assert_ne!(
+        base, merge_commit,
+        "fixture models a squash, not a merge parent"
+    );
+}
+
+#[test]
+fn promotion_validation_keeps_probe_failure_blocked_when_github_provenance_is_unavailable() {
+    let plan = history_plan("materialize");
+    let candidate = "5f1d10cc341e385fc9a3e2b16be40f654dea1ece";
+    let installed = "fdc76d461388c5fca38b2a3743fdb33487347cef";
+    let error = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":candidate}}),
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(installed.to_string()),
+            configured_selected: None,
+        },
+        |_, _| {
+            promotion_ancestry_unavailable(ancestry_comparison_error(&plan), || {
+                Err(history_diverged_error(
+                    &plan,
+                    "GitHub PR provenance lookup returned HTTP 503",
+                ))
+            })
+        },
+    )
+    .expect_err("unknown integration provenance remains blocked");
+    assert_eq!(error.details["field"], "history_diverged");
+    assert!(error.message.contains("HTTP 503"));
+    assert!(error.message.contains("cannot prove"));
+    assert!(error.details["tried"][0]
+        .as_str()
+        .is_some_and(|hint| hint.contains("Verify the selected ref")));
+}
+
+#[test]
+fn divergent_or_unmerged_pr_reports_typed_history_diverged_recovery() {
+    let plan = history_plan("select");
+    let cause = github_integration::proves_forward(
+        "https://github.com/Extra-Chill/homeboy.git",
+        "fdc76d461388c5fca38b2a3743fdb33487347cef",
+        "5f1d10cc341e385fc9a3e2b16be40f654dea1ece",
+        |_| {
+            Ok(r#"[{"merged_at":"2026-09-25T11:26:31Z","merge_commit_sha":"07b0fa3d9b9464dc7efe8d7c9d96dda51d37c324","base":{"repo":{"full_name":"Extra-Chill/homeboy"}}}]"#.to_string())
+        },
+        |_, _| Ok(false),
+    )
+    .expect_err("merge commit is not reachable from destination");
+    let error = history_diverged_error(&plan, &cause);
+    assert_eq!(error.details["field"], "history_diverged");
+    assert!(error.message.contains("not an ancestor"));
+    assert!(error.details["tried"][0]
+        .as_str()
+        .is_some_and(|hint| hint.contains("Verify the selected ref")));
+}
+
+#[test]
+fn ordinary_git_ancestry_results_do_not_query_github() {
+    let plan = history_plan("materialize");
+    for (relation, expected) in [
+        (RefreshHistoryRelation::Rollback, true),
+        (RefreshHistoryRelation::Forward, false),
+    ] {
+        let comparison = RefreshAncestryExecution {
+            execution: ancestry_exec_output(0),
+            relation: Some(relation),
+            exit_code: 0,
+        };
+        let decision = promotion_ancestry_decision(&plan, &comparison, || {
+            panic!("GitHub lookup should not run for {relation:?} history")
+        })
+        .expect("ordinary Git comparison is sufficient");
+        assert_eq!(decision, expected);
+    }
+}
+
+#[test]
+fn select_uses_verified_managed_source_and_checkout_for_squash_integration() {
+    let (fixture, installed, selected) = linear_commit_fixture();
+    let mut plan = history_plan("select");
+    plan.source = None;
+    plan.target_dir = None;
+    let stdout = format!(
+        "HOMEBOY_REFRESH_MANAGED_SOURCE=https://github.com/Extra-Chill/homeboy.git\nHOMEBOY_REFRESH_MANAGED_CHECKOUT={}\nHOMEBOY_REFRESH_MANAGED_COMMIT={selected}\n{{\"data\":{{\"git_commit\":\"{selected}\"}}}}",
+        fixture.path().display()
+    );
+    let identity = parse_identity(&stdout).expect("managed selected identity");
+    let checkout = managed_slot_checkout(&plan, &stdout, &identity)
+        .expect("managed provenance is valid")
+        .expect("managed checkout is present");
+    let source = refresh_comparison_source(&plan, &stdout, &identity)
+        .expect("source provenance matches the binary")
+        .expect("verified managed source");
+
+    let accepted = validate_refresh_promotion(
+        &plan,
+        &identity,
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(installed.clone()),
+            configured_selected: None,
+        },
+        |candidate, authority| {
+            let error = ancestry_comparison_error(&plan);
+            promotion_ancestry_unavailable(error, || {
+                assert_eq!(candidate, &selected);
+                assert_eq!(authority, &installed);
+                github_integration::proves_forward(
+                    &source,
+                    authority,
+                    candidate,
+                    |url| {
+                        assert!(url.contains(authority));
+                        Ok(format!(
+                            r#"[{{"merged_at":"2026-09-25T11:26:31Z","merge_commit_sha":"{selected}","base":{{"repo":{{"full_name":"Extra-Chill/homeboy"}}}}}}]"#
+                        ))
+                    },
+                    |merge, destination| {
+                        assert_eq!(checkout, fixture.path().display().to_string());
+                        fixture_commits_are_ancestral(
+                            Path::new(&checkout),
+                            merge,
+                            destination,
+                        )
+                        .map_err(|error| error.to_string())
+                    },
+                )
+                .map_err(Error::internal_unexpected)
+            })
+        },
+    )
+    .expect("verified managed selection can prove merged integration");
+    assert!(accepted.is_none());
+}
+
+#[test]
+fn select_without_managed_source_refuses_unproven_diverged_commit() {
+    let (_, installed, selected) = linear_commit_fixture();
+    let mut plan = history_plan("select");
+    plan.source = None;
+    plan.target_dir = None;
+    let identity = serde_json::json!({"data":{"git_commit":selected}});
+    let output = identity.to_string();
+    assert!(refresh_comparison_source(&plan, &output, &identity)
+        .expect("no managed provenance")
+        .is_none());
+
+    let error = validate_refresh_promotion(
+        &plan,
+        &identity,
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(installed),
+            configured_selected: None,
+        },
+        |_, _| promotion_ancestry_unavailable(ancestry_comparison_error(&plan), || Ok(false)),
+    )
+    .expect_err("selection without verified source stays blocked");
+    assert_eq!(error.details["field"], "allow_downgrade");
 }
 
 #[test]
@@ -2342,7 +2692,7 @@ fn remote_true_downgrade_is_still_refused_from_runner_owned_evidence() {
                     Ok((ancestry_exec_output(exit_code), exit_code))
                 },
             )
-            .map(|result| result.is_ancestor)
+            .map(|result| matches!(result.relation, Some(RefreshHistoryRelation::Rollback)))
         },
     )
     .expect_err("true downgrade remains refused");

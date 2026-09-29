@@ -47,6 +47,7 @@ mod remote_runner;
 pub mod runner_exec_driver;
 mod runner_files;
 pub mod runner_staging;
+pub(crate) mod runner_watch;
 mod stop;
 pub(crate) use stop::stop_unlocked;
 use stop::{active_daemon_job_ids, active_jobs_block_daemon_stop_error, stop_with_force_for_lease};
@@ -665,7 +666,9 @@ fn controller_job_runtimes(
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
 const DAEMON_ENDPOINT_IDENTITY_PROTOCOL: &str = "homeboy.daemon.endpoint-identity.v1";
-pub(super) const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
+// Shared with non-daemon launchers (the lab-runner systemd unit renderer) that
+// must set this exact variable without depending on this module tree (#15087).
+pub(super) use paths::DAEMON_STARTUP_TOKEN_ENV;
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
 pub(super) const FORCE_STOP_WAIT: Duration = Duration::from_secs(5);
@@ -1944,6 +1947,12 @@ fn orchestration_tick_loop(
         });
         isolated_tick(|| {
             let _ = orchestration::reconcile_queued_retries();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_terminal_cook_continuations();
+        });
+        isolated_tick(|| {
+            let _ = orchestration::reconcile_waiting_controllers();
         });
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
@@ -7136,7 +7145,10 @@ fn route_read_only_api(
         }
     }
 
-    match http_api::handle_with_jobs_and_runner(
+    let context = crate::control_plane::ControlPlaneInvocationContext {
+        daemon: Some(DaemonControllerJobService::new(job_store.clone())),
+    };
+    match http_api::handle_with_jobs_runner_and_context(
         http_api::HttpApiRequest {
             method,
             path: path.to_string(),
@@ -7144,6 +7156,7 @@ fn route_read_only_api(
         },
         job_store,
         analysis_runner,
+        &context,
     ) {
         Ok(response) => HttpResponse {
             status_code: response.status,

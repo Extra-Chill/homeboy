@@ -268,7 +268,7 @@ pub fn ssh_auth_failure(stderr: &str) -> Option<SshAuthFailure> {
 mod tests {
     use super::{
         server_host_resolves_only_to_loopback_with, server_uses_loopback_transport_from_ssh_config,
-        ssh_auth_failure, SshAuthFailure,
+        ssh_auth_failure, ssh_host_key_rejected, ssh_transport_unreachable, SshAuthFailure,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -356,6 +356,25 @@ mod tests {
     }
 
     #[test]
+    fn host_down_at_a_numeric_address_is_transport_unreachable() {
+        let stderr = "ssh: connect to host 192.168.86.63 port 22: Host is down";
+        assert!(ssh_transport_unreachable(255, stderr));
+        assert!(ssh_transport_unreachable(
+            -1,
+            &format!("remote Homeboy version check failed (exit 255): stdout=, stderr={stderr}")
+        ));
+        assert!(!ssh_transport_unreachable(
+            255,
+            "Host key verification failed."
+        ));
+        assert!(ssh_host_key_rejected("Host key verification failed."));
+        assert!(!ssh_transport_unreachable(
+            255,
+            "user@host: Permission denied (publickey)."
+        ));
+    }
+
+    #[test]
     fn ssh_proxy_semantics_require_a_tunnel_even_for_loopback_destination() {
         let config = "hostname 127.0.0.1\nport 22\nproxyjump bastion.example\nproxycommand none\n";
         assert!(
@@ -363,6 +382,34 @@ mod tests {
                 .expect("classify")
         );
     }
+}
+
+/// SSH exited 255 before authentication because the recorded host could not be
+/// resolved or reached. `Host is down` is the observed DHCP-address case and is
+/// not in [`TRANSIENT_SSH_STDERR_PATTERNS`]. Auth and host-key failures are not
+/// this class.
+pub fn ssh_transport_unreachable(exit_code: i32, text: &str) -> bool {
+    if ssh_host_key_rejected(text) || ssh_auth_failure(text).is_some() {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    let exit_255 = exit_code == 255 || lower.contains("exit 255");
+    exit_255
+        && (lower.contains("host is down")
+            || lower.contains("nodename nor servname")
+            || lower.contains("name or service not known")
+            || TRANSIENT_SSH_STDERR_PATTERNS
+                .iter()
+                .any(|pattern| lower.contains(pattern)))
+}
+
+/// OpenSSH refused the recorded host key. Callers must not disable verification.
+pub fn ssh_host_key_rejected(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("host key verification failed")
+        || lower.contains("remote host identification has changed")
+        || (lower.contains("host key") && lower.contains("has changed"))
+        || (lower.contains("host key") && lower.contains("strict checking"))
 }
 
 /// Check if an SSH failure is a transient connection error worth retrying.

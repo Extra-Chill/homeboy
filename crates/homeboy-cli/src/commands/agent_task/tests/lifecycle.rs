@@ -96,6 +96,86 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
 }
 
 #[test]
+fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
+    with_temp_home(|| {
+        let run_id = "run-cli-cancelled-lab-json-error";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["lab_staging_diagnostic"] = json!({
+                "schema": "homeboy/lab-staging-diagnostic/v1",
+                "phase": "loading_recipe",
+                "cause": "json_parse",
+                "field": null,
+                "field_status": "unknown",
+                "attachment_kind": "lab-staging-recipe",
+                "attachment": { "run_id": run_id, "kind": "lab-staging-recipe" },
+                "parse": { "category": "data", "line": 4, "column": 17 },
+                "fixture_secret": "never-render-this-secret",
+                "fixture_path": "/private/lab-staging-recipe.json",
+            });
+        })
+        .expect("persist bounded fixture diagnostic");
+        agent_task_lifecycle::cancel_run(run_id, Some("runner cancelled after staging error"))
+            .expect("cancel run");
+
+        let (diagnosis, diagnosis_exit) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose cancelled Lab run");
+        assert_eq!(diagnosis_exit, 0);
+        assert_eq!(diagnosis["root_cause"]["class"], "lab_staging.json_parse");
+        assert_eq!(diagnosis["root_cause"]["source"], "current_lifecycle");
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["phase"],
+            "loading_recipe"
+        );
+        assert_eq!(diagnosis["root_cause"]["details"]["category"], "data");
+        assert_eq!(diagnosis["root_cause"]["details"]["line"], 4);
+        assert_eq!(diagnosis["root_cause"]["details"]["column"], 17);
+        assert_eq!(diagnosis["diagnosis_outcome"], "root_cause_identified");
+        assert!(diagnosis["next_commands"][0]
+            .as_str()
+            .is_some_and(|command| command.contains("agent-task retry")));
+        let compact_diagnosis = serde_json::to_string(&diagnosis).expect("diagnose JSON");
+        assert!(!compact_diagnosis.contains("never-render-this-secret"));
+        assert!(!compact_diagnosis.contains("/private/lab-staging-recipe.json"));
+
+        let (status_value, status_exit) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            exact: true,
+            strict_subject_exit: false,
+            watch: false,
+            interval: "5s".to_string(),
+            timeout: "30m".to_string(),
+        })
+        .expect("status cancelled Lab run");
+        assert_eq!(status_exit, 0);
+        assert!(status_value["blocker_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("JSON could not be parsed")));
+        assert!(status_value["next_action"]["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("agent-task retry")));
+        let compact_status = serde_json::to_string(&status_value).expect("status JSON");
+        assert!(!compact_status.contains("never-render-this-secret"));
+        assert!(!compact_status.contains("/private/lab-staging-recipe.json"));
+
+        let unrelated_run = "run-cli-unrelated-cancellation";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(unrelated_run))
+            .expect("submit unrelated plan");
+        agent_task_lifecycle::cancel_run(unrelated_run, Some("operator cancellation"))
+            .expect("cancel unrelated run");
+        let (unrelated, _) = diagnose(DiagnoseArgs {
+            run_id: unrelated_run.to_string(),
+            full: false,
+        })
+        .expect("diagnose unrelated cancellation");
+        assert_ne!(unrelated["root_cause"]["class"], "lab_staging.json_parse");
+    });
+}
+
+#[test]
 fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
     with_temp_home(|| {
         let run_id = "run-cli-cook-snapshot-failure";

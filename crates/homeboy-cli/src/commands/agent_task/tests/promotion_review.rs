@@ -180,6 +180,109 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
         assert_eq!(hydrated, gates);
         assert_eq!(hydrated.private_verify, [private_program]);
         assert_eq!(hydrated.input_sources[0].path, None);
+
+        cli_gates.gate_environment_preserve.push((
+            "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+            "HOME/.cache/ms-playwright".to_string(),
+        ));
+        let recovered = review::resolve_promotion_gates(
+            &mut cli_gates,
+            true,
+            false,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect("allow environment-only correction alongside durable gates");
+        assert_eq!(recovered.verify, gates.verify);
+        assert_eq!(recovered.private_verify, gates.private_verify);
+        assert_eq!(recovered.input_sources, gates.input_sources);
+        assert_eq!(recovered.gate_toolchains, gates.gate_toolchains);
+        assert_eq!(
+            recovered.gate_package_artifacts,
+            gates.gate_package_artifacts
+        );
+        assert_eq!(recovered.gate_timeout_seconds, gates.gate_timeout_seconds);
+        assert_eq!(
+            recovered
+                .gate_environment
+                .preserve
+                .get("PLAYWRIGHT_BROWSERS_PATH"),
+            Some(&"HOME/.cache/ms-playwright".to_string())
+        );
+        assert!(recovered.gate_environment.isolate_home);
+        assert!(recovered.gate_environment.isolate_xdg);
+
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "promote",
+            run_id,
+            "--to-worktree",
+            "fixture@retained-gates",
+            "--gates-from-cook-recipe",
+            "--gate-env-from",
+            "PLAYWRIGHT_BROWSERS_PATH=HOME/Library/Caches/ms-playwright",
+        ])
+        .expect("durable gate recipe accepts a corrected non-secret environment mapping");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Promote(mut args) = agent_task.command else {
+            panic!("promote command");
+        };
+        assert!(args.gates_from_cook_recipe);
+        assert_eq!(
+            args.gates.gate_environment_preserve[0].0,
+            "PLAYWRIGHT_BROWSERS_PATH"
+        );
+        args.gates.verify.push("npm test".to_string());
+        let changed_policy = review::resolve_promotion_gates(
+            &mut args.gates,
+            true,
+            false,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect_err("a durable reference must reject replacement gate commands");
+        assert!(changed_policy
+            .message
+            .contains("cannot combine a durable gate reference"));
+
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "promote",
+            run_id,
+            "--to-worktree",
+            "fixture@retained-gates",
+            "--gates-from-cook-recipe",
+            "--gate-env",
+            "ARBITRARY=value",
+        ])
+        .expect("parse explicit environment value");
+        let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Promote(mut args) = agent_task.command else {
+            panic!("promote command");
+        };
+        let arbitrary_value = review::resolve_promotion_gates(
+            &mut args.gates,
+            true,
+            false,
+            Some(run_id),
+            run_id,
+            None,
+            None,
+        )
+        .expect_err("durable references permit source mappings only, not arbitrary values");
+        assert!(arbitrary_value
+            .message
+            .contains("cannot combine a durable gate reference"));
     });
 }
 

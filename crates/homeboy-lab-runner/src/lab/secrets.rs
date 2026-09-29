@@ -213,6 +213,80 @@ pub(crate) fn merge_managed_service_secret_env(
     handoff.diagnostics["secret_env_names"] = serde_json::json!(handoff.secret_env_names);
 }
 
+/// Project the admitted provider route into the Lab handoff. The CLI-shaped
+/// discovery above describes the requested route, but readiness may select a
+/// different effective route whose runner-owned identities only exist on the
+/// durable plan.
+pub(crate) fn merge_agent_task_provider_secret_env(
+    handoff: &mut LabSecretEnvHandoffPlan,
+    plan: &AgentTaskPlan,
+) {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers.providers());
+    names.extend(
+        plan.tasks
+            .iter()
+            .flat_map(|task| task.executor.secret_env.iter().cloned()),
+    );
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return;
+    }
+
+    handoff
+        .secret_env_plan
+        .extend_secret_env_names(names.clone());
+    handoff.secret_env_names = handoff.secret_env_plan.secret_env_names();
+    for name in &names {
+        handoff.env_delta.remove(name);
+        if !handoff.runner_deferred_secret_env.contains(name) {
+            handoff.runner_deferred_secret_env.push(name.clone());
+        }
+        if handoff.entries.iter().any(|entry| entry.name == *name) {
+            continue;
+        }
+        handoff.entries.push(SecretEnvHandoffEntry {
+            name: name.clone(),
+            owner: "runner".to_string(),
+            source: PLAN_PROVIDER_PROVENANCE.to_string(),
+            destination: "runner".to_string(),
+            status: "deferred".to_string(),
+            remediation: Some(
+                "Configure this name in the selected runner secret_env references before Lab dispatch."
+                    .to_string(),
+            ),
+        });
+    }
+    handoff.runner_deferred_secret_env.sort();
+    handoff.runner_deferred_secret_env.dedup();
+    handoff.secret_env_plan.env_materialization = Some(EnvMaterializationPlan {
+        secret_refs: handoff
+            .secret_env_plan
+            .secret_env_names()
+            .into_iter()
+            .map(|name| EnvSecretRef {
+                owner: Some(
+                    if handoff.runner_deferred_secret_env.contains(&name) {
+                        "runner"
+                    } else {
+                        "controller"
+                    }
+                    .to_string(),
+                ),
+                name,
+            })
+            .collect(),
+        ..EnvMaterializationPlan::default()
+    });
+    handoff.diagnostics["entries"] =
+        serde_json::to_value(&handoff.entries).unwrap_or(serde_json::Value::Array(Vec::new()));
+    handoff.diagnostics["secret_env_names"] = serde_json::json!(handoff.secret_env_names);
+    handoff.diagnostics["secret_env_plan"] =
+        serde_json::to_value(redacted_lab_secret_env_plan(&handoff.secret_env_plan))
+            .unwrap_or(serde_json::Value::Null);
+}
+
 fn empty_agent_task_secret_env_metadata() -> serde_json::Value {
     serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
@@ -501,38 +575,50 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
     secret_env_plan: &SecretEnvPlan,
 ) -> Result<()> {
     let tasks = declared_agent_task_run_plan_secret_env_by_task(args);
-    if tasks.is_empty() {
-        return Ok(());
-    }
     let required_names = secret_env_plan.secret_env_names();
+    let mut ordered_required_names = Vec::new();
+    for name in tasks.iter().flat_map(|task| task.secret_env.iter()) {
+        if required_names.contains(name) && !ordered_required_names.contains(name) {
+            ordered_required_names.push(name.clone());
+        }
+    }
+    for name in required_names {
+        if !ordered_required_names.contains(&name) {
+            ordered_required_names.push(name);
+        }
+    }
 
     // Dedupe missing env names while preserving first-seen order so the
     // operator-facing message lists each name exactly once, even when several
     // plan tasks declare the same requirement.
     let mut missing: Vec<String> = Vec::new();
     let mut required_by_tasks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    for task in &tasks {
-        for name in &task.secret_env {
-            if !required_names.contains(name) {
-                continue;
-            }
-            if env.contains_key(name)
-                || runner.secret_env.contains_key(name)
-                || task.secret_sources.contains(name)
+    for name in &ordered_required_names {
+        let task_sources = tasks
+            .iter()
+            .filter(|task| task.secret_env.iter().any(|task_name| task_name == name))
+            .any(|task| task.secret_sources.contains(name));
+        if env.contains_key(name) || runner.secret_env.contains_key(name) || task_sources {
+            continue;
+        }
+        missing.push(name.clone());
+        let entry = required_by_tasks
+            .entry(name.clone())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let serde_json::Value::Array(task_ids) = entry {
+            for task in tasks
+                .iter()
+                .filter(|task| task.secret_env.iter().any(|task_name| task_name == name))
             {
-                continue;
-            }
-            if !missing.iter().any(|seen| seen == name) {
-                missing.push(name.clone());
-            }
-            let entry = required_by_tasks
-                .entry(name.clone())
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            if let serde_json::Value::Array(task_ids) = entry {
                 let task_id = serde_json::Value::String(task.task_id.clone());
                 if !task_ids.contains(&task_id) {
                     task_ids.push(task_id);
                 }
+            }
+            if task_ids.is_empty() {
+                task_ids.push(serde_json::Value::String(
+                    "effective_provider_route".to_string(),
+                ));
             }
         }
     }
@@ -560,6 +646,43 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
         );
     }
     Err(error)
+}
+
+/// Check the effective provider identities before a Lab attempt is admitted.
+/// This is deliberately value-free: the controller only needs the runner's
+/// configured reference inventory, not the referenced secret material.
+pub fn preflight_agent_task_runner_provider_secret_env_plan(
+    runner_id: &str,
+    runner: &Runner,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
+    let names = agent_task_runner_provider_secret_env_names(plan);
+    if names.is_empty() {
+        return Ok(());
+    }
+    let secret_env_plan = SecretEnvPlan::from_secret_env_names(names);
+    preflight_agent_task_runner_secret_env_plan(
+        runner_id,
+        runner,
+        &[],
+        &HashMap::new(),
+        &secret_env_plan,
+    )
+}
+
+/// Resolve only the effective provider's required runner secret identities.
+/// Both Cook admission and staging consume this set without resolving values.
+pub fn agent_task_runner_provider_secret_env_names(plan: &AgentTaskPlan) -> Vec<String> {
+    let providers = ExtensionProviderAgentTaskExecutor::discover();
+    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers.providers());
+    names.extend(
+        plan.tasks
+            .iter()
+            .flat_map(|task| task.executor.secret_env.iter().cloned()),
+    );
+    names.sort();
+    names.dedup();
+    names
 }
 
 pub(crate) fn preflight_lab_secret_env_handoff(

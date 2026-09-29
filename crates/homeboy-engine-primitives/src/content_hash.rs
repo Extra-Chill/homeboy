@@ -124,6 +124,51 @@ where
     format!("{:x}", hasher.finalize())
 }
 
+/// Transport name for a projected provider-evidence directory.
+pub const PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT: &str = "content-addressed-directory/v1";
+
+/// One selected file in a directory evidence projection.
+///
+/// `relative_path` uses `/` separators and no `.` or `..` components.
+/// `sha256` is `sha256:` plus lowercase hex of the file bytes.
+pub fn directory_evidence_entry_record(
+    relative_path: &str,
+    sha256: &str,
+    size_bytes: u64,
+) -> String {
+    format!("{relative_path}\n{sha256}\n{size_bytes}")
+}
+
+/// Digest of an ordered directory projection. Distinct from [`sha256_hex`]:
+/// it identifies relative paths, file digests, and sizes via
+/// [`nul_terminated_digest`], not raw directory bytes.
+pub fn directory_evidence_tree_digest<I, S>(entries: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<[u8]>,
+{
+    format!("sha256:{}", nul_terminated_digest(entries))
+}
+
+/// Whether `relative` can be joined under a projection root without escaping it.
+pub fn is_safe_evidence_relative_path(relative: &str) -> bool {
+    if relative.is_empty()
+        || relative.starts_with('/')
+        || relative.contains('\\')
+        || relative.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let mut components = 0usize;
+    for component in relative.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return false;
+        }
+        components += 1;
+    }
+    components > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +178,27 @@ mod tests {
     const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     /// SHA-256 of the empty input.
     const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    #[test]
+    fn directory_evidence_tree_digest_is_order_and_path_sensitive() {
+        let first = directory_evidence_entry_record("website/index.html", "sha256:abc", 3);
+        let second = directory_evidence_entry_record("receipts/note.txt", "sha256:def", 4);
+        let digest = directory_evidence_tree_digest([&first, &second]);
+        assert!(digest.starts_with("sha256:"));
+        assert_ne!(digest, directory_evidence_tree_digest([&second, &first]));
+        assert_ne!(
+            digest,
+            directory_evidence_tree_digest([directory_evidence_entry_record(
+                "website/other.html",
+                "sha256:abc",
+                3
+            )])
+        );
+        assert!(is_safe_evidence_relative_path("website/index.html"));
+        assert!(!is_safe_evidence_relative_path("../website/index.html"));
+        assert!(!is_safe_evidence_relative_path("/website/index.html"));
+        assert!(!is_safe_evidence_relative_path("website//index.html"));
+    }
 
     #[test]
     fn sha256_hex_matches_known_answer_vector() {

@@ -441,7 +441,13 @@ it names an exact job with no recorded child PID, which is evidence homeboy does
 not have.
 
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
-it. This is the preferred Lab execution path because later `runner exec` calls
+it. Connect dials the configured server host and does not discover a new LAN
+address. SSH exit 255 with `Host is down` is `transport_unreachable` for that
+recorded host, not a missing Homeboy install. A numeric DHCP address is not
+stable: set a stable hostname or a DHCP reservation with `homeboy server set`,
+then reconnect. Host key verification stays on. See
+[Unreachable recorded host](../architecture/runner-connection.md#unreachable-recorded-host).
+This is the preferred Lab execution path because later `runner exec` calls
 can use the daemon session instead of ad-hoc SSH command execution. The JSON
 payload uses `command: "runner.connect"` and reports connection state such as
 the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
@@ -716,6 +722,22 @@ is stored under `~/.config/homeboy/broker_auth.json`). `revoke` disables a
 credential by id, and `list` reports non-secret credential metadata. See
 [Broker authentication and pairing](#broker-authentication-and-pairing) for the
 full trust model.
+
+### `service`
+
+```sh
+homeboy runner service install homeboy-lab
+homeboy runner service status homeboy-lab
+```
+
+Run the runner daemon as a systemd user unit that the runner owns. `install`
+requires an idle runner. It writes the unit, hands the controller-started
+daemon over to it, stops idle leftover generation daemons, and marks the runner
+`service_managed`. After that, `connect` only attaches, `disconnect` only
+detaches, and `refresh-homeboy --reconnect` repoints the unit's binary and
+restarts it instead of rotating daemon generations. `status` reports the unit
+and the daemon lease it holds. See
+[Runner-Owned Service](../architecture/runner-connection.md#runner-owned-service).
 
 ### `job`
 

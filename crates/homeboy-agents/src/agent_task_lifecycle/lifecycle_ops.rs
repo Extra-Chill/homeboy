@@ -1294,6 +1294,63 @@ pub fn release_unmaterialized_cook_replay_claim_after_worker_exit(
     Ok(released.is_some())
 }
 
+/// Terminalize an exact replay claim after its supervised worker exits with a
+/// deterministic (non-retryable) validation failure, instead of releasing it
+/// back to the queue for another bounded attempt (#15009). A deterministic
+/// failure — a missing model-override acknowledgement, an invalid gate, a bad
+/// argument — fails identically on every retry; retrying it for up to an hour
+/// only delays the operator from seeing the real blocker, which the bounded
+/// admission budget then reports as a generic "runner shortage" once
+/// exhausted. `reason` is the worker's own typed error message, surfaced
+/// verbatim so `agent-task status` shows the real cause.
+///
+/// Mirrors [`release_unmaterialized_cook_replay_claim_after_worker_exit`]'s
+/// ownership guard exactly; only the terminal disposition differs. A
+/// published index or reserved child record remains authoritative and is
+/// never overridden here either.
+pub fn fail_unmaterialized_cook_replay_claim_after_worker_exit(
+    cook_id: &str,
+    fence: u64,
+    token: &str,
+    reason: &str,
+) -> Result<bool> {
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let cook_id = sanitize_run_id(cook_id);
+    let token = token.to_string();
+    let failed = store.mutate_record(&cook_id, |record| {
+        if record.state.is_terminal() || store.read_cook_index(&cook_id).is_ok() {
+            return false;
+        }
+        let reserved_child_published = record.metadata["detached_cook_handoff"]
+            ["materializing_attempt_run_id"]
+            .as_str()
+            .is_some_and(|run_id| store.read_record(run_id).is_ok());
+        let admission = &mut record.metadata["unmaterialized_cook_admission"];
+        if reserved_child_published
+            || !matches!(
+                admission["lease"]["state"].as_str(),
+                Some("claimed" | "consumed" | "materializing")
+            )
+            || admission["lease"]["fence"].as_u64() != Some(fence)
+            || admission["lease"]["token"].as_str() != Some(token.as_str())
+        {
+            return false;
+        }
+        admission["state"] = json!("failed");
+        admission["reason"] = json!(homeboy_core::redaction::redact_string(reason));
+        admission
+            .as_object_mut()
+            .expect("unmaterialized admission object")
+            .remove("lease");
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    if failed.is_some() {
+        let _ = fail_detached_cook_handoff_parent_in_store(&store, &cook_id, reason);
+    }
+    Ok(failed.is_some())
+}
+
 /// Rearm one blocked admission for an explicit scoped resume. Active replay or
 /// materialization ownership is preserved; terminal records are never reopened.
 pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRunRecord> {
@@ -3966,6 +4023,64 @@ pub fn mark_running_in_store(
     .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
+/// Return a materialized Cook attempt to the durable queue when runtime
+/// promotion admission is unavailable before provider work begins. This keeps
+/// the attempt identity and provider budget intact; queued execution claims it
+/// through the normal fenced lifecycle transition on a later daemon tick.
+pub fn defer_cook_runtime_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let now = now_timestamp();
+    let deferred = lifecycle_store.mutate_record(&run_id, |record| {
+        if !matches!(
+            record.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) || record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .is_some_and(|consumed| consumed != 0)
+            || record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        {
+            return false;
+        }
+        let fence = record.metadata["cook_runtime_admission"]["fence"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1);
+        record.metadata["cook_runtime_admission"] = json!({
+            "schema": "homeboy/cook-runtime-admission/v1",
+            "state": "queued",
+            "fence": fence,
+            "owner": owner,
+            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "provider_executions_consumed": 0,
+        });
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Queued);
+        record.lifecycle.execution.started_at = None;
+        record.lifecycle.execution.finished_at = None;
+        for task in &mut record.tasks {
+            task.state = AgentTaskState::Queued;
+        }
+        for key in [
+            "runner_pid",
+            "runner_process_start_identity",
+            "runner_started_at",
+        ] {
+            record
+                .metadata
+                .as_object_mut()
+                .map(|metadata| metadata.remove(key));
+        }
+        true
+    })?;
+    Ok(deferred.is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderExecutionReservation {
     Acquired,
@@ -4190,7 +4305,7 @@ pub fn record_cook_progress_in_store(
 
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
-pub(crate) fn record_cook_controller_failure(
+pub fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
@@ -5670,6 +5785,99 @@ pub fn reconcile_status_with_options(
 /// `validate_recipe_attempt_record_with_controller_plan` with a plan read from
 /// the injected lifecycle store, so the recipe half and the plan half cannot
 /// come from different homes.
+/// Resolve a `CandidateRecoverable` latch left behind by a completed
+/// candidate adoption on a record whose own execution never reached a
+/// provider (a genuine pre-execution failure, durably preserved as
+/// authenticated adoption provenance by `record_pre_execution_failure`).
+///
+/// `record_promotion_in_store`'s #14315 override only ever *sets*
+/// `CandidateRecoverable` for a verification-pending or gate-failed
+/// checkpoint; nothing reverts it once the adoption that latched it
+/// concludes, so it stays latched permanently even after the adoption's
+/// terminal outcome is known (homeboy#15008).
+///
+/// Reverting eagerly the moment `finish_candidate_adoption_in_store` marks
+/// the adoption attempt itself completed would erase this record's chance to
+/// be picked up by the continuation-enqueue reconciliation below: a
+/// candidate-adoption review can dispatch remediation to a *different*,
+/// still-pending run (`candidate_adoption.remediation_run_id`) before this
+/// record's own outcome is knowable, and `enqueue_terminal_continuation`
+/// deliberately only ever queues a continuation for `Succeeded`,
+/// `CandidateRecoverable`, or `PartialRecoverable` records. So this waits
+/// until any dispatched remediation is itself terminal — meaning there is
+/// nothing left to resume — before restoring this record's true terminal
+/// fact.
+fn reconcile_candidate_adoption_terminal_state_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
+    if record.state != AgentTaskRunState::CandidateRecoverable
+        || record.metadata.get("pre_execution_failure").is_none()
+    {
+        return Ok(false);
+    }
+    let Some(adoption) = record.candidate_adoption.as_ref() else {
+        return Ok(false);
+    };
+    if !matches!(adoption.state.as_str(), "completed" | "failed") {
+        return Ok(false);
+    }
+    if let Some(remediation_run_id) = adoption.remediation_run_id.clone() {
+        let remediation_terminal = lifecycle_store
+            .read_record(&remediation_run_id)
+            .is_ok_and(|remediation| remediation.state.is_terminal());
+        if !remediation_terminal {
+            return Ok(false);
+        }
+    }
+    set_run_state(record, AgentTaskRunState::Failed);
+    Ok(true)
+}
+
+/// Admit terminal provider results to the durable Cook continuation queue.
+/// Called from the terminal Lab projection path so it does not depend on a
+/// later status read or explicit resume command.
+pub fn reconcile_terminal_cook_provider_result(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record(run_id)?;
+    if !record.state.is_terminal() {
+        return Ok(record);
+    }
+    let recipe_store =
+        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe = match record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .map(|cook_id| recipe_store.load_recipe(cook_id))
+        .transpose()?
+    {
+        Some(recipe) => recipe,
+        None => match recipe_store.load_recipe_for_attempt(run_id)? {
+            Some(recipe) => recipe,
+            // Terminal Lab runs are also used outside Cook. They have no
+            // continuation to enqueue and must leave their normal projection
+            // path untouched.
+            None => return Ok(record),
+        },
+    };
+    let cook_id = recipe.cook_id;
+    let enqueued = recipe_store.enqueue_terminal_continuation(&cook_id, run_id)?;
+    lifecycle_store.mutate_record(run_id, |stored| {
+        stored.ensure_metadata_object().insert(
+            "cook_continuation_scheduler".to_string(),
+            json!({
+                "status": if enqueued { "queued" } else { "already_queued_or_completed" },
+                "cook_id": cook_id,
+                "run_id": run_id,
+                "phase": "continuation",
+            }),
+        );
+        true
+    })?;
+    lifecycle_store.read_record(run_id)
+}
+
 pub fn reconcile_status_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -5776,6 +5984,9 @@ pub fn reconcile_status_in_store(
     }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
+        lifecycle_store.write_record(&record)?;
+    }
+    if reconcile_candidate_adoption_terminal_state_in_store(lifecycle_store, &mut record)? {
         lifecycle_store.write_record(&record)?;
     }
     if record.state.is_terminal() {
@@ -8080,6 +8291,16 @@ pub fn record_promotion_in_store(
             return false;
         }
         record.updated_at = Some(now_timestamp());
+        // Captured before this write overwrites `latest_promotion` below, so
+        // this is the status of the *previous* promotion recorded for this
+        // run — the one the pending/failed-gate branch below may have already
+        // latched `CandidateRecoverable` for (homeboy#15008).
+        let previous_status = record
+            .metadata
+            .get("latest_promotion")
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let metadata = record.ensure_metadata_object();
         // The first post-apply checkpoint is immutable recovery authority. Later
         // gate/finalization reports advance `latest_promotion` without obscuring
@@ -8110,6 +8331,38 @@ pub fn record_promotion_in_store(
             Some("verification_pending" | "gate_failed" | "no_op_gate_failed")
         ) {
             set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+        } else if promotion.get("status").and_then(Value::as_str) == Some("applied")
+            && record.state == AgentTaskRunState::CandidateRecoverable
+            && previous_status.as_deref() == Some("verification_pending")
+            && record.candidate_adoption.is_none()
+        {
+            // The branch above only ever *sets* `CandidateRecoverable`;
+            // nothing previously reverted it once a later promotion for the
+            // same run's own live progression reached a conclusive status.
+            // That left it permanently latched even once a still-pending
+            // candidate went on to apply clean (the #14315 case: this run was
+            // never anything but its own straight-line execution, so once
+            // verification completes there is nothing left to wait on).
+            //
+            // Scoped to reverting a `verification_pending` checkpoint
+            // specifically: a *documented* `gate_failed` (a candidate that
+            // was actually rejected, not merely unverified) must stay a
+            // permanent scar on this run's history even after a later
+            // corrected promotion proves a different candidate clean — that
+            // is the existing, deliberately un-reverted behavior of
+            // `corrected_promotion_replaces_gate_failed_latest_proof`.
+            //
+            // Excluded whenever `candidate_adoption` is active on this
+            // record: an adoption's own gate/verification checkpoints can
+            // legitimately land here mid-flight — e.g. once gates pass but
+            // before a still-pending review-form follow-up resolves — and
+            // reverting early would hide the adoption's pending continuation
+            // before it concludes.
+            // `reconcile_candidate_adoption_terminal_state_in_store` (below)
+            // is the one place that can tell adoption has truly concluded —
+            // including any dispatched remediation — so it owns the
+            // equivalent revert for that flow (homeboy#15008).
+            set_run_state(record, AgentTaskRunState::Succeeded);
         }
         if let Some(acceptance) = record.acceptance.as_mut() {
             let candidate = acceptance_candidate(&promotion);
