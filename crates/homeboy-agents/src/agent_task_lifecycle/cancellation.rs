@@ -59,6 +59,44 @@ fn already_terminal_error(record: &AgentTaskRunRecord) -> Error {
     )
 }
 
+/// The event ledger can outlive a runner's record projection. Reuse the first
+/// immutable cancellation payload when an operator later terminalizes that run;
+/// writing a different payload under the same event key would roll back the
+/// record mutation with an idempotency collision.
+fn canonical_cancellation_provenance_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Option<Value>> {
+    let run = homeboy_control_plane_contract::RunId::new(run_id).map_err(|error| {
+        Error::validation_invalid_argument(
+            "run_id",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let events = lifecycle_store
+        .open_observation_readonly()?
+        .control_plane_event_stream(&run)?
+        .unwrap_or_default();
+    events
+        .into_iter()
+        .find(|event| event.kind == "run.cancelled")
+        .map(|event| {
+            event
+                .data
+                .get("provenance")
+                .filter(|provenance| provenance.is_object())
+                .cloned()
+                .ok_or_else(|| {
+                    Error::internal_unexpected(format!(
+                        "canonical cancellation event for '{run_id}' has no provenance"
+                    ))
+                })
+        })
+        .transpose()
+}
+
 fn run_after_initial_cancellation_for_test() {
     #[cfg(test)]
     AFTER_INITIAL_CANCELLATION.with(|slot| {
@@ -222,6 +260,8 @@ pub(crate) fn cancel_exact_run_in_store(
     reason: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
+    let canonical_provenance =
+        canonical_cancellation_provenance_in_store(lifecycle_store, &run_id)?;
     let committed = lifecycle_store.with_config_lock(|| {
         let record = lifecycle_store.read_record(&run_id)?;
         ensure_rooted_exact_cancellation_supported(&record)?;
@@ -305,13 +345,17 @@ pub(crate) fn cancel_exact_run_in_store(
             );
             // A prior runner cancellation may already have emitted run.cancelled
             // while this record was still running. Its keyed event is immutable.
-            metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
+            if let Some(provenance) = canonical_provenance.clone() {
+                metadata.insert("cancellation_provenance".to_string(), provenance);
+            } else {
+                metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
                     "actor": "controller",
                     "cause": "operator_requested",
                     "reason": reason.unwrap_or("cancel requested"),
                     "timestamp": cancelled_at,
                     "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
                 }));
+            }
             if let Some(service_cleanup) = service_cleanup.clone() {
                 metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
             }
@@ -781,6 +825,8 @@ fn cancel_resolved_run_in_store(
     // above. Make the final decision under the record mutation lock so a late
     // success is either observed here or cancellation wins before it can be
     // imported; never overwrite an already durable success.
+    let canonical_provenance =
+        canonical_cancellation_provenance_in_store(lifecycle_store, &record.run_id)?;
     let record = lifecycle_store.mutate_record(&record.run_id, |record| {
         // An aggregate or runner projection may have finished after the live
         // cancellation transport returned. Its terminal state is authoritative.
@@ -826,13 +872,17 @@ fn cancel_resolved_run_in_store(
         );
         // Keep the first provenance payload bound to the canonical event key;
         // cancel_reason records this operator request independently.
-        metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
+        if let Some(provenance) = canonical_provenance.clone() {
+            metadata.insert("cancellation_provenance".to_string(), provenance);
+        } else {
+            metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
                 "actor": "controller",
                 "cause": "operator_requested",
                 "reason": reason.unwrap_or("cancel requested"),
                 "timestamp": cancelled_at,
                 "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
             }));
+        }
         if detached_handoff_parent {
             metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
                 json!("cancelled");
