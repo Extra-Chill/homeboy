@@ -586,6 +586,7 @@ mod tests {
                     role: "validation_dependency".to_string(),
                     local_path: "/Users/user/Developer/static-site-importer".to_string(),
                     remote_path: "/home/user/Developer/job-123/static-site-importer".to_string(),
+                    prepare_cache: None,
                 },
             ),
             workspace_mapping_entry(

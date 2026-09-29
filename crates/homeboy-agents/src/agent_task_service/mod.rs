@@ -45,6 +45,8 @@ pub use cook_adoption::*;
 pub use cook_baseline::*;
 pub use cook_batch_job::*;
 pub use cook_budget::*;
+#[cfg(test)]
+pub(crate) use cook_job::finalize_detached_cook_attempt;
 pub use cook_job::*;
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;

@@ -1830,31 +1830,23 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     if !preserve_terminal {
         metadata_json["agent_task_aggregate"] = Value::Null;
     }
-    let attempt = redirected_cook_attempt(lifecycle_store, &record);
-    let redirected = record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id
-        && record.metadata["detached_cook_handoff"]["state"] == "redirected";
-    let status = if redirected {
-        attempt
-            .as_ref()
-            .map(|attempt| run_status(attempt.state).to_string())
-            .unwrap_or_else(|| RunStatus::Running.as_str().to_string())
+    let handoff = &record.metadata["detached_cook_handoff"];
+    let redirected = handoff["cook_id"] == record.run_id && handoff["state"] == "redirected";
+    let (status, finished_at) = if redirected {
+        (RunStatus::Running.as_str().to_string(), None)
     } else {
-        run_status(record.state).to_string()
+        (
+            run_status(record.state).to_string(),
+            terminal_finished_at(&record),
+        )
     };
-    // A redirected handoff parent is admission bookkeeping. Its observation
-    // status is the latest attempt, and it stays non-terminal until that
-    // attempt is — otherwise indexing the attempt looks like a pass and
-    // consumes the completion notification.
-    let finished_at = if status == RunStatus::Running.as_str() {
-        None
-    } else {
-        terminal_finished_at(&record)
-    };
-    if let Some(attempt) = attempt.as_ref() {
-        metadata_json["cook_attempt"] = json!({
-            "run_id": attempt.run_id,
-            "state": serde_json::to_value(attempt.state).unwrap_or(Value::Null),
-        });
+    if let Some(cook_id) = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .filter(|cook_id| !cook_id.is_empty() && *cook_id != record.run_id)
+    {
+        metadata_json["parent_run_id"] = json!(cook_id);
     }
     let projected = RunRecord {
         id: record.run_id.clone(),
@@ -1887,11 +1879,6 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
             record.run_id
         ))
     })?;
-    drop(store);
-    // The attempt's terminal state is raw provider evidence. Cook still owns
-    // promotion gates and PR finalization; only its terminal report may consume
-    // the Cook-level notification claim.
-    refresh_cook_parent_observation(lifecycle_store, &record)?;
     record_from_run(&committed)
 }
 
@@ -1922,67 +1909,6 @@ fn work_intents_for_record(
         }),
     }])
 }
-
-/// Latest attempt behind a redirected Cook handoff parent.
-///
-/// The parent row is the id Cook prints. Its lifecycle state is terminal so an
-/// exit observer cannot fail the placeholder after the attempt is indexed, but
-/// that bookkeeping success is not the Cook outcome.
-fn redirected_cook_attempt(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &AgentTaskRunRecord,
-) -> Option<AgentTaskRunRecord> {
-    let handoff = &record.metadata["detached_cook_handoff"];
-    if handoff["cook_id"] != record.run_id || handoff["state"] != "redirected" {
-        return None;
-    }
-    let attempt_id = handoff["attempt_run_id"].as_str()?;
-    lifecycle_store
-        .read_record_without_historical_import(attempt_id)
-        .ok()
-}
-
-fn refresh_cook_parent_observation(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    attempt: &AgentTaskRunRecord,
-) -> Result<()> {
-    std::thread_local! {
-        static DEPTH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
-    }
-    if DEPTH.with(|depth| depth.get()) > 0 {
-        return Ok(());
-    }
-    let Some(cook_id) = attempt.metadata.get("cook_id").and_then(Value::as_str) else {
-        return Ok(());
-    };
-    if cook_id == attempt.run_id {
-        return Ok(());
-    }
-    let Ok(index) = lifecycle_store.read_cook_index(cook_id) else {
-        return Ok(());
-    };
-    if index.latest_run_id != attempt.run_id {
-        return Ok(());
-    }
-    let Ok(parent) = lifecycle_store.read_record_without_historical_import(cook_id) else {
-        return Ok(());
-    };
-    if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
-        return Ok(());
-    }
-    let aggregate = read_mirrored_aggregate_in_store(lifecycle_store, cook_id)?;
-    struct RefreshDepth;
-    impl Drop for RefreshDepth {
-        fn drop(&mut self) {
-            DEPTH.with(|depth| depth.set(0));
-        }
-    }
-    DEPTH.with(|depth| depth.set(1));
-    let _guard = RefreshDepth;
-    write_record_with_aggregate_without_workspace_authority(lifecycle_store, &parent, aggregate)?;
-    Ok(())
-}
-
 /// Rebuild one record's projection without disturbing Cook alias ownership.
 ///
 /// An ordinary record write knows its own lifecycle state but nothing about
