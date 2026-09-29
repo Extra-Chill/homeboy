@@ -115,7 +115,10 @@ impl AgentTaskLoopControllerRecord {
             }
         }
 
-        if self.open_wait_count() == 0 && self.state == AgentTaskLoopControllerState::Waiting {
+        if !self.waits.is_empty()
+            && self.open_wait_count() == 0
+            && self.state == AgentTaskLoopControllerState::Waiting
+        {
             self.state = AgentTaskLoopControllerState::Running;
         }
 
@@ -126,6 +129,9 @@ impl AgentTaskLoopControllerRecord {
             .and_then(|value| serde_json::from_value::<AgentTaskLoopPolicy>(value.clone()).ok())
         {
             actions = self.evaluate_policy(&policy, Some(&event));
+        }
+        if !actions.is_empty() && self.state == AgentTaskLoopControllerState::Waiting {
+            self.state = AgentTaskLoopControllerState::Running;
         }
         self.touch();
         actions
