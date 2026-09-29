@@ -494,12 +494,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn find_open_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
         let output = pr_find(
-            None,
+            component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
                 head: Some(head.to_string()),
@@ -517,12 +518,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn find_merged_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>> {
         let output = pr_find(
-            None,
+            component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
                 head: Some(head.to_string()),
@@ -538,8 +540,13 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         }))
     }
 
-    fn open_pr_title(&mut self, path: &str, number: u64) -> Result<Option<String>> {
-        Ok(pr_view(None, number, Some(path.to_string()))?.title)
+    fn open_pr_title(
+        &mut self,
+        component_id: Option<&str>,
+        path: &str,
+        number: u64,
+    ) -> Result<Option<String>> {
+        Ok(pr_view(component_id, number, Some(path.to_string()))?.title)
     }
 
     fn verify_remote_candidate(
@@ -571,6 +578,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn create_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         base: &str,
         head: &str,
@@ -579,7 +587,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
         let output = pr_create(
-            None,
+            component_id,
             PrCreateOptions {
                 base: base.to_string(),
                 head: head.to_string(),
@@ -598,13 +606,14 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn update_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         number: u64,
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef> {
         let output = pr_edit(
-            None,
+            component_id,
             PrEditOptions {
                 number,
                 title: Some(title.to_string()),

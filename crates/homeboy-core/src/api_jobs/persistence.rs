@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -512,33 +512,14 @@ pub(super) fn compact_terminal_jobs(
     durable
         .jobs
         .retain(|stored| !removed_job_ids.contains(&stored.job.id));
-    // Keep an explicit tombstone when compaction expires an idempotency key.
-    // Replaying an expired accepted submission must fail closed, never enqueue
-    // a second execution after the original evidence has been pruned.
-    for (key, submission) in std::mem::take(&mut durable.submission_keys) {
-        if removed_job_ids.contains(&submission.job_id) {
-            durable.expired_submission_keys.insert(key, submission);
-        } else {
-            durable.submission_keys.insert(key, submission);
-        }
-    }
-    // Controller keys are permanent once accepted. Their tombstones retain the
-    // canonical fingerprint after terminal-job compaction, preventing a retry
-    // from executing the same logical work a second time.
-    for (key, submission) in std::mem::take(&mut durable.controller_submissions) {
-        if removed_job_ids.contains(&submission.job_id) {
-            let terminal_job = removed_controller_jobs.get(&submission.job_id).cloned();
-            durable.expired_controller_submissions.insert(
-                key,
-                super::store::ControllerJobSubmission {
-                    terminal_job,
-                    ..submission
-                },
-            );
-        } else {
-            durable.controller_submissions.insert(key, submission);
-        }
-    }
+    expire_submission_keys(
+        &mut durable.submission_keys,
+        &mut durable.expired_submission_keys,
+        &mut durable.controller_submissions,
+        &mut durable.expired_controller_submissions,
+        &removed_job_ids,
+        &removed_controller_jobs,
+    );
     let evidence = JobStoreCompactionEvidence {
         timestamp_ms: timestamp_ms(),
         removed_terminal_jobs,
@@ -555,6 +536,40 @@ pub(super) fn compact_terminal_jobs(
         evidence.active_jobs,
     );
     Some(evidence)
+}
+
+/// Preserve accepted submission fingerprints when terminal job evidence is
+/// explicitly pruned or automatically compacted. Replaying an expired key must
+/// never dispatch a second execution after its original job was removed.
+pub(super) fn expire_submission_keys(
+    submission_keys: &mut HashMap<String, super::store::RemoteRunnerSubmission>,
+    expired_submission_keys: &mut HashMap<String, super::store::RemoteRunnerSubmission>,
+    controller_submissions: &mut HashMap<String, super::store::ControllerJobSubmission>,
+    expired_controller_submissions: &mut HashMap<String, super::store::ControllerJobSubmission>,
+    removed_job_ids: &HashSet<Uuid>,
+    removed_controller_jobs: &HashMap<Uuid, Job>,
+) {
+    for (key, submission) in std::mem::take(submission_keys) {
+        if removed_job_ids.contains(&submission.job_id) {
+            expired_submission_keys.insert(key, submission);
+        } else {
+            submission_keys.insert(key, submission);
+        }
+    }
+    for (key, submission) in std::mem::take(controller_submissions) {
+        if removed_job_ids.contains(&submission.job_id) {
+            let terminal_job = removed_controller_jobs.get(&submission.job_id).cloned();
+            expired_controller_submissions.insert(
+                key,
+                super::store::ControllerJobSubmission {
+                    terminal_job,
+                    ..submission
+                },
+            );
+        } else {
+            controller_submissions.insert(key, submission);
+        }
+    }
 }
 #[cfg(test)]
 pub(super) fn reconcile_stale_jobs(

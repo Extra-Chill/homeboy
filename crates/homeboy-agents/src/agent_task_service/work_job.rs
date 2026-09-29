@@ -90,12 +90,12 @@ struct WorkJobResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WorkJobInvocation {
+pub enum WorkJobInvocation {
     Execute,
     Resume,
 }
 
-pub(crate) enum WorkJobStep {
+pub enum WorkJobStep {
     Continue {
         checkpoint: Value,
         progress: Value,
@@ -105,7 +105,7 @@ pub(crate) enum WorkJobStep {
 }
 
 /// Built-in orchestration adapter behind the generic lifecycle driver.
-pub(crate) trait WorkJobHandler: Send + Sync {
+pub trait WorkJobHandler: Send + Sync {
     fn work_type(&self) -> &'static str;
     fn version(&self) -> u32;
     fn linked_durable_run_id(&self, _request: &Value) -> Option<String> {
@@ -171,7 +171,7 @@ fn handlers() -> &'static WorkJobHandlers {
     HANDLERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn register_work_job_handler(handler: Arc<dyn WorkJobHandler>) -> Result<()> {
+pub fn register_work_job_handler(handler: Arc<dyn WorkJobHandler>) -> Result<()> {
     let key = (handler.work_type().to_string(), handler.version());
     let mut registry = handlers().lock().expect("work job handler lock");
     if registry.contains_key(&key) {
@@ -350,7 +350,7 @@ pub fn register_work_job_driver() {
     });
 }
 
-pub(crate) fn work_job_submission(
+pub fn work_job_submission(
     handler: &dyn WorkJobHandler,
     idempotency_key: String,
     request: Value,

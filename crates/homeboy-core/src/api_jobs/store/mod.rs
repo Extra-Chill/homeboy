@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,11 +17,11 @@ use super::persistence::read_durable_store;
 #[cfg(test)]
 use super::persistence::reconcile_stale_jobs;
 use super::persistence::{
-    apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone,
-    prepare_tombstone_store, recovered_terminal_from_result, timestamp_ms, tombstone_store_report,
-    validate_transition, write_durable_store_with_tombstones, JobStoreCompactionEvidence,
-    ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
-    DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+    apply_event_retention, compact_terminal_jobs, expire_submission_keys, job_not_found,
+    lookup_tombstone, prepare_tombstone_store, recovered_terminal_from_result, timestamp_ms,
+    tombstone_store_report, validate_transition, write_durable_store_with_tombstones,
+    JobStoreCompactionEvidence, ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT,
+    DEFAULT_TERMINAL_JOB_RETENTION_BYTES, DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
@@ -74,6 +74,62 @@ pub struct JobStore {
 }
 
 impl JobStore {
+    /// Inspect one exact controller driver generation. An active match blocks
+    /// pruning rather than silently excluding work that could resume later.
+    pub fn terminal_controller_job_ids(&self, job_type: &str, version: u32) -> Result<Vec<Uuid>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        terminal_controller_job_ids_in(&inner, job_type, version)
+    }
+
+    /// Prune only an operator-reviewed set of terminal jobs for one driver
+    /// generation. Recheck the complete identity set under the durable lock and
+    /// preserve replay tombstones exactly as automatic compaction does.
+    pub fn prune_terminal_controller_jobs(
+        &self,
+        job_type: &str,
+        version: u32,
+        expected_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        if expected_ids.is_empty()
+            || expected_ids.iter().copied().collect::<HashSet<_>>().len() != expected_ids.len()
+        {
+            return Err(Error::validation_invalid_argument(
+                "expected_ids",
+                "provide a non-empty list of distinct exact job ids",
+                None,
+                None,
+            ));
+        }
+        self.durable_transaction(|inner| {
+            let ids = terminal_controller_job_ids_in(inner, job_type, version)?;
+            let mut expected = expected_ids.to_vec();
+            expected.sort_unstable();
+            if ids != expected {
+                return Err(Error::validation_invalid_argument(
+                    "expected_ids",
+                    "controller job inventory changed; re-inspect before pruning",
+                    None,
+                    None,
+                ));
+            }
+            let removed = ids.iter().copied().collect::<HashSet<_>>();
+            let terminal_jobs = ids
+                .iter()
+                .map(|id| (*id, inner.jobs[id].job.clone()))
+                .collect::<HashMap<_, _>>();
+            expire_submission_keys(
+                &mut inner.submission_keys,
+                &mut inner.expired_submission_keys,
+                &mut inner.controller_submissions,
+                &mut inner.expired_controller_submissions,
+                &removed,
+                &terminal_jobs,
+            );
+            inner.jobs.retain(|id, _| !removed.contains(id));
+            Ok(ids)
+        })
+    }
+
     /// Stable process-local ownership key for runtime state associated with this
     /// durable queue. Independent test stores must never share supervisors.
     pub(crate) fn runtime_registry_scope(&self) -> String {
@@ -85,6 +141,44 @@ impl JobStore {
             None => format!("memory:{:p}", std::sync::Arc::as_ptr(&self.inner)),
         }
     }
+}
+
+fn terminal_controller_job_ids_in(
+    inner: &JobStoreInner,
+    job_type: &str,
+    version: u32,
+) -> Result<Vec<Uuid>> {
+    if job_type.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "job_type",
+            "require an exact controller job type",
+            None,
+            None,
+        ));
+    }
+    let mut ids = Vec::new();
+    for (id, stored) in &inner.jobs {
+        if !stored.controller_job.as_ref().is_some_and(|controller| {
+            controller.job_type == job_type && controller.version == version
+        }) {
+            continue;
+        }
+        if !stored.job.status.is_terminal()
+            || stored.job.operation != format!("controller.{job_type}")
+        {
+            return Err(Error::validation_invalid_argument(
+                "job_type",
+                format!(
+                    "controller job {id} is active or has inconsistent ownership; refusing prune"
+                ),
+                Some(job_type.to_string()),
+                None,
+            ));
+        }
+        ids.push(*id);
+    }
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 #[derive(Debug, Clone)]
