@@ -884,6 +884,7 @@ fn register_startup_providers_after_reconcile(
     // depending on the agent-task subsystem. Loop waits are owned by their
     // durable Work jobs below rather than this unrelated periodic sweep.
     crate::agents::agent_task_service::register_orchestration_driver();
+    crate::commands::agent_task::capacity::register_capacity_snapshot_provider();
     crate::commands::route::register_unmaterialized_cook_replay_driver();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // New orchestration submissions share one versioned lifecycle driver.

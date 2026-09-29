@@ -5,7 +5,8 @@
 //! here so core stays agent-task-agnostic.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionFence, ControlPlaneActionIntent,
@@ -28,6 +29,113 @@ use homeboy_control_plane_contract::{
 
 use crate::observation::store::ControlPlaneEffectAdmission;
 use crate::observation::{ControlPlaneResourceProjection, ObservationStore, RunRecord};
+
+/// Domain-owned read-only resource. The kernel owns lookup, cache freshness,
+/// and transport identity; query fields and the result schema stay with the
+/// domain instead of extending kernel vocabulary for every new resource.
+pub trait ControlPlaneReadResourceProvider: Send + Sync {
+    fn resource_type(&self) -> &'static str;
+    fn read(&self, query: &serde_json::Value) -> crate::Result<serde_json::Value>;
+}
+
+type ReadResourceCache = Mutex<BTreeMap<(String, String), (Instant, serde_json::Value)>>;
+static READ_RESOURCE_PROVIDERS: OnceLock<
+    RwLock<BTreeMap<&'static str, Arc<dyn ControlPlaneReadResourceProvider>>>,
+> = OnceLock::new();
+static READ_RESOURCE_CACHE: OnceLock<ReadResourceCache> = OnceLock::new();
+const READ_RESOURCE_CACHE_TTL: Duration = Duration::from_secs(15);
+const READ_RESOURCE_CACHE_MAX_ENTRIES: usize = 64;
+
+pub fn register_read_resource_provider(provider: Arc<dyn ControlPlaneReadResourceProvider>) {
+    let kind = provider.resource_type();
+    READ_RESOURCE_PROVIDERS
+        .get_or_init(|| RwLock::new(BTreeMap::new()))
+        .write()
+        .expect("read resource provider registry poisoned")
+        .insert(kind, provider);
+    if let Some(cache) = READ_RESOURCE_CACHE.get() {
+        cache
+            .lock()
+            .expect("read resource cache poisoned")
+            .retain(|(type_name, _), _| type_name != kind);
+    }
+}
+
+pub fn read_resource(kind: &str, query: &serde_json::Value) -> crate::Result<serde_json::Value> {
+    let cache = READ_RESOURCE_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let provider = READ_RESOURCE_PROVIDERS
+        .get_or_init(|| RwLock::new(BTreeMap::new()))
+        .read()
+        .expect("read resource provider registry poisoned")
+        .get(kind)
+        .cloned()
+        .ok_or_else(|| {
+            crate::Error::internal_unexpected(format!(
+                "{kind} read resource provider is not registered"
+            ))
+        })?;
+    read_resource_with_provider(kind, query, cache, provider.as_ref())
+}
+
+fn read_resource_with_provider(
+    kind: &str,
+    query: &serde_json::Value,
+    cache: &ReadResourceCache,
+    provider: &dyn ControlPlaneReadResourceProvider,
+) -> crate::Result<serde_json::Value> {
+    let key = (kind.to_string(), query.to_string());
+    let cached = cache
+        .lock()
+        .expect("read resource cache poisoned")
+        .get(&key)
+        .cloned();
+    if let Some((observed_at, snapshot)) = &cached {
+        if observed_at.elapsed() < READ_RESOURCE_CACHE_TTL {
+            return Ok(with_resource_freshness(
+                snapshot.clone(),
+                observed_at.elapsed(),
+                false,
+            ));
+        }
+    }
+    match provider.read(query) {
+        Ok(snapshot)
+            if snapshot["schema"]
+                .as_str()
+                .is_some_and(|schema| !schema.is_empty()) =>
+        {
+            let observed_at = Instant::now();
+            let mut cache = cache.lock().expect("read resource cache poisoned");
+            if cache.len() >= READ_RESOURCE_CACHE_MAX_ENTRIES && !cache.contains_key(&key) {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, (observed_at, _))| *observed_at)
+                    .map(|(query, _)| query.clone())
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(key, (observed_at, snapshot.clone()));
+            Ok(with_resource_freshness(snapshot, Duration::ZERO, false))
+        }
+        Ok(_) => Err(crate::Error::internal_unexpected(
+            "read resource provider returned no versioned schema",
+        )),
+        Err(error) => cached
+            .map(|(at, snapshot)| with_resource_freshness(snapshot, at.elapsed(), true))
+            .ok_or(error),
+    }
+}
+
+fn with_resource_freshness(
+    mut snapshot: serde_json::Value,
+    age: Duration,
+    stale: bool,
+) -> serde_json::Value {
+    snapshot["stale"] = serde_json::json!(stale);
+    snapshot["snapshot_age_seconds"] = serde_json::json!(age.as_secs());
+    snapshot
+}
 
 /// Canonical public reconciliation service for an ambiguous deployment-provider
 /// effect. Transport adapters call this rather than owning a second recovery
@@ -766,8 +874,10 @@ pub fn effect_status(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::{
         append_delegated_action_event, execute_delegated_action,
@@ -783,6 +893,47 @@ mod tests {
 
     static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
     static RECOVERIES: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn expired_capacity_snapshot_is_visible_as_stale_when_the_refresh_fails() {
+        struct FailingCapacity;
+        impl super::ControlPlaneReadResourceProvider for FailingCapacity {
+            fn resource_type(&self) -> &'static str {
+                "capacity"
+            }
+            fn read(&self, _query: &serde_json::Value) -> crate::Result<serde_json::Value> {
+                Err(crate::Error::internal_unexpected(
+                    "usage endpoint unavailable",
+                ))
+            }
+        }
+        let query = serde_json::json!({"backend":"test-cache-13697"});
+        let cached = serde_json::json!({
+            "schema": "homeboy/agent-task-capacity/v1",
+            "generated_at": "2026-09-29T00:00:00Z",
+            "routes": [],
+            "next_reset": null,
+        });
+        let cache = Mutex::new(BTreeMap::from([(
+            ("capacity".to_string(), query.to_string()),
+            (Instant::now() - Duration::from_secs(20), cached.clone()),
+        )]));
+        let stale =
+            super::read_resource_with_provider("capacity", &query, &cache, &FailingCapacity)
+                .expect("last snapshot survives provider failure");
+        assert_eq!(stale["generated_at"], cached["generated_at"]);
+        assert_eq!(stale["stale"], true);
+        assert!(stale["snapshot_age_seconds"].as_u64().unwrap() >= 20);
+        assert!(super::read_resource_with_provider(
+            "capacity",
+            &serde_json::json!({}),
+            &cache,
+            &FailingCapacity,
+        )
+        .unwrap_err()
+        .message
+        .contains("usage endpoint unavailable"));
+    }
 
     struct ProjectionFailureDelegate;
 
