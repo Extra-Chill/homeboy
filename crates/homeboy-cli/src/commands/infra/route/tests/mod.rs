@@ -4,6 +4,50 @@ mod dispatch;
 mod handoff;
 
 #[test]
+fn terminal_cook_uses_shared_work_job_with_the_existing_active_fence() {
+    use homeboy::core::daemon::controller_job_driver::ControllerJobDriver;
+
+    register_unmaterialized_cook_replay_driver();
+    let request = serde_json::json!({
+        "schema": "homeboy/terminal-cook-continuation-request/v1",
+        "cook_id": "cook",
+        "run_id": "run",
+        "generation": 2,
+    });
+    let submission = terminal_cook_work_submission(&request).expect("typed work submission");
+    assert_eq!(submission["type"], "work");
+    assert_eq!(submission["version"], 1);
+    assert_eq!(submission["request"]["work_type"], TERMINAL_COOK_WORK_TYPE);
+    assert_eq!(
+        submission["request"]["work_version"],
+        TERMINAL_COOK_JOB_VERSION
+    );
+    assert_eq!(submission["request"]["request"], request);
+    assert_eq!(
+        submission["active_idempotency_key"],
+        terminal_cook_job_idempotency_keys("cook", "run", 2).1
+    );
+
+    let driver = crate::agents::agent_task_service::WorkJobDriver;
+    driver
+        .validate_secret_references(&submission["request"])
+        .expect("request carries references only");
+    assert_eq!(
+        driver.linked_durable_run_id(&submission["request"]),
+        Some("run".to_string())
+    );
+    assert_eq!(
+        driver.public_request(&submission["request"]).unwrap(),
+        serde_json::json!({ "cook_id": "cook", "run_id": "run" })
+    );
+    let checkpoint = driver
+        .prepare(submission["request"].clone())
+        .expect("shared driver prepares terminal Cook handler");
+    assert_eq!(checkpoint["work_type"], TERMINAL_COOK_WORK_TYPE);
+    assert_eq!(checkpoint["checkpoint"], request);
+}
+
+#[test]
 fn terminal_cook_job_retry_epoch_changes_submission_key_but_keeps_active_fence() {
     let first = terminal_cook_job_idempotency_keys("cook", "run", 0);
     let retry = terminal_cook_job_idempotency_keys("cook", "run", 1);

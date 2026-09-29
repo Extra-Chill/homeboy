@@ -76,6 +76,7 @@ fn successful_cook_carries_the_pull_request_link() {
     let report = report(
         "succeeded",
         Some(serde_json::json!({
+            "status": "review_ready",
             "pr_url": "https://example.test/pull/42",
             "pr_action": "created",
         })),
@@ -102,6 +103,14 @@ fn intentional_no_change_terminal_notifications_match_policy_outcome() {
     let refused = terminal_payload(&report("no_candidate", None), None, 1);
     assert_eq!(refused.kind, NotifyEventKind::NeedsAttention);
     assert!(refused.render_body().contains("Status: no_candidate"));
+}
+
+#[test]
+fn green_no_finalize_is_completed_without_a_pull_request_link() {
+    let payload = terminal_payload(&report("green_no_finalize", None), None, 0);
+    assert_eq!(payload.kind, NotifyEventKind::Completed);
+    assert!(payload.links.is_empty());
+    assert!(payload.render_body().contains("Status: green_no_finalize"));
 }
 
 #[test]
@@ -218,8 +227,8 @@ fn failed_cook_forwards_a_recovery_action_once_when_report_sections_overlap() {
 }
 
 #[test]
-fn terminal_kind_follows_the_exit_code_not_the_open_status_vocabulary() {
-    // An unrecognized status must not be mistaken for success.
+fn terminal_kind_requires_publication_evidence_even_with_zero_exit() {
+    // A provider result cannot advertise publication without a PR receipt.
     let unknown = report("moving_base", None);
     assert_eq!(
         terminal_payload(&unknown, None, 1).kind,
@@ -227,6 +236,17 @@ fn terminal_kind_follows_the_exit_code_not_the_open_status_vocabulary() {
     );
     assert_eq!(
         terminal_payload(&unknown, None, 0).kind,
+        NotifyEventKind::NeedsAttention
+    );
+    let published = report(
+        "succeeded",
+        Some(serde_json::json!({
+            "status": "review_ready",
+            "pr_url": "https://example.test/pull/43",
+        })),
+    );
+    assert_eq!(
+        terminal_payload(&published, None, 0).kind,
         NotifyEventKind::Completed
     );
 }
@@ -454,7 +474,7 @@ fn latest_delivery(cook_id: &str) -> Value {
 }
 
 #[test]
-fn detached_cook_terminal_failure_reaches_the_configured_transport() {
+fn detached_attempt_terminal_preserves_cook_notification_for_final_report() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("test.cook", vec!["true"]);
         set_default_transport("test.cook");
@@ -483,7 +503,12 @@ fn detached_cook_terminal_failure_reaches_the_configured_transport() {
             crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
                 .expect("read outcome")
                 .is_none(),
-            "persisting a terminal attempt is not the cook notification"
+            "provider outcome must not consume Cook's terminal notification"
+        );
+        let attempt = store.read_record(attempt_id).expect("raw provider record");
+        assert_eq!(
+            attempt.state,
+            crate::agent_task_lifecycle::AgentTaskRunState::Failed
         );
         crate::agent_task_service::finalize_detached_cook_attempt(cook_id, attempt_id)
             .expect("detached finalizer");
@@ -491,6 +516,30 @@ fn detached_cook_terminal_failure_reaches_the_configured_transport() {
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport"], "test.cook");
     });
+}
+
+#[test]
+fn pending_gate_fix_and_finalization_rejection_do_not_announce_success() {
+    let mut pending = report("gate_failed", None);
+    pending.stop_reason = Some("gate fix pending".to_string());
+    let gate = terminal_payload(&pending, None, 1);
+    assert_eq!(gate.kind, NotifyEventKind::NeedsAttention);
+    assert!(gate.render_body().contains("Gates: failed"));
+    assert!(gate.render_body().contains("gate fix pending"));
+
+    let mut rejected = report(
+        "publication_rejected",
+        Some(serde_json::json!({
+            "status": "publication_rejected", "reason": "component finalization rejected"
+        })),
+    );
+    rejected.stop_reason = Some("component finalization rejected".to_string());
+    let finalization = terminal_payload(&rejected, None, 0);
+    assert_eq!(finalization.kind, NotifyEventKind::NeedsAttention);
+    assert!(finalization
+        .render_body()
+        .contains("component finalization rejected"));
+    assert!(finalization.links.is_empty());
 }
 
 #[test]

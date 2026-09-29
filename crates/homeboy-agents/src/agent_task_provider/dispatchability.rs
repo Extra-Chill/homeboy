@@ -1442,7 +1442,14 @@ fn selected_plan_provider_dispatchability_with_providers(
         let mut selected = None;
         let mut first_failure = None;
         for (mut candidate, next_rotation_index) in candidates {
-            candidate.limits.execution_deadline_unix_ms = admission_deadline;
+            // Readiness has its own bounded invocation budget (the provider
+            // declaration, normally 20s). A task execution deadline is not a
+            // per-phase readiness deadline: passing it here can leave only a
+            // few seconds after preview/materialization and falsely reject a
+            // route that validates within its declared probe window. Retain a
+            // plan-level deadline, which bounds admission as a whole.
+            candidate.limits.execution_deadline_unix_ms =
+                plan.options.execution_budget.deadline_unix_ms;
             if super::is_fixture_backend(&candidate.executor.backend)
                 || crate::agent_task_gate_executor::is_repo_local_gate_request(&candidate)
             {
@@ -1532,7 +1539,7 @@ fn selected_plan_provider_dispatchability_with_providers(
                 deadline.map(|value| value.to_string()),
                 hints,
             )
-            .with_retryable(false);
+            .with_retryable(true);
             error.details["classification"] = serde_json::json!("timeout");
             error.details["zero_provider_executions"] = serde_json::json!(true);
             error.details["deadline_unix_ms"] = serde_json::json!(deadline);
@@ -1664,8 +1671,8 @@ mod tests {
         let mut task = request("model");
         task.executor.backend = "missing".to_string();
         let deadline = crate::agent_task_timeout::now_unix_ms() + 30;
-        task.limits.execution_deadline_unix_ms = Some(deadline);
         let mut plan = AgentTaskPlan::new("deadline", vec![task]);
+        plan.options.execution_budget.deadline_unix_ms = Some(deadline);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
                 backend: Some("test".to_string()),

@@ -384,12 +384,55 @@ pub(super) fn daemon_failure_payload_message(envelope: &DaemonEnvelope) -> Optio
 
     let code = payload.get("error").and_then(Value::as_str);
     let message = payload.get("message").and_then(Value::as_str);
-    Some(match (code, message) {
+    let summary = match (code, message) {
         (Some(code), Some(message)) => format!("{code}: {message}"),
         (Some(code), None) => code.to_string(),
         (None, Some(message)) => message.to_string(),
-        (None, None) => payload.to_string(),
+        (None, None) => return Some(payload.to_string()),
+    };
+    Some(match daemon_failure_detail_suffix(payload) {
+        Some(suffix) => format!("{summary} ({suffix})"),
+        None => summary,
     })
+}
+
+/// Longest detail text carried into a controller-facing daemon failure.
+const DAEMON_FAILURE_DETAIL_MAX_CHARS: usize = 600;
+
+/// Render the daemon error's structured `details` cause, when present.
+///
+/// Several daemon error codes use a fixed, generic `message` and carry the
+/// real cause only in `details` — `internal.io_error` is always the literal
+/// "IO error", with the OS error in `details.error` and the failing operation
+/// in `details.context`. Dropping `details` made every runner-side I/O failure
+/// indistinguishable at the controller (`daemon exec request failed:
+/// internal.io_error: IO error`).
+fn daemon_failure_detail_suffix(payload: &Value) -> Option<String> {
+    let details = payload.get("details")?.as_object()?;
+    let text = |key: &str| {
+        details
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let suffix = match (text("context"), text("error")) {
+        (Some(context), Some(error)) => format!("{context}: {error}"),
+        (Some(context), None) => context.to_string(),
+        (None, Some(error)) => error.to_string(),
+        (None, None) => return None,
+    };
+    Some(
+        if suffix.chars().count() > DAEMON_FAILURE_DETAIL_MAX_CHARS {
+            let truncated: String = suffix
+                .chars()
+                .take(DAEMON_FAILURE_DETAIL_MAX_CHARS)
+                .collect();
+            format!("{truncated}…")
+        } else {
+            suffix
+        },
+    )
 }
 
 /// Build the controller-facing error for a daemon exec submission that came back
