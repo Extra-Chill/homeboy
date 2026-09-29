@@ -1136,6 +1136,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     review_dossier.apply_overrides()?;
     let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;
     let options = AgentTaskPrFinalizationOptions {
+        component_id: args.component.clone(),
         path,
         run_id,
         base: args.base,

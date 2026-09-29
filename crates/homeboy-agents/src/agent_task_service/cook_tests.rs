@@ -16752,6 +16752,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
     fn find_open_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
@@ -16760,6 +16761,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
     fn find_merged_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
@@ -16789,6 +16791,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
     fn create_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
@@ -16807,6 +16810,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
     fn update_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         number: u64,
         _title: &str,

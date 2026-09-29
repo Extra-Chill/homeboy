@@ -3353,6 +3353,7 @@ fn cook_finalization_options_with_stores_and_review_form(
     };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: selected_component_id.map(str::to_string),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
@@ -4981,6 +4982,7 @@ fn manual_finalization_options(
     let path = path.expect("validated path");
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: component_id.map(str::to_string),
         run_id: report.run_id,
         base: base.expect("validated base"),
         verified_base_sha,
