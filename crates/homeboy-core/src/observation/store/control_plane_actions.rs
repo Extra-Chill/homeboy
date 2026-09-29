@@ -494,6 +494,22 @@ impl ObservationStore {
         }
     }
 
+    /// Extend a live lease for its exact fence. Returns false once the lease has
+    /// expired into recovery, been terminalized, or been superseded, so the owner
+    /// stops renewing instead of reviving an effect another worker now owns.
+    pub fn renew_control_plane_effect_lease(
+        &self,
+        effect_id: &EffectId,
+        lease_fence: u64,
+        expires_at: &str,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE control_plane_action_claims SET lease_expires_at = ?3 WHERE effect_id = ?1 AND outbox_state = 'leased' AND lease_fence = ?2",
+            params![effect_id.0, lease_fence, expires_at],
+        ).map_err(sqlite_error("renew control-plane effect lease"))?;
+        Ok(changed == 1)
+    }
+
     /// Claim an effect already fenced into recovery without making it normally
     /// leaseable again. The caller may only reconcile durable evidence; it must
     /// never redispatch the external operation.
