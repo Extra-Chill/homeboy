@@ -413,7 +413,10 @@ mod release_deadline_tests {
             release_stage_after_line("executing release pipeline", "[release] stage: publishing"),
             Some("publishing".to_string())
         );
-        assert_eq!(release_stage_after_line("startup", "unrelated output"), None);
+        assert_eq!(
+            release_stage_after_line("startup", "unrelated output"),
+            None
+        );
     }
 
     #[test]
@@ -429,13 +432,15 @@ mod release_deadline_tests {
         let deadline = release_deadline(None, &stage);
         assert_eq!(deadline, RELEASE_EXECUTION_DEADLINE);
         // Silent gate output for two minutes: still within the inactivity window.
-        assert!(!release_deadline_expired(Duration::from_secs(120), deadline));
+        assert!(!release_deadline_expired(
+            Duration::from_secs(120),
+            deadline
+        ));
         // A chatty gate resets the idle clock on every chunk.
         assert!(!release_deadline_expired(Duration::from_secs(1), deadline));
         // A genuinely stalled gate still trips the deadline.
         assert!(release_deadline_expired(deadline, deadline));
     }
-
 }
 
 fn generic_route_policy_snapshot(
