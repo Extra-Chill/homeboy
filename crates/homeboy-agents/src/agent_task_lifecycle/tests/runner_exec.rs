@@ -473,6 +473,61 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
 }
 
 #[test]
+fn terminal_runner_result_projection_stays_handled_when_a_generic_runner_exec_snapshot_repeats() {
+    // #14169: `project_terminal_runner_result_in_store` owns generic runner-exec
+    // runs through its observation branch, but that branch reports `false` on a
+    // repeated terminal snapshot (the observation row is already terminal), so
+    // the caller fell through to the agent-task `read_record` — which a row
+    // without `agent_task_run` metadata cannot satisfy — and turned idempotent
+    // replay into an error. Both the first projection and its replay must stay
+    // handled for success and failure terminal snapshots alike.
+    with_isolated_home(|_| {
+        let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
+        for (run_id, status, expected_status) in [
+            ("runner-result-repeat-success", "succeeded", "pass"),
+            ("runner-result-repeat-failure", "failed", "fail"),
+        ] {
+            record_runner_exec_job_identity(
+                run_id,
+                "homeboy-lab",
+                "00000000-0000-0000-0000-000000000123",
+                "/runner/workspace",
+                &command,
+            )
+            .expect("generic run bound to daemon job");
+            record_runner_exec_artifact_refs_in_store(&test_lifecycle_store(), run_id, &[])
+                .expect("empty declared promotion completes before terminal projection");
+
+            let snapshot = runner_snapshot(status);
+            assert!(project_terminal_runner_result_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &snapshot
+            )
+            .expect("terminal daemon result projects"));
+            assert!(!project_terminal_runner_result_in_store(
+                &test_lifecycle_store(),
+                run_id,
+                &snapshot
+            )
+            .expect("repeated terminal snapshot stays handled"));
+
+            let run = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(run_id)
+                .expect("read run")
+                .expect("projected run");
+            assert_eq!(run.status, expected_status);
+            assert!(run.finished_at.is_some());
+            assert_eq!(
+                run.metadata_json["runner_terminal_projection"]["state"],
+                "projected"
+            );
+        }
+    });
+}
+
+#[test]
 fn generic_runner_exec_preserves_submission_provenance_on_failure() {
     with_isolated_home(|_| {
         let run_id = "runner-provenance-before-spawn";
