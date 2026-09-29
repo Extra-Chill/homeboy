@@ -795,8 +795,14 @@ write_phpstan_producer_metadata() {
 
 write_phpstan_producer_metadata
 
-# Memory limit (default: 2G)
-phpstan_args+=(--memory-limit=2G)
+# Memory limit. HOMEBOY_PHPSTAN_MEMORY_LIMIT overrides the default; the same
+# value is used for the parallel run and the single-process (--debug) retry.
+# A fixed 2G was exhausted by larger components (data-machine at level 7): the
+# parallel worker crashed with "reached configured PHP memory limit", and the
+# single-process retry died on the same limit without ever emitting a JSON
+# report (homeboy-extensions#2903).
+PHPSTAN_MEMORY_LIMIT="${HOMEBOY_PHPSTAN_MEMORY_LIMIT:-4G}"
+phpstan_args+=(--memory-limit="${PHPSTAN_MEMORY_LIMIT}")
 
 # Component baseline: if <component>/phpstan-baseline.neon exists, it's pulled
 # in via `includes:` in the generated dependency/autoload neon (see
@@ -1134,7 +1140,7 @@ if [ -n "$PHPSTAN_MAX_PROCESSES" ] || [ -n "$PHPSTAN_PHP_VERSION" ]; then
     if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
         phpstan_args+=(--level="$PHPSTAN_LEVEL")
     fi
-    phpstan_args+=(--memory-limit=2G)
+    phpstan_args+=(--memory-limit="${PHPSTAN_MEMORY_LIMIT}")
     # Baseline is pulled in via neon includes (PHPSTAN_TMPCONFIG includes
     # PHPSTAN_BASE_CONFIG which includes COMPONENT_BASELINE when present),
     # so there's no --baseline CLI flag to pass (removed in PHPStan 2.x).
@@ -1207,6 +1213,20 @@ add_phpstan_retry_targets() {
     fi
 }
 
+# Point at HOMEBOY_PHPSTAN_MEMORY_LIMIT when PHPStan died on its memory limit.
+phpstan_memory_limit_hint() {
+    if printf '%s' "$1" | grep -Eqi 'memory limit|Allowed memory size'; then
+        echo "PHPStan ran out of memory at ${PHPSTAN_MEMORY_LIMIT}. Raise it with HOMEBOY_PHPSTAN_MEMORY_LIMIT (for example 4G)."
+    fi
+}
+
+# Extract the PHPStan JSON envelope from a stream that may have `--debug`
+# file-path lines mixed in ahead of (or glued onto) it. Prints the envelope, or
+# nothing when the stream holds no complete PHPStan report.
+extract_phpstan_json() {
+    printf '%s' "$1" | php "${SCRIPT_DIR}/extract-phpstan-json.php" 2>/dev/null || true
+}
+
 # Summary mode: get JSON output and parse it
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     set +e
@@ -1224,7 +1244,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     if [ "$json_exit" -ne 0 ] && is_parallel_worker_failure "$json_output"; then
         echo "Parallel worker failure detected, retrying single-process (--debug)..."
         prepare_phpstan_retry_config > /dev/null
-        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
+        retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit="${PHPSTAN_MEMORY_LIMIT}" --no-progress --debug)
         if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
             retry_args+=(--level="$PHPSTAN_LEVEL")
         fi
@@ -1244,13 +1264,14 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
         stderr_output=$(cat "$stderr_file")
         rm -f "$stderr_file"
         # --debug prints analysed file paths to stdout BEFORE the JSON envelope,
-        # which would break the downstream JSON parser. Extract the JSON line
-        # (first line starting with `{`) from the combined debug stream.
-        json_output=$(printf '%s\n' "$raw_output" | awk '/^\{/{print; exit}')
-        # If we couldn't isolate a JSON envelope, fall back to the raw output
-        # so error propagation still works (the worker-failure re-check below
-        # tolerates non-JSON input by also inspecting stderr).
-        [ -z "$json_output" ] && json_output="$raw_output"
+        # which would break the downstream JSON parser. Extract the PHPStan
+        # JSON envelope from the debug stream. When there is no envelope (the
+        # process died mid-analysis, e.g. on the memory limit) json_output stays
+        # EMPTY: substituting the raw path list made the findings sidecar write
+        # `[]` and the summary print a file listing as "errors", silently
+        # dropping every PHPStan finding (homeboy-extensions#2903). The real
+        # error is in stderr_output and is surfaced below.
+        json_output=$(extract_phpstan_json "$raw_output")
 
         # Graceful degradation: if --debug retry STILL reports a parallel worker
         # failure (the crash happened outside of worker IPC, e.g. in PHPStan's
@@ -1517,10 +1538,14 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     fi
 
     # Fallback: show stderr if PHPStan failed without producing JSON
-    if [ "$json_exit" -ne 0 ] && [ -z "$json_output" ] && [ -n "$stderr_output" ]; then
+    if [ "$json_exit" -ne 0 ] && [ -z "$json_output" ]; then
         echo ""
-        echo "PHPStan error:"
-        echo "$stderr_output"
+        echo "PHPStan exited ${json_exit} without producing a JSON report; no findings were recorded."
+        if [ -n "$stderr_output" ]; then
+            echo "PHPStan error:"
+            echo "$stderr_output"
+        fi
+        phpstan_memory_limit_hint "$stderr_output"
     fi
 
     # Exit with appropriate code
@@ -1650,7 +1675,7 @@ if [ "$full_exit" -ne 0 ] && \
    { is_parallel_worker_failure_text "$stderr_output" || is_parallel_worker_failure_text "$stdout_output"; }; then
     echo "Parallel worker failure detected, retrying single-process (--debug)..."
     prepare_phpstan_retry_config > /dev/null
-    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit=2G --no-progress --debug)
+    retry_args=(analyse --configuration="$PHPSTAN_TMPCONFIG" --memory-limit="${PHPSTAN_MEMORY_LIMIT}" --no-progress --debug)
     if [ -n "${HOMEBOY_PHPSTAN_LEVEL:-}" ] || [ -z "$PHPSTAN_COMPONENT_CONFIG" ] || [ "$PHPSTAN_COMPONENT_CONFIG_HAS_RULESET" -ne 1 ]; then
         retry_args+=(--level="$PHPSTAN_LEVEL")
     fi
@@ -1680,6 +1705,7 @@ if [ "$full_exit" -ne 0 ] && \
         '
     fi
     [ -n "$retry_stderr_output" ] && printf '%s\n' "$retry_stderr_output" >&2
+    [ "$full_exit" -ne 0 ] && phpstan_memory_limit_hint "$retry_stderr_output"
     set -e
 
     # Graceful degradation: if --debug retry STILL reports a parallel worker
