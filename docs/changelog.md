@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.1] - 2026-09-29
+
+### Fixed
+- detach controller-only binary promotion from caller
+- block skewed cook admission and report refresh progress
+- simplify attempt status and terminal notify
+- cache prepared validation dependencies by content
+
 ## [0.398.0] - 2026-09-29
 
 ### Added
