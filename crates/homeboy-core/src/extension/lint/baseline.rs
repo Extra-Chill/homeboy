@@ -3,6 +3,7 @@
 //! Tracks lint findings emitted by extension sidecar JSON so CI only fails on
 //! NEW findings (`id` fingerprints).
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -257,6 +258,59 @@ pub fn load_baseline_for_scope_or_legacy_full(
 pub fn compare(findings: &[HomeboyFinding], baseline: &LintBaseline) -> BaselineComparison {
     let items: Vec<LintFingerprint> = findings.iter().map(LintFingerprint).collect();
     generic::compare(&items, baseline)
+}
+
+/// Fingerprints of every lint baseline stored in the component's `homeboy.json`,
+/// independent of the changed-file scope, tool set, or filters they were saved
+/// under.
+///
+/// Persisted baseline keys (`lint:<digest>`) incorporate the run's scope, so a
+/// scoped run (a release gate's `--changed-since <tag>`) can never *address* the
+/// stored full-scope baseline by key. Fingerprints, however, identify individual
+/// findings and are scope-independent: a finding present in any stored baseline
+/// is pre-existing debt no matter which files the current run happened to scope.
+pub fn stored_known_fingerprints(source_path: &Path) -> HashSet<String> {
+    let json_path = config(source_path, None).json_path();
+    let Ok(content) = std::fs::read_to_string(&json_path) else {
+        return HashSet::new();
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return HashSet::new();
+    };
+    let Some(baselines) = root.get("baselines").and_then(|value| value.as_object()) else {
+        return HashSet::new();
+    };
+    baselines
+        .iter()
+        .filter(|(key, _)| {
+            key.as_str() == BASELINE_KEY || key.starts_with(&format!("{BASELINE_KEY}:"))
+        })
+        .filter_map(|(_, baseline)| baseline.get("known_fingerprints")?.as_array())
+        .flatten()
+        .filter_map(|fingerprint| fingerprint.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Reclassify findings already recorded in a stored baseline as known.
+///
+/// `comparison` was computed against a scope-specific reference (for example
+/// findings measured at a git base). Any "new" item whose fingerprint is in
+/// `stored` is pre-existing debt and is removed from `new_items`.
+pub fn exclude_stored_known(
+    mut comparison: BaselineComparison,
+    stored: &HashSet<String>,
+) -> BaselineComparison {
+    if stored.is_empty() {
+        return comparison;
+    }
+    let before = comparison.new_items.len();
+    comparison
+        .new_items
+        .retain(|item| !stored.contains(&item.fingerprint));
+    let removed = (before - comparison.new_items.len()) as i64;
+    comparison.delta -= removed;
+    comparison.drift_increased = !comparison.new_items.is_empty();
+    comparison
 }
 
 /// Compare candidate findings with findings measured from an immutable source revision.
@@ -565,6 +619,83 @@ mod tests {
             assert!(load_baseline_for_scope_or_legacy_full(dir.path(), &mut provenance).is_none());
             assert_eq!(provenance.baseline_key, scoped_key);
         }
+    }
+
+    #[test]
+    fn scoped_run_with_only_preexisting_findings_has_no_baseline_new() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Stored baseline saved by a full-scope run.
+        let full = LintBaselineProvenance::new(
+            Vec::new(),
+            vec!["phpcs".to_string()],
+            "full",
+            None,
+            false,
+            None,
+            None,
+        );
+        let stored = vec![
+            lint_finding("a", "style", "a"),
+            lint_finding("b", "style", "b"),
+            lint_finding("c", "style", "c"),
+        ];
+        save_baseline_for_scope(dir.path(), "full", &stored, Some(&full)).expect("save baseline");
+
+        // A release gate runs scoped to the changed files: its key differs.
+        let scoped = LintBaselineProvenance::new(
+            vec!["src/one.php".to_string()],
+            vec!["phpcs".to_string()],
+            "changed",
+            None,
+            false,
+            None,
+            None,
+        );
+        assert_ne!(scoped.baseline_key, full.baseline_key);
+        assert!(load_baseline_for_scope(dir.path(), Some(&scoped)).is_none());
+
+        // Git-base measurement found nothing, so everything looks new.
+        let current = vec![lint_finding("a", "style", "a"), lint_finding("b", "style", "b")];
+        let comparison = compare_against_findings(&current, &[]);
+        assert_eq!(comparison.new_items.len(), 2);
+
+        let comparison = exclude_stored_known(comparison, &stored_known_fingerprints(dir.path()));
+
+        assert!(comparison.new_items.is_empty());
+        assert!(!comparison.drift_increased);
+        assert_eq!(comparison.delta, 0);
+    }
+
+    #[test]
+    fn stored_baseline_does_not_hide_genuinely_new_findings() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        save_baseline(dir.path(), "legacy", &[lint_finding("a", "style", "a")])
+            .expect("save baseline");
+
+        let current = vec![lint_finding("a", "style", "a"), lint_finding("z", "style", "z")];
+        let comparison = exclude_stored_known(
+            compare_against_findings(&current, &[]),
+            &stored_known_fingerprints(dir.path()),
+        );
+
+        assert_eq!(comparison.new_items.len(), 1);
+        assert_eq!(comparison.new_items[0].fingerprint, "z");
+        assert!(comparison.drift_increased);
+    }
+
+    #[test]
+    fn stored_known_fingerprints_ignores_non_lint_baselines() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{"baselines":{"audit":{"known_fingerprints":["audit-1"]},"lint:abc":{"known_fingerprints":["lint-1"]}}}"#,
+        )
+        .expect("write homeboy.json");
+
+        let stored = stored_known_fingerprints(dir.path());
+
+        assert_eq!(stored, HashSet::from(["lint-1".to_string()]));
+        assert!(stored_known_fingerprints(&dir.path().join("missing")).is_empty());
     }
 
     #[test]
