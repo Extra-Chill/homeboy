@@ -231,7 +231,31 @@ pub fn run_upgrade_with_method(
         return run_targeted_runner_upgrade(force, method_override, runner_targets, source_path);
     }
 
-    let mut operation = UpgradeOperation::start_durable("homeboy upgrade")?;
+    run_upgrade_with_operation(
+        force,
+        method_override,
+        skip_extensions,
+        skip_runners,
+        skip_services,
+        runner_targets,
+        source_path,
+        pinned_version,
+        UpgradeOperation::start_durable("homeboy upgrade")?,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_upgrade_with_operation(
+    force: bool,
+    method_override: Option<InstallMethod>,
+    skip_extensions: bool,
+    skip_runners: bool,
+    skip_services: bool,
+    runner_targets: &[String],
+    source_path: Option<&Path>,
+    pinned_version: Option<&str>,
+    mut operation: UpgradeOperation,
+) -> Result<UpgradeResult> {
     let upgrade_result = run_controller_upgrade_with_operation(
         force,
         method_override,
@@ -263,6 +287,23 @@ pub fn run_upgrade_with_method(
             Err(error)
         }
     }
+}
+
+/// Freeze the published asset before admitting a detached binary upgrade. A
+/// later release becoming "latest" must never change a queued operation.
+pub(super) fn select_durable_release_tag(
+    method: InstallMethod,
+    pinned_version: Option<&str>,
+) -> Result<String> {
+    if !matches!(method, InstallMethod::Binary | InstallMethod::Secondary) {
+        return Err(Error::validation_invalid_argument(
+            "install_method",
+            "detached upgrade requires a published binary release",
+            Some(method.as_str()),
+            None,
+        ));
+    }
+    resolve_binary_release(pinned_version).map(|release| release.tag)
 }
 
 #[allow(clippy::too_many_arguments)]
