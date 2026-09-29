@@ -394,7 +394,7 @@ const CLEANUP_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const REFACTOR_DANGEROUS_FLAGS: &[&str] = &["--write", "--commit"];
 const FILE_APPLY_DANGEROUS_FLAGS: &[&str] = &["--apply"];
 const FLEET_EXEC_DANGEROUS_FLAGS: &[&str] = &["--apply"];
-const API_MUTATION_DANGEROUS_FLAGS: &[&str] = &["--apply"];
+const API_REQUEST_DANGEROUS_FLAGS: &[&str] = &["--apply", "METHOD!=GET"];
 const API_HTTP_REQUEST_DANGEROUS_FLAGS: &[&str] =
     &["--apply", "METHOD!=GET", "METHOD!=HEAD", "METHOD!=OPTIONS"];
 
@@ -496,7 +496,6 @@ const DEPS_MUTATING_PATHS: &[&str] = &["install", "update", "stack apply"];
 const FILE_APPLY_PATHS: &[&str] = &["write", "delete", "mkdir", "rename"];
 const FILE_TRANSFER_PATHS: &[&str] = &["copy", "sync"];
 const FLEET_CONFIG_PATHS: &[&str] = &["create", "set", "delete", "add", "remove"];
-const API_MUTATION_PATHS: &[&str] = &["post", "put", "patch", "delete"];
 const API_AUTH_PATHS: &[&str] = &[
     "auth login",
     "auth set",
@@ -577,9 +576,9 @@ const FLEET_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
 
 const API_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
-        API_MUTATION_PATHS,
-        operator_safety(None, API_MUTATION_DANGEROUS_FLAGS),
-        "mutating API requests require --apply",
+        &["request"],
+        operator_safety(None, API_REQUEST_DANGEROUS_FLAGS),
+        "mutating API methods require --apply; GET is allowed without it",
     ),
     paths_safety(
         &["http request"],

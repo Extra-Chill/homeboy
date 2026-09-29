@@ -1595,7 +1595,8 @@ mod tests {
             [
                 "homeboy",
                 "api",
-                "post",
+                "request",
+                "POST",
                 "mysite",
                 "/wp/v2/posts",
                 "--apply",

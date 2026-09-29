@@ -10,7 +10,7 @@ Homeboy projects can configure an API client for making HTTP requests to project
 - Template-based URL and header construction
 - Keychain-stored authentication tokens
 - JSON request/response handling
-- Project-scoped `get`, `post`, `put`, `patch`, and `delete` requests
+- Project-scoped `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` requests via `homeboy api request`
 
 ## Configuration
 
@@ -88,33 +88,34 @@ Authentication header templates use `{{var}}` placeholders.
 ### Make Request
 
 ```bash
-homeboy api <project_id> <command> <endpoint> [options]
+homeboy api request <method> <project_id> <endpoint> [options]
 ```
 
 **Arguments:**
+- `<method>`: HTTP method (`GET`, `POST`, `PUT`, `PATCH`, `DELETE`)
 - `<project_id>`: Project identifier
-- `<command>`: Request command (`get`, `post`, `put`, `patch`, `delete`)
 - `<endpoint>`: API endpoint path (appended to `base_url`)
 
 **Options:**
-- `--body <json>`: Request body for `post`, `put`, and `patch`
-- `--form <key=value>`: Form field for `post`, `put`, and `patch` (repeatable)
+- `--apply`: Required for mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`)
+- `--body <json>`: Request body for `POST`, `PUT`, and `PATCH`
+- `--form <key=value>`: Form field for `POST`, `PUT`, and `PATCH` (repeatable)
 - `--output <path>`: Write the structured JSON envelope to a file
 
 **Examples:**
 
 ```bash
 # GET request
-homeboy api get myproject /posts
+homeboy api request GET myproject /posts
 
 # POST with JSON body
-homeboy api post myproject /posts --body '{"title": "Hello", "content": "World"}'
+homeboy api request POST myproject /posts --apply --body '{"title": "Hello", "content": "World"}'
 
 # POST with form fields
-homeboy api post myproject /posts --form title=Hello --form status=draft
+homeboy api request POST myproject /posts --apply --form title=Hello --form status=draft
 
 # Write structured response to a file
-homeboy --output /tmp/posts.json api myproject get /posts
+homeboy --output /tmp/posts.json api request GET myproject /posts
 ```
 
 ## Extension Integration
@@ -202,10 +203,10 @@ All API commands return responses wrapped in the global JSON envelope:
 
 ```bash
 # List posts
-homeboy api get myproject /wp/v2/posts
+homeboy api request GET myproject /wp/v2/posts
 
 # Create post
-homeboy api post myproject /wp/v2/posts --body '{"title": "New Post"}'
+homeboy api request POST myproject /wp/v2/posts --apply --body '{"title": "New Post"}'
 ```
 
 ### Custom API
@@ -221,7 +222,7 @@ homeboy api post myproject /wp/v2/posts --body '{"title": "New Post"}'
 
 ```bash
 # Make authenticated request
-homeboy api myproject get /users
+homeboy api request GET myproject /users
 ```
 
 ## Security Considerations
