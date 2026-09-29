@@ -422,12 +422,17 @@ fn daemon_failure_detail_suffix(payload: &Value) -> Option<String> {
         (None, Some(error)) => error.to_string(),
         (None, None) => return None,
     };
-    Some(if suffix.chars().count() > DAEMON_FAILURE_DETAIL_MAX_CHARS {
-        let truncated: String = suffix.chars().take(DAEMON_FAILURE_DETAIL_MAX_CHARS).collect();
-        format!("{truncated}…")
-    } else {
-        suffix
-    })
+    Some(
+        if suffix.chars().count() > DAEMON_FAILURE_DETAIL_MAX_CHARS {
+            let truncated: String = suffix
+                .chars()
+                .take(DAEMON_FAILURE_DETAIL_MAX_CHARS)
+                .collect();
+            format!("{truncated}…")
+        } else {
+            suffix
+        },
+    )
 }
 
 /// Build the controller-facing error for a daemon exec submission that came back

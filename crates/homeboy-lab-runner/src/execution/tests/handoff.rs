@@ -1967,9 +1967,14 @@ fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
         })),
     };
     let err = daemon_exec_request_failed_error("lab", 500, &envelope);
-    assert!(err.message.contains("internal.io_error: IO error"), "{}", err.message);
     assert!(
-        err.message.contains("No such file or directory (os error 2)"),
+        err.message.contains("internal.io_error: IO error"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("No such file or directory (os error 2)"),
         "{}",
         err.message
     );
@@ -1997,7 +2002,10 @@ fn daemon_exec_request_failed_error_bounds_and_ignores_non_text_details() {
             })),
         },
     );
-    assert!(bounded.message.chars().count() < 1_000, "detail must be bounded");
+    assert!(
+        bounded.message.chars().count() < 1_000,
+        "detail must be bounded"
+    );
     assert!(bounded.message.ends_with("…)"), "{}", bounded.message);
 
     let structured = daemon_exec_request_failed_error(
