@@ -382,10 +382,16 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
 #[test]
 fn local_retry_launch_token_is_not_reinterpreted_as_a_detached_cook() {
     let context = HermeticTestContext::new();
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .expect("disable host-capacity admission for fixture retry");
     let token_path = context.root().join("retry-launch-token");
     std::fs::write(&token_path, "consumed-token").expect("publish retry launch token");
     let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
     command
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
         .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "0")
         .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN", "consumed-token")
         .env("HOMEBOY_LOCAL_COOK_LAUNCH_TOKEN_PATH", token_path)

@@ -366,8 +366,51 @@ fn run_command_with_workspace_inner(
             ));
         }
 
-        let early_plan = super::plan(&input.component_id, &options).ok();
+        // Keep planner failures visible in a preview. Silently converting an
+        // error to `None` used to produce an unclassified `skipped` result
+        // (without a version or a reason), notably when a primary checkout
+        // was behind its already-fetched upstream.
+        let early_plan_result = super::plan(&input.component_id, &options);
+        let early_plan = early_plan_result.as_ref().ok().cloned();
         let skipped_reason = early_plan.as_ref().and_then(skipped_reason_from_plan);
+
+        if let Err(error) = early_plan_result {
+            let current_version = current_component_version(&component).ok().flatten();
+            let remote_freshness = release_remote_freshness(&component);
+            let mut summary = vec![error.to_string()];
+            if let Some((local, remote, behind)) = remote_freshness {
+                summary.push(format!(
+                    "Local HEAD {local} is {behind} commit(s) behind remote default {remote}. Fast-forward the checkout and rerun the preview."
+                ));
+            }
+            if let Some(owner) = ci_release_owner(&component) {
+                summary.push(format!("Automatic release publication is owned by {owner}; wait for that workflow to finish rather than publishing manually."));
+            }
+            return Ok((
+                ReleaseWorkspaceCommandResult {
+                    result: ReleaseCommandResult {
+                        phase: execution.phase,
+                        component_id: input.component_id,
+                        status: "blocked".to_string(),
+                        bump_type,
+                        dry_run: true,
+                        releasable_commits: releasable_count,
+                        new_version: current_version,
+                        tag: None,
+                        skipped_reason: Some("release-plan-invalid".to_string()),
+                        plan: None,
+                        run: None,
+                        deployment: None,
+                        continuation_command: None,
+                        release_summary: summary,
+                        changelog_history_recovery: None,
+                        readiness: None,
+                    },
+                    workspace: None,
+                },
+                1,
+            ));
+        }
 
         if skipped_reason.as_deref() == Some("release-already-at-head") {
             let plan = early_plan.expect("skipped reason came from plan");
@@ -733,6 +776,34 @@ fn current_component_version(
     component: &homeboy_core::component::Component,
 ) -> Result<Option<String>> {
     super::version::read_component_version(component).map(|info| Some(info.version))
+}
+
+fn release_remote_freshness(
+    component: &homeboy_core::component::Component,
+) -> Option<(String, String, usize)> {
+    let snapshot = git::get_repo_snapshot(&component.local_path).ok()?;
+    let behind = snapshot.behind?;
+    if behind == 0 {
+        return None;
+    }
+    let head = git::get_head_commit(&component.local_path).ok()?;
+    let branch = snapshot.branch;
+    let remote =
+        homeboy_core::git::resolve_default_remote(std::path::Path::new(&component.local_path));
+    Some((head, format!("{remote}/{branch}"), behind as usize))
+}
+
+fn ci_release_owner(component: &homeboy_core::component::Component) -> Option<String> {
+    // The repository's checked-in release workflow is the ownership contract:
+    // it triggers on main pushes and is responsible for automatic publication.
+    // Do not infer ownership from an invocation-specific environment variable.
+    let workflow =
+        std::path::Path::new(&component.local_path).join(".github/workflows/release.yml");
+    let contents = std::fs::read_to_string(workflow).ok()?;
+    (contents.contains("name: Release")
+        && contents.contains("push:")
+        && contents.contains("branches: [main]"))
+    .then(|| "the repository's `.github/workflows/release.yml` workflow".to_string())
 }
 
 /// Recognize only a release branch that Homeboy already prepared and pushed.
@@ -2438,6 +2509,80 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.contains("homeboy release fixture --head")));
+    }
+
+    #[test]
+    fn dry_run_stale_main_is_blocked_with_freshness_and_release_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let remote = tempfile::tempdir().expect("remote");
+        let dir = temp.path();
+        run_in(remote.path(), &["git", "init", "--bare", "-q"]);
+        run_in(dir, &["git", "init", "-q", "--initial-branch=main"]);
+        run_in(dir, &["git", "config", "user.email", "test@example.com"]);
+        run_in(dir, &["git", "config", "user.name", "Test"]);
+        run_in(dir, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("VERSION"), "1.2.3\n").expect("write version");
+        std::fs::write(dir.join("homeboy.json"), r#"{"id":"fixture","version_targets":[{"file":"VERSION","pattern":"^([0-9]+\\.[0-9]+\\.[0-9]+)$"}]}"#).expect("write config");
+        std::fs::create_dir_all(dir.join(".github/workflows")).expect("workflow dir");
+        std::fs::write(
+            dir.join(".github/workflows/release.yml"),
+            "name: Release\non:\n  push:\n    branches: [main]\n",
+        )
+        .expect("write release workflow");
+        run_in(dir, &["git", "add", "."]);
+        run_in(dir, &["git", "commit", "-q", "-m", "release: v1.2.3"]);
+        run_in(dir, &["git", "tag", "v1.2.3"]);
+        run_in(
+            dir,
+            &[
+                "git",
+                "remote",
+                "add",
+                "origin",
+                &remote.path().to_string_lossy(),
+            ],
+        );
+        run_in(dir, &["git", "push", "-q", "-u", "origin", "main"]);
+        run_in(dir, &["git", "checkout", "-q", "--detach"]);
+        run_in(dir, &["git", "checkout", "-q", "-B", "main"]);
+        run_in(dir, &["git", "fetch", "-q", "origin"]);
+        run_in(dir, &["git", "checkout", "-q", "--detach"]);
+        run_in(dir, &["git", "checkout", "-q", "-B", "main", "origin/main"]);
+        run_in(dir, &["git", "reset", "-q", "--hard", "HEAD"]);
+        run_in(dir, &["git", "checkout", "-q", "--detach"]);
+        run_in(dir, &["git", "checkout", "-q", "-B", "main"]);
+        std::fs::write(dir.join("README"), "new upstream work\n").expect("write upstream work");
+        run_in(dir, &["git", "add", "README"]);
+        run_in(dir, &["git", "commit", "-q", "-m", "feat: upstream work"]);
+        run_in(dir, &["git", "push", "-q", "origin", "main"]);
+        run_in(dir, &["git", "reset", "-q", "--hard", "HEAD~1"]);
+        run_in(
+            dir,
+            &["git", "branch", "--set-upstream-to=origin/main", "main"],
+        );
+
+        let (result, exit_code) = run_command(ReleaseCommandInput {
+            component_id: "fixture".to_string(),
+            path_override: Some(dir.to_string_lossy().to_string()),
+            dry_run: true,
+            ..Default::default()
+        })
+        .expect("stale preview should return a classified result");
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(result.status, "blocked");
+        assert_eq!(
+            result.skipped_reason.as_deref(),
+            Some("release-plan-invalid")
+        );
+        assert!(result
+            .release_summary
+            .iter()
+            .any(|line| line.contains("behind remote default origin/main")));
+        assert!(result
+            .release_summary
+            .iter()
+            .any(|line| line.contains(".github/workflows/release.yml")));
     }
 
     #[test]

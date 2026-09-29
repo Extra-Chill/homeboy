@@ -3332,11 +3332,15 @@ fn cook_finalization_options_with_stores_and_review_form(
     // admitted the run against, so finalization must reuse that identity
     // rather than re-deriving it ambiguously from the bare worktree path
     // (#14725).
-    let review_profile = resolve_review_profile(
-        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
-            .as_deref(),
-        &path,
-    )?;
+    let recorded_component_id =
+        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
+    let selected_component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .as_deref()
+        .or(recorded_component_id.as_deref());
+    let review_profile = resolve_review_profile(selected_component_id, &path)?;
     review_dossier.validate(&review_profile)?;
     let form_title = if options.finalization.title.is_empty() {
         Some(terminal_form_title(
@@ -3349,6 +3353,7 @@ fn cook_finalization_options_with_stores_and_review_form(
     };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: selected_component_id.map(str::to_string),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
@@ -4977,6 +4982,7 @@ fn manual_finalization_options(
     let path = path.expect("validated path");
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: component_id.map(str::to_string),
         run_id: report.run_id,
         base: base.expect("validated base"),
         verified_base_sha,
@@ -5142,12 +5148,16 @@ fn cook_review_dossier_with_stores_and_review_form(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let command = gate.invocation().ok()?.reviewer_command();
-            (verification_promotion.has_visible_passed_gate_for_command(&command)
-                && crate::agent_task_review_dossier::reviewer_runnable_command(&command))
-            .then(|| AgentTaskReviewTestStep {
-                command,
-                expected: "passes as recorded by Cook's deterministic gate".to_string(),
+            let exact_command = gate.invocation().ok()?.reviewer_command();
+            if !verification_promotion.has_visible_passed_gate_for_command(&exact_command) {
+                return None;
+            }
+            let command = crate::agent_task_review_dossier::reviewer_safe_command(&exact_command)?;
+            crate::agent_task_review_dossier::reviewer_runnable_command(&command).then(|| {
+                AgentTaskReviewTestStep {
+                    command,
+                    expected: "passes as recorded by Cook's deterministic gate".to_string(),
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -6607,12 +6617,14 @@ pub(crate) fn cook_failure_context_with_stores(
             "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
         )
     {
-        let diagnostic = promotion.and_then(gate_failure_diagnostic).or_else(|| {
-            Some(json!({
-                "class": "agent_task.promotion_gate_failed",
-                "message": "Deterministic promotion gate failed",
-            }))
-        });
+        let diagnostic = promotion
+            .and_then(|promotion| gate_failure_diagnostic(promotion, record_run_id))
+            .or_else(|| {
+                Some(json!({
+                    "class": "agent_task.promotion_gate_failed",
+                    "message": "Deterministic promotion gate failed",
+                }))
+            });
         (
             "deterministic_gate".to_string(),
             "gate_failed".to_string(),
@@ -6788,7 +6800,7 @@ pub(crate) fn cook_failure_context_with_stores(
 /// Project the first failed controller-owned gate into the Cook-wide bounded
 /// cause. Provider output is evidence of candidate production, not the cause
 /// after promotion has reached deterministic verification.
-fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
+fn gate_failure_diagnostic(promotion: &Value, run_id: &str) -> Option<Value> {
     let gate = promotion
         .get("deterministic_gates")
         .or_else(|| promotion.get("gate_results"))
@@ -6801,30 +6813,118 @@ fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
             )
         })?;
     let evidence = gate.get("failure_evidence");
-    let message = evidence
-        .and_then(|evidence| {
-            evidence
-                .get("summary")
-                .or_else(|| evidence.get("agent_feedback"))
-        })
+    let termination = gate
+        .get("termination")
         .and_then(Value::as_str)
-        .or_else(|| gate.get("message").and_then(Value::as_str))
-        .or_else(|| {
-            evidence
-                .and_then(|evidence| evidence.get("stderr_tail"))
-                .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let exit_code = gate.get("exit_code").and_then(Value::as_i64).or_else(|| {
+        evidence
+            .and_then(|evidence| evidence.get("exit_code"))
+            .and_then(Value::as_i64)
+    });
+    let message = if termination == "no_progress" {
+        "Deterministic gate made no progress before its deadline; inspect the last progress marker and output tail, then split or increase the gate's progress cadence.".to_string()
+    } else {
+        evidence
+            .and_then(|evidence| {
+                evidence
+                    .get("summary")
+                    .or_else(|| evidence.get("agent_feedback"))
+            })
+            .and_then(Value::as_str)
+            .or_else(|| gate.get("message").and_then(Value::as_str))
+            .or_else(|| {
+                evidence
+                    .and_then(|evidence| evidence.get("stderr_tail"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("Deterministic promotion gate failed")
+            .to_string()
+    };
+    let command = gate
+        .get("command")
+        .or_else(|| evidence.and_then(|evidence| evidence.get("command")));
+    let output_tail = |field: &str| {
+        evidence
+            .and_then(|evidence| evidence.get(field))
+            .and_then(Value::as_str)
+            .map(|value| bounded_gate_detail(&homeboy_core::redaction::redact_string(value)))
+    };
+    let private_summary_only = gate.get("visibility").and_then(Value::as_str) == Some("private")
+        && gate.get("reveal_policy").and_then(Value::as_str) != Some("full_evidence");
+    let command = (!private_summary_only)
+        .then(|| {
+            command.map(|value| {
+                bounded_gate_detail(&homeboy_core::redaction::redact_string(&value.to_string()))
+            })
         })
-        .unwrap_or("Deterministic promotion gate failed");
+        .flatten();
     Some(json!({
         "class": "agent_task.promotion_gate_failed",
         "message": message,
         "details": {
             "gate": gate.get("id").or_else(|| gate.get("name")),
-            "command": gate.get("command").or_else(|| evidence.and_then(|evidence| evidence.get("command"))),
-            "exit_code": gate.get("exit_code").or_else(|| evidence.and_then(|evidence| evidence.get("exit_code"))),
-            "failure_evidence": evidence,
+            "command": command,
+            "exit_code": exit_code,
+            "termination": termination,
+            "timed_out": termination == "timed_out" || termination == "no_progress",
+            "elapsed_ms": gate.get("elapsed_ms"),
+            "last_progress_ms_ago": gate.get("last_progress_ms_ago"),
+            "stdout_tail": if private_summary_only { None } else { output_tail("stdout_tail") },
+            "stderr_tail": if private_summary_only { None } else { output_tail("stderr_tail") },
+            "candidate_checkout": gate.get("candidate_checkout"),
+            "evidence_ref": format!("homeboy://agent-task/run/{run_id}/gates#gate={}",
+                gate.get("id").and_then(Value::as_str).unwrap_or("unknown")),
         },
     }))
+}
+
+fn bounded_gate_detail(value: &str) -> String {
+    const LIMIT: usize = 4096;
+    if value.len() <= LIMIT {
+        return value.to_string();
+    }
+    let mut boundary = LIMIT;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}…[truncated]", &value[..boundary])
+}
+
+#[cfg(test)]
+mod gate_failure_diagnostic_tests {
+    use super::gate_failure_diagnostic;
+    use serde_json::json;
+
+    #[test]
+    fn failed_gate_diagnostic_is_bounded_actionable_and_candidate_bound() {
+        let promotion = json!({
+            "deterministic_gates": [{
+                "id": "gate-1", "status": "failed", "command": ["sh", "-lc", "cargo test"],
+                "exit_code": 125, "termination": "no_progress", "elapsed_ms": 12000,
+                "last_progress_ms_ago": 11000,
+                "candidate_checkout": {"commit":"abc", "tree":"tree", "candidate_sha256":"digest"},
+                "failure_evidence": {"command":"cargo test", "exit_code":125,
+                    "stdout_tail":"last test output", "stderr_tail":"stalled"}
+            }]
+        });
+        let diagnostic = gate_failure_diagnostic(&promotion, "cook-run").expect("failure detail");
+        let details = &diagnostic["details"];
+        assert_eq!(details["exit_code"], 125);
+        assert_eq!(details["termination"], "no_progress");
+        assert_eq!(details["timed_out"], true);
+        assert_eq!(details["stdout_tail"], "last test output");
+        assert_eq!(details["candidate_checkout"]["commit"], "abc");
+        assert_eq!(
+            details["evidence_ref"],
+            "homeboy://agent-task/run/cook-run/gates#gate=gate-1"
+        );
+        assert!(diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains("no progress"));
+        assert!(!diagnostic.to_string().contains("provider transcript"));
+    }
 }
 
 fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bool {

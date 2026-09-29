@@ -4,6 +4,76 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.8] - 2026-09-29
+
+### Changed
+- isolate retry token fixture from host pressure
+
+### Fixed
+- preflight selected Lab provider secret refs
+
+## [0.397.7] - 2026-09-29
+
+### Fixed
+- dispatch runner-local command in deferred staging; give silent git failures diagnostics
+
+## [0.397.6] - 2026-09-29
+
+### Fixed
+- report worktree reserve shortfall in preview
+
+## [0.397.5] - 2026-09-29
+
+### Changed
+- allow bounded CI startup for external check hydration
+
+## [0.397.4] - 2026-09-29
+
+### Fixed
+- scope-independent lint baseline and gate-aware stall deadline
+
+## [0.397.3] - 2026-09-29
+
+### Fixed
+- settle failed and idle loop work jobs
+- hydrate empty prepared dependency directories
+
+## [0.397.2] - 2026-09-29
+
+### Fixed
+- keep automatic Lab placement through resource admission
+- retain unsafe assignment rejection in gate review
+- use admitted component for PR publication
+- publish reviewer-safe gate commands
+- retain admitted component through finalization
+
+## [0.397.1] - 2026-09-29
+
+### Changed
+- cargo fmt
+- route terminal continuation through WorkJob
+
+### Fixed
+- wait for live terminal continuation claims
+- include redacted stderr in failed provider readiness reasons
+- keep a running provider's effect lease alive
+
+## [0.397.0] - 2026-09-29
+
+### Added
+- prune exact terminal controller jobs
+
+### Fixed
+- surface daemon error details in failed exec requests
+- give readiness its declared probe budget
+- report lease recovery outcome accurately
+- inherit existing pull request base before preview
+- explain stale checkout in dry-run preview
+- persist actual replacement plan in retry recipe
+- retain live local retry owner during reconciliation
+- notify only after terminal publication outcome
+- surface bounded failed-gate evidence
+
 ## [0.396.8] - 2026-09-29
 
 ### Fixed

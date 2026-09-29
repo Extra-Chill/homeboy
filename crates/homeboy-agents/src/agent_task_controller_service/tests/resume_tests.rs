@@ -264,6 +264,40 @@ fn resume_with_options_stops_at_max_actions_with_pending_work_remaining() {
 }
 
 #[test]
+fn resume_does_not_idle_while_an_action_is_running() {
+    with_isolated_home(|_| {
+        let mut record = init(ControllerInitRequest {
+            loop_id: "loop-service-running-action".to_string(),
+            phase: "repair".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunCommand {
+                dedupe_key: "running-action".to_string(),
+                entity_id: None,
+                request: json!({"execution": {"command": "/bin/sh", "args": ["-c", "true"]}}),
+            },
+            "running action fixture",
+        );
+        record.next_actions[0].status = AgentTaskLoopActionStatus::Running;
+        controller::write_controller(&record).expect("controller written");
+
+        let result = resume(
+            "loop-service-running-action",
+            Arc::new(CapturingExecutor::default()),
+            &NoopDispatchHook,
+        )
+        .expect("controller resumed");
+        assert_eq!(result.value.stopped_reason, "idle");
+        assert_eq!(
+            result.value.controller.state,
+            AgentTaskLoopControllerState::Running
+        );
+    });
+}
+
+#[test]
 fn resume_with_options_stops_after_terminal_state() {
     with_isolated_home(|_| {
         let mut record = init(ControllerInitRequest {

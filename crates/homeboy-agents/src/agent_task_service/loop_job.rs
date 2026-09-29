@@ -234,6 +234,20 @@ impl LoopWorkHandler {
     ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
+        if job.controller_state == Some(AgentTaskLoopControllerState::Waiting)
+            && agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(
+                |record| {
+                    record.open_wait_count() == 0
+                        && record
+                            .next_actions
+                            .iter()
+                            .all(|action| !action.status.is_open())
+                },
+            )
+        {
+            job.phase = WorkJobPhase::Completed;
+            return Ok(WorkJobStep::Complete(job.result()));
+        }
         if job
             .controller_state
             .is_some_and(controller_state_is_terminal)
@@ -313,6 +327,12 @@ impl LoopWorkHandler {
             }
         };
         write_loop_dispatch_completion_receipt(&job.request.loop_id, &job.request.generation)?;
+        let action_failed = report.value.stopped_reason == "action_failed";
+        let action_cancelled = report
+            .value
+            .results
+            .iter()
+            .any(value_contains_cancelled_state);
         job.resume_result = Some(
             serde_json::to_value(report.value)
                 .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
@@ -324,6 +344,34 @@ impl LoopWorkHandler {
             ));
         }
         job.refresh_controller_state();
+        if action_cancelled {
+            job.phase = WorkJobPhase::Completed;
+            job.controller_state = Some(AgentTaskLoopControllerState::Abandoned);
+            return Ok(WorkJobStep::Complete(job.result()));
+        }
+        if action_failed
+            && !job
+                .controller_state
+                .is_some_and(controller_state_is_terminal)
+        {
+            job.phase = WorkJobPhase::Completed;
+            job.controller_state = Some(AgentTaskLoopControllerState::Failed);
+            return Ok(WorkJobStep::Complete(job.result()));
+        }
+        if job.controller_state == Some(AgentTaskLoopControllerState::Waiting)
+            && agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(
+                |record| {
+                    record.open_wait_count() == 0
+                        && record
+                            .next_actions
+                            .iter()
+                            .all(|action| !action.status.is_open())
+                },
+            )
+        {
+            job.phase = WorkJobPhase::Completed;
+            return Ok(WorkJobStep::Complete(job.result()));
+        }
         if job
             .controller_state
             .is_some_and(controller_state_is_terminal)
@@ -336,6 +384,20 @@ impl LoopWorkHandler {
             progress: job.result(),
             wait: SUPERVISION_POLL,
         })
+    }
+}
+
+fn value_contains_cancelled_state(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            object
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "cancelled")
+                || object.values().any(value_contains_cancelled_state)
+        }
+        Value::Array(values) => values.iter().any(value_contains_cancelled_state),
+        _ => false,
     }
 }
 
@@ -1109,6 +1171,92 @@ mod tests {
     }
 
     #[test]
+    fn failed_action_blocks_downstream_work_and_terminalizes_supervision() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-failed-blocker";
+            let downstream_marker = tempfile::NamedTempFile::new().expect("marker");
+            std::fs::remove_file(downstream_marker.path()).expect("remove marker placeholder");
+            let mut record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            record.record_action(
+                agent_task_loop_controller::AgentTaskLoopPolicyAction::RunCommand {
+                    dedupe_key: "producer".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "execution": { "command": "/bin/sh", "args": ["-c", "exit 7"] }
+                    }),
+                },
+                "producer fixture",
+            );
+            record.record_action(
+                agent_task_loop_controller::AgentTaskLoopPolicyAction::RunCommand {
+                    dedupe_key: "consumer".to_string(),
+                    entity_id: None,
+                    request: json!({
+                        "execution": {
+                            "command": "/bin/sh",
+                            "args": ["-c", format!("touch {}", downstream_marker.path().display())]
+                        }
+                    }),
+                },
+                "consumer fixture",
+            );
+            agent_task_loop_controller::write_controller(&record).expect("write controller");
+
+            let mut job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: loop_id.to_string(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
+                generation: "generation-failed-blocker".to_string(),
+                dispatch_defaults: json!({}),
+                provider_catalog: AgentTaskProviderCatalog::default(),
+            })?;
+            let step = LoopWorkHandler.observe(&mut job, WorkJobInvocation::Execute)?;
+            assert!(matches!(step, WorkJobStep::Complete(_)));
+            assert_eq!(job.phase, WorkJobPhase::Completed);
+            let record = agent_task_loop_controller::load_controller(loop_id)?;
+            assert_eq!(record.state, AgentTaskLoopControllerState::Running);
+            assert_eq!(
+                record.next_actions[0].status,
+                agent_task_loop_controller::AgentTaskLoopActionStatus::Failed
+            );
+            assert_eq!(
+                record.next_actions[1].status,
+                agent_task_loop_controller::AgentTaskLoopActionStatus::Pending
+            );
+            assert!(!downstream_marker.path().exists());
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("failed producer blocks consumer");
+    }
+
+    #[test]
+    fn actionless_loop_waits_and_supervising_work_job_completes() {
+        with_isolated_home(|_| {
+            let loop_id = "loop-actionless-waiting";
+            agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("create controller");
+            let mut job = AgentTaskLoopJob::new(AgentTaskLoopJobRequest {
+                schema: AGENT_TASK_LOOP_JOB_SCHEMA.to_string(),
+                loop_id: loop_id.to_string(),
+                kind: AgentTaskLoopJobKind::DaemonExecution,
+                generation: "generation-actionless".to_string(),
+                dispatch_defaults: json!({}),
+                provider_catalog: AgentTaskProviderCatalog::default(),
+            })?;
+            let step = LoopWorkHandler.observe(&mut job, WorkJobInvocation::Execute)?;
+            assert!(matches!(step, WorkJobStep::Complete(_)));
+            assert_eq!(job.phase, WorkJobPhase::Completed);
+            assert_eq!(
+                agent_task_loop_controller::load_controller(loop_id)?.state,
+                AgentTaskLoopControllerState::Waiting
+            );
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("actionless loop becomes waiting");
+    }
+
+    #[test]
     fn active_provider_execution_is_cancelled_through_the_work_job_harness() {
         with_isolated_home(|_| {
             register_loop_work_job_handler();
@@ -1231,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn waiting_execution_stays_resumable_instead_of_becoming_completed() {
+    fn actionless_waiting_execution_completes_without_a_pending_action() {
         with_isolated_home(|_| {
             let mut record = agent_task_loop_controller::create_controller(
                 "loop-waiting-execution",
@@ -1251,11 +1399,11 @@ mod tests {
             })?;
 
             let step = LoopWorkHandler.observe(&mut job, WorkJobInvocation::Execute)?;
-            assert!(matches!(step, WorkJobStep::Continue { .. }));
-            assert_ne!(job.phase, WorkJobPhase::Completed);
+            assert!(matches!(step, WorkJobStep::Complete(_)));
+            assert_eq!(job.phase, WorkJobPhase::Completed);
             Ok::<(), homeboy_core::Error>(())
         })
-        .expect("waiting execution remains resumable");
+        .expect("actionless waiting execution completes");
     }
 
     #[test]
@@ -1407,7 +1555,10 @@ mod tests {
             assert_eq!(recovered.state, AgentTaskLoopControllerState::Running);
             let recovered_job = checkpoint["checkpoint"].clone();
             let step = LoopWorkHandler.advance(recovered_job, WorkJobInvocation::Resume)?;
-            assert!(matches!(step, WorkJobStep::Continue { .. }));
+            assert!(matches!(
+                step,
+                WorkJobStep::Continue { .. } | WorkJobStep::Complete(_)
+            ));
             let recovered = agent_task_loop_controller::load_controller(
                 "loop-interrupted-admission",
             )?;

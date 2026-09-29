@@ -2118,6 +2118,100 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
 }
 
 #[test]
+fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_completion() {
+    use crate::agents::agent_task_service::{WorkJobHandler, WorkJobInvocation, WorkJobStep};
+
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path());
+        let cook_id = "cook-shared-terminal-claim";
+        let run_id = "cook-shared-terminal-claim-attempt-1";
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            run_id,
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture" },
+                "instructions": "terminal continuation",
+                "workspace": { "root": workspace.path() }
+            }))
+            .expect("task")],
+        );
+        let options = crate::agents::agent_task_service::CookRequest {
+            identity: crate::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: plan.clone(),
+            },
+            workspace: crate::agents::agent_task_service::CookWorkspace {
+                to_worktree: workspace.path().display().to_string(),
+                source_worktree_path: Some(workspace.path().to_path_buf()),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: Default::default(),
+            retry_policy: crate::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
+            finalization: crate::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                provider_ci: None,
+                base: "main".to_string(),
+                head: None,
+                title: "Terminal claim".to_string(),
+                commit_message: "test".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context:
+                homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                    .expect("harvest context"),
+        };
+        let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()
+            .expect("recipe store");
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+        store
+            .enqueue_terminal_continuation(cook_id, run_id)
+            .expect("enqueue continuation");
+        let claim = store
+            .claim_continuation_for(cook_id, run_id)
+            .expect("claim lookup")
+            .expect("other owner claims work");
+        let checkpoint = serde_json::json!({
+            "schema": "homeboy/terminal-cook-continuation-request/v1",
+            "cook_id": cook_id,
+            "run_id": run_id,
+            "generation": 0,
+        });
+        let handler = TerminalCookWorkHandler;
+        let waiting = handler
+            .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+            .expect("other owner remains active");
+        assert!(
+            matches!(waiting, WorkJobStep::Continue { checkpoint: next, .. } if next == checkpoint)
+        );
+
+        claim.complete().expect("first owner completes");
+        let replay = handler
+            .advance(checkpoint, WorkJobInvocation::Resume)
+            .expect("completed claim is observed");
+        assert!(
+            matches!(replay, WorkJobStep::Complete(result) if result["completed"] == true && result["claimed"] == false)
+        );
+    });
+}
+
+#[test]
 fn preacceptance_io_failure_becomes_a_typed_no_job_receipt() {
     let io_error = std::io::Error::new(
         std::io::ErrorKind::BrokenPipe,

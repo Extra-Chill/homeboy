@@ -1886,30 +1886,9 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
         ))
     })?;
     drop(store);
-    if let Some(attempt) = attempt
-        .as_ref()
-        .filter(|attempt| attempt.state.is_terminal())
-    {
-        let status_label = serde_json::to_value(attempt.state)
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| "failed".to_string());
-        let exit_code = if matches!(
-            attempt.state,
-            AgentTaskRunState::Succeeded | AgentTaskRunState::Cancelled
-        ) {
-            0
-        } else {
-            1
-        };
-        crate::agent_task_notify::notify_detached_cook_terminal(
-            lifecycle_store,
-            &record.run_id,
-            &attempt.run_id,
-            &status_label,
-            exit_code,
-        );
-    }
+    // The attempt's terminal state is raw provider evidence. Cook still owns
+    // promotion gates and PR finalization; only its terminal report may consume
+    // the Cook-level notification claim.
     refresh_cook_parent_observation(lifecycle_store, &record)?;
     record_from_run(&committed)
 }

@@ -516,7 +516,12 @@ fn claim_pre_artifact_interruption_retry_with_stores(
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
             };
             if replace_semantic_attempt {
-                recipe_store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
+                recipe_store.record_recipe_attempt_replacement_with_plan(
+                    cook_id,
+                    run_id,
+                    &next_run_id,
+                    plan,
+                )?;
             } else {
                 recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
             }
@@ -4278,7 +4283,12 @@ pub(crate) fn dispatch_cook_follow_up(
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        recipe_store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        recipe_store.record_recipe_attempt_replacement_with_plan(
+            cook_id,
+            &replaced_run_id,
+            &next_run_id,
+            &follow_up_plan,
+        )?;
     } else {
         recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }
@@ -6324,6 +6334,18 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
+    if !options.gates.verify.is_empty()
+        && !options.gates.verify.iter().any(|command| {
+            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "verification",
+            "Cook has no visible gate that can produce a reviewer-safe command; move machine-local values into gate environment configuration before provider work",
+            Some(options.identity.cook_id.clone()),
+            None,
+        ));
+    }
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -9970,7 +9992,15 @@ fn materialize_pending_cook_workspace(
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     validate_pending_cook_repository_identity(&options.identity.initial_plan, &target)?;
-    bind_materialized_cook_component_workspace(&mut options.identity.initial_plan, &target)?;
+    bind_materialized_cook_component_workspace(
+        &mut options.identity.initial_plan,
+        &target,
+        options
+            .gates
+            .gate_environment
+            .admitted_component_id
+            .as_deref(),
+    )?;
     // Deferred provider materialization has no checkout at initial recipe
     // persistence. Capture and persist this immutable boundary before Cook can
     // admit or dispatch the materialized destination.
@@ -10023,8 +10053,12 @@ pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
 fn bind_materialized_cook_component_workspace(
     plan: &mut AgentTaskPlan,
     repository_root: &Path,
+    selected_component_id: Option<&str>,
 ) -> Result<()> {
-    let Some(component_id) = cook_repository_identity_component_id(plan) else {
+    let Some(component_id) = selected_component_id
+        .map(str::to_string)
+        .or_else(|| cook_repository_identity_component_id(plan))
+    else {
         return Ok(());
     };
     let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {

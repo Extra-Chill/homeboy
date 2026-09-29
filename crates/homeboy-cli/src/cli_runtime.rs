@@ -130,8 +130,10 @@ const RELEASE_DEADLINE_SECS_ENV: &str = "HOMEBOY_RELEASE_DEADLINE_SECS";
 const RELEASE_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
 const RELEASE_EXECUTION_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 
+const RELEASE_EXECUTION_STAGE: &str = "executing release pipeline";
+
 fn release_stage_deadline(stage: &str) -> Duration {
-    if stage == "executing release pipeline" {
+    if stage == RELEASE_EXECUTION_STAGE {
         RELEASE_EXECUTION_DEADLINE
     } else {
         RELEASE_DISCOVERY_DEADLINE
@@ -161,6 +163,26 @@ fn release_deadline_with_test_duration(
                 RELEASE_DISCOVERY_DEADLINE
             }
         })
+}
+
+/// Stage the watchdog should track after a child stderr `line`, or `None` to
+/// keep the current stage.
+///
+/// Explicit `[release] stage: <name>` markers always win. Other `[release] ...`
+/// lines name a sub-step for discovery-phase diagnostics, but once the release
+/// has entered the execution stage they must not demote it: quality gates
+/// (lint, tests) run inside that stage and emit their own `[release]` progress
+/// lines, and downgrading to the discovery window would kill a live gate after
+/// 30s of quiet subprocess output (#15069).
+fn release_stage_after_line(current: &str, line: &str) -> Option<String> {
+    if let Some(value) = line.strip_prefix("[release] stage: ") {
+        return Some(value.to_string());
+    }
+    if current == RELEASE_EXECUTION_STAGE {
+        return None;
+    }
+    line.strip_prefix("[release]")
+        .map(|rest| rest.trim_start().to_string())
 }
 
 fn release_deadline_expired(idle_for: Duration, deadline: Duration) -> bool {
@@ -224,13 +246,9 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
                 let line = String::from_utf8_lossy(&pending[..index])
                     .trim()
                     .to_string();
-                if let Some(value) = line.strip_prefix("[release] stage: ") {
-                    if let Ok(mut current) = stage_for_reader.lock() {
-                        *current = value.to_string();
-                    }
-                } else if line.starts_with("[release]") {
-                    if let Ok(mut current) = stage_for_reader.lock() {
-                        *current = line.trim_start_matches("[release] ").to_string();
+                if let Ok(mut current) = stage_for_reader.lock() {
+                    if let Some(next) = release_stage_after_line(&current, &line) {
+                        *current = next;
                     }
                 }
                 pending.drain(..=index);
@@ -315,7 +333,7 @@ fn run_release_with_deadline(args: &[String]) -> Option<std::process::ExitCode> 
 mod release_deadline_tests {
     use super::{
         release_deadline, release_deadline_expired, release_deadline_with_test_duration,
-        RELEASE_EXECUTION_DEADLINE,
+        release_stage_after_line, RELEASE_EXECUTION_DEADLINE,
     };
     use std::time::Duration;
 
@@ -369,6 +387,59 @@ mod release_deadline_tests {
         );
         assert!(release_deadline_expired(idle_for, Duration::from_secs(30)));
         assert!(!release_deadline_expired(idle_for, execution_deadline));
+    }
+    #[test]
+    fn gate_output_lines_do_not_demote_the_execution_stage() {
+        let mut stage = String::from("startup");
+        for line in [
+            "[release] stage: executing release pipeline",
+            "[release] Running lint (wordpress)...",
+            "[release] Running tests (scripts.test)...",
+        ] {
+            if let Some(next) = release_stage_after_line(&stage, line) {
+                stage = next;
+            }
+        }
+        assert_eq!(stage, "executing release pipeline");
+    }
+
+    #[test]
+    fn discovery_sub_steps_still_track_and_explicit_stage_markers_always_win() {
+        assert_eq!(
+            release_stage_after_line("startup", "[release] version show: resolving component"),
+            Some("version show: resolving component".to_string())
+        );
+        assert_eq!(
+            release_stage_after_line("executing release pipeline", "[release] stage: publishing"),
+            Some("publishing".to_string())
+        );
+        assert_eq!(
+            release_stage_after_line("startup", "unrelated output"),
+            None
+        );
+    }
+
+    #[test]
+    fn gate_longer_than_discovery_window_stays_alive_while_silent_or_chatty() {
+        // Simulate a 2-minute test gate: the stage is fixed at execution, so
+        // the watchdog applies the execution deadline, not the 30s window.
+        let mut stage = String::from("executing release pipeline");
+        if let Some(next) =
+            release_stage_after_line(&stage, "[release] Running tests (scripts.test)...")
+        {
+            stage = next;
+        }
+        let deadline = release_deadline(None, &stage);
+        assert_eq!(deadline, RELEASE_EXECUTION_DEADLINE);
+        // Silent gate output for two minutes: still within the inactivity window.
+        assert!(!release_deadline_expired(
+            Duration::from_secs(120),
+            deadline
+        ));
+        // A chatty gate resets the idle clock on every chunk.
+        assert!(!release_deadline_expired(Duration::from_secs(1), deadline));
+        // A genuinely stalled gate still trips the deadline.
+        assert!(release_deadline_expired(deadline, deadline));
     }
 }
 
@@ -3914,7 +3985,15 @@ fn resource_policy_runner_hint<'a>(
 
 fn required_lab_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> bool {
     hot_command.lab_offload_supported
-        && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab)
+        && (cli.runner.is_some()
+            || cli.placement == crate::cli_surface::Placement::Lab
+            || (cli.placement == crate::cli_surface::Placement::Auto
+                && matches!(
+                    cli.command,
+                    Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                        command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+                    })
+                )))
 }
 
 fn run_startup_update_checks(command: &Commands) {

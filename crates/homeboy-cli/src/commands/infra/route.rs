@@ -1999,12 +1999,12 @@ struct CliCookAdmissionReplayDriver;
 struct CliQueuedRetryReplayDriver;
 
 #[derive(Debug)]
-struct CliTerminalCookContinuationDriver;
+struct TerminalCookWorkHandler;
 
-const TERMINAL_COOK_JOB_TYPE: &str = "agent-task-cook-terminal-continuation";
+const TERMINAL_COOK_WORK_TYPE: &str = "agent-task-cook-terminal-continuation";
 const TERMINAL_COOK_JOB_VERSION: u32 = 1;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct TerminalCookJobRequest {
     schema: String,
@@ -2070,23 +2070,27 @@ impl homeboy::core::daemon::orchestration::QueuedRetryReplayDriver for CliQueued
     }
 }
 
-impl homeboy::core::daemon::controller_job_driver::ControllerJobDriver
-    for CliTerminalCookContinuationDriver
-{
-    fn job_type(&self) -> &'static str {
-        TERMINAL_COOK_JOB_TYPE
+impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandler {
+    fn work_type(&self) -> &'static str {
+        TERMINAL_COOK_WORK_TYPE
     }
 
     fn version(&self) -> u32 {
         TERMINAL_COOK_JOB_VERSION
     }
 
+    fn linked_durable_run_id(&self, request: &serde_json::Value) -> Option<String> {
+        parse_terminal_cook_job(request)
+            .ok()
+            .map(|request| request.run_id)
+    }
+
     fn public_request(
         &self,
         request: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
-        let parsed = parse_terminal_cook_job(request)?;
-        Ok(serde_json::json!({ "cook_id": parsed.cook_id, "run_id": parsed.run_id }))
+        let request = parse_terminal_cook_job(request)?;
+        Ok(serde_json::json!({ "cook_id": request.cook_id, "run_id": request.run_id }))
     }
 
     fn public_progress(
@@ -2103,81 +2107,139 @@ impl homeboy::core::daemon::controller_job_driver::ControllerJobDriver
         Ok(result.clone())
     }
 
-    fn public_error(
-        &self,
-        error: &homeboy::core::Error,
-    ) -> homeboy::core::daemon::controller_job_driver::ControllerJobPublicError {
-        homeboy::core::daemon::controller_job_driver::ControllerJobPublicError {
-            message: "terminal Cook continuation failed; inspect the linked run lifecycle record"
-                .to_string(),
-            data: serde_json::json!({ "code": error.code.as_str() }),
-        }
-    }
-
     fn validate_secret_references(&self, request: &serde_json::Value) -> homeboy::core::Result<()> {
         parse_terminal_cook_job(request).map(|_| ())
     }
 
-    fn linked_durable_run_id(&self, request: &serde_json::Value) -> Option<String> {
-        parse_terminal_cook_job(request)
-            .ok()
-            .map(|request| request.run_id)
+    fn prepare(&self, request: serde_json::Value) -> homeboy::core::Result<serde_json::Value> {
+        let request = parse_terminal_cook_job(&request)?;
+        serde_json::to_value(request).map_err(|error| Error::internal_json(error.to_string(), None))
     }
 
-    fn execute(
+    fn initial_progress(
         &self,
-        request: serde_json::Value,
-        job: homeboy::core::daemon::controller_job_driver::ControllerJobHandle,
+        checkpoint: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
-        if job.is_cancelled() {
-            return Err(Error::validation_invalid_argument(
-                "terminal_cook_continuation",
-                "terminal Cook continuation job was cancelled before execution",
-                None,
-                None,
-            ));
-        }
-        let request = parse_terminal_cook_job(&request)?;
-        let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-        let Some(claim) = store.claim_continuation_for(&request.cook_id, &request.run_id)? else {
-            return Ok(serde_json::json!({ "claimed": false, "completed": true }));
-        };
-        let exit_code =
-            crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
-                claim,
-                crate::commands::route::reconstruct_cook_attempt_dispatcher,
-                |options| {
-                    let executor = Arc::new(
-                    crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                );
-                    crate::agents::agent_task_service::CookService::run(
-                    options,
-                    crate::agents::agent_task_service::CookRuntime::production(
-                        executor,
-                        &store,
-                        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
-                    ),
-                    crate::agents::agent_task_service::CookMode::ContinueTerminal,
-                )
-                .map(|result| result.exit_code)
-                },
-            )?;
-        if exit_code != 0 {
-            return Err(Error::internal_unexpected(format!(
-                "terminal Cook continuation exited with status {exit_code}"
-            )));
-        }
+        let request = parse_terminal_cook_job(checkpoint)?;
         Ok(serde_json::json!({
-            "claimed": true,
+            "phase": "terminal_continuation",
             "cook_id": request.cook_id,
             "run_id": request.run_id,
-            "exit_code": exit_code,
         }))
     }
 
-    fn cancel(&self, _prepared: &serde_json::Value) -> homeboy::core::Result<()> {
+    fn terminal_result(
+        &self,
+        _checkpoint: &serde_json::Value,
+    ) -> homeboy::core::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
+    fn advance(
+        &self,
+        checkpoint: serde_json::Value,
+        _invocation: crate::agents::agent_task_service::WorkJobInvocation,
+    ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+        let request = parse_terminal_cook_job(&checkpoint)?;
+        run_terminal_cook_continuation(
+            &request,
+            checkpoint.clone(),
+            self.initial_progress(&checkpoint)?,
+        )
+    }
+
+    fn cancelled(
+        &self,
+        _checkpoint: serde_json::Value,
+    ) -> homeboy::core::Result<serde_json::Value> {
+        Ok(serde_json::json!({ "claimed": false, "cancelled": true }))
+    }
+
+    fn cancel(&self, _checkpoint: &serde_json::Value) -> homeboy::core::Result<()> {
         Ok(())
     }
+}
+
+fn run_terminal_cook_continuation(
+    request: &TerminalCookJobRequest,
+    checkpoint: serde_json::Value,
+    progress: serde_json::Value,
+) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
+
+    let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let Some(claim) = store.claim_continuation_for(&request.cook_id, &request.run_id)? else {
+        // A second consumer can own the continuation while this WorkJob is
+        // recovered. Only a completed claim is a completed job; an active claim
+        // must remain supervised until that consumer settles its durable state.
+        let state = crate::agents::agent_task_service::continuation_state_in_store(
+            &store,
+            &request.cook_id,
+            &request.run_id,
+        )?;
+        return match state {
+            CookContinuationState::Pending | CookContinuationState::Claimed => {
+                Ok(WorkJobStep::Continue {
+                    checkpoint,
+                    progress,
+                    wait: Duration::from_millis(250),
+                })
+            }
+            CookContinuationState::Completed => Ok(WorkJobStep::Complete(
+                serde_json::json!({ "claimed": false, "completed": true }),
+            )),
+            CookContinuationState::Absent | CookContinuationState::Failed => {
+                Err(Error::internal_unexpected(format!(
+                    "terminal Cook continuation is {state:?} without a claim"
+                )))
+            }
+        };
+    };
+    let exit_code = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
+        claim,
+        reconstruct_cook_attempt_dispatcher,
+        |options| {
+            let executor = Arc::new(
+                crate::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+            );
+            crate::agents::agent_task_service::CookService::run(
+                options,
+                crate::agents::agent_task_service::CookRuntime::production(
+                    executor,
+                    &store,
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                ),
+                crate::agents::agent_task_service::CookMode::ContinueTerminal,
+            )
+            .map(|result| result.exit_code)
+        },
+    )?;
+    if exit_code != 0 {
+        return Err(Error::internal_unexpected(format!(
+            "terminal Cook continuation exited with status {exit_code}"
+        )));
+    }
+    Ok(WorkJobStep::Complete(serde_json::json!({
+        "claimed": true,
+        "cook_id": request.cook_id,
+        "run_id": request.run_id,
+        "exit_code": exit_code,
+    })))
+}
+
+fn terminal_cook_work_submission(
+    request: &serde_json::Value,
+) -> homeboy::core::Result<serde_json::Value> {
+    let parsed = parse_terminal_cook_job(request)?;
+    let (key, active_key) =
+        terminal_cook_job_idempotency_keys(&parsed.cook_id, &parsed.run_id, parsed.generation);
+    let mut submission = crate::agents::agent_task_service::work_job_submission(
+        &TerminalCookWorkHandler,
+        key,
+        request.clone(),
+    )?;
+    submission["active_idempotency_key"] = serde_json::json!(active_key);
+    Ok(submission)
 }
 
 impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
@@ -2187,17 +2249,8 @@ impl homeboy::core::daemon::orchestration::CookAdmissionReplayDriver
         &self,
         request: &serde_json::Value,
     ) -> homeboy::core::Result<serde_json::Value> {
-        let parsed = parse_terminal_cook_job(request)?;
-        let (key, active_key) =
-            terminal_cook_job_idempotency_keys(&parsed.cook_id, &parsed.run_id, parsed.generation);
         let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
-        let job = client.submit(serde_json::json!({
-            "type": TERMINAL_COOK_JOB_TYPE,
-            "version": TERMINAL_COOK_JOB_VERSION,
-            "idempotency_key": key,
-            "active_idempotency_key": active_key,
-            "request": request,
-        }))?;
+        let job = client.submit(terminal_cook_work_submission(request)?)?;
         Ok(serde_json::json!({ "scheduled": true, "job_id": job.id.to_string() }))
     }
 
@@ -2455,10 +2508,10 @@ pub(crate) fn register_unmaterialized_cook_replay_driver() {
     ));
     static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     REGISTERED.get_or_init(|| {
-        homeboy::core::daemon::controller_job_driver::register_controller_job_driver(Arc::new(
-            CliTerminalCookContinuationDriver,
+        crate::agents::agent_task_service::register_work_job_handler(Arc::new(
+            TerminalCookWorkHandler,
         ))
-        .expect("register terminal Cook continuation controller job driver");
+        .expect("register terminal Cook continuation work handler");
     });
 }
 
