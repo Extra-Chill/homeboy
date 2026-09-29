@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.7] - 2026-09-29
+
+### Fixed
+- dispatch runner-local command in deferred staging; give silent git failures diagnostics
+
 ## [0.397.6] - 2026-09-29
 
 ### Fixed
