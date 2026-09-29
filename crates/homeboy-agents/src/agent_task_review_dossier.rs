@@ -1172,7 +1172,11 @@ pub fn reviewer_safe_command(value: &str) -> Option<String> {
             };
             if name
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '_')
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
                 && (assigned.starts_with('/') || assigned.starts_with("~/"))
             {
                 changed = true;
@@ -2270,6 +2274,8 @@ mod tests {
         assert!(!safe.contains("/Users"));
         assert!(reviewer_runnable_command(&safe));
         assert!(reviewer_runnable_command(original));
+        assert!(reviewer_safe_command("root=/private/repo").is_none());
+        assert!(reviewer_safe_command("path=~/workspace").is_none());
         assert!(reviewer_safe_command("cargo test --token secret").is_none());
     }
 
