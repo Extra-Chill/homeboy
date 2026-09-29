@@ -1064,7 +1064,7 @@ fn source_promotion_is_superseded(
 }
 
 fn upgrade_phase(phase: &str) {
-    eprintln!("[upgrade] {phase}");
+    super::operation::emit_upgrade_phase(phase);
 }
 
 fn run_source_upgrade_command(
