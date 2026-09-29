@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.1] - 2026-09-29
+
+### Changed
+- cargo fmt
+- route terminal continuation through WorkJob
+
+### Fixed
+- wait for live terminal continuation claims
+- include redacted stderr in failed provider readiness reasons
+- keep a running provider's effect lease alive
+
 ## [0.397.0] - 2026-09-29
 
 ### Added
