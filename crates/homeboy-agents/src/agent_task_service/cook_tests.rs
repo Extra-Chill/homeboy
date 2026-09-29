@@ -12033,16 +12033,49 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                 run_id,
             )
             .expect("register terminal Cook without lock reentry");
-            let reconciled = agent_task_lifecycle::reconcile_terminal_cook_provider_result(run_id)
-                .expect("provider projection enqueues continuation directly");
-            assert_eq!(reconciled.run_id, run_id);
-            assert!(
-                recipe_store
-                    .claim_continuation_for(cook_id, run_id)
-                    .expect("claim terminal continuation")
-                    .is_some(),
-                "terminal result is consumable without status/resume/read commands"
+            let interrupted =
+                agent_task_lifecycle::reconcile_terminal_cook_provider_result_with_scheduler(
+                    run_id,
+                    |_| {
+                        Err(homeboy_core::Error::internal_unexpected(
+                            "interrupted before WorkJob submission",
+                        ))
+                    },
+                )
+                .expect_err("pending continuation survives failed submission");
+            assert!(interrupted
+                .message
+                .contains("interrupted before WorkJob submission"));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id)
+                    .expect("pending after interruption")
+                    .metadata["cook_continuation"]["state"],
+                "pending"
             );
+            let scheduled = std::cell::Cell::new(0);
+            let recovery =
+                super::super::reconcile::reconcile_terminal_cook_continuations_with(|request| {
+                    scheduled.set(scheduled.get() + 1);
+                    assert_eq!(request["cook_id"], cook_id);
+                    assert_eq!(request["run_id"], run_id);
+                    assert_eq!(request["generation"], 0);
+                    Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
+                })
+                .expect("daemon recovers durable pending work after interrupted event submission");
+            assert_eq!(recovery["scheduled"], true);
+            let reconciled = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
+            assert_eq!(reconciled.run_id, run_id);
+            assert_eq!(scheduled.get(), 1);
+            let claim = recipe_store
+                .claim_continuation_for(cook_id, run_id)
+                .expect("claim terminal continuation")
+                .expect("terminal result is consumable without status/resume/read commands");
+            agent_task_lifecycle::reconcile_terminal_cook_provider_result_with_scheduler(
+                run_id,
+                |_| panic!("a claimed continuation cannot schedule another work job"),
+            )
+            .expect("duplicate terminal projection is idempotent");
+            claim.complete().expect("complete exact continuation claim");
             let receipt = agent_task_lifecycle::resolve_workspace_terminal_authority(
                 run_id,
                 "strict-terminal-lab",
