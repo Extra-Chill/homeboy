@@ -661,11 +661,18 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         .expect("job id")
         .to_string();
     let job = wait_for_job(&store, &job_id);
-    assert_eq!(job.status, JobStatus::Succeeded);
+    let events = store.events(job.id).expect("events");
+    assert_eq!(
+        job.status,
+        JobStatus::Succeeded,
+        "terminal events: {:?}",
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, JobEventKind::Result | JobEventKind::Error))
+            .collect::<Vec<_>>()
+    );
 
-    let result = store
-        .events(job.id)
-        .expect("events")
+    let result = events
         .into_iter()
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data)
