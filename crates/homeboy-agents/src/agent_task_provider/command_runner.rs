@@ -3931,8 +3931,14 @@ mod readiness_failure_stderr_tests {
     #[test]
     fn stderr_excerpt_redacts_every_request_credential_value() {
         let credentials = vec![
-            ("AI_PROVIDER_OPENCODE_OPENAI_ACCESS".to_string(), "sk-access-123".to_string()),
-            ("AI_PROVIDER_OPENCODE_OPENAI_REFRESH".to_string(), "rt-refresh-456".to_string()),
+            (
+                "AI_PROVIDER_OPENCODE_OPENAI_ACCESS".to_string(),
+                "sk-access-123".to_string(),
+            ),
+            (
+                "AI_PROVIDER_OPENCODE_OPENAI_REFRESH".to_string(),
+                "rt-refresh-456".to_string(),
+            ),
             ("EMPTY".to_string(), String::new()),
         ];
         let excerpt = readiness_failure_stderr_excerpt(
@@ -3950,11 +3956,17 @@ mod readiness_failure_stderr_tests {
 
     #[test]
     fn stderr_excerpt_is_bounded_to_the_tail_and_empty_stderr_is_omitted() {
-        let long = format!("{}\nFINAL: model gpt-6-luna not found", "noise ".repeat(500));
+        let long = format!(
+            "{}\nFINAL: model gpt-6-luna not found",
+            "noise ".repeat(500)
+        );
         let excerpt = readiness_failure_stderr_excerpt(long.as_bytes(), &[]).expect("excerpt");
         assert!(excerpt.chars().count() <= READINESS_FAILURE_STDERR_MAX_CHARS + 1);
         assert!(excerpt.starts_with('…'), "{excerpt}");
-        assert!(excerpt.ends_with("FINAL: model gpt-6-luna not found"), "{excerpt}");
+        assert!(
+            excerpt.ends_with("FINAL: model gpt-6-luna not found"),
+            "{excerpt}"
+        );
 
         assert_eq!(readiness_failure_stderr_excerpt(b"  \n\t\n", &[]), None);
         assert_eq!(readiness_failure_stderr_excerpt(b"", &[]), None);
