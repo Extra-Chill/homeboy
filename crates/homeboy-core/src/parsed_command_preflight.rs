@@ -1135,6 +1135,40 @@ mod tests {
     }
 
     #[test]
+    fn split_cook_auto_preserves_lab_route_when_local_admission_is_blocked() {
+        // Cook's split route is Lab-required under Auto, so a local admission
+        // failure must never become an implicit placement transition.
+        let mut input = split_cook_input();
+        input.resource_admission = ResourceAdmissionRequirement::Required {
+            label: "agent-task cook local resource reserve".into(),
+            engages_at: ResourceHeat::Warm,
+        };
+        let error = resolve_parsed_command_preflight(
+            vec!["homeboy".into()],
+            input,
+            auto_route_policy(
+                Some("homeboy-lab"),
+                "connected_ineligible",
+                Vec::new(),
+                vec!["runner secret route is unavailable".into()],
+                false,
+                ResourceAdmissionEvidence::Observed {
+                    pressure: ResourceHeat::Hot,
+                },
+            ),
+        )
+        .expect_err("Cook must expose the Lab blocker before local workspace creation");
+
+        assert_eq!(error.details["field"], "placement");
+        assert!(error
+            .message
+            .contains("Lab runner homeboy-lab inadmissible"));
+        assert!(error.message.contains("runner secret route is unavailable"));
+        assert!(error.message.contains("local fallback is inadmissible"));
+        assert!(error.message.contains("local resource reserve"));
+    }
+
+    #[test]
     fn split_cook_auto_reports_runner_and_local_preflight_when_neither_route_is_ready() {
         let mut input = split_cook_input();
         input.resource_admission = ResourceAdmissionRequirement::Required {
