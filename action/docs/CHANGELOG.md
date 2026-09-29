@@ -2,6 +2,14 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.11] - 2026-09-29
+
+### Changed
+- use canonical retry identities in reconciliation
+
+### Fixed
+- retry exact Rust test identities
+
 ## [2.20.10] - 2026-09-27
 
 ### Fixed
