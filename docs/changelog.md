@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.5] - 2026-09-29
+
+### Changed
+- allow bounded CI startup for external check hydration
+
 ## [0.397.4] - 2026-09-29
 
 ### Fixed
