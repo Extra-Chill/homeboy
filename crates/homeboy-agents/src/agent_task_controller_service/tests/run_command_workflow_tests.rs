@@ -92,6 +92,49 @@ fn run_command_workflow_executes_deterministic_artifact_action() {
 }
 
 #[test]
+fn run_command_validates_consumed_artifacts_before_spawning() {
+    with_isolated_home(|_| {
+        let marker = tempfile::NamedTempFile::new().expect("marker");
+        std::fs::remove_file(marker.path()).expect("remove marker placeholder");
+        let mut record = init(ControllerInitRequest {
+            loop_id: "repo-loop-missing-input".to_string(),
+            phase: "init".to_string(),
+            config_version: "v1".to_string(),
+        })
+        .expect("controller initialized");
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunCommand {
+                dedupe_key: "consumer".to_string(),
+                entity_id: None,
+                request: json!({
+                    "consumes": ["producer_output"],
+                    "execution": {
+                        "command": "/bin/sh",
+                        "args": ["-c", format!("touch {}", marker.path().display())]
+                    }
+                }),
+            },
+            "missing artifact fixture",
+        );
+        controller::write_controller(&record).expect("controller written");
+
+        let result = run_next(
+            "repo-loop-missing-input",
+            Arc::new(CapturingExecutor::default()),
+            &CapturingDispatchHook::default(),
+        )
+        .expect("missing artifact action returns typed failure");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status.as_deref(), Some("failed"));
+        assert_eq!(
+            result.value.controller.next_actions[0].diagnostics[0].code,
+            "required_artifact_dependency_missing"
+        );
+        assert!(!marker.path().exists());
+    });
+}
+
+#[test]
 fn run_command_workflow_inherits_dispatch_default_cwd() {
     let repo = tempfile::tempdir().expect("repo tempdir");
     std::fs::write(repo.path().join("repo-marker"), "ok").expect("repo marker");

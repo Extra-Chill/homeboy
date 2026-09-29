@@ -306,7 +306,10 @@ pub(crate) fn refresh_subcontroller_statuses(
         }
     }
 
-    if record.open_wait_count() == 0 && record.state == AgentTaskLoopControllerState::Waiting {
+    if !record.waits.is_empty()
+        && record.open_wait_count() == 0
+        && record.state == AgentTaskLoopControllerState::Waiting
+    {
         record.state = AgentTaskLoopControllerState::Running;
         changed = true;
     }
