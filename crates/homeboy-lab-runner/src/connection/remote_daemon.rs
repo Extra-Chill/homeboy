@@ -1634,7 +1634,7 @@ mod tests {
     #[test]
     fn daemon_lifecycle_command_uses_a_controller_scoped_state_directory() {
         let controller =
-            homeboy_core::paths::sanitize_path_segment(&crate::connection::controller_id());
+            crate::connection::controller_scope_segment(&crate::connection::controller_id());
         assert_eq!(
             remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
             format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/daemon-generations/runner_a/controllers/{controller}/primary\" /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
@@ -1649,9 +1649,11 @@ mod tests {
     fn two_controllers_have_disjoint_daemon_stores_and_preserve_each_others_jobs() {
         let first_store = remote_daemon_state_dir("shared-runner", "controller-a");
         let second_store = remote_daemon_state_dir("shared-runner", "controller-b");
+        let first_scope = crate::connection::controller_scope_segment("controller-a");
+        let second_scope = crate::connection::controller_scope_segment("controller-b");
         assert_ne!(first_store, second_store);
-        assert!(first_store.ends_with("/controllers/controller-a/primary"));
-        assert!(second_store.ends_with("/controllers/controller-b/primary"));
+        assert!(first_store.ends_with(&format!("/controllers/{first_scope}/primary")));
+        assert!(second_store.ends_with(&format!("/controllers/{second_scope}/primary")));
         let first_status =
             format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon status");
         let second_start = format!("HOMEBOY_DAEMON_STATE_DIR=\"{second_store}\" /opt/homeboy daemon ensure-running --addr 127.0.0.1:0");
@@ -1660,6 +1662,21 @@ mod tests {
         assert!(second_start.contains("controllers/controller-b"));
         assert!(first_stop.contains("controllers/controller-a"));
         assert!(!second_start.contains("controllers/controller-a"));
+    }
+
+    #[test]
+    fn daemon_store_scope_does_not_alias_distinct_ids_with_equal_sanitized_prefixes() {
+        let first = remote_daemon_state_dir("shared-runner", "a/b-controller");
+        let second = remote_daemon_state_dir("shared-runner", "a_b-controller");
+        assert_ne!(first, second);
+        assert!(first.contains(&crate::connection::controller_scope_segment(
+            "a/b-controller"
+        )));
+        assert!(
+            second.contains(&crate::connection::controller_scope_segment(
+                "a_b-controller"
+            ))
+        );
     }
 }
 
@@ -2246,7 +2263,7 @@ fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
 
 fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
     let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let controller_segment = homeboy_core::paths::sanitize_path_segment(controller_id);
+    let controller_segment = crate::connection::controller_scope_segment(controller_id);
     format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/primary")
 }
 

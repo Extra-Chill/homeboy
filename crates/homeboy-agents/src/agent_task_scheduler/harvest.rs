@@ -672,6 +672,13 @@ pub(super) fn committed_harvest_failure(
     mut outcome: AgentTaskOutcome,
     error: HarvestError,
 ) -> AgentTaskOutcome {
+    // Harvest is secondary evidence collection. If execution already failed and
+    // there is no candidate to harvest, a Git/provenance inspection failure
+    // must not replace the provider's actionable failure reason. Workspace
+    // cleanliness and candidate-baseline violations remain fail-closed below.
+    let preserve_execution_failure = outcome.status != AgentTaskOutcomeStatus::Succeeded
+        && !outcome.artifacts.iter().any(is_actionable_patch_artifact)
+        && matches!(error, HarvestError::Git { .. });
     let (class, message, data) = match error {
         HarvestError::DirtyWorkspace { status } => (
             "agent_task.committed_harvest_dirty_workspace",
@@ -720,6 +727,14 @@ pub(super) fn committed_harvest_failure(
             serde_json::json!({ "error": message, "pre_provider": true }),
         ),
     };
+    if preserve_execution_failure {
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: class.to_string(),
+            message,
+            data,
+        });
+        return outcome;
+    }
     outcome.status = AgentTaskOutcomeStatus::Failed;
     outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
     outcome.summary = Some(message.clone());
@@ -743,6 +758,67 @@ mod committed_harvest_tests {
     use std::time::Instant;
 
     static LAB_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn unavailable_provider_remains_primary_when_hash_check_fails_without_candidate() {
+        let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+        outcome.summary = Some("provider unavailable: account_unavailable".to_string());
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.provider_unavailable".to_string(),
+            message: "selected provider account is unavailable".to_string(),
+            data: serde_json::json!({"reason": "account_unavailable"}),
+        });
+
+        let failed = committed_harvest_failure(
+            outcome,
+            HarvestError::Git {
+                command: "verify workspace content hash".to_string(),
+                cwd: PathBuf::from("/lab/workspace"),
+                message: "workspace content hash mismatch (expected abc, got def)".to_string(),
+            },
+        );
+
+        assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            failed.summary.as_deref(),
+            Some("provider unavailable: account_unavailable")
+        );
+        assert!(failed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.provider_unavailable"
+                && diagnostic.data["reason"] == "account_unavailable"
+        }));
+        assert!(failed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.committed_harvest_git_failed"
+                && diagnostic.message.contains("content hash mismatch")
+        }));
+        assert!(!failed.artifacts.iter().any(is_actionable_patch_artifact));
+    }
+
+    #[test]
+    fn changed_workspace_remains_fail_closed_during_harvest() {
+        let mut outcome = committed_harvest_preflight_outcome("task-1".to_string());
+        outcome.status = AgentTaskOutcomeStatus::Failed;
+        outcome.summary = Some("provider unavailable: account_unavailable".to_string());
+
+        let failed = committed_harvest_failure(
+            outcome,
+            HarvestError::DirtyWorkspace {
+                status: " M src/lib.rs".to_string(),
+            },
+        );
+
+        assert_eq!(failed.status, AgentTaskOutcomeStatus::Failed);
+        assert!(failed
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("refusing committed-change harvest")));
+        assert!(failed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.committed_harvest_dirty_workspace"
+                && diagnostic.data["status"] == " M src/lib.rs"
+        }));
+    }
 
     #[test]
     fn process_context_rejects_incomplete_lab_transport_before_scheduler_execution() {

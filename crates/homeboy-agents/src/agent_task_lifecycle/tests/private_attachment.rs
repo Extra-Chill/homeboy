@@ -97,6 +97,35 @@ fn private_attachment_rejects_tampered_envelope_bindings_and_digest() {
 }
 
 #[test]
+fn malformed_private_attachment_reports_redacted_parse_type_and_location() {
+    with_isolated_home(|_| {
+        submit_attachment_run("attachment-malformed");
+        let path = attachment_path("attachment-malformed", "lab-staging-recipe");
+        std::fs::create_dir_all(path.parent().expect("private directory")).expect("mkdir");
+        std::fs::write(&path, br#"{"payload":"secret-marker",broken}"#).expect("write fixture");
+
+        let error =
+            load_private_run_attachment::<Value>("attachment-malformed", "lab-staging-recipe")
+                .expect_err("malformed fixture rejected");
+        assert_eq!(error.message, "JSON error");
+        assert_eq!(error.details["json_parse"]["category"], "syntax");
+        assert!(error.details["json_parse"]["line"].as_u64().is_some());
+        assert_eq!(error.details["attachment"]["kind"], "lab-staging-recipe");
+        assert!(!error.to_string().contains("secret-marker"));
+
+        let healthy = json!({"payload": "healthy"});
+        persist_private_run_attachment("attachment-malformed", "healthy", &healthy)
+            .expect("healthy staging attachment persists");
+        assert_eq!(
+            load_private_run_attachment::<Value>("attachment-malformed", "healthy")
+                .expect("healthy attachment loads")
+                .payload,
+            healthy
+        );
+    });
+}
+
+#[test]
 fn concurrent_conflicting_private_attachment_writers_commit_once() {
     with_isolated_home(|_| {
         submit_attachment_run("attachment-concurrent");

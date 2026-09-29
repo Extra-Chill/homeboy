@@ -625,6 +625,9 @@ struct RetainedStorageSqlite {
 
 #[derive(Debug, Serialize)]
 struct RetainedStorageFilesystem {
+    inventory_completeness: &'static str,
+    /// Suggested manual follow-up; deliberately not a resumable continuation.
+    actionable_next_step: Option<&'static str>,
     /// The Homeboy **data** root. `reconciliation` balances this walk against
     /// the non-external `top_level` entries.
     root: RetainedStorageFilesystemUsage,
@@ -655,6 +658,7 @@ struct RetainedStorageFilesystemEntry {
     physical_bytes: u64,
     cleanup_or_status_command: &'static str,
     largest_examples: Vec<RetainedStorageFilesystemUsage>,
+    inventory_completeness: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -949,6 +953,9 @@ fn retained_storage_report(
         sqlite,
         filesystem,
     );
+    if report.filesystem.inventory_completeness == "partial" {
+        report.totals_complete = false;
+    }
     if let Some(command) = runtime_tmp_continuation {
         report.totals_complete = false;
         report.source_continuations.push(command);
@@ -1023,8 +1030,9 @@ fn retained_storage_filesystem_inventory_for(
     artifact_root: PathBuf,
     cargo_target_root: PathBuf,
 ) -> homeboy::core::Result<RetainedStorageFilesystem> {
-    let root_usage = filesystem_usage(&root)?;
-    let config_root_usage = filesystem_usage(&config_root)?;
+    let mut budget = FilesystemScanBudget::default();
+    let root_usage = filesystem_usage_with_budget(&root, &mut budget)?;
+    let config_root_usage = filesystem_usage_with_budget(&config_root, &mut budget)?;
     let mut top_level = Vec::new();
     if root.exists() {
         for entry in std::fs::read_dir(&root).map_err(|error| {
@@ -1033,13 +1041,16 @@ fn retained_storage_filesystem_inventory_for(
                 Some(format!("read Homeboy storage root {}", root.display())),
             )
         })? {
+            if budget.exhausted() {
+                break;
+            }
             let entry = entry.map_err(|error| {
                 homeboy::core::Error::internal_io(
                     error.to_string(),
                     Some(format!("read Homeboy storage root {}", root.display())),
                 )
             })?;
-            top_level.push(filesystem_entry(entry.path())?);
+            top_level.push(filesystem_entry_with_budget(entry.path(), &mut budget)?);
         }
     }
 
@@ -1062,6 +1073,7 @@ fn retained_storage_filesystem_inventory_for(
             "config_root",
             "managed/external",
             "homeboy cleanup",
+            &mut budget,
         )?);
     }
 
@@ -1073,6 +1085,7 @@ fn retained_storage_filesystem_inventory_for(
             "artifacts",
             "managed/external",
             "homeboy cleanup --include persisted-run-artifacts",
+            &mut budget,
         )?);
     }
     if !cargo_target_root.starts_with(&root) {
@@ -1081,6 +1094,7 @@ fn retained_storage_filesystem_inventory_for(
             "shared_cargo_targets",
             "managed/external",
             "homeboy cleanup --include shared-cargo-targets",
+            &mut budget,
         )?);
     }
     top_level.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
@@ -1095,7 +1109,15 @@ fn retained_storage_filesystem_inventory_for(
         .filter(|entry| entry.classification != "managed/external")
         .map(|entry| entry.physical_bytes)
         .sum();
+    let partial = budget.exhausted()
+        || root_usage.truncated
+        || config_root_usage.truncated
+        || top_level
+            .iter()
+            .any(|entry| entry.inventory_completeness == "partial");
     Ok(RetainedStorageFilesystem {
+        inventory_completeness: if partial { "partial" } else { "complete" },
+        actionable_next_step: partial.then_some("Inspect the largest listed stores with `du -xhd 1 <path>` and use the listed Homeboy cleanup command after reviewing its plan."),
         root: RetainedStorageFilesystemUsage {
             path: root.display().to_string(),
             exists: root.exists(),
@@ -1137,7 +1159,15 @@ fn difference_direction(root: u64, top_level: u64) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn filesystem_entry(path: PathBuf) -> homeboy::core::Result<RetainedStorageFilesystemEntry> {
+    filesystem_entry_with_budget(path, &mut FilesystemScanBudget::default())
+}
+
+fn filesystem_entry_with_budget(
+    path: PathBuf,
+    budget: &mut FilesystemScanBudget,
+) -> homeboy::core::Result<RetainedStorageFilesystemEntry> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -1170,7 +1200,7 @@ fn filesystem_entry(path: PathBuf) -> homeboy::core::Result<RetainedStorageFiles
             "inspect path ownership before removal",
         ),
     };
-    filesystem_entry_with_category(path, category, classification, command)
+    filesystem_entry_with_category(path, category, classification, command, budget)
 }
 
 fn filesystem_entry_with_category(
@@ -1178,8 +1208,9 @@ fn filesystem_entry_with_category(
     category: &'static str,
     classification: &'static str,
     command: &'static str,
+    budget: &mut FilesystemScanBudget,
 ) -> homeboy::core::Result<RetainedStorageFilesystemEntry> {
-    let usage = filesystem_usage(&path)?;
+    let usage = filesystem_usage_with_budget(&path, budget)?;
     Ok(RetainedStorageFilesystemEntry {
         path: path.display().to_string(),
         category,
@@ -1187,7 +1218,12 @@ fn filesystem_entry_with_category(
         apparent_bytes: usage.apparent_bytes,
         physical_bytes: usage.physical_bytes,
         cleanup_or_status_command: command,
-        largest_examples: largest_children(&path)?,
+        largest_examples: largest_children_with_budget(&path, budget)?,
+        inventory_completeness: if usage.truncated {
+            "partial"
+        } else {
+            "complete"
+        },
     })
 }
 
@@ -1195,12 +1231,34 @@ fn filesystem_entry_with_category(
 struct FilesystemUsage {
     apparent_bytes: u64,
     physical_bytes: u64,
+    truncated: bool,
 }
 
+const RETAINED_STORAGE_FILESYSTEM_ENTRY_BUDGET: usize = 20_000;
+
+#[derive(Default)]
+struct FilesystemScanBudget {
+    visited: usize,
+}
+
+impl FilesystemScanBudget {
+    fn exhausted(&self) -> bool {
+        self.visited >= RETAINED_STORAGE_FILESYSTEM_ENTRY_BUDGET
+    }
+}
+
+#[cfg(test)]
 fn filesystem_usage(path: &Path) -> homeboy::core::Result<FilesystemUsage> {
+    filesystem_usage_with_budget(path, &mut FilesystemScanBudget::default())
+}
+
+fn filesystem_usage_with_budget(
+    path: &Path,
+    budget: &mut FilesystemScanBudget,
+) -> homeboy::core::Result<FilesystemUsage> {
     let mut seen = HashSet::new();
     let mut usage = FilesystemUsage::default();
-    accumulate_filesystem_usage(path, &mut seen, &mut usage)?;
+    accumulate_filesystem_usage(path, &mut seen, &mut usage, budget)?;
     Ok(usage)
 }
 
@@ -1208,7 +1266,13 @@ fn accumulate_filesystem_usage(
     path: &Path,
     seen: &mut HashSet<(u64, u64)>,
     usage: &mut FilesystemUsage,
+    budget: &mut FilesystemScanBudget,
 ) -> homeboy::core::Result<()> {
+    if budget.exhausted() {
+        usage.truncated = true;
+        return Ok(());
+    }
+    budget.visited += 1;
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1253,13 +1317,20 @@ fn accumulate_filesystem_usage(
                     Some(format!("read Homeboy storage path {}", path.display())),
                 )
             })?;
-            accumulate_filesystem_usage(&entry.path(), seen, usage)?;
+            accumulate_filesystem_usage(&entry.path(), seen, usage, budget)?;
+            if usage.truncated || budget.exhausted() {
+                usage.truncated = true;
+                break;
+            }
         }
     }
     Ok(())
 }
 
-fn largest_children(path: &Path) -> homeboy::core::Result<Vec<RetainedStorageFilesystemUsage>> {
+fn largest_children_with_budget(
+    path: &Path,
+    budget: &mut FilesystemScanBudget,
+) -> homeboy::core::Result<Vec<RetainedStorageFilesystemUsage>> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -1272,9 +1343,12 @@ fn largest_children(path: &Path) -> homeboy::core::Result<Vec<RetainedStorageFil
     for entry in std::fs::read_dir(path)
         .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?
     {
+        if budget.exhausted() {
+            break;
+        }
         let entry =
             entry.map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-        let usage = filesystem_usage(&entry.path())?;
+        let usage = filesystem_usage_with_budget(&entry.path(), budget)?;
         children.push(RetainedStorageFilesystemUsage {
             path: entry.path().display().to_string(),
             exists: true,
@@ -4976,6 +5050,8 @@ mod tests {
 
     fn test_filesystem() -> RetainedStorageFilesystem {
         RetainedStorageFilesystem {
+            inventory_completeness: "complete",
+            actionable_next_step: None,
             root: RetainedStorageFilesystemUsage {
                 path: "/homeboy".to_string(),
                 exists: true,
@@ -4999,6 +5075,49 @@ mod tests {
             },
             accounting_notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn filesystem_usage_bounds_high_volume_inventory_and_preserves_partial_bytes() {
+        let root = TempDir::new().expect("high-volume storage root");
+        for index in 0..=RETAINED_STORAGE_FILESYSTEM_ENTRY_BUDGET {
+            std::fs::write(
+                root.path().join(format!("entry-{index:05}")),
+                b"useful-bytes",
+            )
+            .expect("create inventory entry");
+        }
+
+        let usage = filesystem_usage(root.path()).expect("bounded filesystem usage");
+        assert!(usage.truncated, "entry budget must mark incomplete totals");
+        assert!(
+            usage.apparent_bytes > 0,
+            "measured partial bytes are retained"
+        );
+
+        let mut budget = FilesystemScanBudget::default();
+        let first = filesystem_usage_with_budget(root.path(), &mut budget)
+            .expect("first shared-budget walk");
+        let visited_after_first = budget.visited;
+        let second = filesystem_usage_with_budget(root.path(), &mut budget)
+            .expect("second shared-budget walk");
+        assert!(first.apparent_bytes > 0);
+        assert!(second.truncated);
+        assert_eq!(budget.visited, visited_after_first);
+        assert!(budget.visited <= RETAINED_STORAGE_FILESYSTEM_ENTRY_BUDGET);
+
+        let filesystem = retained_storage_filesystem_inventory_for(
+            root.path().to_path_buf(),
+            root.path().join("config"),
+            root.path().join("artifacts"),
+            root.path().join("cargo-targets"),
+        )
+        .expect("bounded filesystem report");
+        assert_eq!(filesystem.inventory_completeness, "partial");
+        assert!(filesystem.actionable_next_step.is_some());
+        let evidence = serde_json::to_value(filesystem).expect("serialize filesystem report");
+        assert!(evidence.get("continuation").is_none());
+        assert!(evidence.get("continuation_required").is_none());
     }
 
     #[test]
