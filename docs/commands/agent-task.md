@@ -704,10 +704,8 @@ homeboy runs watch <run-id>
 homeboy agent-task evidence <run-id> --full
 ```
 
-`--detach-after-handoff` was removed when detaching became the default. It is
-kept as a hidden no-op for one minor release so existing scripts, prompts, and
-runbooks do not fail outright — passing it prints a deprecation warning and
-otherwise does nothing; pass `--wait` instead (#14964).
+Detaching after handoff is the default. Use `--wait` to observe until terminal
+completion; the old `--detach-after-handoff` flag is no longer accepted.
 
 #### Provider activity
 

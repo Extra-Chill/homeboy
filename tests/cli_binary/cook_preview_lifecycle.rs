@@ -108,13 +108,10 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     );
 }
 
-/// #14964: `--detach-after-handoff` was removed when detaching became the
-/// default (#14931). It must still parse — accepted as a hidden no-op — and
-/// its use must be diagnosed rather than silently swallowed, so a caller
-/// still running 0.383.7-era scripts learns to switch to `--wait` instead of
-/// wondering why nothing changed.
+/// A removed flag cannot silently appear to control the detached-by-default
+/// lifecycle. Clap rejects it before Cook preview creates any durable work.
 #[test]
-fn deprecated_detach_after_handoff_flag_still_parses_as_a_warned_no_op() {
+fn removed_detach_after_handoff_flag_is_rejected_before_cook_admission() {
     let home = tempfile::tempdir().expect("home");
     let output = Command::new(homeboy_bin())
         .args([
@@ -140,24 +137,23 @@ fn deprecated_detach_after_handoff_flag_still_parses_as_a_warned_no_op() {
         .env("XDG_DATA_HOME", home.path().join(".local/share"))
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .output()
-        .expect("run Cook preview with the retired flag");
+        .expect("run Cook preview with the removed flag");
 
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "--detach-after-handoff must still parse and preview must still succeed; \
+        Some(2),
+        "--detach-after-handoff must be rejected before Cook preview; \
          stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--detach-after-handoff") && stderr.contains("--wait"),
-        "expected a deprecation warning naming the replacement; stderr: {stderr}"
+        stderr.contains("unexpected argument '--detach-after-handoff'"),
+        "expected an unknown flag error; stderr: {stderr}"
     );
-    let envelope: Value = serde_json::from_slice(&output.stdout).expect("preview JSON");
-    assert_eq!(envelope["success"], true);
-    assert_eq!(envelope["data"]["mutates"], false);
+    assert!(output.stdout.is_empty(), "no preview executed");
+    assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
 }
 
 #[test]
