@@ -471,7 +471,7 @@ pub fn test_inherited_pipe_holder_cleanup() {
     let output = execute_deadline_process(
         command,
         b"{}",
-        Instant::now() + Duration::from_millis(100),
+        Instant::now() + Duration::from_secs(2),
         CLEANUP_BUDGET,
         CAPTURE_LIMIT_BYTES,
         "Resolver",

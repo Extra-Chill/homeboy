@@ -391,7 +391,9 @@ fn remote_executor_probe_shell_returns_promptly_after_success() {
         &shell_entrypoint("exit 0"),
         30,
     );
-    assert!(shell.contains("kill \"$killer\""));
+    assert!(shell.contains("kill \"$killer\" 2>/dev/null"));
+    assert!(shell.contains("pkill -P \"$killer\" 2>/dev/null"));
+    assert!(shell.contains("kill -9 \"$killer\" 2>/dev/null"));
     assert!(shell.contains("wait \"$killer\""));
     assert!(shell.contains("kill \"$pid\" 2>/dev/null)"));
     let shell = format!(
