@@ -1762,10 +1762,7 @@ fn canonical_candidate_produced(selected_candidate: Option<&Value>) -> bool {
 
 /// Recovery needs the exact selected immutable artifact, a finalizable promotion,
 /// required-gate evidence accepted by the Cook recipe, and reviewer metadata.
-fn canonical_finalization_recovery_run_id(selected_candidate: Option<&Value>) -> Option<String> {
-    canonical_finalization_recovery_run_id_with_stores(None, selected_candidate)
-}
-
+/// The optional stores keep reads rooted to the installation being reconciled.
 fn canonical_finalization_recovery_run_id_with_stores(
     stores: Option<(&CookRecipeStore, &AgentTaskLifecycleStore)>,
     selected_candidate: Option<&Value>,
