@@ -88,8 +88,8 @@ fn command_output_with_timeout_captures_child_output() {
     let mut command = Command::new("sh");
     command.args(["-c", "printf 'homeboy 0.247.5'; printf 'warn' >&2"]);
 
-    let output =
-        command_output_with_timeout(&mut command, Duration::from_secs(5)).expect("command output");
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(5), "test command")
+        .expect("command output");
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "homeboy 0.247.5");
@@ -665,29 +665,45 @@ fn installer_completion_contains_fast_double_fork_after_inherited_descriptors_cl
 #[test]
 fn installer_timeout_kills_setsid_descendant_before_delayed_mutation() {
     let workspace = tempfile::tempdir().expect("workspace");
-    let target = workspace.path().join("homeboy");
-    std::fs::write(&target, b"original").expect("write target");
     let test_binary = std::env::current_exe().expect("test executable");
     let shell = format!(
         "{} --ignored --exact upgrade::execution::tests::part_a::installer_setsid_descendant_fixture --nocapture & wait",
         quote_path(&test_binary.display().to_string()),
     );
-    supervise_installer_shell_command(
-        &shell,
-        Duration::from_millis(75),
-        "setsid descendant installer",
-        |_| Ok(()),
-        |command| {
-            command.env("HOMEBOY_INSTALLER_TARGET", &target);
-        },
-    )
-    .expect_err("installer with escaped descendant times out");
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        std::fs::read(&target).expect("read target"),
-        b"original",
-        "setsid descendant mutated after installer cleanup"
-    );
+    for attempt in 0..3 {
+        let target = workspace.path().join(format!("homeboy-{attempt}"));
+        let pid_file = workspace.path().join(format!("descendant-{attempt}.pid"));
+        std::fs::write(&target, b"original").expect("write target");
+        supervise_installer_shell_command(
+            &shell,
+            Duration::from_millis(75),
+            "setsid descendant installer",
+            |_| Ok(()),
+            |command| {
+                command
+                    .env("HOMEBOY_INSTALLER_TARGET", &target)
+                    .env("HOMEBOY_INSTALLER_PID_FILE", &pid_file);
+            },
+        )
+        .expect_err("installer with escaped descendant times out");
+        let descendant_pid =
+            wait_for_installer_pid(&pid_file, Instant::now() + Duration::from_secs(1));
+        assert_eq!(
+            std::fs::read(&target).expect("read target immediately after timeout"),
+            b"original",
+            "setsid descendant mutated before timeout cleanup returned on attempt {attempt}"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read(&target).expect("read target after delayed mutation window"),
+            b"original",
+            "setsid descendant mutated after installer cleanup on attempt {attempt}"
+        );
+        assert!(
+            !homeboy_core::process::pid_is_running(descendant_pid),
+            "setsid descendant {descendant_pid} remained runnable on attempt {attempt}"
+        );
+    }
 }
 
 #[cfg(unix)]

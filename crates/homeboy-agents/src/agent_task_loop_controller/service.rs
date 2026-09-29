@@ -3,8 +3,9 @@ use crate::agent_task::AgentTaskEvidenceRef;
 use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    ControlPlaneActionPayload, ControlPlaneActionRequest, RunId,
+    ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionEligibilityReport,
+    ControlPlaneActionOutcome, ControlPlaneActionPayload, ControlPlaneActionRequest,
+    ControlPlaneOwner, ControlPlaneRun, ControlPlaneRunState, RunId,
     CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
 };
 use homeboy_core::control_plane::{
@@ -59,6 +60,181 @@ pub fn control_plane_run_id(loop_id: &str) -> Result<RunId> {
     RunId::new(format!("loop:{loop_id}")).map_err(|error| {
         Error::validation_invalid_argument("loop_id", error.to_string(), None, None)
     })
+}
+
+pub fn loop_id_from_control_plane_run(run_id: &str) -> Option<&str> {
+    run_id
+        .strip_prefix("loop:")
+        .filter(|loop_id| !loop_id.is_empty())
+}
+
+/// One bounded loop read shared by CLI adapters and the control-plane route.
+/// The controller and diagnostics fields are compatibility adjuncts; `resource`
+/// is the canonical lifecycle projection. This read does not rewrite the
+/// controller file or publish a missing projection.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct LoopStatusRead {
+    pub schema: String,
+    pub controller: AgentTaskLoopControllerRecord,
+    pub diagnostics: AgentTaskLoopControllerDiagnostics,
+    pub resource: ControlPlaneRun,
+    pub work: Value,
+}
+
+pub fn loop_status_read(
+    loop_id: &str,
+    context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+) -> Result<LoopStatusRead> {
+    loop_status_read_with(loop_id, context, homeboy_core::control_plane::run_stored)
+}
+
+pub fn loop_status_read_with(
+    loop_id: &str,
+    context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
+    stored_run: impl FnOnce(
+        &RunId,
+    ) -> std::result::Result<
+        ControlPlaneRun,
+        homeboy_control_plane_contract::ControlPlaneError,
+    >,
+) -> Result<LoopStatusRead> {
+    let report = controller_status_report(loop_id)?;
+    let run_id = control_plane_run_id(&report.controller.loop_id)?;
+    let work = loop_work_status(&report.controller.metadata, context);
+    let stored = match stored_run(&run_id) {
+        Ok(resource) => resource,
+        Err(error)
+            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
+        {
+            legacy_loop_resource(&run_id, &report.controller)?
+        }
+        Err(error) => return Err(Error::internal_unexpected(error.message)),
+    };
+    Ok(LoopStatusRead {
+        schema: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
+        resource: project_loop_read(&report.controller, stored),
+        controller: report.controller,
+        diagnostics: report.diagnostics,
+        work,
+    })
+}
+
+pub fn controller_file_exists(loop_id: &str) -> Result<bool> {
+    Ok(controller_path(loop_id)?.exists())
+}
+
+/// Publish a missing control-plane identity for a persisted controller. Status
+/// reads do not call this; stop and resume do, because they are the mutating
+/// operations that require the durable action identity.
+pub fn migrate_loop_control_plane_identity(loop_id: &str) -> Result<()> {
+    migrate_loop_control_plane_identity_with(loop_id, homeboy_core::control_plane::run_stored)
+}
+
+pub fn migrate_loop_control_plane_identity_with(
+    loop_id: &str,
+    stored_run: impl FnOnce(
+        &RunId,
+    ) -> std::result::Result<
+        ControlPlaneRun,
+        homeboy_control_plane_contract::ControlPlaneError,
+    >,
+) -> Result<()> {
+    if !controller_file_exists(loop_id)? {
+        return Ok(());
+    }
+    let record = load_controller(loop_id)?;
+    let run_id = control_plane_run_id(&record.loop_id)?;
+    match stored_run(&run_id) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if error.class == homeboy_control_plane_contract::ControlPlaneErrorClass::NotFound =>
+        {
+            publish_control_plane_loop(&record)
+        }
+        Err(error) => Err(Error::internal_unexpected(error.message)),
+    }
+}
+
+fn legacy_loop_resource(
+    run_id: &RunId,
+    record: &AgentTaskLoopControllerRecord,
+) -> Result<ControlPlaneRun> {
+    let status = loop_observation_status(record.state);
+    let mut resource = ControlPlaneRun::new(run_id.clone());
+    resource.state = loop_resource_state(status);
+    if !record.phase.is_empty() {
+        resource.phase = Some(record.phase.clone());
+    }
+    resource.created_at = record.created_at.clone();
+    resource.finished_at = (status != "running").then(|| record.updated_at.clone());
+    resource.updated_at = resource
+        .finished_at
+        .clone()
+        .or_else(|| Some(record.created_at.clone()));
+    let actions = serde_json::from_value(loop_control_plane_actions(status)).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("loop control-plane action eligibility".to_string()),
+        )
+    })?;
+    let mut eligibility = ControlPlaneActionEligibilityReport::new(run_id.clone());
+    eligibility.actions = actions;
+    resource.action_eligibility = Some(eligibility);
+    Ok(resource)
+}
+
+fn project_loop_read(
+    record: &AgentTaskLoopControllerRecord,
+    mut resource: ControlPlaneRun,
+) -> ControlPlaneRun {
+    resource.owner = Some(ControlPlaneOwner {
+        kind: "agent-task-loop".to_string(),
+        id: record.loop_id.clone(),
+    });
+    resource
+}
+
+fn loop_observation_status(state: AgentTaskLoopControllerState) -> &'static str {
+    match state {
+        AgentTaskLoopControllerState::Running
+        | AgentTaskLoopControllerState::Waiting
+        | AgentTaskLoopControllerState::HumanReady => "running",
+        AgentTaskLoopControllerState::Completed => "pass",
+        AgentTaskLoopControllerState::Failed | AgentTaskLoopControllerState::Escalated => "fail",
+        AgentTaskLoopControllerState::Abandoned => "cancelled",
+    }
+}
+
+fn loop_resource_state(status: &str) -> ControlPlaneRunState {
+    match status {
+        "running" => ControlPlaneRunState::Running,
+        "pass" => ControlPlaneRunState::Succeeded,
+        "fail" | "error" => ControlPlaneRunState::Failed,
+        "cancelled" => ControlPlaneRunState::Cancelled,
+        "skipped" => ControlPlaneRunState::Skipped,
+        _ => ControlPlaneRunState::Unknown,
+    }
+}
+
+fn loop_control_plane_actions(status: &str) -> Value {
+    let running = status == "running";
+    serde_json::json!([{
+        "action": "cancel",
+        "availability": if running { "available" } else { "unavailable" },
+        "reason": if running { "loop can be stopped" } else { "loop is terminal" },
+        "confirmation": "required",
+        "idempotent": true,
+        "requires_revalidation": true,
+        "result_resource_type": "agent_task_loop"
+    }, {
+        "action": "resume",
+        "availability": if running { "available" } else { "unavailable" },
+        "reason": if running { "loop can be resumed" } else { "loop is terminal" },
+        "confirmation": "required",
+        "idempotent": true,
+        "requires_revalidation": true,
+        "result_resource_type": "agent_task_loop"
+    }])
 }
 
 /// Adapt the CLI stop request to the canonical action service.
@@ -1582,37 +1758,14 @@ fn publish_control_plane_loop(record: &AgentTaskLoopControllerRecord) -> Result<
     let run_id = control_plane_run_id(&record.loop_id)?;
     let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let observation = store.open_observation_initialized()?;
-    let status = match record.state {
-        AgentTaskLoopControllerState::Running
-        | AgentTaskLoopControllerState::Waiting
-        | AgentTaskLoopControllerState::HumanReady => "running",
-        AgentTaskLoopControllerState::Completed => "pass",
-        AgentTaskLoopControllerState::Failed | AgentTaskLoopControllerState::Escalated => "fail",
-        AgentTaskLoopControllerState::Abandoned => "cancelled",
-    };
+    let status = loop_observation_status(record.state);
     let metadata = serde_json::json!({
         "loop_id": record.loop_id,
         "controller": record,
-            "control_plane": {
-                "phase": record.phase,
-                "actions": [{
-                    "action": "cancel",
-                    "availability": if status == "running" { "available" } else { "unavailable" },
-                "reason": if status == "running" { "loop can be stopped" } else { "loop is terminal" },
-                "confirmation": "required",
-                "idempotent": true,
-                    "requires_revalidation": true,
-                    "result_resource_type": "agent_task_loop"
-                }, {
-                    "action": "resume",
-                    "availability": if status == "running" { "available" } else { "unavailable" },
-                    "reason": if status == "running" { "loop can be resumed" } else { "loop is terminal" },
-                    "confirmation": "required",
-                    "idempotent": true,
-                    "requires_revalidation": true,
-                    "result_resource_type": "agent_task_loop"
-                }]
-            }
+        "control_plane": {
+            "phase": record.phase,
+            "actions": loop_control_plane_actions(status)
+        }
     });
     let run = RunRecord {
         id: run_id.to_string(),

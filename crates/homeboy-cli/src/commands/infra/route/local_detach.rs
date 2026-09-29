@@ -1587,7 +1587,12 @@ fn detached_child_pre_admission_error(
     error
 }
 
-fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'static str> {
+/// Read the last typed `homeboy/command-result/v3` failure out of a bounded
+/// prefix of a redirected child log. Reused by the unmaterialized Cook replay
+/// worker path (#15009) as well as the detached-launcher pre-admission path
+/// this was written for, since both redirect the same JSON envelope to a log
+/// file and need the same bounded, redacted extraction.
+pub(super) fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'static str> {
     let file =
         std::fs::File::open(log_path).map_err(|_| "child diagnostic log could not be read")?;
     let mut bytes = Vec::new();
@@ -1614,7 +1619,13 @@ fn detached_child_diagnostic(log_path: &Path) -> Result<Value, &'static str> {
                         == Some("homeboy/command-result/v3")
                         && result.get("success").and_then(Value::as_bool) == Some(false)
                 })
-                .and_then(|result| result.get("error"))
+                // The real v3 envelope carries its typed failure under
+                // `diagnostics`, not `error` (`CommandResultEnvelope::diagnostics`,
+                // `homeboy-cli/src/commands/utils/response.rs`). This previously
+                // read a key production output never emits, so no detached-Cook
+                // launcher failure was ever actually classified — every call
+                // fell through to the narrow fallback below.
+                .and_then(|result| result.get("diagnostics"))
                 .filter(|error| {
                     error.get("code").and_then(Value::as_str).is_some()
                         && error.get("message").and_then(Value::as_str).is_some()
@@ -2328,7 +2339,7 @@ mod tests {
         let result = serde_json::to_string_pretty(&json!({
                 "schema": "homeboy/command-result/v3",
                 "success": false,
-                "error": {
+                "diagnostics": {
                     "code": "validation.invalid_argument",
                     "message": format!("provider token=super-secret was rejected {}", "x".repeat(CHILD_DIAGNOSTIC_TEXT_CHARS)),
                     "details": { "field": "provider", "nested": { "value": "x" } },

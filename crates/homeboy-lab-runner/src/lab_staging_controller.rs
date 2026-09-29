@@ -1197,9 +1197,7 @@ where
         request,
         request.local_output_file.is_some(),
     )?;
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
+    let attachment = load_recipe_attachment(&lab_lifecycle_store, run_id)?;
     let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan_in_store(
         &lab_lifecycle_store,
         run_id,
@@ -1227,6 +1225,12 @@ where
         .map_err(|error| {
             Error::internal_unexpected(format!("build controller daemon client: {error}"))
         })?;
+    // The run ID alone is not a sufficient idempotency scope: a retry can
+    // reuse the reserved run identity while regenerating an immutable staging
+    // envelope (for example when recovering from a pre-execution failure).
+    // Bind submission identity to both the attempt and its canonical request,
+    // so exact replays deduplicate and changed requests cannot collide.
+    let staging_idempotency_key = lab_staging_idempotency_key(run_id, &envelope)?;
     let create = post_controller_job_with_retries(
         &client,
         format!("{endpoint}/controller/jobs"),
@@ -1234,7 +1238,7 @@ where
             "type": LAB_STAGING_DISPATCH_JOB_TYPE,
             "version": LAB_STAGING_DISPATCH_VERSION,
             "request": envelope,
-            "idempotency_key": run_id,
+            "idempotency_key": staging_idempotency_key,
         })),
         "create durable Lab staging controller job",
     )?;
@@ -1262,6 +1266,28 @@ where
         )));
     }
     Ok(DetachedStagingSubmission::Controller { job_id })
+}
+
+fn lab_staging_idempotency_key(
+    run_id: &str,
+    envelope: &LabStagingDispatchEnvelope,
+) -> Result<String> {
+    let request = serde_json::to_value(envelope).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize Lab staging idempotency request".to_string()),
+        )
+    })?;
+    let canonical = canonical_json_bytes(&request).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("canonicalize Lab staging idempotency request".to_string()),
+        )
+    })?;
+    Ok(format!(
+        "lab-staging:{}",
+        content_hash::sha256_hex(&[run_id.as_bytes(), b"\0", &canonical].concat())
+    ))
 }
 
 /// The initiating client must distinguish a controller job from runner-owned
@@ -1464,9 +1490,9 @@ fn source_artifact_exceeds_transfer_bounds(error: &Error) -> bool {
 }
 
 /// A response can be lost after the daemon accepted the request. Create uses
-/// the durable run ID as its idempotency key; replaying start targets that same
-/// job ID. Both operations can therefore be retried without admitting another
-/// controller execution.
+/// the attempt and canonical request as its idempotency key; replaying start
+/// targets that same job ID. Both operations can therefore be retried without
+/// admitting another controller execution.
 fn post_controller_job_with_retries(
     client: &Client,
     url: String,
@@ -1958,9 +1984,42 @@ impl LabStagingRecipeRef {
 }
 
 pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    load_lab_staging_recipe_in_store(&store, run_id)
+}
+
+fn load_recipe_attachment(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<homeboy_agents::agent_task_lifecycle::PrivateRunAttachment<LabStagingRecipe>> {
+    homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<LabStagingRecipe>(
+        run_id,
+        LAB_STAGING_RECIPE_ATTACHMENT_KIND,
+    )
+    .map_err(|error| {
+        if error.details.get("json_parse").is_some() {
+            if let Err(persist_error) =
+                homeboy_agents::agent_task_lifecycle::record_lab_staging_json_error(
+                    store,
+                    run_id,
+                    "loading_recipe",
+                    LAB_STAGING_RECIPE_ATTACHMENT_KIND,
+                    &error,
+                )
+            {
+                return persist_error;
+            }
+        }
+        error
+    })
+}
+
+fn load_lab_staging_recipe_in_store(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<LabStagingRequest> {
+    let attachment = load_recipe_attachment(store, run_id)?;
     let recipe = attachment.payload;
     recipe.validate()?;
     if recipe.run_id != run_id {
@@ -1971,7 +2030,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
             None,
         ));
     }
-    let record = homeboy_agents::agent_task_lifecycle::reconcile_status(run_id)?;
+    let record = homeboy_agents::agent_task_lifecycle::status_in_store(store, run_id)?;
     if record.run_id != recipe.run_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -1981,7 +2040,7 @@ pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
         ));
     }
     let durable_agent_task_plan =
-        homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)?;
+        homeboy_agents::agent_task_lifecycle::load_controller_plan_in_store(store, run_id)?;
     if durable_agent_task_plan.plan_id != record.plan_id {
         return Err(Error::validation_invalid_argument(
             "plan_id",
@@ -2002,10 +2061,10 @@ fn load_validated_staging_request(
     recipe_ref: &LabStagingRecipeRef,
 ) -> Result<LabStagingExecutionRequest> {
     recipe_ref.validate()?;
-    let attachment = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-        LabStagingRecipe,
-    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)?;
-    let staging = load_lab_staging_recipe(run_id)?;
+    let store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let attachment = load_recipe_attachment(&store, run_id)?;
+    let staging = load_lab_staging_recipe_in_store(&store, run_id)?;
     if attachment.payload_digest != recipe_ref.attachment_digest
         || staging.recipe.runner_id != runner_id
         || staging.durable_agent_task_plan.plan_id != recipe_ref.durable_plan_id
@@ -3690,6 +3749,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &request.recipe.normalized_args,
             public_env,
         )?;
+        crate::lab::secrets::merge_agent_task_provider_secret_env(
+            &mut secret_handoff,
+            &request.durable_agent_task_plan,
+        );
         crate::lab::secrets::merge_managed_service_secret_env(
             &mut secret_handoff,
             Some(&request.durable_agent_task_plan),
@@ -3741,7 +3804,6 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                     "lab.staging-dispatch",
                     lease_id,
                     Some(&request.recipe.run_id),
-                    crate::execution::DaemonAdmissionPolicy::DurableLeaseRequired,
                     homeboy_agents::agent_task_lifecycle::workspace_owner_registration_if_present(
                         &request.recipe.run_id,
                     )?,
@@ -5072,6 +5134,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn staging_idempotency_key_is_stable_per_canonical_request_and_scoped_by_inputs() {
+        let envelope = |runner_id: &str| {
+            LabStagingDispatchEnvelope::new(
+                "retry-attempt",
+                runner_id,
+                LabStagingInputRef::AgentTaskAttempt {
+                    run_id: "retry-attempt".to_string(),
+                    recipe: recipe_ref(),
+                },
+            )
+        };
+
+        let first = envelope("lab-a");
+        let same = envelope("lab-a");
+        let different_scope = envelope("lab-b");
+        let first_key = lab_staging_idempotency_key("retry-attempt", &first)
+            .expect("canonical staging identity");
+
+        assert_eq!(
+            first_key,
+            lab_staging_idempotency_key("retry-attempt", &same).expect("same request identity")
+        );
+        assert_ne!(
+            first_key,
+            lab_staging_idempotency_key("retry-attempt", &different_scope)
+                .expect("distinct scope identity")
+        );
+        assert!(first_key.is_ascii());
+        assert!(first_key.len() <= 128);
+        assert!(!first_key.trim().is_empty());
+
+        let wire = serde_json::to_value(&first).expect("serialize dispatch envelope");
+        let keys = wire
+            .as_object()
+            .expect("envelope object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(keys, ["input", "run_id", "runner_id", "schema"].into());
+    }
+
     fn global_state_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -5378,6 +5482,94 @@ mod tests {
         assert_eq!(requests[2], requests[3]);
         assert!(requests[0].starts_with("POST /controller/jobs HTTP/1.1"));
         assert!(requests[2].starts_with(&format!("POST /controller/jobs/{job_id}/start HTTP/1.1")));
+    }
+
+    #[test]
+    fn controller_jobs_endpoint_reuses_identical_retry_and_accepts_changed_immutable_scope() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        let accepted = std::thread::spawn(move || {
+            let mut by_key: HashMap<String, (Value, uuid::Uuid)> = HashMap::new();
+            let mut submissions = Vec::new();
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().expect("accept staging submission");
+                let raw = read_http_request(&mut stream);
+                let body = raw
+                    .split_once("\r\n\r\n")
+                    .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+                    .expect("controller job request JSON");
+                let key = body["idempotency_key"]
+                    .as_str()
+                    .expect("idempotency key")
+                    .to_string();
+                assert!(key.is_ascii() && !key.is_empty() && key.len() <= 128);
+                let request = body["request"].clone();
+                let (prior_request, job_id) = by_key
+                    .entry(key)
+                    .or_insert_with(|| (request.clone(), uuid::Uuid::new_v4()));
+                assert_eq!(*prior_request, request, "a key must bind one request");
+                submissions.push(body);
+                let response = json!({
+                    "success": true,
+                    "data": { "body": { "job": controller_job(*job_id, homeboy_core::api_jobs::JobStatus::Queued) } },
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .expect("write accepted job response");
+            }
+            submissions
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("client");
+        let original = envelope();
+        let identical = original.clone();
+        let mut changed = original.clone();
+        changed.runner_id = "lab-retry-scope".to_string();
+        let envelopes = [original, identical, changed];
+        let mut jobs = Vec::new();
+        for dispatch in envelopes {
+            let run_id = dispatch.run_id.clone();
+            let key = lab_staging_idempotency_key(&run_id, &dispatch)
+                .expect("derive canonical submission key");
+            jobs.push(
+                post_controller_job_with_retries(
+                    &client,
+                    format!("{endpoint}/controller/jobs"),
+                    Some(json!({
+                        "type": LAB_STAGING_DISPATCH_JOB_TYPE,
+                        "version": LAB_STAGING_DISPATCH_VERSION,
+                        "request": dispatch,
+                        "idempotency_key": key,
+                    })),
+                    "submit retry staging request",
+                )
+                .expect("controller accepts staging request"),
+            );
+        }
+        let submissions = accepted.join().expect("mock controller");
+
+        assert_eq!(submissions.len(), 3);
+        assert_eq!(submissions[0], submissions[1]);
+        assert_ne!(
+            submissions[0]["idempotency_key"],
+            submissions[2]["idempotency_key"]
+        );
+        assert_eq!(
+            jobs[0].id, jobs[1].id,
+            "identical retry reuses accepted job"
+        );
+        assert_ne!(
+            jobs[0].id, jobs[2].id,
+            "changed immutable scope is accepted separately"
+        );
     }
 
     #[test]
@@ -7674,6 +7866,52 @@ mod tests {
             )
             .public_projection();
             assert!(!public.to_string().contains("private-marker"));
+        });
+    }
+
+    #[test]
+    fn malformed_recipe_diagnostic_is_visible_after_run_cancellation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let run_id = "malformed-recipe-after-cancel";
+            submit_recipe_run(run_id);
+            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store");
+            let recipe_path = homeboy_core::paths::homeboy_data()
+                .expect("data root")
+                .join("agent-task-runs")
+                .join(run_id)
+                .join("private/lab-staging-recipe.json");
+            std::fs::create_dir_all(recipe_path.parent().expect("private directory"))
+                .expect("create private directory");
+            std::fs::write(&recipe_path, br#"{"payload":"secret-marker",broken}"#)
+                .expect("write malformed recipe fixture");
+
+            assert!(load_lab_staging_recipe_in_store(&store, run_id).is_err());
+            homeboy_agents::agent_task_lifecycle::cancel_run_in_store(
+                &store,
+                run_id,
+                Some("fixture cancellation"),
+            )
+            .expect("cancel run after staging error");
+
+            let status = homeboy_agents::agent_task_lifecycle::status_in_store(&store, run_id)
+                .expect("status after cancellation");
+            let diagnostic = &status.metadata["lab_staging_diagnostic"];
+            assert_eq!(diagnostic["cause"], "json_parse");
+            assert_eq!(diagnostic["field_status"], "unknown");
+            assert!(diagnostic["field"].is_null());
+            assert_eq!(diagnostic["phase"], "loading_recipe");
+            assert_eq!(
+                diagnostic["attachment_kind"],
+                LAB_STAGING_RECIPE_ATTACHMENT_KIND
+            );
+            assert_eq!(diagnostic["parse"]["category"], "data");
+            assert!(diagnostic["parse"]["line"].as_u64().is_some());
+            assert!(diagnostic["parse"]["column"].as_u64().is_some());
+
+            let status_json = serde_json::to_string(&status).expect("serialize status");
+            assert!(!status_json.contains("secret-marker"));
+            assert!(!status_json.contains("private/lab-staging-recipe"));
         });
     }
 

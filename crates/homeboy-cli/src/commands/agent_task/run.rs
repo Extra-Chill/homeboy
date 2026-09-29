@@ -215,6 +215,68 @@ pub(crate) fn cook_rotation_disclosure(plan: &AgentTaskPlan) -> String {
     }
 }
 
+fn cook_effective_plan_disclosure(plan: &AgentTaskPlan) -> String {
+    let budget = &plan.options.execution_budget;
+    let initial_route = plan.tasks.first().map(|task| {
+        let backend = task.executor.backend.as_str();
+        let model = task.executor.model.as_deref();
+        model.map_or_else(|| backend.to_string(), |model| format!("{backend}/{model}"))
+    });
+    let mut routes = Vec::new();
+    if let Some(rotation) = &plan.options.rotation {
+        if initial_route.is_none() {
+            routes.extend(rotation.entries.first().map(rotation_entry_label));
+        }
+        routes.extend(
+            rotation
+                .entries
+                .iter()
+                .skip(1)
+                .take(
+                    budget
+                        .max_provider_rotations
+                        .min(budget.max_provider_executions.saturating_sub(1))
+                        as usize,
+                )
+                .map(rotation_entry_label),
+        );
+    }
+    if let Some(initial_route) = initial_route {
+        routes.insert(0, initial_route);
+    }
+    let rotation = if routes.len() > 1 {
+        routes.join(" → ")
+    } else {
+        routes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "configured provider".to_string())
+    };
+    let retry_classes = if budget.max_provider_rotations > 0 {
+        "provider/transient/timeout/stalled/rate-limited/account-quota-billing-credentials"
+    } else {
+        "none"
+    };
+    format!(
+        "cook: effective plan: up to {} executions; rotation order: {}; rotates on {}; {} gate retries (same provider; rotations do not fund gates)",
+        budget.max_provider_executions,
+        rotation,
+        retry_classes,
+        budget.max_same_provider_retries,
+    )
+}
+
+fn rotation_entry_label(
+    entry: &homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry,
+) -> String {
+    match (entry.backend.as_deref(), entry.model.as_deref()) {
+        (Some(backend), Some(model)) => format!("{backend}/{model}"),
+        (Some(backend), None) => backend.to_string(),
+        (None, Some(model)) => model.to_string(),
+        (None, None) => "configured provider".to_string(),
+    }
+}
+
 /// Warn before a detached Cook becomes observable only through durable status.
 pub(crate) fn detached_cook_route_less_warning(
     resolution: &homeboy::core::notification_route::NotificationRouteResolution,
@@ -225,17 +287,18 @@ pub(crate) fn detached_cook_route_less_warning(
     let resolver = resolution
         .resolver_transport
         .as_deref()
-        .map(|transport| format!(" installed resolver transport {transport}"))
-        .unwrap_or_else(|| " no installed resolver transport matched".to_string());
-    let missing = (!resolution.missing_context.is_empty()).then(|| {
-        format!(
-            "; provide caller context: {}",
-            resolution.missing_context.join(", ")
-        )
-    });
+        .map(|transport| format!(" resolver transport `{transport}` was consulted"))
+        .unwrap_or_else(|| " no resolver supplied a route".to_string());
+    let missing = (!resolution.missing_context.is_empty())
+        .then(|| {
+            format!(
+                "; resolver-reported caller context missing: {}",
+                resolution.missing_context.join(", ")
+            )
+        })
+        .unwrap_or_default();
     Some(format!(
-        "cook: detached notification route is route-less;{resolver}{missing}. Terminal updates will not return to the launching notification destination; inspect them with `homeboy agent-task status <cook-id>`",
-        missing = missing.unwrap_or_default(),
+        "cook: detached notification route is route-less;{resolver}{missing}. The Homeboy process can resolve only caller context available to its installed resolver; an active Discord thread is not inferred from extension readiness. To return terminal updates, invoke Cook with `--notification-transport <transport> --notification-route <route>` (or set `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE` in the Homeboy process environment); inspect this Cook with `homeboy agent-task status <cook-id>`",
     ))
 }
 
@@ -537,8 +600,10 @@ pub(crate) fn preview_cook(
                 .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
-    plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
+    eprintln!("{}", cook_effective_plan_disclosure(&plan));
+    plan.metadata["gate_contract_validation"] = serde_json::to_value(&gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    preflight_preview_lab_provider_secret_env(&placement, &plan)?;
 
     let executor = plan
         .tasks
@@ -548,6 +613,8 @@ pub(crate) fn preview_cook(
     let mut resolved = cook_preview_resolved_request(&args, placement);
     resolved["base_preparation"] = provision["base_preparation"].clone();
     resolved["workspace"] = provision;
+    resolved["gate_contract_validation"] =
+        preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
     resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
@@ -557,6 +624,23 @@ pub(crate) fn preview_cook(
         cook_preview_result(resolved, progress, replay, None, None),
         0,
     ))
+}
+
+fn preflight_preview_lab_provider_secret_env(
+    placement: &Value,
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> homeboy::core::Result<()> {
+    if placement.get("selected").and_then(Value::as_str) != Some("lab") {
+        return Ok(());
+    }
+    let Some(runner_id) = placement.get("selected_runner").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+        return Ok(());
+    }
+    let runner = homeboy::runner::load(runner_id)?;
+    homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(runner_id, &runner, plan)
 }
 
 fn preview_staging_component(
@@ -661,6 +745,37 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
             "ai_tool": args.ai_tool,
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
+    })
+}
+
+fn preview_gate_contract_disclosure(
+    validation: &crate::commands::agent_task::gate_contract::GateContractValidation,
+    public_gates: &[String],
+) -> Value {
+    let mut entries = Vec::new();
+    let mut private_deferred = 0usize;
+    for gate in &validation.gates {
+        if gate.status != "selection_deferred" {
+            continue;
+        }
+        if !public_gates.iter().any(|public| public == &gate.command) {
+            private_deferred += 1;
+            continue;
+        }
+        entries.push(serde_json::json!({
+            "kind": gate.kind,
+            "status": gate.status,
+            "filter_interpretation": gate.filter_interpretation,
+            "filter": gate.filter,
+            "selected_count": gate.selected_count,
+            "selected_ids": gate.selected_ids,
+            "validation": gate.validation,
+        }));
+    }
+    serde_json::json!({
+        "schema": "homeboy/cook-preview-gate-validation/v1",
+        "deferred_public": entries,
+        "deferred_private_count": private_deferred,
     })
 }
 
@@ -3215,6 +3330,59 @@ mod preview_tests {
     }
 
     #[test]
+    fn preview_provider_secrets_require_a_runner_ref_only_when_the_plan_declares_one() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner_id = "lab-secret-preview";
+            homeboy::runner::runners::create(
+                &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
+                false,
+            )
+            .expect("register runner without secret refs");
+            let placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": runner_id,
+            });
+            let plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+                serde_json::from_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-plan/v1",
+                    "plan_id": "provider-secret-preview",
+                    "tasks": [{
+                        "schema": "homeboy/agent-task-request/v1",
+                        "task_id": "provider-route",
+                        "executor": { "backend": "fixture" },
+                        "instructions": "Check the runner secret contract."
+                    }],
+                }))
+                .expect("parse plan");
+
+            preflight_preview_lab_provider_secret_env(&placement, &plan)
+                .expect("a no-secret plan needs no runner credential");
+
+            let mut required_plan = plan;
+            required_plan.tasks[0].executor.secret_env =
+                vec!["PROVIDER_PREVIEW_SECRET_TEST".to_string()];
+            let error = preflight_preview_lab_provider_secret_env(&placement, &required_plan)
+                .expect_err("missing runner-owned reference must block preview");
+            assert!(error.message.contains("PROVIDER_PREVIEW_SECRET_TEST"));
+
+            let configured_runner = "lab-secret-configured-preview";
+            homeboy::runner::runners::create(
+                &format!(
+                    r#"{{"id":"{configured_runner}","kind":"local","secret_env":{{"PROVIDER_PREVIEW_SECRET_TEST":{{"env":"PROVIDER_PREVIEW_SECRET_TEST"}}}}}}"#
+                ),
+                false,
+            )
+            .expect("register runner with secret reference");
+            let configured_placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": configured_runner,
+            });
+            preflight_preview_lab_provider_secret_env(&configured_placement, &required_plan)
+                .expect("present runner reference admits the same plan");
+        });
+    }
+
+    #[test]
     fn local_preview_omits_runner_admission_and_replay_prerequisites() {
         let args = cook(&[
             "homeboy",
@@ -3516,6 +3684,8 @@ mod preview_tests {
             let evidence = vec![AgentTaskProviderEvidenceInput {
                 id: "issue".to_string(),
                 source: source.path().display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }];
             validate_provider_evidence_inputs(&evidence, Some("Read the evidence."))
                 .expect("validate evidence");
@@ -6753,16 +6923,25 @@ pub(crate) fn preflight_cook_execution_request(
     Ok(())
 }
 
-fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+/// Non-interactive form of the model-override check every Cook admission path
+/// must run (#15009). A queued Lab admission is created out of process, with
+/// no TTY to prompt against, so it must be refused here at submit time with
+/// the same typed error a replay would otherwise only discover later, deep
+/// inside a spawned replay worker, after an admission record already exists.
+pub(crate) fn require_model_override_acknowledgement_for_cook(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<()> {
     if args.dispatch.core.acknowledge_model_override {
         return Ok(());
     }
     let dispatch = resolved_dispatch_args_for_cook(args)?;
     let request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let catalog = provider::AgentTaskProviderCatalog::discover();
-    if let Err(error) =
-        dispatch_service::require_model_override_acknowledgement_with_catalog(&request, &catalog)
-    {
+    dispatch_service::require_model_override_acknowledgement_with_catalog(&request, &catalog)
+}
+
+fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if let Err(error) = require_model_override_acknowledgement_for_cook(args) {
         if !crate::commands::utils::tty::require_tty_for_interactive() {
             return Err(error);
         }
@@ -6776,6 +6955,106 @@ fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result
         args.dispatch.core.acknowledge_model_override = true;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod require_model_override_acknowledgement_for_cook_tests {
+    use super::*;
+    use crate::cli_surface::{Cli, Commands};
+    use clap::Parser;
+
+    /// Configure a global rotation policy whose first entry pins
+    /// `configured-model`, the same shape `configured_rotation_policy()`
+    /// reads back in [`dispatch_service::require_model_override_acknowledgement`].
+    fn configure_default_model_route() {
+        let mut config = homeboy::core::defaults::load_config();
+        config.agent_task.rotation = Some(serde_json::json!({
+            "entries": [{ "model": "configured-model" }],
+        }));
+        homeboy::core::defaults::save_config(&config).expect("save configured model route");
+    }
+
+    fn cook_with_explicit_model(model: &str, acknowledge: bool) -> AgentTaskCookArgs {
+        let mut argv = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--backend".to_string(),
+            "fixture".to_string(),
+            "--model".to_string(),
+            model.to_string(),
+            "--prompt".to_string(),
+            "fix the deterministic admission fail-fast bug".to_string(),
+        ];
+        if acknowledge {
+            argv.push("--acknowledge-model-override".to_string());
+        }
+        let cli = Cli::try_parse_from(&argv).expect("parse Cook args");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task command");
+        };
+        let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("Cook command");
+        };
+        *cook
+    }
+
+    /// The submit-time gap #15009 fixes: a Cook whose explicit `--model`
+    /// displaces a configured route must be refused here, before any
+    /// unmaterialized Lab admission is persisted — not admitted only to fail
+    /// this identical, deterministic check on every one of the replay
+    /// worker's up-to-20 bounded attempts over the following hour.
+    #[test]
+    fn unacknowledged_model_override_is_refused_before_any_admission_work() {
+        crate::test_support::with_isolated_home(|_| {
+            configure_default_model_route();
+            let args = cook_with_explicit_model("operator-model", false);
+            let error = require_model_override_acknowledgement_for_cook(&args)
+                .expect_err("an unacknowledged model override must be refused at submit time");
+            assert_eq!(
+                error.details["schema"],
+                "homeboy/agent-task-model-override-confirmation-required/v1"
+            );
+            assert_eq!(error.details["selected_model"], "operator-model");
+            assert_eq!(
+                error.details["configured_primary_model"],
+                "configured-model"
+            );
+            assert_eq!(
+                error.details["acknowledgement_flag"],
+                "--acknowledge-model-override"
+            );
+        });
+    }
+
+    #[test]
+    fn acknowledged_model_override_is_admitted() {
+        crate::test_support::with_isolated_home(|_| {
+            configure_default_model_route();
+            let args = cook_with_explicit_model("operator-model", true);
+            require_model_override_acknowledgement_for_cook(&args)
+                .expect("an explicit acknowledgement admits the override");
+        });
+    }
+
+    #[test]
+    fn matching_the_configured_model_needs_no_acknowledgement() {
+        crate::test_support::with_isolated_home(|_| {
+            configure_default_model_route();
+            let args = cook_with_explicit_model("configured-model", false);
+            require_model_override_acknowledgement_for_cook(&args)
+                .expect("matching the configured route needs no acknowledgement");
+        });
+    }
+
+    #[test]
+    fn no_configured_route_needs_no_acknowledgement() {
+        crate::test_support::with_isolated_home(|_| {
+            let args = cook_with_explicit_model("operator-model", false);
+            require_model_override_acknowledgement_for_cook(&args)
+                .expect("an explicit model with no configured route to conflict with is fine");
+        });
+    }
 }
 
 /// Wall-clock ceiling on how long a queued local Cook dispatch waits for
@@ -6990,7 +7269,8 @@ fn run_preflight_cook_execution(
     if let Some(prepared_base_sha) = &args.prepared_base_sha {
         initial_plan.metadata["cook_prepared_base_sha"] = Value::String(prepared_base_sha.clone());
     }
-    let title = default_loop_title(&args, source_worktree_path.as_deref());
+    // Empty recipe title delegates to the validated agent form after candidate gates.
+    let title = args.title.clone().unwrap_or_default();
     let commit_message = args
         .commit_message
         .clone()
@@ -7492,6 +7772,27 @@ mod rotation_disclosure_tests {
     }
 
     #[test]
+    fn preview_effective_plan_shows_rotation_classes_and_gate_retries() {
+        let disclosure = cook_effective_plan_disclosure(&plan_with(3, 2, 2));
+
+        assert!(disclosure.contains("up to 3 executions"), "{disclosure}");
+        assert!(
+            disclosure.contains("fallback-model-0 → fallback-model-1"),
+            "{disclosure}"
+        );
+        assert!(
+            disclosure.contains(
+                "provider/transient/timeout/stalled/rate-limited/account-quota-billing-credentials"
+            ),
+            "{disclosure}"
+        );
+        assert!(
+            disclosure.contains("0 gate retries (same provider; rotations do not fund gates)"),
+            "{disclosure}"
+        );
+    }
+
+    #[test]
     fn explicit_route_without_opt_in_is_pinned_but_keeps_same_provider_retries() {
         let args = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
@@ -7863,8 +8164,10 @@ fn validate_cook_provider_execution_plan(
 ) -> homeboy::core::Result<()> {
     let mut readiness_cache =
         homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
+    // A Lab-placed Cook proves provider readiness on the runner with the
+    // runner's credentials; controller-local credentials must not reject it.
     let selected_plan =
-        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
             &plan,
             &catalog,
             &mut readiness_cache,
@@ -7915,6 +8218,16 @@ pub(crate) fn admit_provider_evidence_inputs(
             ));
         }
         let source = admit_provider_evidence_source(&input.source)?;
+        if source.kind == ProviderEvidenceKind::File
+            && (!input.include.is_empty() || !input.exclude.is_empty())
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "provider-evidence",
+                "provider evidence include and exclude apply only to directories",
+                Some(input.id.clone()),
+                None,
+            ));
+        }
         if !canonical_sources.insert(source.canonical_path.clone()) {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "provider-evidence",
@@ -8171,11 +8484,18 @@ fn is_projected_provider_evidence_path(
     projected_paths.contains(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderEvidenceKind {
+    File,
+    Directory,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AdmittedProviderEvidenceSource {
     supplied_path: PathBuf,
     canonical_path: PathBuf,
     approved_root: Option<PathBuf>,
+    kind: ProviderEvidenceKind,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -8198,15 +8518,27 @@ fn admit_provider_evidence_source(
     let metadata = std::fs::symlink_metadata(&supplied_path).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
-            "provider evidence sources must be existing absolute regular files",
+            "provider evidence sources must be existing absolute regular files or directories",
             Some(format!("{source}: {error}")),
             None,
         )
     })?;
-    if !supplied_path.is_absolute() || !metadata.is_file() || metadata.file_type().is_symlink() {
+    let kind = if metadata.is_file() {
+        ProviderEvidenceKind::File
+    } else if metadata.is_dir() {
+        ProviderEvidenceKind::Directory
+    } else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "provider-evidence",
-            "provider evidence sources must be existing absolute regular files without symlinks",
+            "provider evidence sources must be existing absolute regular files or directories without symlinks",
+            Some(source.to_string()),
+            None,
+        ));
+    };
+    if !supplied_path.is_absolute() || metadata.file_type().is_symlink() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "provider-evidence",
+            "provider evidence sources must be existing absolute regular files or directories without symlinks",
             Some(source.to_string()),
             None,
         ));
@@ -8225,6 +8557,7 @@ fn admit_provider_evidence_source(
         approved_root: approved_macos_temporary_root(&supplied_path, &canonical_path),
         supplied_path,
         canonical_path,
+        kind,
         #[cfg(unix)]
         device: metadata.dev(),
         #[cfg(unix)]
@@ -8284,25 +8617,19 @@ fn verify_admitted_provider_evidence_source(
             None,
         )
     })?;
+    let kind_matches = match source.kind {
+        ProviderEvidenceKind::File => metadata.is_file(),
+        ProviderEvidenceKind::Directory => metadata.is_dir(),
+    };
     #[cfg(unix)]
-    {
+    let identity_matches = {
         use std::os::unix::fs::MetadataExt;
-        if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || metadata.dev() != source.device
-            || metadata.ino() != source.inode
-            || canonical != source.canonical_path
-        {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "provider-evidence",
-                "provider evidence source identity changed after validation",
-                Some(source.copy_path().display().to_string()),
-                None,
-            ));
-        }
-    }
+        metadata.dev() == source.device && metadata.ino() == source.inode
+    };
     #[cfg(not(unix))]
-    if !metadata.is_file()
+    let identity_matches = true;
+    if !kind_matches
+        || !identity_matches
         || metadata.file_type().is_symlink()
         || canonical != source.canonical_path
     {
@@ -8352,6 +8679,27 @@ fn provider_evidence_blob_path(store: &Path, digest: &str) -> PathBuf {
         .join(digest.trim_start_matches("sha256:"))
 }
 
+fn provider_evidence_tree_path(store: &Path, digest: &str) -> PathBuf {
+    store
+        .join("trees")
+        .join(digest.trim_start_matches("sha256:"))
+}
+
+fn directory_evidence_plan(
+    input: &AgentTaskProviderEvidenceInput,
+    source: &AdmittedProviderEvidenceSource,
+) -> homeboy::core::Result<super::provider_evidence::DirectoryEvidencePlan> {
+    verify_admitted_provider_evidence_source(source)?;
+    let plan = super::provider_evidence::plan_directory_evidence(
+        source.copy_path(),
+        &input.include,
+        &input.exclude,
+        &super::provider_evidence::DirectoryEvidenceLimits::production(MAX_PROVIDER_EVIDENCE_BYTES),
+    )?;
+    verify_admitted_provider_evidence_source(source)?;
+    Ok(plan)
+}
+
 pub(crate) fn projected_provider_evidence(
     inputs: &[AgentTaskProviderEvidenceInput],
     workspace: Option<&str>,
@@ -8377,6 +8725,21 @@ fn projected_provider_evidence_from_admitted(
     let mut projected = Vec::with_capacity(inputs.len());
     for (input, source) in inputs.iter().zip(admitted) {
         verify_admitted_provider_evidence_source(source)?;
+        if source.kind == ProviderEvidenceKind::Directory {
+            let plan = directory_evidence_plan(input, source)?;
+            projected.push(super::provider_evidence::directory_projection_value(
+                &input.id,
+                Path::new(&input.source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+                &provider_evidence_tree_path(store, &plan.digest),
+                &plan,
+                false,
+            ));
+            continue;
+        }
         let digest = homeboy_engine_primitives::content_hash::sha256_file(source.copy_path())?;
         projected.push(serde_json::json!({
             "id": input.id,
@@ -8392,7 +8755,7 @@ pub(crate) fn projected_provider_evidence_paths(
 ) -> std::collections::BTreeSet<String> {
     evidence
         .iter()
-        .filter_map(|input| input["path"].as_str().map(str::to_string))
+        .flat_map(|input| super::provider_evidence::projected_directory_member_paths(input))
         .collect()
 }
 
@@ -8427,6 +8790,27 @@ fn project_admitted_provider_evidence_inputs_at(
     let mut projected = Vec::with_capacity(inputs.len());
     for (input, source) in inputs.iter().zip(admitted) {
         verify_admitted_provider_evidence_source(source)?;
+        if source.kind == ProviderEvidenceKind::Directory {
+            let plan = directory_evidence_plan(input, source)?;
+            let destination = provider_evidence_tree_path(store, &plan.digest);
+            super::provider_evidence::copy_directory_evidence(
+                source.copy_path(),
+                &plan,
+                &destination,
+            )?;
+            projected.push(super::provider_evidence::directory_projection_value(
+                &input.id,
+                Path::new(&input.source)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref(),
+                &destination,
+                &plan,
+                true,
+            ));
+            continue;
+        }
         let staging = store
             .join("staging")
             .join(format!("evidence-{}", uuid::Uuid::new_v4()));
@@ -8967,6 +9351,8 @@ mod provider_evidence_tests {
         let input = AgentTaskProviderEvidenceInput {
             id: "acceptance".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit evidence");
@@ -9053,6 +9439,8 @@ mod provider_evidence_tests {
                 .expect("canonical source")
                 .display()
                 .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit fixture");
@@ -9241,6 +9629,8 @@ Use / as a separator and retain https://example.test/response plus `// NOTE: imp
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut prompt = Some(format!(
             "file://{} key={} [source]({}) '{}'",
@@ -9346,6 +9736,8 @@ let path = "/private/fenced-code.json";
             &[AgentTaskProviderEvidenceInput {
                 id: "source".to_string(),
                 source: link.display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             temp.path(),
             None,
@@ -9379,6 +9771,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: supplied_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         validate_provider_evidence_inputs(
@@ -9446,6 +9840,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: canonical_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let prompt_source = var_source.display().to_string();
 
@@ -9534,6 +9930,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: supplied_source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let dotted = canonical_source
             .parent()
@@ -9567,6 +9965,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
 
         let projected =
@@ -9597,6 +9997,8 @@ let path = "/private/fenced-code.json";
             &[AgentTaskProviderEvidenceInput {
                 id: "source".to_string(),
                 source: linked_parent.join("source.json").display().to_string(),
+                include: Vec::new(),
+                exclude: Vec::new(),
             }],
             &workspace,
             None,
@@ -9659,6 +10061,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let admitted =
             admit_provider_evidence_inputs(&[input.clone()]).expect("validate and admit source");
@@ -9688,6 +10092,8 @@ let path = "/private/fenced-code.json";
         let input = AgentTaskProviderEvidenceInput {
             id: "source".to_string(),
             source: source.display().to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let mut prompt = Some(format!("Read {}", source.display()));
         let admitted =
@@ -9711,18 +10117,155 @@ let path = "/private/fenced-code.json";
         });
     }
 
-    #[test]
-    fn rejects_non_regular_evidence_source() {
-        let temp = tempfile::tempdir().expect("temporary workspace");
-        let error = validate_provider_evidence_inputs(
-            &[AgentTaskProviderEvidenceInput {
-                id: "directory".to_string(),
-                source: temp.path().display().to_string(),
-            }],
-            None,
+    fn capture_directory() -> (tempfile::TempDir, AgentTaskProviderEvidenceInput) {
+        let temp = tempfile::tempdir().expect("capture");
+        std::fs::create_dir(temp.path().join("website")).expect("website");
+        std::fs::write(temp.path().join("website/index.html"), "<html>home</html>").expect("html");
+        std::fs::create_dir(temp.path().join("receipts")).expect("receipts");
+        std::fs::write(temp.path().join("receipts/note.txt"), "receipt").expect("receipt");
+        std::fs::create_dir(temp.path().join("screenshots")).expect("screenshots");
+        std::fs::write(
+            temp.path().join("screenshots/home.png"),
+            vec![
+                9u8;
+                (super::super::provider_evidence::DEFAULT_EVIDENCE_MEDIA_FILE_CAP_BYTES as usize)
+                    + 1
+            ],
         )
-        .expect_err("directory evidence is rejected");
-        assert!(error.message.contains("regular files"));
+        .expect("screenshot");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "capture".to_string(),
+            source: temp
+                .path()
+                .canonicalize()
+                .expect("canonical capture")
+                .display()
+                .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        (temp, input)
+    }
+
+    #[test]
+    fn preview_and_execution_project_the_same_directory_tree() {
+        let (_temp, input) = capture_directory();
+        let store = tempfile::tempdir().expect("store");
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit directory");
+        let preview =
+            projected_provider_evidence_from_admitted(&[input.clone()], &admitted, store.path())
+                .expect("preview directory");
+        assert!(
+            !Path::new(preview[0]["path"].as_str().expect("preview path")).exists(),
+            "preview must not copy the capture"
+        );
+        let executed =
+            project_admitted_provider_evidence_inputs_at(&[input.clone()], &admitted, store.path())
+                .expect("execute directory projection");
+        for field in ["path", "sha256", "size_bytes", "transport", "entries"] {
+            assert_eq!(preview[0][field], executed[0][field], "{field}");
+        }
+        let root = PathBuf::from(executed[0]["path"].as_str().expect("path"));
+        assert!(root.join("website/index.html").is_file());
+        assert_eq!(
+            std::fs::read_to_string(root.join("website/index.html")).expect("html"),
+            "<html>home</html>"
+        );
+        assert!(root.join("receipts/note.txt").is_file());
+        assert!(
+            std::fs::metadata(&root)
+                .expect("projected root metadata")
+                .permissions()
+                .readonly(),
+            "projected directory is immutable"
+        );
+        assert!(
+            std::fs::metadata(root.join("website/index.html"))
+                .expect("projected file metadata")
+                .permissions()
+                .readonly(),
+            "projected files are immutable"
+        );
+        assert!(
+            !root.join("screenshots/home.png").exists(),
+            "huge screenshots stay out of the projection"
+        );
+        assert_eq!(
+            executed[0]["transport"],
+            homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT
+        );
+        assert!(executed[0]["omitted"]["count"].as_u64().unwrap_or(0) >= 1);
+        let mut prompt = Some(format!("Read {} before editing.", input.source));
+        let projected_paths = projected_provider_evidence_paths(&executed);
+        rewrite_provider_evidence_prompt(
+            &mut prompt,
+            &[input.clone()],
+            &admitted,
+            &executed,
+            &projected_paths,
+        )
+        .expect("rewrite directory prompt");
+        let rewritten = prompt.expect("rewritten");
+        assert!(rewritten.contains(root.to_str().expect("utf-8 root")));
+        assert!(!rewritten.contains(&input.source));
+        let retry =
+            project_admitted_provider_evidence_inputs_at(&[input.clone()], &admitted, store.path())
+                .expect("retry reuses the directory projection");
+        assert_eq!(retry[0]["path"], executed[0]["path"]);
+        assert_eq!(retry[0]["sha256"], executed[0]["sha256"]);
+        let mut permissions = std::fs::metadata(&root)
+            .expect("root metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&root, permissions).expect("simulate mutable store");
+        std::fs::write(root.join("unexpected.txt"), "injected")
+            .expect("simulate unexpected content-addressed store mutation");
+        let error = project_admitted_provider_evidence_inputs_at(&[input], &admitted, store.path())
+            .expect_err("content-addressed tree with extra files is rejected");
+        assert!(error.message.contains("storage is corrupt"));
+        for directory in [root.clone(), root.join("website"), root.join("receipts")] {
+            let mut permissions = std::fs::metadata(&directory)
+                .expect("directory metadata")
+                .permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(directory, permissions).expect("restore cleanup permissions");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_projection_rejects_a_selected_symlink_without_copying_outside() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("capture");
+        let outside = temp.path().join("secret.txt");
+        std::fs::write(&outside, "secret").expect("outside");
+        let website = temp.path().join("website");
+        std::fs::create_dir(&website).expect("website");
+        symlink(&outside, website.join("index.html")).expect("symlink evidence");
+        let input = AgentTaskProviderEvidenceInput {
+            id: "capture".to_string(),
+            source: temp
+                .path()
+                .canonicalize()
+                .expect("canonical")
+                .display()
+                .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+        };
+        let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit");
+        let error = project_admitted_provider_evidence_inputs_at(
+            &[input],
+            &admitted,
+            &temp.path().join("store"),
+        )
+        .expect_err("symlink blocks projection");
+        assert!(error.message.contains("cannot follow symlinks"));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("untouched"),
+            "secret"
+        );
+        assert!(!temp.path().join("store/trees").exists());
     }
 
     #[cfg(unix)]
@@ -9745,6 +10288,8 @@ let path = "/private/fenced-code.json";
                 .expect("canonical source")
                 .display()
                 .to_string(),
+            include: Vec::new(),
+            exclude: Vec::new(),
         };
         let admitted = admit_provider_evidence_inputs(&[input.clone()]).expect("admit source");
         let error = project_admitted_provider_evidence_inputs_at(&[input], &admitted, &store)
@@ -9823,64 +10368,6 @@ fn git_head_sha(path: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn default_loop_title(args: &AgentTaskCookArgs, source_worktree_path: Option<&Path>) -> String {
-    if let Some(title) = &args.title {
-        return title.clone();
-    }
-    if let Some(title) = args.goal.as_deref().and_then(bounded_cook_title) {
-        return title;
-    }
-    if let Some(title) = source_worktree_path
-        .zip(
-            args.base_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.get("sha"))
-                .and_then(Value::as_str),
-        )
-        .and_then(|(path, base_sha)| existing_candidate_title(path, base_sha))
-    {
-        return title;
-    }
-    let target = args
-        .dispatch
-        .repo
-        .as_deref()
-        .or(args.dispatch.task_url.as_deref())
-        .unwrap_or("agent task");
-    bounded_cook_title(&format!("Cook {target}")).unwrap_or_else(|| "Cook agent task".to_string())
-}
-
-fn existing_candidate_title(path: &Path, base_sha: &str) -> Option<String> {
-    let head_sha = git_head_sha(path)?;
-    if head_sha == base_sha
-        || !Command::new("git")
-            .args(["merge-base", "--is-ancestor", base_sha, &head_sha])
-            .current_dir(path)
-            .status()
-            .ok()?
-            .success()
-    {
-        return None;
-    }
-    let output = Command::new("git")
-        .args(["show", "-s", "--format=%s", &head_sha])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-        .and_then(|subject| bounded_cook_title(&subject))
-}
-
-fn bounded_cook_title(value: &str) -> Option<String> {
-    const MAX_PR_TITLE_CHARS: usize = 256;
-
-    let title = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!title.is_empty()).then(|| title.chars().take(MAX_PR_TITLE_CHARS).collect())
 }
 
 fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
@@ -10156,11 +10643,47 @@ pub(super) fn run_resume_with_executor(
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
+    let explicit_local =
+        homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+            result.placement.requested == homeboy_lab_runner_contract::Placement::Local
+        });
+    let reconstruct = if explicit_local {
+        reconstruct_local_cook_attempt_dispatcher
+    } else {
+        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher
+    };
     retry_with(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+        reconstruct,
     )
+}
+
+fn reconstruct_local_cook_attempt_dispatcher(
+    recipe: &Value,
+) -> homeboy::core::Result<
+    Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+> {
+    if recipe.get("kind").and_then(Value::as_str) == Some("lab") {
+        let admission = homeboy::core::parsed_command_preflight::captured_result()
+            .map(|result| result.resource_admission);
+        if let Some(
+            homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+                label,
+                ..
+            },
+        ) = admission
+        {
+            return Err(Error::validation_invalid_argument(
+                "placement",
+                format!("explicit local retry refused: controller resource admission rejected {label}; wait for controller capacity or retry without --placement local"),
+                None,
+                None,
+            ));
+        }
+        return Ok(None);
+    }
+    crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(recipe)
 }
 
 pub(super) fn retry_with<F>(
@@ -10175,6 +10698,11 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
+    if let Some(error) = explicit_local_retry_admission_refusal(
+        homeboy::core::parsed_command_preflight::captured_result().as_ref(),
+    ) {
+        return Err(error);
+    }
     let route_override = cook_provider_route_override(
         args.backend.clone(),
         args.selector.clone(),
@@ -10259,19 +10787,105 @@ where
     ))
 }
 
+fn explicit_local_retry_admission_refusal(
+    preflight: Option<&homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult>,
+) -> Option<Error> {
+    let result = preflight?;
+    if result.placement.requested != homeboy_lab_runner_contract::Placement::Local {
+        return None;
+    }
+    let homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+        label, ..
+    } = &result.resource_admission
+    else {
+        return None;
+    };
+    Some(Error::validation_invalid_argument(
+        "placement",
+        format!("explicit local retry refused: controller resource admission rejected {label}; wait for controller capacity or retry without --placement local"),
+        None,
+        None,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_cook_title, cook_continuation_status, cook_provider_timeout_disclosure,
+        cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
         cook_report_with_continuation, cook_resolved_policy_disclosure,
-        cook_review_form_timeout_disclosure, default_loop_title, detached_cook_route_less_warning,
-        durable_cook_identity_lines, existing_candidate_title, preflight_continue_cook,
-        project_preview_dirty_admission,
+        cook_review_form_timeout_disclosure, detached_cook_route_less_warning,
+        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
+        project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
+
+    #[test]
+    fn preview_result_render_discloses_public_exact_filter_and_withholds_private_gate() {
+        let validation = crate::commands::agent_task::gate_contract::GateContractValidation {
+            schema: "homeboy/gate-contract-validation/v1",
+            status: "valid",
+            gates: vec![
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test public::test_id -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("public::test_id".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test private-command-secret -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("private-command-secret".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+            ],
+        };
+        let mut resolved = serde_json::json!({
+            "placement": { "requested": "local" },
+            "provider": { "backend": "fixture", "model": "test-model" },
+            "workspace": { "path": "/tmp/worktree" },
+            "gates": { "public": 1, "private": 1 },
+        });
+        resolved["gate_contract_validation"] = preview_gate_contract_disclosure(
+            &validation,
+            &["cargo test public::test_id -- --exact".to_string()],
+        );
+        let preview = cook_preview_result(
+            resolved,
+            Vec::new(),
+            PreviewReplayArgv {
+                argv: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                requires: Vec::new(),
+            },
+            None,
+            None,
+        );
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+            &preview,
+        )
+        .expect("rendered preview summary");
+        assert!(summary.contains("filter `public::test_id` (exact)"));
+        assert!(summary.contains("test inventory unavailable without building test binaries"));
+        assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
+        assert!(!summary.contains("private-command-secret"));
+    }
 
     fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
         let mut argv = vec![
@@ -10295,64 +10909,88 @@ mod tests {
     }
 
     #[test]
-    fn cook_title_precedence_keeps_explicit_goal_candidate_and_fallback_semantics() {
-        let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
-        assert_eq!(default_loop_title(&explicit, None), "Explicit title");
-
-        let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
+    fn explicit_local_retry_selects_controller_owned_dispatch_for_lab_recipe() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "retry",
+            "cook-previously-lab",
+            "--placement",
+            "local",
+            "--run",
+        ])
+        .expect("the exact operator retry form parses");
         assert_eq!(
-            default_loop_title(&goal, None),
-            "Restore cold reconstruction"
+            cli.placement,
+            crate::cli_surface::Placement::Local,
+            "a post-subcommand --placement maps to the same global CLI field",
         );
 
-        let fallback = title_cook_args(&["--repo", "fixture-repository"]);
+        let normalized = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "retry".to_string(),
+            "cook-previously-lab".to_string(),
+            "--placement".to_string(),
+            "local".to_string(),
+            "--run".to_string(),
+        ];
+        let mut preflight =
+            homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                normalized.clone(),
+                crate::commands::utils::resource_policy::parsed_command_preflight_input(
+                    &cli,
+                    &normalized,
+                ),
+                None,
+                None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, None, false),
+                None,
+            );
+        preflight.resource_admission =
+            homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected {
+                label: "agent-task retry".to_string(),
+                engages_at: homeboy::core::parsed_command_preflight::ResourceHeat::Hot,
+                evidence:
+                    homeboy::core::parsed_command_preflight::ResourceAdmissionEvidence::Observed {
+                        pressure: homeboy::core::parsed_command_preflight::ResourceHeat::Hot,
+                    },
+            };
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+        homeboy::core::parsed_command_preflight::capture_result(preflight);
+        let captured = homeboy::core::parsed_command_preflight::captured_result()
+            .expect("completed CLI preflight captured");
+        assert_eq!(captured.placement.requested, cli.placement);
+        let refusal = super::explicit_local_retry_admission_refusal(Some(&captured))
+            .expect("hot local admission must refuse before reservation");
         assert_eq!(
-            default_loop_title(&fallback, None),
-            "Cook fixture-repository"
+            refusal.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(refusal
+            .message
+            .contains("resource admission rejected agent-task retry"));
+        homeboy::core::parsed_command_preflight::reset_captured_result_for_test();
+
+        let recipe = serde_json::json!({ "kind": "lab", "runner_id": "lab-1" });
+        let dispatcher = super::reconstruct_local_cook_attempt_dispatcher(&recipe)
+            .expect("explicit local placement should reconstruct locally");
+        assert!(
+            dispatcher.is_none(),
+            "the retry successor must be controller-owned rather than sent to the prior Lab runner",
         );
     }
 
     #[test]
-    fn cook_title_semantics_are_bounded_and_candidate_aware() {
-        assert_eq!(
-            bounded_cook_title("  Restore\n cold\t reconstruction  ").as_deref(),
-            Some("Restore cold reconstruction")
-        );
-        assert_eq!(
-            bounded_cook_title(&"x".repeat(300))
-                .expect("bounded title")
-                .chars()
-                .count(),
-            256
-        );
-
-        let workspace = tempfile::tempdir().expect("workspace");
-        let git = |args: &[&str]| {
-            assert!(std::process::Command::new("git")
-                .args(args)
-                .current_dir(workspace.path())
-                .status()
-                .expect("run git")
-                .success());
-        };
-        git(&["init", "--initial-branch=main"]);
-        git(&["config", "user.email", "agent@example.test"]);
-        git(&["config", "user.name", "Agent"]);
-        std::fs::write(workspace.path().join("candidate.txt"), "base\n").expect("write base");
-        git(&["add", "candidate.txt"]);
-        git(&["commit", "-m", "base"]);
-        let base = super::git_head_sha(workspace.path()).expect("base sha");
-        assert_eq!(existing_candidate_title(workspace.path(), &base), None);
-
-        std::fs::write(workspace.path().join("candidate.txt"), "candidate\n")
-            .expect("write candidate");
-        git(&["commit", "-am", "fix: restore schema\n\nuntrusted body"]);
-        let mut candidate = title_cook_args(&["--repo", "fixture-repository"]);
-        candidate.base_resolution = Some(serde_json::json!({ "sha": base }));
-        assert_eq!(
-            default_loop_title(&candidate, Some(workspace.path())),
-            "fix: restore schema"
-        );
+    fn only_explicit_cook_title_is_immutable_recipe_title() {
+        let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
+        assert_eq!(explicit.title.as_deref(), Some("Explicit title"));
+        let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
+        assert!(goal.title.is_none());
+        let fallback = title_cook_args(&["--repo", "fixture-repository"]);
+        assert!(fallback.title.is_none());
     }
 
     #[test]
@@ -10475,10 +11113,22 @@ mod tests {
         let warning = detached_cook_route_less_warning(&resolution).expect("warning");
         assert!(warning.contains("generic.completed"));
         assert!(warning.contains("CALLER_THREAD_ID"));
+        assert!(warning.contains("active Discord thread is not inferred"));
+        assert!(
+            warning.contains("--notification-transport <transport> --notification-route <route>")
+        );
+        assert!(warning.contains("HOMEBOY_NOTIFICATION_TRANSPORT"));
         assert!(!warning.contains("opaque-destination"));
 
         resolution.classification = "resolver".to_string();
         assert!(detached_cook_route_less_warning(&resolution).is_none());
+
+        resolution.classification = "route_less".to_string();
+        resolution.resolver_transport = None;
+        resolution.missing_context.clear();
+        let warning = detached_cook_route_less_warning(&resolution).expect("warning");
+        assert!(warning.contains("no resolver supplied a route"));
+        assert!(!warning.contains("no installed resolver transport matched"));
     }
 
     #[test]

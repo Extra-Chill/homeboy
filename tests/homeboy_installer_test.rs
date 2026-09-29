@@ -90,6 +90,7 @@ fn run_installer(
     candidate_exit: i32,
     legacy_installed: bool,
     force_sudo: bool,
+    non_writable_parent: bool,
 ) -> (std::process::Output, String, String, String) {
     let temp = tempfile::tempdir().expect("tempdir");
     let tools = temp.path().join("tools");
@@ -107,6 +108,13 @@ fn run_installer(
             &installed,
             "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then printf 'legacy-controller-identity'; exit 0; fi\nexit 64\n",
         );
+    }
+    if non_writable_parent {
+        let mut permissions = fs::metadata(&install_dir)
+            .expect("install directory")
+            .permissions();
+        permissions.set_mode(0o555);
+        fs::set_permissions(&install_dir, permissions).expect("make parent non-writable");
     }
     write_executable(
         &tools.join("curl"),
@@ -153,7 +161,8 @@ fn run_installer(
 
 #[test]
 fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure() {
-    let (allowed, installed, evidence, _) = run_installer(ArchiveFixture::Valid, 0, true, false);
+    let (allowed, installed, evidence, _) =
+        run_installer(ArchiveFixture::Valid, 0, true, false, false);
     assert!(allowed.status.success(), "{allowed:?}");
     assert!(installed.contains("upgrade-admission"));
     assert!(evidence.contains("legacy-controller-identity"));
@@ -166,7 +175,7 @@ fn installer_admits_a_staged_candidate_and_preserves_bytes_on_admission_failure(
 
     for exit_code in [1, 70] {
         let (blocked, installed, evidence, _) =
-            run_installer(ArchiveFixture::Valid, exit_code, true, false);
+            run_installer(ArchiveFixture::Valid, exit_code, true, false, false);
         assert!(!blocked.status.success());
         assert!(installed.contains("legacy-controller-identity"));
         assert!(evidence.contains("legacy-controller-identity"));
@@ -216,7 +225,8 @@ fn installer_rejects_a_digest_verified_candidate_with_the_wrong_target_version()
 
 #[test]
 fn installer_creates_a_first_install_parent_before_staging_the_replacement() {
-    let (output, installed, evidence, _) = run_installer(ArchiveFixture::Valid, 0, false, false);
+    let (output, installed, evidence, _) =
+        run_installer(ArchiveFixture::Valid, 0, false, false, false);
 
     assert!(output.status.success(), "{output:?}");
     assert!(installed.contains("upgrade-admission"));
@@ -225,11 +235,24 @@ fn installer_creates_a_first_install_parent_before_staging_the_replacement() {
 
 #[test]
 fn installer_uses_privileged_atomic_replacement_after_staged_admission() {
-    let (output, installed, evidence, events) = run_installer(ArchiveFixture::Valid, 0, true, true);
+    let (output, installed, evidence, events) =
+        run_installer(ArchiveFixture::Valid, 0, true, true, false);
 
     assert!(output.status.success(), "{output:?}");
     assert!(installed.contains("upgrade-admission"));
     assert!(evidence.contains("legacy-controller-identity"));
+    assert_eq!(
+        events.lines().collect::<Vec<_>>(),
+        ["admission", "sudo:install", "sudo:mv"]
+    );
+}
+
+#[test]
+fn installer_uses_privilege_when_binary_is_writable_but_parent_is_not_replaceable() {
+    let (output, installed, _, events) = run_installer(ArchiveFixture::Valid, 0, true, false, true);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(installed.contains("upgrade-admission"));
     assert_eq!(
         events.lines().collect::<Vec<_>>(),
         ["admission", "sudo:install", "sudo:mv"]
@@ -246,7 +269,7 @@ fn installer_rejects_unsafe_or_ambiguous_archive_members_before_admission() {
         ArchiveFixture::SymlinkCandidate,
         ArchiveFixture::HardlinkCandidate,
     ] {
-        let (output, installed, evidence, events) = run_installer(fixture, 0, true, false);
+        let (output, installed, evidence, events) = run_installer(fixture, 0, true, false, false);
         assert!(!output.status.success(), "{output:?}");
         assert!(installed.contains("legacy-controller-identity"));
         assert!(evidence.is_empty());

@@ -344,6 +344,14 @@ fn effective_provider_default<'a>(
 ) -> Option<&'a Value> {
     if let Some(name) = request
         .executor
+        .runtime_selection
+        .as_ref()
+        .and_then(|selection| selection.ai_provider_id.as_deref())
+    {
+        return provider.provider_defaults.get(name);
+    }
+    if let Some(name) = request
+        .executor
         .config
         .get("provider")
         .and_then(Value::as_str)
@@ -354,13 +362,56 @@ fn effective_provider_default<'a>(
     // via executor.config.provider or a provider/model route may inherit that
     // default's credentials. An unused alternative must not become mandatory
     // merely because the executor declares exactly one account.
-    request
+    let requested = request
         .executor
         .model
         .as_deref()
         .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
         .filter(|provider| !provider.trim().is_empty())
-        .and_then(|model_provider| provider.provider_defaults.get(model_provider))
+        .and_then(|model_provider| provider.provider_defaults.get(model_provider));
+
+    // A model prefix may use an alternate default only when that default
+    // explicitly declares compatibility with the requested model provider.
+    if requested.is_some_and(provider_default_credentials_available) {
+        return requested;
+    }
+    provider
+        .provider_defaults
+        .values()
+        .filter(|config| Some(*config) != requested)
+        .find(|config| {
+            provider_default_supports_model_provider(config, request)
+                && provider_default_credentials_available(config)
+        })
+        .or(requested)
+}
+
+fn provider_default_supports_model_provider(config: &Value, request: &AgentTaskRequest) -> bool {
+    let Some(model_provider) = request
+        .executor
+        .model
+        .as_deref()
+        .and_then(|model| model.split_once('/').map(|(provider, _)| provider))
+    else {
+        return false;
+    };
+    config
+        .get("model_providers")
+        .or_else(|| config.get("modelProviders"))
+        .and_then(Value::as_array)
+        .is_some_and(|providers| {
+            providers
+                .iter()
+                .any(|item| item.as_str() == Some(model_provider))
+        })
+}
+
+fn provider_default_credentials_available(config: &Value) -> bool {
+    let names = provider_config_secret_env(config);
+    !names.is_empty()
+        && secret_env_status_with_fallbacks(&names, &provider_config_secret_sources(config))
+            .iter()
+            .all(|status| status.configured)
 }
 
 fn requirement_matches_request(when: Option<&Value>, request: Option<&AgentTaskRequest>) -> bool {
@@ -497,6 +548,122 @@ mod tests {
 
         assert!(provider_secret_env(&provider, Some(&request(Value::Null))).is_empty());
         assert!(provider_secret_sources(&provider, Some(&request(Value::Null))).is_empty());
+    }
+
+    #[test]
+    fn model_default_uses_alias_only_when_compatible_and_available() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "openai": {
+                    "secret_env": ["MISSING_API_KEY"],
+                    "secret_env_sources": {
+                        "MISSING_API_KEY": {"source": "env", "env": "HOMEBOY_TEST_MISSING_API_KEY"}
+                    }
+                },
+                "openai-oauth": {
+                    "model_providers": ["openai"],
+                    "secret_env": ["AVAILABLE_OAUTH_TOKEN"],
+                    "secret_env_sources": {
+                        "AVAILABLE_OAUTH_TOKEN": {"source": "env", "env_var": "PATH"}
+                    }
+                }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.model = Some("openai/gpt-5".to_string());
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&task)),
+            vec!["AVAILABLE_OAUTH_TOKEN"]
+        );
+        assert_eq!(
+            provider_secret_sources(&provider, Some(&task))["AVAILABLE_OAUTH_TOKEN"]
+                .env_var
+                .as_deref(),
+            Some("PATH")
+        );
+    }
+
+    #[test]
+    fn model_default_does_not_fall_back_to_unrelated_provider() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "openai": { "required_secret_env": ["MISSING_API_KEY"] },
+                "xai": {
+                    "model_providers": ["xai"],
+                    "secret_env": ["AVAILABLE_XAI_TOKEN"],
+                    "secret_env_sources": {
+                        "AVAILABLE_XAI_TOKEN": {"source": "env", "env_var": "PATH"}
+                    }
+                }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.model = Some("openai/gpt-5".to_string());
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&task)),
+            vec!["MISSING_API_KEY"]
+        );
+    }
+
+    #[test]
+    fn unavailable_oauth_compatible_default_does_not_fall_back() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "openai": { "required_secret_env": ["MISSING_API_KEY"] },
+                "openai-oauth": {
+                    "model_providers": ["openai"],
+                    "required_secret_env": ["MISSING_OAUTH_TOKEN"]
+                }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.model = Some("openai/gpt-5".to_string());
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&task)),
+            vec!["MISSING_API_KEY"]
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_provider_selection_does_not_fall_back() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "test.provider",
+            "backend": "test",
+            "provider_defaults": {
+                "openai": { "required_secret_env": ["MISSING_API_KEY"] },
+                "openai-oauth": {
+                    "model_providers": ["openai"],
+                    "secret_env": ["AVAILABLE_OAUTH_TOKEN"],
+                    "secret_env_sources": {
+                        "AVAILABLE_OAUTH_TOKEN": {"source": "env", "env_var": "PATH"}
+                    }
+                }
+            }
+        }))
+        .expect("provider");
+        let mut task = request(Value::Null);
+        task.executor.model = Some("openai/gpt-5".to_string());
+        task.executor.runtime_selection = Some(crate::agent_task::AgentTaskRuntimeSelection {
+            ai_provider_id: Some("openai".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            provider_secret_env(&provider, Some(&task)),
+            vec!["MISSING_API_KEY"]
+        );
     }
 
     #[test]

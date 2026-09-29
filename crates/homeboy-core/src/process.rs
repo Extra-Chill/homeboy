@@ -992,6 +992,23 @@ pub fn wait_for_isolated_process_group_exit(
     }
 }
 
+/// Signal an isolated process group. A group that is already gone is not an
+/// error: `ESRCH` means no members remain, and macOS reports `EPERM` for a
+/// group whose members have all exited but are not yet reaped, which the
+/// liveness probe confirms by finding no running member.
+#[cfg(unix)]
+fn signal_isolated_process_group(owner_pid: u32, signal: libc::c_int) -> std::io::Result<()> {
+    if unsafe { libc::kill(-(owner_pid as libc::pid_t), signal) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) if !process_group_is_running(owner_pid as i32) => Ok(()),
+        _ => Err(error),
+    }
+}
+
 /// Terminate the dedicated process group created for a managed child command.
 /// Callers must only pass a PID they just spawned with process-group isolation.
 pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
@@ -1005,16 +1022,11 @@ pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
                 None,
             ));
         }
-        unsafe {
-            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGTERM) != 0
-                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "terminate isolated process group {owner_pid}: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
+        signal_isolated_process_group(owner_pid, libc::SIGTERM).map_err(|error| {
+            Error::internal_unexpected(format!(
+                "terminate isolated process group {owner_pid}: {error}"
+            ))
+        })?;
         std::thread::sleep(std::time::Duration::from_millis(100));
         if process_group_is_running(owner_pid as i32) {
             unsafe {
@@ -1052,31 +1064,21 @@ pub fn terminate_isolated_process_group_with_grace(
     }
     #[cfg(unix)]
     {
-        unsafe {
-            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGTERM) != 0
-                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "terminate isolated process group {owner_pid}: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
+        signal_isolated_process_group(owner_pid, libc::SIGTERM).map_err(|error| {
+            Error::internal_unexpected(format!(
+                "terminate isolated process group {owner_pid}: {error}"
+            ))
+        })?;
         if wait_for_isolated_process_group_exit(owner_pid, grace)
             .map_err(Error::internal_unexpected)?
         {
             return Ok(false);
         }
-        unsafe {
-            if libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL) != 0
-                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "force-terminate isolated process group {owner_pid}: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
+        signal_isolated_process_group(owner_pid, libc::SIGKILL).map_err(|error| {
+            Error::internal_unexpected(format!(
+                "force-terminate isolated process group {owner_pid}: {error}"
+            ))
+        })?;
         if !wait_for_isolated_process_group_exit(owner_pid, SIGKILL_REAP_GRACE)
             .map_err(Error::internal_unexpected)?
         {
@@ -2412,5 +2414,30 @@ mod process_tree_tests {
 
         let _ = reaper.join();
         assert!(!pid_is_running(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminating_an_exited_unreaped_process_group_succeeds() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn isolated group leader");
+        let pid = child.id();
+        // Leave the leader exited but unreaped: a zombie is still a group
+        // member, and macOS answers a group signal to it with EPERM.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while process_group_is_running(pid as i32) {
+            assert!(std::time::Instant::now() < deadline, "leader never exited");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        terminate_isolated_process_group(pid).expect("SIGTERM path tolerates a gone group");
+        terminate_isolated_process_group_with_grace(pid, std::time::Duration::from_millis(50))
+            .expect("graceful path tolerates a gone group");
+        child.wait().expect("reap leader");
     }
 }

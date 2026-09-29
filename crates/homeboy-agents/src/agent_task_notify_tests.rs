@@ -279,7 +279,9 @@ fn cook_lifecycle_emission_is_inert_without_a_configured_transport() {
     // End-to-end guard that emission never panics or fails a cook when no
     // transport is installed at all.
     homeboy_core::test_support::with_isolated_home(|_| {
-        cook_started("cook-abc", "run-1", "task", None, "main", 3, "claude");
+        cook_started(
+            "cook-abc", "run-1", "task", None, "main", 3, "claude", false,
+        );
         cook_retrying("cook-abc", "run-1", None, 2, 3);
         cook_terminal(&report("succeeded", None), None, 0);
         // A distinct cook: the terminal event is now claimed once per cook,
@@ -300,6 +302,123 @@ fn seed_run_with_route(run_id: &str, destination: &str) {
     crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
     crate::agent_task_lifecycle::persist_notification_route(run_id, &route(destination))
         .expect("persist route");
+}
+
+#[test]
+fn started_announcement_is_durable_once_per_cook_across_recipe_reentry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("extension", vec!["false"]);
+        seed_run_with_route("cook-once-attempt-1-aaaa", "original-thread");
+        seed_run_with_route("cook-once-attempt-2-bbbb", "later-thread");
+        assert!(notification_route::current().is_none());
+
+        let start = |run_id| {
+            cook_started(
+                "cook-once",
+                run_id,
+                "task",
+                None,
+                "main",
+                3,
+                "claude",
+                false,
+            );
+        };
+        start("cook-once-attempt-1-aaaa");
+        let pending = homeboy_core::notify_outbox::pending_entries();
+        assert_eq!(pending.len(), 1, "first admission must announce");
+        assert_eq!(pending[0].event.kind, NotifyEventKind::Started);
+        assert_eq!(pending[0].event.route.as_deref(), Some("original-thread"));
+        assert_eq!(pending[0].event.transport.as_deref(), Some("extension"));
+        assert_eq!(pending[0].event.run_id, "cook-once");
+        assert_eq!(
+            pending[0].once_marker.as_ref().unwrap().subject_id,
+            "cook-once"
+        );
+
+        // Re-entering the existing recipe, even with a different attempt and
+        // route, cannot enqueue another start. The original route survives in
+        // the pending event for the eventual drain.
+        start("cook-once-attempt-1-aaaa");
+        start("cook-once-attempt-2-bbbb");
+        let pending = homeboy_core::notify_outbox::pending_entries();
+        assert_eq!(pending.len(), 1, "a queued start consumes the claim");
+        assert_eq!(pending[0].event.route.as_deref(), Some("original-thread"));
+
+        // Started and terminal have independent Cook-scoped eligibility.
+        assert!(
+            crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &test_lifecycle_store(),
+                "cook-once",
+                "test"
+            )
+            .unwrap()
+        );
+    });
+}
+
+#[test]
+fn unrouted_admission_does_not_consume_the_started_announcement() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("extension", vec!["false"]);
+        set_default_transport("extension");
+        cook_started(
+            "cook-late-route",
+            "missing",
+            "task",
+            None,
+            "main",
+            3,
+            "claude",
+            false,
+        );
+        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
+
+        seed_run_with_route("cook-late-route-attempt-1-aaaa", "thread-42");
+        cook_started(
+            "cook-late-route",
+            "cook-late-route-attempt-1-aaaa",
+            "task",
+            None,
+            "main",
+            3,
+            "claude",
+            false,
+        );
+        assert_eq!(homeboy_core::notify_outbox::pending_entries().len(), 1);
+    });
+}
+
+#[test]
+fn historical_cook_progress_seeds_start_marker_without_reannouncing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("extension", vec!["false"]);
+        seed_run_with_route("historical-attempt", "old-thread");
+        cook_started(
+            "historical-cook",
+            "historical-attempt",
+            "old task",
+            None,
+            "main",
+            3,
+            "claude",
+            true,
+        );
+        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
+        // A second process sees the confirmed marker even if progress was
+        // rewritten to durable_identity by the first continuation.
+        cook_started(
+            "historical-cook",
+            "historical-attempt",
+            "old task",
+            None,
+            "main",
+            3,
+            "claude",
+            false,
+        );
+        assert!(homeboy_core::notify_outbox::pending_entries().is_empty());
+    });
 }
 
 fn install_transport(id: &str, command: Vec<&str>) {

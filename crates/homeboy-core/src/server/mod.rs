@@ -16,8 +16,9 @@ pub use client::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_passthrough, is_transient_ssh_error,
     server_host_resolves_only_to_loopback, server_uses_loopback_transport, ssh_auth_failure,
-    CommandObservation, CommandOutput, SshAuthFailure, SshClient, CHILD_PROGRESS_LABEL_ENV,
-    CHILD_SECRET_ENV_NAMES_ENV, TRANSIENT_SSH_STDERR_PATTERNS,
+    ssh_host_key_rejected, ssh_transport_unreachable, CommandObservation, CommandOutput,
+    SshAuthFailure, SshClient, CHILD_PROGRESS_LABEL_ENV, CHILD_SECRET_ENV_NAMES_ENV,
+    TRANSIENT_SSH_STDERR_PATTERNS,
 };
 pub use client::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,
@@ -71,6 +72,11 @@ pub struct RunnerSettings {
     pub homeboy_path: Option<String>,
     #[serde(default)]
     pub daemon: bool,
+    /// The runner daemon runs as a host service (a systemd user unit) that the
+    /// runner owns. The controller attaches to it and never starts, replaces,
+    /// or rotates it (#13881 step 3). Set by `homeboy runner service install`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub service_managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
     /// Maximum seconds the controller waits for an accepted runner job. Unset

@@ -670,6 +670,26 @@ pub(super) enum RunnerCommand {
         #[command(subcommand)]
         command: RunnerBrokerCommand,
     },
+    /// Manage the runner-owned daemon service (a systemd user unit)
+    Service {
+        #[command(subcommand)]
+        command: RunnerServiceCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(super) enum RunnerServiceCommand {
+    /// Install the runner daemon as a systemd user unit and hand the daemon to it.
+    /// The runner must be idle. Afterwards `runner connect` only attaches.
+    Install {
+        /// Runner ID
+        runner_id: String,
+    },
+    /// Show the runner service and the daemon lease it holds
+    Status {
+        /// Runner ID
+        runner_id: String,
+    },
 }
 
 #[derive(Subcommand)]

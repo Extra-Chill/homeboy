@@ -3,6 +3,55 @@
 use super::*;
 
 #[test]
+fn runner_provider_query_refuses_durable_staging_with_runner_exec_replay() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--model".to_string(),
+            "xai/grok-4.7".to_string(),
+            "--validate-readiness".to_string(),
+        ],
+    );
+
+    assert!(error.message.contains("no offload was created"));
+    assert!(error.message.contains("runner exec"));
+    assert_eq!(
+        error.details["tried"][0],
+        "Run `homeboy runner exec homeboy-lab -- homeboy agent-task providers --backend opencode --model xai/grok-4.7 --validate-readiness` to query the selected runner directly."
+    );
+}
+
+#[test]
+fn runner_provider_query_replay_does_not_forward_controller_runner_environment() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--runner-env".to_string(),
+            "TOKEN=secret-value".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+        ],
+    );
+
+    let replay = error.details["id"].as_str().expect("replay command");
+    assert!(replay.contains("homeboy agent-task providers --backend opencode"));
+    assert!(!replay.contains("TOKEN"));
+    assert!(!replay.contains("secret-value"));
+}
+
+#[test]
 fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
     assert!(placement_outcome_target(None, None).is_none());
 }
@@ -3881,15 +3930,178 @@ fn replay_worker_supervisor_reaps_and_releases_an_unpublished_claim() {
             .args(["-c", "exit 17"])
             .spawn()
             .expect("spawn deterministic replay worker");
+        let worker_log = tempfile::tempdir()
+            .expect("worker log directory")
+            .keep()
+            .join("no-diagnostic.log");
         supervise_replay_worker(
             cook_id.to_string(),
             1,
             "supervised-token".to_string(),
+            worker_log,
             child,
         )
         .join()
         .expect("supervisor joins");
         let record = agent_task_lifecycle::exact_record(cook_id).expect("released claim");
+        // No worker log means no typed diagnostic to classify (#15009): this
+        // must fall through to the existing release-and-requeue path, not the
+        // new deterministic-failure path, since a crash with no captured
+        // reason is not known to be deterministic.
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
+            "released"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
+        assert!(!record.state.is_terminal());
+    });
+}
+
+#[test]
+fn replay_worker_supervisor_terminalizes_a_deterministic_validation_failure() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "supervised-replay-worker-deterministic";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            cook_id,
+            serde_json::json!({ "request_ref": "sha256:request" }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = serde_json::json!(1);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = serde_json::json!({
+                "state": "claimed",
+                "fence": 1,
+                "token": "deterministic-token",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("claimed");
+        let worker_log = tempfile::tempdir()
+            .expect("worker log directory")
+            .keep()
+            .join("deterministic-failure.log");
+        let real_message =
+            "explicit model `operator-model` differs from configured model route(s); explicit acknowledgement is required before dispatch";
+        std::fs::write(
+            &worker_log,
+            format!(
+                "progress: starting Cook\n{}\n",
+                serde_json::json!({
+                    "schema": "homeboy/command-result/v3",
+                    "success": false,
+                    "diagnostics": {
+                        "code": "validation.invalid_argument",
+                        "message": real_message,
+                    },
+                })
+            ),
+        )
+        .expect("write worker log");
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 2"])
+            .spawn()
+            .expect("spawn deterministic replay worker");
+        supervise_replay_worker(
+            cook_id.to_string(),
+            1,
+            "deterministic-token".to_string(),
+            worker_log,
+            child,
+        )
+        .join()
+        .expect("supervisor joins");
+        let record = agent_task_lifecycle::exact_record(cook_id).expect("terminalized run");
+        // A deterministic validation failure must end the admission
+        // immediately with its real message, not the generic
+        // "replay worker exited before attempt publication" reason and not
+        // another bounded retry (#15009).
+        assert!(record.state.is_terminal());
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "failed"
+        );
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["reason"],
+            real_message
+        );
+        assert_eq!(
+            record.metadata["detached_cook_handoff"]["reason"],
+            real_message
+        );
+    });
+}
+
+#[test]
+fn replay_worker_supervisor_still_requeues_a_retryable_diagnostic() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let cook_id = "supervised-replay-worker-retryable";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                .expect("lifecycle store"),
+            cook_id,
+            serde_json::json!({ "request_ref": "sha256:request" }),
+            "queued",
+            "eligible",
+        )
+        .expect("admitted");
+        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+            record.metadata["unmaterialized_cook_admission"]["fence"] = serde_json::json!(1);
+            record.metadata["unmaterialized_cook_admission"]["lease"] = serde_json::json!({
+                "state": "claimed",
+                "fence": 1,
+                "token": "retryable-token",
+                "expires_at": "2999-01-01T00:00:00+00:00",
+            });
+        })
+        .expect("claimed");
+        let worker_log = tempfile::tempdir()
+            .expect("worker log directory")
+            .keep()
+            .join("retryable-failure.log");
+        std::fs::write(
+            &worker_log,
+            serde_json::json!({
+                "schema": "homeboy/command-result/v3",
+                "success": false,
+                "diagnostics": {
+                    "code": "runner.lab_transport_failure",
+                    "message": "the Lab runner dropped mid-dispatch",
+                    "retryable": true,
+                },
+            })
+            .to_string(),
+        )
+        .expect("write worker log");
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 20"])
+            .spawn()
+            .expect("spawn transient replay worker");
+        supervise_replay_worker(
+            cook_id.to_string(),
+            1,
+            "retryable-token".to_string(),
+            worker_log,
+            child,
+        )
+        .join()
+        .expect("supervisor joins");
+        let record = agent_task_lifecycle::exact_record(cook_id).expect("requeued claim");
+        // A diagnostic explicitly marked `retryable: true` is a genuinely
+        // transient condition (#15009's "keep bounded retries only for
+        // genuinely transient conditions"): it must still take the ordinary
+        // release-and-requeue path, not be terminalized.
+        assert!(!record.state.is_terminal());
+        assert_eq!(
+            record.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
         assert_eq!(
             record.metadata["unmaterialized_cook_admission"]["lease"]["state"],
             "released"

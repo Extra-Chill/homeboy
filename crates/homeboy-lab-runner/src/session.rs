@@ -400,6 +400,7 @@ pub struct LabRunnerHandoff {
 pub enum RunnerFailureKind {
     SshFailure,
     MissingRemoteHomeboy,
+    TransportUnreachable,
     RunnerCapabilityMissing,
     DaemonStartupFailure,
     TunnelFailure,
@@ -903,6 +904,16 @@ impl RunnerStatusReport {
                 generation.admission_owner
                     && generation.active_job_count_authoritative
                     && generation.live_job_count() != self.active_job_count
+                    // The daemon's positive live observation can precede the
+                    // controller's persisted generation projection. A durable
+                    // owner identity confirms this is delayed projection, not
+                    // an unexplained retained counter; the daemon remains the
+                    // authority for capacity in this case.
+                    && !(self.active_job_count > 0
+                        && generation.live_job_count() == 0
+                        && owners.iter().any(|owner| {
+                            owner.generation == generation.generation && !owner.job_ids.is_empty()
+                        }))
             })
         })
         .flatten()
@@ -1862,6 +1873,51 @@ mod status_serialization_tests {
                 job_ids: vec!["job-live".to_string()],
             })
         );
+    }
+
+    #[test]
+    fn delayed_zero_projection_does_not_override_live_daemon_count_with_owner() {
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
+        report.daemon_freshness = Some(fresh_daemon_freshness());
+        report.active_job_count = 1;
+        let generations = vec![RunnerDaemonGenerationStatus {
+            generation: "lease-current".to_string(),
+            admission_owner: true,
+            drain_state: crate::RollingDrainState::Admitting,
+            active_job_count: 1,
+            observed_active_job_count: Some(0),
+            active_job_count_authoritative: true,
+            job_owner_count: 1,
+            run_owner_count: 0,
+            artifact_owner_count: 0,
+            homeboy_build_identity: None,
+            remote_daemon_lease_id: Some("lease-current".to_string()),
+            remote_daemon_address: None,
+            local_url: None,
+        }];
+        let owners = vec![RunnerGenerationJobOwners {
+            generation: "lease-current".to_string(),
+            job_ids: vec!["job-live".to_string()],
+        }];
+
+        let summary = report.admission_summary_with_generations(&generations, &owners, 0);
+
+        assert_eq!(summary.active_job_count, 1);
+        assert_eq!(summary.live_daemon_job_count, 1);
+        assert!(summary.accepting_jobs);
+        assert!(summary.retained_job_inconsistency.is_none());
+        assert!(report.admission_availability(Some(32)).accepts_jobs);
+
+        let mut missing_observation = generations.clone();
+        missing_observation[0].observed_active_job_count = None;
+        missing_observation[0].active_job_count_authoritative = false;
+        let missing_summary =
+            report.admission_summary_with_generations(&missing_observation, &owners, 0);
+        assert_eq!(missing_summary.live_daemon_job_count, 1);
+        assert!(missing_summary.accepting_jobs);
+        assert!(missing_summary.retained_job_inconsistency.is_none());
     }
 
     #[test]

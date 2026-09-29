@@ -2236,17 +2236,17 @@ fn direct_daemon_fresh_live_job_suppresses_false_orphan_inference() {
 }
 
 #[test]
-fn daemon_count_divergence_reconciles_to_typed_owners_without_cancelling_them() {
+fn direct_daemon_count_remains_authoritative_when_typed_projection_lags() {
     let typed = vec![sample_active_job(Some("run-live"), "live runner job")];
 
-    assert_eq!(reconciled_active_job_count(typed.len(), Some(2)), 1);
+    assert_eq!(reconciled_active_job_count(typed.len(), Some(2)), 2);
     assert_eq!(typed.len(), 1);
     assert_eq!(typed[0].durable_run_id.as_deref(), Some("run-live"));
     assert_eq!(typed[0].status, JobStatus::Running);
 
-    // Once the known job exits, the stale freshness count cannot keep a
-    // synthetic owner around to block a safe daemon rotation.
-    assert_eq!(reconciled_active_job_count(0, Some(2)), 0);
+    // The direct daemon count is authoritative even when the ownership
+    // projection has not caught up; this conservatively retains capacity.
+    assert_eq!(reconciled_active_job_count(0, Some(2)), 2);
 }
 
 fn read_fixture_request_until(
@@ -2290,7 +2290,9 @@ fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
     let address = listener.local_addr().expect("listener address");
     let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + Duration::from_millis(100);
+        // Bounds only absorb scheduler load; the reader returns as soon as the
+        // full request arrives.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
@@ -2307,7 +2309,7 @@ fn fixture_request_reader_handles_delayed_partial_nonblocking_request() {
 
     let mut client = TcpStream::connect(address).expect("connect fixture client");
     accepted_rx
-        .recv_timeout(Duration::from_millis(50))
+        .recv_timeout(Duration::from_secs(30))
         .expect("server accepted client");
     std::thread::sleep(Duration::from_millis(10));
     client
@@ -2344,7 +2346,7 @@ fn fixture_request_reader_times_out_without_a_request() {
 }
 
 #[test]
-fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
+fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger() {
     test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener
@@ -2437,9 +2439,11 @@ fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
         .expect("status observation");
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
-        assert_eq!(report.active_job_count, 1);
-        assert!(report.active_job_error.is_none());
-        assert!(summary.retained_job_inconsistency.is_none());
+        assert_eq!(report.active_job_count, 2);
+        assert_eq!(report.active_jobs.len(), 1);
+        assert!(report.active_job_error.is_some());
+        assert!(summary.retained_job_inconsistency.is_some());
+        assert!(!summary.accepting_jobs);
 
         let mut mismatched = crate::generation_store::read("homeboy-lab", report.session.as_ref())
             .expect("read generation ledger")
@@ -2469,16 +2473,10 @@ fn status_admission_uses_typed_jobs_not_a_differing_direct_count() {
             &mismatched_owners,
             0,
         );
-        assert_eq!(mismatched_report.active_job_count, 1);
-        assert_eq!(
-            mismatched_report
-                .active_job_error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("retained_active_job_count_inconsistent")
-        );
-        assert!(!mismatch.accepting_jobs);
-        assert!(mismatch.retained_job_inconsistency.is_some());
+        assert_eq!(mismatched_report.active_job_count, 2);
+        assert_eq!(mismatched_report.active_jobs.len(), 1);
+        assert!(mismatched_report.active_job_error.is_none());
+        assert!(mismatch.retained_job_inconsistency.is_none());
 
         stop.store(true, std::sync::atomic::Ordering::Release);
         server.join().expect("daemon server");

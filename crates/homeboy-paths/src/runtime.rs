@@ -9,6 +9,18 @@ use super::{homeboy, homeboy_data, sanitize_path_segment};
 /// and normal config resolution intact for generation-scoped daemon processes.
 pub const DAEMON_STATE_DIR_ENV: &str = "HOMEBOY_DAEMON_STATE_DIR";
 
+/// The startup token a daemon persists into its own session lease
+/// (`DaemonState::startup_token`). Any launcher that wants its daemon to
+/// publish an attributable ownership token — proof a later `daemon status`,
+/// `daemon reconcile-unleased-candidates`, or `daemon ensure-running` call can
+/// use to tell "a process this launcher started" apart from an unrelated
+/// foreground `daemon serve` — must set this exact variable in the child's
+/// environment before it writes its lease. Shared here, rather than defined
+/// only inside the daemon crate, because non-daemon launchers (systemd unit
+/// rendering in particular) need the exact name without depending on the
+/// daemon module tree (#15087).
+pub const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
+
 /// The `DAEMON_STATE_DIR_ENV` override, if it names a non-blank directory.
 fn daemon_state_dir_override() -> Option<PathBuf> {
     std::env::var(DAEMON_STATE_DIR_ENV)

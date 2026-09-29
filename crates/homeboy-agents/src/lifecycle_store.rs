@@ -554,14 +554,39 @@ impl AgentTaskLifecycleStore {
             )
         })?;
         let path = self.aggregate_path(&record.run_id);
-        let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
-        serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        let raw = String::from_utf8(raw).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(path.display().to_string()))
-        })?;
-        Ok((raw, path))
+        // The canonical local aggregate.json is the controller-owned, exact-bytes
+        // source (c138e12162) and stays preferred whenever it exists. But a run's
+        // record can outlive that file — retention sweeps, or a controller crash
+        // between writing the record and materializing the file — leaving the
+        // durable record pointing at an aggregate that genuinely is not on this
+        // installation's disk. Falling back to the SQLite-backed observation
+        // mirror in that case only, rather than propagating a plain IO error,
+        // keeps this accessor resolving whatever local evidence still exists
+        // instead of spelunking `record.aggregate_path`'s stored string, which
+        // may itself name a foreign installation's path (#7505).
+        match fs::metadata(&path) {
+            Ok(_) => {
+                let raw = read_aggregate_bytes_bounded_in_store(self, &record.run_id)?;
+                serde_json::from_slice::<AgentTaskAggregate>(&raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                let raw = String::from_utf8(raw).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let aggregate = self.read_aggregate_readonly(&record.run_id)?;
+                let raw = serde_json::to_string(&aggregate).map_err(|error| {
+                    Error::internal_json(error.to_string(), Some(path.display().to_string()))
+                })?;
+                Ok((raw, path))
+            }
+            Err(error) => Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            )),
+        }
     }
 
     pub fn operation_claim(
@@ -855,6 +880,31 @@ impl AgentTaskLifecycleStore {
     /// ambient one.
     pub fn claim_cook_notification(&self, cook_id: &str, marker: &Value) -> Result<bool> {
         claim_cook_notification_in_store(self, cook_id, marker)
+    }
+
+    pub fn claim_cook_started_notification(&self, cook_id: &str) -> Result<bool> {
+        if cook_id.trim().is_empty() {
+            return Ok(false);
+        }
+        claim_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller"}),
+        )
+    }
+
+    pub fn confirm_cook_started_notification(&self, cook_id: &str) -> Result<()> {
+        confirm_cook_notification_event_in_store(
+            self,
+            cook_id,
+            "notification-started",
+            &serde_json::json!({"at": chrono::Utc::now().to_rfc3339(), "by": "cook-controller", "state": "delivered"}),
+        )
+    }
+
+    pub fn release_cook_started_notification_claim(&self, cook_id: &str) -> Result<()> {
+        release_cook_notification_event_claim_in_store(self, cook_id, "notification-started")
     }
 
     /// Commit a confirmed terminal delivery beside this store's own Cook index.
@@ -2270,13 +2320,22 @@ pub(super) fn claim_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<bool> {
+    claim_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn claim_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<bool> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     if delivered_path.exists() {
         return Ok(false);
     }
-    let path = delivered_path.with_file_name("notification-claim.json");
+    let path = delivered_path.with_file_name(format!("{event}-claim.json"));
     if path.exists() {
         let stale = fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
@@ -2332,9 +2391,18 @@ pub(super) fn confirm_cook_notification_in_store(
     cook_id: &str,
     marker: &Value,
 ) -> Result<()> {
+    confirm_cook_notification_event_in_store(store, cook_id, "notification", marker)
+}
+
+fn confirm_cook_notification_event_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+    marker: &Value,
+) -> Result<()> {
     let delivered_path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification.json");
+        .with_file_name(format!("{event}.json"));
     write_private_json(&delivered_path, marker)
 }
 
@@ -2350,9 +2418,17 @@ pub(super) fn release_cook_notification_claim_in_store(
     store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
+    release_cook_notification_event_claim_in_store(store, cook_id, "notification")
+}
+
+fn release_cook_notification_event_claim_in_store(
+    store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    event: &str,
+) -> Result<()> {
     let path = store
         .cook_index_path(&sanitize_run_id(cook_id))
-        .with_file_name("notification-claim.json");
+        .with_file_name(format!("{event}-claim.json"));
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

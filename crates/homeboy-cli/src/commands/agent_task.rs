@@ -23,6 +23,7 @@ pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod loop_definition;
 pub mod prompts;
+pub(crate) mod provider_evidence;
 pub mod retained_artifacts;
 pub mod review;
 pub mod run;
