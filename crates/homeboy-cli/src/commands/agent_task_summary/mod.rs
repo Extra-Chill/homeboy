@@ -673,6 +673,19 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     }
     if primary_failure.is_some() {
         // Its exact action already leads the report.
+    } else if let Some(command) = string_value(payload, &["promotion_replay", "command"]) {
+        lines.push(format!("Next: {command}"));
+    } else if payload
+        .pointer("/promotion_replay/available")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        let reason = string_value(payload, &["promotion_replay", "reason"])
+            .unwrap_or("promotion source is unavailable");
+        lines.push(format!("Promotion unavailable: {reason}"));
+        if let Some(remediation) = string_value(payload, &["promotion_replay", "remediation"]) {
+            lines.push(format!("Remediation: {remediation}"));
+        }
     } else if metrics.candidate_state.is_available() {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
@@ -1633,6 +1646,38 @@ mod tests {
         assert!(summary.contains("Patch candidates: 0 non-empty / 3 empty\n"));
         assert!(summary.contains("Next: homeboy agent-task logs agent-task-abe47e4d\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
+    }
+
+    #[test]
+    fn cook_summary_renders_replayable_promotion_and_unavailable_remediation() {
+        let replayable = json!({
+            "run_id": "cook-timeout-attempt-1",
+            "state": "partial_recoverable",
+            "promotion_replay": {
+                "available": true,
+                "command": "homeboy agent-task promote cook-timeout-attempt-1 --dry-run"
+            }
+        });
+        let replayable = render_agent_task_summary(AgentTaskSummaryKind::Cook, &replayable)
+            .expect("replayable Cook summary");
+        assert!(replayable
+            .contains("Next: homeboy agent-task promote cook-timeout-attempt-1 --dry-run\n"));
+
+        let unavailable = json!({
+            "run_id": "cook-timeout-attempt-1",
+            "state": "partial_recoverable",
+            "promotion_replay": {
+                "available": false,
+                "reason": "aggregate key agent_task_aggregate is missing",
+                "remediation": "restore aggregate.json or executor evidence"
+            }
+        });
+        let unavailable = render_agent_task_summary(AgentTaskSummaryKind::Cook, &unavailable)
+            .expect("unavailable Cook summary");
+        assert!(unavailable
+            .contains("Promotion unavailable: aggregate key agent_task_aggregate is missing\n"));
+        assert!(unavailable.contains("Remediation: restore aggregate.json or executor evidence\n"));
+        assert!(!unavailable.contains("Next: homeboy agent-task logs"));
     }
 
     #[test]
