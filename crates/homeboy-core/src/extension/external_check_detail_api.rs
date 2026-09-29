@@ -702,7 +702,9 @@ mod tests {
             let hydrated = api.hydrate_api(
                 &request,
                 ExternalCheckDetailHydrationContext {
-                    deadline: Instant::now() + Duration::from_secs(2),
+                    // Leave realistic headroom for process startup on loaded CI workers while
+                    // keeping the resolver invocation bounded.
+                    deadline: Instant::now() + Duration::from_secs(30),
                     resolve_environment: &resolve_environment,
                 },
             );

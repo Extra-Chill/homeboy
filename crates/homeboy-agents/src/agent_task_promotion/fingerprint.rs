@@ -1,8 +1,6 @@
+use homeboy_core::error::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::process::Command;
-
-use homeboy_core::error::{Error, Result};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AgentTaskCandidateFingerprint {
@@ -122,48 +120,27 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
 fn candidate_tree(path: &str) -> Result<String> {
     let temporary = tempfile::NamedTempFile::new()
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
-    let output = Command::new("git")
-        .args(["read-tree", "HEAD"])
-        .current_dir(path)
-        .env("GIT_INDEX_FILE", temporary.path())
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !output.status.success() {
-        return Err(Error::git_command_failed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-    let output = Command::new("git")
-        .args(["add", "-A"])
-        .current_dir(path)
-        .env("GIT_INDEX_FILE", temporary.path())
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !output.status.success() {
-        return Err(Error::git_command_failed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-    let output = Command::new("git")
-        .args(["write-tree"])
-        .current_dir(path)
-        .env("GIT_INDEX_FILE", temporary.path())
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !output.status.success() {
-        return Err(Error::git_command_failed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ));
-    }
-    Ok(text(output.stdout).trim().to_string())
+    let index = [(
+        "GIT_INDEX_FILE".to_string(),
+        temporary.path().display().to_string(),
+    )];
+    let git = |args: &[&str], context: &str| {
+        homeboy_core::git::run_git_bytes_with_env(Path::new(path), args, context, &index)
+    };
+    git(
+        &["read-tree", "HEAD"],
+        "seed candidate tree index from HEAD",
+    )?;
+    git(&["add", "-A"], "stage candidate tree")?;
+    Ok(text(git(&["write-tree"], "write candidate tree")?)
+        .trim()
+        .to_string())
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let args = ["rev-parse", "--is-inside-work-tree"];
+    let context = "check candidate is a Git worktree";
+    let output = homeboy_core::git::run_git_output(Path::new(path), &args, context)?;
     if output.status.success() {
         return Ok(text(output.stdout).trim() == "true");
     }
@@ -173,7 +150,8 @@ fn is_git_worktree(path: &str) -> Result<bool> {
     if stderr.contains("not a git repository") && !Path::new(path).join(".git").exists() {
         return Ok(false);
     }
-    Err(Error::git_command_failed(stderr.to_string()))
+    // Re-run through the checked path so the failure carries its full evidence.
+    homeboy_core::git::run_git_bytes_with_env(Path::new(path), &args, context, &[]).map(|_| false)
 }
 
 fn reject_gitlinks(git: &impl Fn(&[&str]) -> Result<Vec<u8>>) -> Result<()> {
@@ -261,23 +239,18 @@ fn text(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
 fn run_git(path: &str, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(Error::git_command_failed(
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        ))
-    }
+    homeboy_core::git::run_git_bytes_with_env(
+        Path::new(path),
+        args,
+        "fingerprint Cook candidate",
+        &[],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     fn repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for args in [
@@ -314,6 +287,22 @@ mod tests {
         };
         fingerprint
     }
+    #[test]
+    fn a_silent_git_failure_still_names_its_command_and_exit() {
+        // `git diff --quiet` exits 1 on a dirty tree with no output at all, the
+        // shape that used to surface as an empty pre-execution failure (#15226).
+        let dir = repo();
+        commit(&dir, "a");
+        std::fs::write(dir.path().join("a"), "two").unwrap();
+
+        let error = run_git(dir.path().to_str().unwrap(), &["diff", "--quiet"])
+            .expect_err("dirty tree makes diff --quiet fail");
+
+        assert!(!error.message.trim().is_empty());
+        assert_eq!(error.details["command"], "git diff --quiet");
+        assert_eq!(error.details["exit_code"], 1);
+    }
+
     #[test]
     fn root_commit_and_repeated_state_are_stable() {
         let dir = repo();

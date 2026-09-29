@@ -172,6 +172,20 @@ pub fn run_git_with_env(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Run Git and return its raw stdout bytes, for output that is not UTF-8 text
+/// such as binary diffs. A failure carries the same command, cwd, exit code,
+/// and streams as [`run_git_with_env`].
+pub fn run_git_bytes_with_env(
+    git_root: &Path,
+    args: &[&str],
+    context: &str,
+    env: &[(String, String)],
+) -> Result<Vec<u8>> {
+    let output = run_git_output_with_env(git_root, args, context, env)?;
+    ensure_git_success(git_root, args, context, &output)?;
+    Ok(output.stdout)
+}
+
 /// Run Git with a deadline, terminating its isolated process group on expiry.
 ///
 /// Remote Git operations can wait indefinitely for a transport or credential

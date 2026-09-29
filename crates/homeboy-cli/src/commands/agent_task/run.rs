@@ -460,6 +460,15 @@ pub(crate) fn preview_cook(
             resolve_cook_preview_destination(args)
         })?;
     project_preview_dirty_admission(&mut provision);
+    let capacity_path = provision.get("path").and_then(Value::as_str).or_else(|| {
+        args.repository_identity
+            .as_ref()
+            .and_then(|identity| identity.get("repository_path"))
+            .and_then(Value::as_str)
+    });
+    let capacity = capacity_path.map(|path| {
+        homeboy::core::cleanup::reconstructable_artifact_capacity_preview(Path::new(path))
+    });
     let staging_component = preview_staging_component(&args, &provision)?;
     let base_preparation = if let (Some(path), Some(base)) = (
         provision
@@ -506,6 +515,11 @@ pub(crate) fn preview_cook(
         let mut resolved = cook_preview_resolved_request(&args, placement);
         resolved["base_preparation"] = provision["base_preparation"].clone();
         resolved["workspace"] = provision;
+        apply_preview_worktree_capacity(
+            &mut resolved,
+            capacity.as_ref(),
+            args.repository_identity.as_ref(),
+        );
         attach_preview_staging_component(&mut resolved, staging_component.as_ref());
         return Ok((
             cook_preview_result(resolved, progress, replay, None, failure),
@@ -613,6 +627,11 @@ pub(crate) fn preview_cook(
     let mut resolved = cook_preview_resolved_request(&args, placement);
     resolved["base_preparation"] = provision["base_preparation"].clone();
     resolved["workspace"] = provision;
+    apply_preview_worktree_capacity(
+        &mut resolved,
+        capacity.as_ref(),
+        args.repository_identity.as_ref(),
+    );
     resolved["gate_contract_validation"] =
         preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;
@@ -636,11 +655,30 @@ fn preflight_preview_lab_provider_secret_env(
     let Some(runner_id) = placement.get("selected_runner").and_then(Value::as_str) else {
         return Ok(());
     };
-    if homeboy::runner::agent_task_runner_provider_secret_env_names(plan).is_empty() {
+    let required = homeboy::runner::agent_task_runner_provider_secret_env_names(plan);
+    if required.is_empty() {
         return Ok(());
     }
-    let runner = homeboy::runner::load(runner_id)?;
-    homeboy::runner::preflight_agent_task_runner_provider_secret_env_plan(runner_id, &runner, plan)
+    let inventory = homeboy::runner::runner_secret_identity_inventory(runner_id)?;
+    let missing = required
+        .into_iter()
+        .filter(|name| !inventory.identities.contains(name))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "secret-env",
+        format!(
+            "selected Lab runner `{runner_id}` is missing required secret identity reference(s): {}",
+            missing.join(", ")
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Configure these names in the selected runner's secret_env map before Cook dispatch.".to_string(),
+            format!("Inspect redacted references with `homeboy runner env {runner_id}`."),
+        ]),
+    ))
 }
 
 fn preview_staging_component(
@@ -713,6 +751,37 @@ fn cook_preview_blocked_admission_failure(resolved: &Value) -> Option<Value> {
         failure["next_action"] = next_action;
     }
     Some(failure)
+}
+
+fn apply_preview_worktree_capacity(
+    resolved: &mut Value,
+    capacity: Option<&Value>,
+    repository_identity: Option<&Value>,
+) {
+    let Some(capacity) = capacity else { return };
+    resolved["workspace"]["capacity"] = capacity.clone();
+    if capacity["state"] != "shortfall"
+        || resolved["placement"]["selected"].as_str() == Some("lab")
+        || resolved["placement"]["requested"].as_str() == Some("lab")
+    {
+        return;
+    }
+    let shortfall = capacity["shortfall_bytes"].as_u64().unwrap_or_default();
+    let blocker =
+        format!("local worktree filesystem is {shortfall} bytes below its configured reserve");
+    let repository_path = repository_identity
+        .and_then(|identity| identity.get("repository_path"))
+        .and_then(Value::as_str);
+    let next_action = repository_path
+        .map(|repository| {
+            format!(
+                "homeboy cleanup artifacts --path '{}' --all-worktrees --sort size --limit 100",
+                repository.replace('\'', "'\\''")
+            )
+        })
+        .unwrap_or_else(|| "homeboy cleanup --include repo-artifacts".to_string());
+    resolved["placement"]["admission"] = blocked_preview_admission(blocker, Some(next_action));
+    resolved["placement"]["admission"]["capacity"] = capacity.clone();
 }
 
 fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> Value {
@@ -5565,6 +5634,32 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         .flatten()
         .map(|component| PathBuf::from(component.local_path));
     let destination = args.to_worktree.as_deref().map(Path::new);
+    // An existing PR is the durable task identity for linked-worktree Cook.
+    // Resolve its canonical refs before preview/provider admission; branch
+    // upstream metadata on a linked worktree is commonly the feature branch.
+    let existing_pr = workspace
+        .and_then(|_| args.dispatch.task_url.as_deref())
+        .filter(|url| url.contains("/pull/"))
+        .map(|url| cook_pull_request_refs(workspace.expect("workspace checked"), url))
+        .transpose()?;
+    if let Some((base, head)) = existing_pr {
+        if args.base.is_none() {
+            args.base = Some(base);
+        }
+        if args
+            .head
+            .as_deref()
+            .is_some_and(|explicit| explicit != head)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "head",
+                "explicit Cook --head must match the existing pull request head",
+                args.head.clone(),
+                None,
+            ));
+        }
+        args.head = Some(head);
+    }
     let resolution = resolve_default_branch(DefaultBranchRequest {
         explicit_base: args.base.as_deref(),
         explicit_from: None,
@@ -5579,7 +5674,118 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
             "serialize Cook default-branch resolution: {error}"
         ))
     })?);
+    if args.head.as_deref() == args.base.as_deref() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "Cook PR head must differ from its base",
+            args.head.clone(),
+            None,
+        ));
+    }
     Ok(())
+}
+
+fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(String, String)> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", url, "--json", "baseRefName,headRefName"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
+        })?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "could not resolve canonical pull request refs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    let refs: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let base = refs["baseRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let head = refs["headRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    match (base, head) {
+        (Some(base), Some(head)) => Ok((base.to_string(), head.to_string())),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "pull request lookup returned no canonical base/head refs",
+            Some(url.to_string()),
+            None,
+        )),
+    }
+}
+
+#[cfg(test)]
+mod cook_pull_request_ref_tests {
+    use super::cook_pull_request_refs;
+    use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrates_existing_pr_refs_from_linked_git_worktree_with_fake_gh() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).expect("repository directory");
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q", "--initial-branch=main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+        run_git(&["add", "tracked"]);
+        run_git(&["commit", "-qm", "base"]);
+        let linked = root.path().join("linked");
+        run_git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ]);
+
+        let bin = tempfile::tempdir().expect("fake gh bin");
+        let gh = bin.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        assert_eq!(
+            cook_pull_request_refs(&linked, "https://github.com/example/repo/pull/1895")
+                .expect("canonical PR refs"),
+            ("release".to_string(), "feature".to_string())
+        );
+    }
 }
 
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -7214,6 +7420,17 @@ fn run_preflight_cook_execution(
         serde_json::to_value(gate_contract_validation)
             .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     resolve_cook_execution_budget(&args, &mut initial_plan)?;
+    if let Some(preflight) = homeboy::core::parsed_command_preflight::captured_result() {
+        if preflight.placement.selected
+            == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+        {
+            let placement = serde_json::json!({
+                "selected": "lab",
+                "selected_runner": preflight.selected_runner_id,
+            });
+            preflight_preview_lab_provider_secret_env(&placement, &initial_plan)?;
+        }
+    }
     if !no_progress {
         eprintln!(
             "{}",
@@ -10811,16 +11028,125 @@ fn explicit_local_retry_admission_refusal(
 #[cfg(test)]
 mod tests {
     use super::{
-        cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
-        cook_report_with_continuation, cook_resolved_policy_disclosure,
-        cook_review_form_timeout_disclosure, detached_cook_route_less_warning,
-        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
-        project_preview_dirty_admission, PreviewReplayArgv,
+        apply_preview_worktree_capacity, cook_continuation_status, cook_preview_result,
+        cook_provider_timeout_disclosure, cook_report_with_continuation,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
+        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
+        preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
     use crate::commands::agent_task::AgentTaskCommand;
     use clap::Parser;
+
+    #[test]
+    fn preview_worktree_capacity_blocks_local_shortfall_and_reports_safe_action() {
+        let mut resolved = serde_json::json!({ "placement": { "selected": "local" } });
+        let capacity = serde_json::json!({
+            "state": "shortfall",
+            "available_bytes": 90,
+            "reserved_bytes": 100,
+            "shortfall_bytes": 10
+        });
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
+        assert_eq!(resolved["placement"]["admission"]["state"], "blocked");
+        assert_eq!(
+            resolved["placement"]["admission"]["capacity"]["shortfall_bytes"],
+            10
+        );
+        let action = resolved["placement"]["admission"]["next_action"]
+            .as_str()
+            .expect("bounded cleanup action");
+        assert!(action.contains("--all-worktrees") || action.contains("repo-artifacts"));
+    }
+
+    #[test]
+    fn preview_worktree_capacity_admits_at_reserve_and_leaves_other_placement_unblocked() {
+        let available = serde_json::json!({ "placement": { "selected": "local" } });
+        let mut resolved = available;
+        let capacity = serde_json::json!({ "state": "available", "shortfall_bytes": 0 });
+        apply_preview_worktree_capacity(&mut resolved, Some(&capacity), None);
+        assert!(resolved["placement"].get("admission").is_none());
+
+        let mut lab = serde_json::json!({ "placement": { "selected": "lab" } });
+        apply_preview_worktree_capacity(
+            &mut lab,
+            Some(&serde_json::json!({ "state": "shortfall", "shortfall_bytes": 10 })),
+            None,
+        );
+        assert!(lab["placement"].get("admission").is_none());
+    }
+
+    #[test]
+    fn full_preview_checks_capacity_for_missing_worktree_destination() {
+        crate::test_support::with_isolated_home(|home| {
+            let config_path = home.path().join(".config/homeboy/homeboy.json");
+            std::fs::create_dir_all(config_path.parent().expect("config parent"))
+                .expect("config directory");
+            std::fs::write(
+                &config_path,
+                r#"{"retention":{"reconstructable_artifact_reserve_bytes":18446744073709551615}}"#,
+            )
+            .expect("constrained reserve config");
+            homeboy::core::defaults::reset_config_cache_for_test();
+
+            let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("workspace repository");
+            let destination = "homeboy@feature-preview-capacity";
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement the issue",
+                "--repo",
+                "homeboy",
+                "--workspace",
+                repository.to_str().expect("repository path"),
+                "--base",
+                // CI checks out the candidate by SHA without a local main ref.
+                "HEAD",
+                "--head",
+                "feature/preview-capacity",
+                "--task-url",
+                "https://github.com/Extra-Chill/homeboy/issues/15150",
+                "--to-worktree",
+                destination,
+                "--placement",
+                "local",
+                "--no-finalize",
+            ])
+            .expect("parse full preview command");
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Cook(args) = agent_task.command else {
+                panic!("Cook")
+            };
+            let (preview, exit_code) = super::preview_cook(*args, None)
+                .expect("preview completes with typed capacity denial");
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                preview["resolved"]["workspace"]["capacity"]["state"], "shortfall",
+                "workspace projection: {}",
+                preview["resolved"]["workspace"]
+            );
+            let target = repository
+                .parent()
+                .expect("worktree parent")
+                .join("homeboy@feature-preview-capacity");
+            assert!(!target.exists(), "preview must not create destination");
+            assert_eq!(
+                preview["resolved"]["placement"]["admission"]["state"],
+                "blocked"
+            );
+        });
+    }
 
     #[test]
     fn preview_result_render_discloses_public_exact_filter_and_withholds_private_gate() {

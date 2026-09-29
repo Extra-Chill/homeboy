@@ -93,6 +93,24 @@ pub struct RunnerAdmissionSnapshot {
     pub summary: RunnerAdmissionSummary,
 }
 
+/// Redacted identities configured in a runner's `secret_env` map. This
+/// intentionally exposes names only; credential values remain runner-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerSecretIdentityInventory {
+    pub runner_id: String,
+    pub identities: std::collections::BTreeSet<String>,
+}
+
+/// Read the selected runner's configured secret identities without resolving
+/// or exposing any credential values.
+pub fn runner_secret_identity_inventory(runner_id: &str) -> Result<RunnerSecretIdentityInventory> {
+    let runner = load(runner_id)?;
+    Ok(RunnerSecretIdentityInventory {
+        runner_id: runner_id.to_string(),
+        identities: runner.secret_env.keys().cloned().collect(),
+    })
+}
+
 impl RunnerAdmissionSnapshot {
     fn from_status_and_generations(
         status: RunnerStatusReport,

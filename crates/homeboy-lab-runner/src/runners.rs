@@ -80,18 +80,19 @@ pub use crate::{
     RunnerExecPromotedOutput, RunnerExecRequest, RunnerExecStructuredSummary, RunnerFailureKind,
     RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerRequiredTool, RunnerResourceMetrics,
-    RunnerResult, RunnerRetainedJobInconsistency, RunnerSecretEnvMigrationPlan, RunnerSession,
-    RunnerSessionRole, RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning,
-    RunnerStaleRuntimePath, RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec,
-    RunnerTunnelMode, RunnerUnresolvedJobOwner, RunnerWorkspaceApplyOptions,
-    RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus, RunnerWorkspaceLease,
-    RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
-    RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-    RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
-    RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
-    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
+    RunnerResult, RunnerRetainedJobInconsistency, RunnerSecretEnvMigrationPlan,
+    RunnerSecretIdentityInventory, RunnerSession, RunnerSessionRole, RunnerSessionState,
+    RunnerSpec, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
+    RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode, RunnerUnresolvedJobOwner,
+    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry,
+    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
+    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
 pub use crate::{
     observe_runner_capabilities, runner_capability_inventory, runner_capability_inventory_until,
@@ -100,7 +101,8 @@ pub use crate::{
 // Registry CRUD entry points.
 pub use crate::{
     apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner, exists,
-    list, load, merge, runner_exec_orchestration_provenance, secret_env_migration_plan,
+    list, load, merge, runner_exec_orchestration_provenance, runner_secret_identity_inventory,
+    secret_env_migration_plan,
 };
 
 // Crate-internal helpers that historically flowed through the wildcard
