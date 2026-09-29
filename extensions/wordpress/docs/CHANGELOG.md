@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.5] - 2026-09-29
+
+### Fixed
+- stop PHPStan retry dropping findings when the run has no report
+
 ## [3.50.4] - 2026-09-27
 
 ### Fixed
