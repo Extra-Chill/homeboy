@@ -230,6 +230,22 @@ enum DaemonJobsCommand {
     Show(DaemonJobsShowArgs),
     /// Wait for one daemon job to reach a terminal state
     Watch(DaemonJobsWatchArgs),
+    /// Preview or remove exact terminal jobs of one controller driver generation
+    Prune(DaemonJobsPruneArgs),
+}
+
+#[derive(Args)]
+pub struct DaemonJobsPruneArgs {
+    /// Exact controller driver type (without the controller. operation prefix).
+    #[arg(long)]
+    job_type: String,
+    #[arg(long)]
+    version: u32,
+    /// JSON array of job ids from the preview. Required with --apply.
+    #[arg(long)]
+    expected_ids: Option<String>,
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Args)]
@@ -299,6 +315,16 @@ pub enum DaemonOutput {
     JobsList(DaemonJobsListOutput),
     JobsShow(DaemonJobsShowOutput),
     JobsWatch(DaemonJobsWatchOutput),
+    JobsPrune(DaemonJobsPruneOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonJobsPruneOutput {
+    pub command: &'static str,
+    pub job_type: String,
+    pub version: u32,
+    pub applied: bool,
+    pub job_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -575,7 +601,43 @@ fn jobs(args: DaemonJobsArgs) -> CmdResult<DaemonOutput> {
         DaemonJobsCommand::List(args) => jobs_list(args),
         DaemonJobsCommand::Show(args) => jobs_show(args),
         DaemonJobsCommand::Watch(args) => jobs_watch(args),
+        DaemonJobsCommand::Prune(args) => jobs_prune(args),
     }
+}
+
+fn jobs_prune(args: DaemonJobsPruneArgs) -> CmdResult<DaemonOutput> {
+    let store = job_store()?;
+    let job_ids = if args.apply {
+        let expected = args.expected_ids.as_deref().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "expected_ids",
+                "--apply requires the exact JSON job id list from a fresh preview",
+                None,
+                None,
+            )
+        })?;
+        let expected: Vec<Uuid> = serde_json::from_str(expected).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "expected_ids",
+                error.to_string(),
+                None,
+                None,
+            )
+        })?;
+        store.prune_terminal_controller_jobs(&args.job_type, args.version, &expected)?
+    } else {
+        store.terminal_controller_job_ids(&args.job_type, args.version)?
+    };
+    Ok((
+        DaemonOutput::JobsPrune(DaemonJobsPruneOutput {
+            command: "daemon.jobs.prune",
+            job_type: args.job_type,
+            version: args.version,
+            applied: args.apply,
+            job_ids,
+        }),
+        0,
+    ))
 }
 
 fn job_store() -> homeboy::core::Result<JobStore> {
