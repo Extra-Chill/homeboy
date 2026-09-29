@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.8] - 2026-09-29
+
+### Changed
+- isolate retry token fixture from host pressure
+
+### Fixed
+- preflight selected Lab provider secret refs
+
+## [0.397.7] - 2026-09-29
+
+### Fixed
+- dispatch runner-local command in deferred staging; give silent git failures diagnostics
+
+## [0.397.6] - 2026-09-29
+
+### Fixed
+- report worktree reserve shortfall in preview
+
+## [0.397.5] - 2026-09-29
+
+### Changed
+- allow bounded CI startup for external check hydration
+
 ## [0.397.4] - 2026-09-29
 
 ### Fixed

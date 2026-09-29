@@ -1144,6 +1144,43 @@ mod provider_config_default_injection_tests {
 mod run_plan_remap_tests {
     use super::*;
 
+    /// Deferred runner staging dispatches the remapped argv, so an inlined plan
+    /// must name the runner workspace, never the controller worktree (#15226).
+    #[test]
+    fn remap_agent_task_run_plan_rewrites_inlined_workspace_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mappings = vec![LabPathRemap {
+            local: "/Users/user/Developer/homeboy@fix-15226".to_string(),
+            remote: "/home/user/Developer/_lab_workspaces/homeboy-fix-15226".to_string(),
+        }];
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "plan-15226",
+            "tasks": [{
+                "task_id": "cook-homeboy",
+                "executor": { "backend": "tool-runner", "config": {} },
+                "workspace": { "root": "/Users/user/Developer/homeboy@fix-15226" },
+                "instructions": "test"
+            }]
+        });
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            plan.to_string(),
+        ];
+
+        let out = remap_agent_task_plan_in_args(&args, &mappings, temp.path()).expect("remap plan");
+        let plan_idx = out.iter().position(|a| a == "--plan").unwrap() + 1;
+        let remapped: serde_json::Value =
+            serde_json::from_str(&out[plan_idx]).expect("inline plan");
+        assert_eq!(
+            remapped["tasks"][0]["workspace"]["root"],
+            "/home/user/Developer/_lab_workspaces/homeboy-fix-15226"
+        );
+    }
+
     #[test]
     fn remap_agent_task_run_plan_inlines_remapped_plan_json() {
         let temp = tempfile::tempdir().expect("tempdir");
