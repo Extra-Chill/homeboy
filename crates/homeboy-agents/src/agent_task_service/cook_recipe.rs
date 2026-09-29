@@ -1,6 +1,5 @@
 //! Durable, versioned input boundary for cook continuation scheduling.
 
-use homeboy_engine_primitives::content_hash;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -158,10 +157,6 @@ impl CookRecipeStore {
     fn supersession_path(&self, cook_id: &str) -> PathBuf {
         self.recipe_path(cook_id)
             .with_file_name("supersession.json")
-    }
-
-    fn queue_root(&self) -> PathBuf {
-        self.data_root.join("agent-task-cook-continuations")
     }
 
     pub fn persist_recipe(&self, recipe: &AgentTaskCookRecipe) -> Result<()> {
@@ -1880,7 +1875,6 @@ fn claim_lifecycle_continuation_for(
 ) -> Result<Option<ClaimedCookContinuation>> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
-    import_legacy_continuation_for(recipe_store, &lifecycle_store, cook_id, run_id)?;
     let recipe = recipe_store.load_recipe(cook_id)?;
     if !recipe
         .attempts
@@ -2010,7 +2004,7 @@ fn claim_lifecycle_continuation_with_budget(
 ) -> Result<CookContinuationClaim> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(recipe_store.data_root());
-    let mut inspected = import_legacy_continuations(recipe_store, &lifecycle_store, budget)?;
+    let mut inspected = 0;
     if inspected >= budget {
         return Ok(CookContinuationClaim {
             claim: None,
@@ -2199,170 +2193,6 @@ fn transition_lifecycle_continuation(
     }
 }
 
-/// The only compatibility path for the retired sidecar queue. Imports are
-/// bounded by callers, atomically stamp provenance on the lifecycle record, and
-/// rename the consumed entry to a visible retirement marker. The importer can be
-/// removed once no `*.pending`, `*.claimed.*`, `*.failed`, or `*.completed`
-/// entries remain under `agent-task-cook-continuations`.
-fn import_legacy_continuations(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    budget: usize,
-) -> Result<usize> {
-    let root = recipe_store.queue_root();
-    if !root.is_dir() {
-        return Ok(0);
-    }
-    let mut entries = fs::read_dir(&root)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    entries.sort_by_key(|entry| entry.file_name());
-    let mut inspected = 0;
-    for entry in entries {
-        if inspected >= budget {
-            break;
-        }
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let state = if name.ends_with(".pending") {
-            Some("pending")
-        } else if name.ends_with(".failed") {
-            Some("failed")
-        } else if name.ends_with(".completed") {
-            Some("completed")
-        } else if name.contains(".claimed.") {
-            Some("claimed")
-        } else {
-            None
-        };
-        let Some(state) = state else {
-            continue;
-        };
-        inspected += 1;
-        let decoded: std::result::Result<AgentTaskCookContinuation, _> =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
-            })?);
-        let continuation = match decoded {
-            Ok(continuation) if validate_continuation(&continuation).is_ok() => continuation,
-            // An undecodable sidecar can never be imported. Retire it under a
-            // visible marker so it stops consuming the admission budget on
-            // every later scan instead of blocking the queue forever.
-            _ => {
-                retire_legacy_sidecar(&path, "malformed")?;
-                continue;
-            }
-        };
-        if !lifecycle_store.record_exists(&continuation.run_id)? {
-            continue;
-        }
-        import_legacy_continuation_path(lifecycle_store, &continuation, state, &path)?;
-    }
-    Ok(inspected)
-}
-
-fn import_legacy_continuation_for(
-    recipe_store: &CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<()> {
-    let hash = content_hash::sha256_hex(format!("{cook_id}:{run_id}").as_bytes());
-    let root = recipe_store.queue_root();
-    if !root.is_dir() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(&root)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
-    {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some(root.display().to_string()))
-            })?
-            .path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        let Some(suffix) = name.strip_prefix(&format!("{hash}.")) else {
-            continue;
-        };
-        let state = if suffix == "pending" {
-            "pending"
-        } else if suffix == "failed" {
-            "failed"
-        } else if suffix == "completed" {
-            "completed"
-        } else if suffix.starts_with("claimed.") {
-            "claimed"
-        } else {
-            continue;
-        };
-        let continuation: AgentTaskCookContinuation =
-            serde_json::from_slice(&fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
-            })?)
-            .map_err(|error| {
-                Error::validation_invalid_argument(
-                    "cook_continuation",
-                    format!("malformed legacy durable continuation: {error}"),
-                    Some(path.display().to_string()),
-                    None,
-                )
-            })?;
-        validate_continuation(&continuation)?;
-        if continuation.cook_id != cook_id || continuation.run_id != run_id {
-            return Err(Error::validation_invalid_argument(
-                "cook_continuation",
-                "legacy continuation identity does not match its sidecar key",
-                Some(path.display().to_string()),
-                None,
-            ));
-        }
-        import_legacy_continuation_path(lifecycle_store, &continuation, state, &path)?;
-        break;
-    }
-    Ok(())
-}
-
-fn import_legacy_continuation_path(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    continuation: &AgentTaskCookContinuation,
-    state: &str,
-    path: &Path,
-) -> Result<()> {
-    let mut imported = false;
-    lifecycle_store.mutate_record(&continuation.run_id, |record| {
-        if lifecycle_continuation(record).is_some() { return false; }
-        record.ensure_metadata_object().insert(LIFECYCLE_CONTINUATION_KEY.to_string(), serde_json::json!({
-            "schema": LIFECYCLE_CONTINUATION_SCHEMA,
-            "key": continuation.key,
-            "cook_id": continuation.cook_id,
-            "run_id": continuation.run_id,
-            "state": state,
-            "retries": continuation.retries,
-            "imported_from": { "path": path.display().to_string(), "state": state, "retired_at": agent_task_lifecycle::now_timestamp() },
-        }));
-        record.updated_at = Some(agent_task_lifecycle::now_timestamp());
-        imported = true;
-        true
-    })?;
-    if imported {
-        retire_legacy_sidecar(path, "retired")?;
-    }
-    Ok(())
-}
-
-/// Move a consumed sidecar out of the scanned name space. The content is left
-/// intact under a marker extension so it remains inspectable after the queue is
-/// retired for good.
-fn retire_legacy_sidecar(path: &Path, marker: &str) -> Result<()> {
-    let retired = path.with_extension(marker);
-    fs::rename(path, &retired)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
-}
-
 // The ambient `rearm_failed_terminal_continuation()` shim that used to sit
 // here is gone. It had no callers and was reachable only through the
 // `agent_tasks::lifecycle` facade, which nothing outside the crate used (#7505).
@@ -2415,9 +2245,7 @@ pub fn claim_continuation_for(
     default_store()?.claim_continuation_for(cook_id, run_id)
 }
 
-/// Continuation state for one Cook attempt. The lifecycle record is
-/// authoritative; a not-yet-imported sidecar is consulted only as a legacy
-/// fallback and is never mutated by an observation.
+/// Continuation state for one Cook attempt from its authoritative lifecycle row.
 pub fn continuation_state_in_store(
     store: &CookRecipeStore,
     cook_id: &str,
@@ -2425,13 +2253,12 @@ pub fn continuation_state_in_store(
 ) -> Result<CookContinuationState> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(store.data_root());
-    observe_continuation_state(store, &lifecycle_store, cook_id, run_id)
+    observe_continuation_state(&lifecycle_store, cook_id, run_id)
 }
 
 /// The single continuation reader. Both the state query and the claim preflight
 /// resolve through this, so they can never disagree about the same attempt.
 fn observe_continuation_state(
-    store: &CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: &str,
     run_id: &str,
@@ -2440,6 +2267,21 @@ fn observe_continuation_state(
         let value = lifecycle_continuation(&record);
         let state = lifecycle_continuation_state(value);
         if state != CookContinuationState::Absent {
+            if matches!(
+                state,
+                CookContinuationState::Pending | CookContinuationState::Claimed
+            ) && value
+                .and_then(|value| value.get("cook_id"))
+                .and_then(Value::as_str)
+                != Some(cook_id)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "cook_continuation.cook_id",
+                    "continuation belongs to a different Cook",
+                    Some(run_id.to_string()),
+                    None,
+                ));
+            }
             // A claim whose owner is gone is recoverable work, not a live claim.
             if state == CookContinuationState::Claimed && lifecycle_continuation_is_claimable(value)
             {
@@ -2448,57 +2290,11 @@ fn observe_continuation_state(
             return Ok(state);
         }
     }
-    legacy_sidecar_state(store, cook_id, run_id)
-}
-
-/// Read-only view of a sidecar entry that has not been imported yet.
-/// Observation never creates the queue root, reclaims a claim, or renames an
-/// entry. Delete this with the importer once no sidecars remain.
-fn legacy_sidecar_state(
-    store: &CookRecipeStore,
-    cook_id: &str,
-    run_id: &str,
-) -> Result<CookContinuationState> {
-    let hash = content_hash::sha256_hex(format!("{cook_id}:{run_id}").as_bytes());
-    let root = store.queue_root();
-    if !root.is_dir() {
-        return Ok(CookContinuationState::Absent);
-    }
-    for entry in fs::read_dir(&root)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
-    {
-        let name = entry
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some(root.display().to_string()))
-            })?
-            .file_name()
-            .to_string_lossy()
-            .into_owned();
-        let Some(suffix) = name.strip_prefix(&format!("{hash}.")) else {
-            continue;
-        };
-        return Ok(match suffix {
-            "pending" => CookContinuationState::Pending,
-            "failed" => CookContinuationState::Failed,
-            "completed" => CookContinuationState::Completed,
-            _ => match suffix.strip_prefix("claimed.") {
-                Some(identity)
-                    if continuation_claim_owner_pid(identity)
-                        .is_none_or(homeboy_core::process::pid_is_running) =>
-                {
-                    CookContinuationState::Claimed
-                }
-                Some(_) => CookContinuationState::Pending,
-                None => continue,
-            },
-        });
-    }
     Ok(CookContinuationState::Absent)
 }
 
-/// Observe whether the exact continuation claim that `cook-continue` will make
-/// is currently admissible. This never creates the queue root, reclaims a dead
-/// claim, or renames a queue entry.
+/// Observe whether the exact lifecycle continuation claim that `cook-continue`
+/// will make is currently admissible without mutating the record.
 pub fn preflight_continuation_claim(
     cook_id: &str,
     run_id: &str,
@@ -2529,7 +2325,7 @@ pub fn preflight_continuation_claim_in_store(
             )]),
         ));
     }
-    let state = observe_continuation_state(store, &lifecycle_store, cook_id, run_id)?;
+    let state = observe_continuation_state(&lifecycle_store, cook_id, run_id)?;
     let admitted = if rearm {
         state == CookContinuationState::Failed
     } else {
@@ -2563,7 +2359,6 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
     cook_id: &str,
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
-    import_legacy_continuation_for(store, lifecycle_store, cook_id, run_id)?;
     let claim_identity = format!("{}-{}", std::process::id(), Uuid::new_v4());
     let mut claim = None;
     lifecycle_store.mutate_record(run_id, |record| {
@@ -3373,10 +3168,6 @@ fn canonical_sensitive_mappings(attempts: &[AgentTaskCookRecipeAttempt]) -> Resu
     Ok(mappings)
 }
 
-fn continuation_claim_owner_pid(identity: &str) -> Option<u32> {
-    identity.split('-').next()?.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3388,7 +3179,6 @@ mod tests {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
         AgentTaskProgressEvent, AgentTaskState,
     };
-    use sha2::Digest;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
@@ -4426,87 +4216,60 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_targeted_continuation_fails_closed_without_consuming_other_cook() {
+    fn lifecycle_continuation_cannot_be_observed_under_another_cook() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
-        let mut other = recipe();
-        other.cook_id = "other".to_string();
-        other.attempts[0].run_id = "other-run".to_string();
         store.persist_recipe(&recipe()).unwrap();
-        store.persist_recipe(&other).unwrap();
         store.enqueue_terminal_continuation("cook", "run").unwrap();
-        store
-            .enqueue_terminal_continuation("other", "other-run")
-            .unwrap();
 
-        let key = "cook:run";
-        let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
-        fs::create_dir_all(store.queue_root()).unwrap();
-        fs::write(
-            store.queue_root().join(format!("{hash}.pending")),
-            serde_json::to_vec(&AgentTaskCookContinuation {
-                schema: CONTINUATION_SCHEMA.to_string(),
-                key: "other:other-run".to_string(),
-                cook_id: "other".to_string(),
-                run_id: "other-run".to_string(),
-                retries: 0,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let error = store.claim_continuation_for("cook", "run").unwrap_err();
-        assert!(error.message.contains("does not match"));
+        let error = continuation_state_in_store(&store, "other-cook", "run").unwrap_err();
+        assert!(error.message.contains("different Cook"));
         assert_eq!(
-            store
-                .claim_continuation_for("other", "other-run")
-                .unwrap()
-                .expect("unrelated continuation remains pending")
-                .continuation()
-                .key,
-            "other:other-run"
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
         );
     }
 
     #[test]
-    fn targeted_claim_rejects_a_key_with_unrelated_cook_fields() {
+    fn old_sidecar_cannot_resurrect_a_missing_lifecycle_continuation() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        let mut other = recipe();
-        other.cook_id = "other".to_string();
-        other.attempts[0].run_id = "other-run".to_string();
+        let (store, lifecycle_store) = rooted_stores(&context);
         store.persist_recipe(&recipe()).unwrap();
-        store.persist_recipe(&other).unwrap();
-        store
-            .enqueue_terminal_continuation("other", "other-run")
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record
+                    .ensure_metadata_object()
+                    .remove(LIFECYCLE_CONTINUATION_KEY);
+                true
+            })
             .unwrap();
-
-        let key = "cook:run";
-        let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
-        fs::create_dir_all(store.queue_root()).unwrap();
+        let old_queue = store.data_root().join("agent-task-cook-continuations");
+        fs::create_dir_all(&old_queue).unwrap();
         fs::write(
-            store.queue_root().join(format!("{hash}.pending")),
+            old_queue.join("abandoned.pending"),
             serde_json::to_vec(&AgentTaskCookContinuation {
                 schema: CONTINUATION_SCHEMA.to_string(),
-                key: key.to_string(),
-                cook_id: "other".to_string(),
-                run_id: "other-run".to_string(),
+                key: "cook:run".to_string(),
+                cook_id: "cook".to_string(),
+                run_id: "run".to_string(),
                 retries: 0,
             })
             .unwrap(),
         )
         .unwrap();
 
-        let error = store.claim_continuation_for("cook", "run").unwrap_err();
-        assert!(error.message.contains("does not match"));
         assert_eq!(
-            store
-                .claim_continuation_for("other", "other-run")
-                .unwrap()
-                .expect("unrelated continuation remains pending")
-                .continuation()
-                .key,
-            "other:other-run"
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Absent
+        );
+        assert!(store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .is_none());
+        assert!(
+            old_queue.join("abandoned.pending").exists(),
+            "observation never imports or rewrites obsolete state"
         );
     }
 
@@ -4904,24 +4667,6 @@ mod tests {
             .claim_continuation_for("cook", "run")
             .unwrap()
             .is_some());
-    }
-
-    /// A sidecar that cannot be decoded is never imported and never becomes a
-    /// claim. It is retired under a marker so it stops consuming the admission
-    /// budget while staying inspectable.
-    #[test]
-    fn malformed_legacy_sidecar_is_never_imported_or_claimed() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        let root = store.queue_root();
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("malformed.pending"), b"not json").unwrap();
-
-        assert!(claim_next_from(&store).unwrap().is_none());
-        // Retired under a visible marker so a later scan cannot spend its
-        // admission budget on the same undecodable entry again.
-        assert!(!root.join("malformed.pending").exists());
-        assert!(root.join("malformed.malformed").is_file());
     }
 
     /// A record carrying an undecodable continuation is inert: it is neither
