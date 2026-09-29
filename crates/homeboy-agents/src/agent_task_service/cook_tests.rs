@@ -3111,6 +3111,17 @@ fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempote
         )
         .unwrap()
         .unwrap();
+        let mut stale_plan = options.identity.initial_plan.clone();
+        stale_plan.metadata["captured_base"] = serde_json::json!("observed in another controller");
+        let replayed_with_stale_plan = claim_pre_artifact_interruption_retry(
+            &options.identity.cook_id,
+            1,
+            &run_id,
+            &stale_plan,
+        )
+        .expect("completed claim uses durable receipt over a changed caller plan")
+        .expect("same successor");
+        assert_eq!(replayed_with_stale_plan, resumed);
         assert!(results.iter().flatten().all(|result| result == &resumed));
         assert_eq!(resumed.0, 2);
         let recipe = super::super::load_recipe(&options.identity.cook_id).unwrap();
