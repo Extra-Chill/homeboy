@@ -783,7 +783,10 @@ pub(crate) fn runner_provider_query_requires_runner_exec(
 ) -> homeboy::core::Error {
     let mut command = vec!["homeboy".to_string()];
     let mut skip_value = false;
-    for argument in normalized_args.iter().skip(1) {
+    for argument in crate::command_capability::homeboy_owned_args(normalized_args)
+        .iter()
+        .skip(1)
+    {
         if skip_value {
             skip_value = false;
             continue;

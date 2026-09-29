@@ -3178,9 +3178,12 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
         )
         .expect_err("transport proxy needs runner recovery");
 
-        assert!(error
-            .message
-            .contains("provider execution was not attempted"));
+        assert!(
+            error
+                .message
+                .contains("must be continued by its owning runner"),
+            "{error:?}"
+        );
         assert!(executor
             .observed_request
             .lock()
