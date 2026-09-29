@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.9] - 2026-09-29
+
+### Changed
+- remove unused recovery wrappers
+
 ## [0.397.8] - 2026-09-29
 
 ### Changed
