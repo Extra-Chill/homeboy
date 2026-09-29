@@ -516,7 +516,12 @@ fn claim_pre_artifact_interruption_retry_with_stores(
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
             };
             if replace_semantic_attempt {
-                recipe_store.record_recipe_attempt_replacement(cook_id, run_id, &next_run_id)?;
+                recipe_store.record_recipe_attempt_replacement_with_plan(
+                    cook_id,
+                    run_id,
+                    &next_run_id,
+                    plan,
+                )?;
             } else {
                 recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
             }
@@ -4139,7 +4144,12 @@ pub(crate) fn dispatch_cook_follow_up(
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
     if let Some(replaced_run_id) = replaced_run_id {
-        recipe_store.record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+        recipe_store.record_recipe_attempt_replacement_with_plan(
+            cook_id,
+            &replaced_run_id,
+            &next_run_id,
+            &follow_up_plan,
+        )?;
     } else {
         recipe_store.record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
     }

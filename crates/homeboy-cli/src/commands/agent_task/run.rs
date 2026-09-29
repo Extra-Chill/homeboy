@@ -5565,6 +5565,32 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         .flatten()
         .map(|component| PathBuf::from(component.local_path));
     let destination = args.to_worktree.as_deref().map(Path::new);
+    // An existing PR is the durable task identity for linked-worktree Cook.
+    // Resolve its canonical refs before preview/provider admission; branch
+    // upstream metadata on a linked worktree is commonly the feature branch.
+    let existing_pr = workspace
+        .and_then(|_| args.dispatch.task_url.as_deref())
+        .filter(|url| url.contains("/pull/"))
+        .map(|url| cook_pull_request_refs(workspace.expect("workspace checked"), url))
+        .transpose()?;
+    if let Some((base, head)) = existing_pr {
+        if args.base.is_none() {
+            args.base = Some(base);
+        }
+        if args
+            .head
+            .as_deref()
+            .is_some_and(|explicit| explicit != head)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "head",
+                "explicit Cook --head must match the existing pull request head",
+                args.head.clone(),
+                None,
+            ));
+        }
+        args.head = Some(head);
+    }
     let resolution = resolve_default_branch(DefaultBranchRequest {
         explicit_base: args.base.as_deref(),
         explicit_from: None,
@@ -5579,7 +5605,118 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
             "serialize Cook default-branch resolution: {error}"
         ))
     })?);
+    if args.head.as_deref() == args.base.as_deref() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "Cook PR head must differ from its base",
+            args.head.clone(),
+            None,
+        ));
+    }
     Ok(())
+}
+
+fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(String, String)> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", url, "--json", "baseRefName,headRefName"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
+        })?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "could not resolve canonical pull request refs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    let refs: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let base = refs["baseRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let head = refs["headRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    match (base, head) {
+        (Some(base), Some(head)) => Ok((base.to_string(), head.to_string())),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "pull request lookup returned no canonical base/head refs",
+            Some(url.to_string()),
+            None,
+        )),
+    }
+}
+
+#[cfg(test)]
+mod cook_pull_request_ref_tests {
+    use super::cook_pull_request_refs;
+    use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrates_existing_pr_refs_from_linked_git_worktree_with_fake_gh() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).expect("repository directory");
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q", "--initial-branch=main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+        run_git(&["add", "tracked"]);
+        run_git(&["commit", "-qm", "base"]);
+        let linked = root.path().join("linked");
+        run_git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ]);
+
+        let bin = tempfile::tempdir().expect("fake gh bin");
+        let gh = bin.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        assert_eq!(
+            cook_pull_request_refs(&linked, "https://github.com/example/repo/pull/1895")
+                .expect("canonical PR refs"),
+            ("release".to_string(), "feature".to_string())
+        );
+    }
 }
 
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {

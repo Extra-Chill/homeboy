@@ -4,6 +4,28 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.0] - 2026-09-29
+
+### Added
+- prune exact terminal controller jobs
+
+### Fixed
+- surface daemon error details in failed exec requests
+- give readiness its declared probe budget
+- report lease recovery outcome accurately
+- inherit existing pull request base before preview
+- explain stale checkout in dry-run preview
+- persist actual replacement plan in retry recipe
+- retain live local retry owner during reconciliation
+- notify only after terminal publication outcome
+- surface bounded failed-gate evidence
+
+## [0.396.8] - 2026-09-29
+
+### Fixed
+- dedupe Cook start notifications across continuations
+- recover cancellation from durable event ledger
+
 ## [0.396.7] - 2026-09-28
 
 ### Fixed
