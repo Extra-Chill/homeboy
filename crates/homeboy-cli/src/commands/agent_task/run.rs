@@ -11079,7 +11079,8 @@ mod tests {
                 "--workspace",
                 repository.to_str().expect("repository path"),
                 "--base",
-                "main",
+                // CI checks out the candidate by SHA without a local main ref.
+                "HEAD",
                 "--head",
                 "feature/preview-capacity",
                 "--task-url",
