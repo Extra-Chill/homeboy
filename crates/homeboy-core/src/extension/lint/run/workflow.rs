@@ -795,7 +795,14 @@ fn process_changed_since_baseline(
     provenance.compared = true;
     provenance.resolution = lint_baseline::LintBaselineResolution::GitBase;
     provenance.base_ref = Some(base_ref);
-    let comparison = lint_baseline::compare_against_findings(lint_findings, &baseline_findings);
+    // Findings recorded in the component's stored baseline are pre-existing
+    // debt regardless of the changed-file scope this run used. The stored
+    // baseline key incorporates that scope, so it is consulted by fingerprint
+    // rather than by key (#15069).
+    let comparison = lint_baseline::exclude_stored_known(
+        lint_baseline::compare_against_findings(lint_findings, &baseline_findings),
+        &lint_baseline::stored_known_fingerprints(source_path),
+    );
     let exit_override = Some(if comparison.drift_increased { 1 } else { 0 });
     Ok((Some(comparison), exit_override, provenance))
 }
