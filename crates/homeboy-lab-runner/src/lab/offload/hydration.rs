@@ -117,7 +117,14 @@ pub fn hydrate_runner_workspace_dependencies(
     local_path: &str,
     remote_path: &str,
 ) -> Result<LabWorkspaceHydrationOutput> {
-    hydrate_lab_workspace_dependencies_with_policy(runner_id, local_path, remote_path, None, true)
+    hydrate_lab_workspace_dependencies_with_policy(
+        runner_id,
+        local_path,
+        remote_path,
+        None,
+        true,
+        None,
+    )
 }
 
 const HYDRATION_RUN_SEGMENT: &str = "-lab-hydration-";
@@ -153,12 +160,29 @@ fn hydrate_lab_workspace_dependencies_for_run(
     remote_path: &str,
     parent_run_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
+    hydrate_lab_workspace_dependencies_for_component(
+        runner_id,
+        local_path,
+        remote_path,
+        parent_run_id,
+        None,
+    )
+}
+
+pub(crate) fn hydrate_lab_workspace_dependencies_for_component(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    parent_run_id: Option<&str>,
+    component_id: Option<&str>,
+) -> Result<LabWorkspaceHydrationOutput> {
     hydrate_lab_workspace_dependencies_with_policy(
         runner_id,
         local_path,
         remote_path,
         parent_run_id,
         false,
+        component_id,
     )
 }
 
@@ -168,8 +192,12 @@ fn hydrate_lab_workspace_dependencies_with_policy(
     remote_path: &str,
     parent_run_id: Option<&str>,
     offline_only: bool,
+    component_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
-    let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
+    let plan = deps::dependency_install_plan_for_component(
+        std::path::Path::new(local_path),
+        component_id,
+    )?;
     let local_workspace_root =
         deps::dependency_install_workspace_root(std::path::Path::new(local_path))?;
     if plan.is_empty() {
@@ -559,13 +587,14 @@ pub(crate) struct RecordedLabDependencyHydration {
     pub(crate) execution_ids: Vec<String>,
 }
 
-pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
+pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle_for_component(
     skip_deps_hydration: bool,
     runner_id: &str,
     local_path: &str,
     remote_path: &str,
     plan: HomeboyPlan,
     agent_task_run_id: Option<&str>,
+    component_id: Option<&str>,
 ) -> Result<RecordedLabDependencyHydration> {
     // The phase executions recorded here belong to the run this hydrates (#7505).
     let lab_lifecycle_store =
@@ -577,6 +606,7 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle(
         remote_path,
         plan,
         agent_task_run_id,
+        component_id,
     )?;
     let execution_ids = match &hydration.record {
         LabWorkspaceHydrationRecord::Applied(output) => output
@@ -607,15 +637,17 @@ fn hydrate_for_lab_workspace_exec_internal(
     remote_path: &str,
     plan: HomeboyPlan,
     agent_task_run_id: Option<&str>,
+    component_id: Option<&str>,
 ) -> Result<LabOffloadDependencyHydration> {
     let mut record = if skip_deps_hydration {
         LabWorkspaceHydrationRecord::NotApplied { reason: "opt_out" }
     } else {
-        LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies_for_run(
+        LabWorkspaceHydrationRecord::Applied(hydrate_lab_workspace_dependencies_for_component(
             runner_id,
             local_path,
             remote_path,
             agent_task_run_id,
+            component_id,
         )?)
     };
 
@@ -846,6 +878,91 @@ mod tests {
     /// Hydration is a no-op (skipped_no_provider) when no provider detects the
     /// workspace, mirroring `deps::install_for_resolved`'s dependency-less
     /// component policy.
+    /// #15039: lab hydration stages a shared-repository worktree when Cook has
+    /// already recorded the component identity. The bare path stays ambiguous.
+    #[test]
+    fn hydration_uses_admitted_component_for_nested_worktree() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("repository root");
+            let primary = root.path().join("blocks-engine");
+            let nested = primary.join("php-transformer");
+            let worktree = root
+                .path()
+                .join("blocks-engine@fix-issue-2194-blocks-engine");
+            std::fs::create_dir_all(&nested).expect("nested component");
+            homeboy_core::test_support::run_git_fixture_command(&primary, &["init", "-q"]);
+            homeboy_core::test_support::run_git_fixture_command(
+                &primary,
+                &["config", "user.email", "test@example.com"],
+            );
+            homeboy_core::test_support::run_git_fixture_command(
+                &primary,
+                &["config", "user.name", "Test"],
+            );
+            homeboy_core::test_support::run_git_fixture_command(
+                &primary,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/org/blocks-engine.git",
+                ],
+            );
+            std::fs::write(primary.join("README.md"), "root\n").expect("readme");
+            homeboy_core::test_support::run_git_fixture_command(&primary, &["add", "."]);
+            homeboy_core::test_support::run_git_fixture_command(
+                &primary,
+                &["commit", "-qm", "base"],
+            );
+            homeboy_core::test_support::run_git_fixture_command(
+                &primary,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "fix/issue-2194",
+                    worktree.to_str().expect("worktree path"),
+                ],
+            );
+            let registrations = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&registrations).expect("registrations");
+            for (id, path) in [("blocks-engine", &primary), ("php-transformer", &nested)] {
+                std::fs::write(
+                    registrations.join(format!("{id}.json")),
+                    serde_json::json!({
+                        "local_path": path,
+                        "remote_url": "https://github.com/example/blocks-engine.git",
+                    })
+                    .to_string(),
+                )
+                .expect("register component");
+            }
+
+            let ambiguous = hydrate_lab_workspace_dependencies_for_component(
+                "unused-runner",
+                &worktree.display().to_string(),
+                "/remote/blocks-engine",
+                None,
+                None,
+            )
+            .expect_err("bare worktree path stays ambiguous");
+            assert!(ambiguous
+                .message
+                .contains("matches multiple registered component configurations"));
+
+            let staged = hydrate_lab_workspace_dependencies_for_component(
+                "unused-runner",
+                &worktree.display().to_string(),
+                "/remote/blocks-engine",
+                None,
+                Some("blocks-engine"),
+            )
+            .expect("admitted --repo identity stages for lab execution");
+            assert_eq!(staged.status, "skipped_no_provider");
+        });
+    }
+
     #[test]
     fn hydration_output_reports_skipped_when_no_provider() {
         let output = LabWorkspaceHydrationOutput::skipped_no_provider("/runner/ws");
@@ -862,6 +979,7 @@ mod tests {
             "/missing/controller-workspace",
             "/missing/runner-workspace",
             HomeboyPlan::for_description(homeboy_core::plan::PlanKind::LabOffload, "hydration"),
+            None,
             None,
         )
         .expect("skip does not detect or execute dependencies");
@@ -1360,6 +1478,7 @@ mod tests {
                 &remote.path().display().to_string(),
                 base_lab_plan(None),
                 None,
+                None,
             )
             .expect("workspace command hydrates");
 
@@ -1494,6 +1613,7 @@ mod tests {
             "/unused/local",
             "/unused/remote",
             base_lab_plan(None),
+            None,
             None,
         )
         .expect("opt-out path does not hydrate");

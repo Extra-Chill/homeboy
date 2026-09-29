@@ -168,8 +168,27 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
+    hydrate_declared_dependencies_for_component(path, workspace, package_root, policy, None)
+}
+
+/// Hydrate declared dependencies using a component identity already recorded at
+/// admission. When `component_id` is known, the worktree path is not re-resolved.
+pub fn hydrate_declared_dependencies_for_component(
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+    component_id: Option<&str>,
+) -> Result<Vec<DependencyHydrationOutcome>> {
     let deadline = Instant::now() + policy.timeout;
-    hydrate_declared_dependencies_unlocked(path, workspace, package_root, policy, deadline)
+    hydrate_declared_dependencies_unlocked(
+        path,
+        workspace,
+        package_root,
+        policy,
+        deadline,
+        component_id.map(str::to_string),
+    )
 }
 
 fn hydrate_declared_dependencies_unlocked(
@@ -178,11 +197,15 @@ fn hydrate_declared_dependencies_unlocked(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
     deadline: Instant,
+    component_id: Option<String>,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let path_arg = path.display().to_string();
     let component_path_arg = path_arg.clone();
     let component = match run_with_hydration_deadline(policy, deadline, move |_| {
-        Ok(component::resolve_effective(None, Some(&component_path_arg), None).ok())
+        Ok(
+            component::resolve_effective(component_id.as_deref(), Some(&component_path_arg), None)
+                .ok(),
+        )
     })? {
         Some(Some(component)) => component,
         Some(None) => return Ok(Vec::new()),
@@ -909,9 +932,19 @@ pub enum DependencyInstallInvocation {
 /// materialized runner workspace exposes. Each provider root is recorded
 /// relative to the source Git repository root, which the runner materializes.
 pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanStep>> {
+    dependency_install_plan_for_component(path, None)
+}
+
+/// Plan dependency installs for a checkout whose component identity is already
+/// known. `component_id` is the identity recorded at admission; when it is
+/// present the worktree path is not re-scanned for a component.
+pub fn dependency_install_plan_for_component(
+    path: &Path,
+    component_id: Option<&str>,
+) -> Result<Vec<DependencyInstallPlanStep>> {
     let workspace = dependency_install_workspace_root(path)?;
     let (component, resolved_path) =
-        resolve_component_path(None, Some(&path.display().to_string()))?;
+        resolve_component_path(component_id, Some(&path.display().to_string()))?;
     let control = CooperativeControl::unbounded();
     let providers = match provider::resolve_dependency_providers_optional_with_control(
         &component,
@@ -1214,6 +1247,13 @@ pub fn stack_apply_value(
 fn serialize_dependency_output<T: Serialize>(value: T, context: &str) -> Result<serde_json::Value> {
     serde_json::to_value(value)
         .map_err(|e| Error::internal_json(e.to_string(), Some(context.to_string())))
+}
+
+/// Resolve a checkout component for a Cook phase. When `component_id` was
+/// recorded at admission, the worktree path is not re-scanned for identity.
+pub fn resolve_checkout_component(component_id: Option<&str>, path: &Path) -> Result<Component> {
+    resolve_component_path(component_id, Some(&path.display().to_string()))
+        .map(|(component, _)| component)
 }
 
 fn resolve_component_path(
@@ -1663,6 +1703,82 @@ mod tests {
             assert_eq!(result.installs.len(), 1);
             assert_eq!(result.installs[0].status, Some(0));
             assert!(project.path().join("installed.marker").is_file());
+        });
+    }
+
+    /// #15039: a shared-repository worktree that also registers a nested
+    /// component cannot be re-resolved from the bare path. Lab staging must use
+    /// the component identity recorded at admission (`--repo`) instead.
+    #[test]
+    fn dependency_install_plan_uses_admitted_component_for_nested_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let root = tempfile::tempdir().expect("repository root");
+            let primary = root.path().join("blocks-engine");
+            let nested = primary.join("php-transformer");
+            let worktree = root
+                .path()
+                .join("blocks-engine@fix-issue-2194-blocks-engine");
+            std::fs::create_dir_all(&nested).expect("nested component");
+            crate::test_support::run_git_fixture_command(&primary, &["init", "-q"]);
+            crate::test_support::run_git_fixture_command(
+                &primary,
+                &["config", "user.email", "test@example.com"],
+            );
+            crate::test_support::run_git_fixture_command(
+                &primary,
+                &["config", "user.name", "Test"],
+            );
+            crate::test_support::run_git_fixture_command(
+                &primary,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/org/blocks-engine.git",
+                ],
+            );
+            std::fs::write(primary.join("README.md"), "root\n").expect("readme");
+            std::fs::write(nested.join("composer.json"), "{}").expect("composer manifest");
+            crate::test_support::run_git_fixture_command(&primary, &["add", "."]);
+            crate::test_support::run_git_fixture_command(&primary, &["commit", "-qm", "base"]);
+            crate::test_support::run_git_fixture_command(
+                &primary,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "fix/issue-2194",
+                    worktree.to_str().expect("worktree path"),
+                ],
+            );
+            let registrations = home.path().join(".config/homeboy/components");
+            std::fs::create_dir_all(&registrations).expect("registrations");
+            for (id, path) in [("blocks-engine", &primary), ("php-transformer", &nested)] {
+                std::fs::write(
+                    registrations.join(format!("{id}.json")),
+                    serde_json::json!({
+                        "local_path": path,
+                        "remote_url": "https://github.com/example/blocks-engine.git",
+                    })
+                    .to_string(),
+                )
+                .expect("register component");
+            }
+
+            let ambiguous =
+                dependency_install_plan(&worktree).expect_err("bare worktree path stays ambiguous");
+            assert!(
+                ambiguous
+                    .message
+                    .contains("matches multiple registered component configurations"),
+                "{}",
+                ambiguous.message
+            );
+
+            dependency_install_plan_for_component(&worktree, Some("blocks-engine"))
+                .expect("admitted --repo identity stages the shared-repository worktree");
         });
     }
 

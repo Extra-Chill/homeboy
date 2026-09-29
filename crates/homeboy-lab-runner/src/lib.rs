@@ -361,6 +361,7 @@ pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
     daemon_lab_handoff_capabilities, status_for_admission,
 };
+pub use connection::{install_runner_service, runner_service_status, RunnerServiceReport};
 pub use runner_probe_gate::observe_runner_capabilities;
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
@@ -415,6 +416,10 @@ pub use homeboy_refresh::{
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;
+pub use lab::secrets::{
+    agent_task_runner_provider_secret_env_names,
+    preflight_agent_task_runner_provider_secret_env_plan,
+};
 pub use lab::{
     execute_lab_offload, LabJobOverrides, LabOffloadCommand, LabOffloadOutcome, LabOffloadRequest,
     LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,

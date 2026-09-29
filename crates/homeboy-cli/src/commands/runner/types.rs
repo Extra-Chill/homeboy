@@ -518,6 +518,15 @@ pub enum RunnerCommandOutput {
     Workspace(Box<workspace::RunnerWorkspaceOutput>),
     RefreshPlan(Box<refresh_plan::LabRefreshPlanOutput>),
     Broker(Box<RunnerBrokerOutput>),
+    Service(Box<RunnerServiceOutput>),
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerServiceOutput {
+    pub variant: &'static str,
+    pub command: &'static str,
+    #[serde(flatten)]
+    pub report: homeboy::runner::RunnerServiceReport,
 }
 
 #[derive(Debug, Serialize)]

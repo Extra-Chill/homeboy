@@ -82,6 +82,26 @@ fn legacy_adoption_budget_failure(
         })
 }
 
+/// Whether the historical source run being adopted could possibly have an
+/// aggregate to read a review form from. `provider_executions_consumed == 0`
+/// alone is not a safe stand-in: plenty of legitimately-executed fixtures
+/// never bump that counter. Require the same durable absence-of-evidence
+/// combination `candidate_adoption_recovery_outcome`'s own expired-handoff
+/// branch checks (minus its narrower runner-job-id requirement) — no
+/// materialized aggregate, no totals, no artifacts, no provider handles, no
+/// executor evidence, and zero provider executions consumed — before
+/// treating this run as never having produced a real outcome, so a missing
+/// aggregate is only tolerated when it is genuinely expected rather than a
+/// data-integrity problem (homeboy#15005).
+fn adopted_source_never_executed(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    record.aggregate_path.is_none()
+        && record.totals.is_none()
+        && record.artifact_refs.is_empty()
+        && record.provider_handles.is_empty()
+        && record.latest_executor_evidence.is_none()
+        && record.metadata["provider_executions_consumed"] == 0
+}
+
 /// Read the AI-authored review form off an adopted candidate's terminal
 /// outcome. The candidate was produced by an earlier cook attempt, so any form
 /// the original agent emitted is recorded on its aggregate. Absent/invalid here
@@ -456,7 +476,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
             require_review_form: true,
-            review_form: adopted_review_form(lifecycle_store, &record.run_id, recovery.is_some())?,
+            review_form: adopted_review_form(
+                lifecycle_store,
+                &record.run_id,
+                recovery.is_some() || adopted_source_never_executed(&record),
+            )?,
             metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
         });
         let finalization = record.metadata.get("cook_finalization").cloned();
@@ -642,12 +666,21 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 None,
             )
         })?;
+    let admitted_component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .clone()
+        .or_else(|| {
+            super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
+        });
     super::cook_baseline::compare_gate_failures_to_verified_base(
         &mut promotion,
         &source_worktree,
         &gate_workspace,
         &candidate_base_sha,
         options.gates.gate_timeout(),
+        admitted_component_id.as_deref(),
         |compared, total| {
             lifecycle_store.checkpoint_candidate_adoption(
                 &record.run_id,
@@ -689,7 +722,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
         require_review_form: true,
-        review_form: adopted_review_form(lifecycle_store, &record.run_id, recovery.is_some())?,
+        review_form: adopted_review_form(
+            lifecycle_store,
+            &record.run_id,
+            recovery.is_some() || adopted_source_never_executed(&record),
+        )?,
         metadata: serde_json::json!({"adopted_candidate_ref": candidate_ref}),
     });
     let attempt = AgentTaskCookAttemptReport {

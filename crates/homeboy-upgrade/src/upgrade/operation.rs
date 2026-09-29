@@ -638,7 +638,62 @@ pub fn load_upgrade_operation_status(id: Option<&str>) -> Result<UpgradeOperatio
                 )
             })?,
     };
+    let run = reconcile_dead_upgrade_owner(&store, run)?;
     status_from_run(&run)
+}
+
+/// A foreground upgrade has no detached worker: if its recorded owner has
+/// exited, the running observation cannot still be making progress. Reconcile
+/// that durable record on status reads instead of leaving a misleading
+/// indefinitely-running operation for manual `runs reconcile` inspection.
+fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Result<RunRecord> {
+    if run.kind != UPGRADE_OPERATION_KIND
+        || run.status != RunStatus::Running.as_str()
+        || homeboy_core::observation::running_status_note(&run).map_or(true, |note| {
+            !note.starts_with("owner process is not running")
+        })
+    {
+        return Ok(run);
+    }
+
+    let expected = run.metadata_json.clone();
+    let mut metadata = expected.clone();
+    reconcile_replacement_projection(&mut metadata);
+    metadata["phase"] = json!("interrupted");
+    metadata["outcome"] = json!("owner_interrupted");
+    metadata["error"] = json!({
+        "code": "InternalUnexpected",
+        "message": "upgrade owner process exited before the operation completed",
+    });
+    metadata["terminal_intent_id"] = json!(format!("upgrade-owner-interrupted:{}", run.id));
+    if metadata["controller"]["status"] == "pending"
+        || metadata["controller"]["status"] == "running"
+    {
+        metadata["controller"] = component(
+            "interrupted",
+            "controller upgrade did not reach a durable completion checkpoint",
+        );
+    }
+    for key in ["extensions", "runners"] {
+        if metadata[key]["status"] == "pending" || metadata[key]["status"] == "running" {
+            metadata[key] = component("interrupted", "owner exited before refresh completed");
+        }
+    }
+    // Owner death before the operation's terminal checkpoint is always
+    // non-success, even when the binary swap itself is proven. Preserve that
+    // proof in `controller`, while marking unfinished convergence components
+    // explicitly above.
+    let updated =
+        store.finish_running_run_if_metadata(&run.id, RunStatus::Error, metadata, &expected)?;
+    if let Some(updated) = updated {
+        return Ok(updated);
+    }
+    store.get_run(&run.id)?.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "upgrade operation disappeared during status reconciliation: {}",
+            run.id
+        ))
+    })
 }
 
 pub fn persist_extension_progress(
@@ -1219,6 +1274,80 @@ mod tests {
                     .map(|component| component.status.as_str()),
                 Some("pending")
             );
+        });
+    }
+
+    #[test]
+    fn status_terminalizes_an_upgrade_after_its_owner_exits() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let mut run = store.get_run(&id).expect("read run").expect("run exists");
+            run.metadata_json["homeboy_run_owner"]["pid"] = json!(u32::MAX);
+            store
+                .update_running_run_metadata(&id, run.metadata_json)
+                .expect("persist dead owner");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("reconcile status");
+
+            assert_eq!(status.status, RunStatus::Error.as_str());
+            assert_eq!(status.phase, "interrupted");
+            assert!(status.failed);
+            let persisted = store
+                .get_run(&id)
+                .expect("read reconciled")
+                .expect("run exists");
+            assert_eq!(persisted.metadata_json["outcome"], "owner_interrupted");
+            assert!(homeboy_core::observation::running_status_note(&persisted).is_none());
+            drop(operation);
+        });
+    }
+
+    #[test]
+    fn dead_owner_after_replacement_is_failed_and_repeated_status_is_idempotent() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let mut run = store.get_run(&id).expect("read run").expect("run exists");
+            run.metadata_json["homeboy_run_owner"]["pid"] = json!(u32::MAX);
+            run.metadata_json["controller"] = component("updated", "replacement verified");
+            run.metadata_json["phase"] = json!("refreshing configured runners");
+            run.metadata_json["runners"] = component("running", "runner refresh in progress");
+            store
+                .update_running_run_metadata(&id, run.metadata_json)
+                .expect("persist interrupted progress");
+
+            let first = load_upgrade_operation_status(Some(&id)).expect("reconcile status");
+            assert_eq!(first.status, RunStatus::Error.as_str());
+            assert_eq!(first.phase, "interrupted");
+            assert!(first.failed);
+            assert_eq!(
+                first
+                    .controller
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("updated")
+            );
+            assert_eq!(
+                first
+                    .runners
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("interrupted")
+            );
+            assert!(first.failure.is_some());
+
+            let persisted_after_first = store.get_run(&id).expect("read terminal run").unwrap();
+            let second = load_upgrade_operation_status(Some(&id)).expect("repeat status");
+            let persisted_after_second = store.get_run(&id).expect("read terminal run").unwrap();
+            assert_eq!(second, first);
+            assert_eq!(
+                persisted_after_second.metadata_json,
+                persisted_after_first.metadata_json
+            );
+            drop(operation);
         });
     }
 

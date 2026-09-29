@@ -83,8 +83,8 @@ pub fn materialize_recovered_patch_artifact(
 }
 
 /// Resolve a persisted artifact record id to the lifecycle artifact id used by
-/// promotion. Controller mirrors and runner references intentionally have
-/// distinct record ids while sharing this logical id.
+/// promotion. The canonical runner ref uses that persisted id; friendly logical
+/// names remain metadata.
 pub fn resolve_promotion_patch_artifact_id(
     run_id: &str,
     task_id: Option<&str>,
@@ -190,9 +190,12 @@ fn materialize_artifact(
             (runner_id, None)
         }
     };
-    let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
-        .artifacts
-        .runner_artifact_ref(&runner_id, run_id, &artifact.id);
+    let remote_ref = super::failure_recording::canonical_runner_artifact_ref(
+        &runner_id,
+        run_id,
+        task_id,
+        &artifact.id,
+    );
     let path = materialized_path(run_id, task_id, &artifact.id)?;
     let download = homeboy_core::observation::runs_service::with_runner_evidence(|provider| {
         provider.download_remote_artifact(&remote_ref, Some(path.clone()))

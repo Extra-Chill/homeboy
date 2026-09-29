@@ -1554,7 +1554,10 @@ fn test_exec_reports_required_path_diagnostics() {
 fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
     homeboy_core::test_support::with_isolated_home(|_| {
         server::create(
-            r#"{"id":"lab-server","host":"192.168.86.63","user":"user"}"#,
+            // Use a TEST-NET address that cannot identify an actual runner, so
+            // the transport preflight cannot accidentally reach a host on the
+            // test machine's private network.
+            r#"{"id":"lab-server","host":"192.0.2.1","user":"user"}"#,
             false,
         )
         .expect("create server");
@@ -1606,7 +1609,11 @@ fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
         .expect_err("disconnected ssh runner needs daemon or diagnostic fallback");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
-        assert!(err.message.contains("SSH connectivity check failed"));
+        assert!(
+            err.message.contains("SSH transport_unreachable")
+                || err.message.contains("SSH connectivity check failed"),
+            "unexpected rejection: {err:?}"
+        );
     });
 }
 

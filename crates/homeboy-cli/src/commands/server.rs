@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::output::{budget_json_values, OutputBudget, OutputTruncation};
 use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{self, ManagedSshSession, Server, SshClient, PERSIST_SCOPE};
 use homeboy::core::{EntityCrudOutput, MergeOutput};
@@ -16,6 +17,8 @@ pub struct ServerExtra {
     pub session: Option<ServerSessionOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_policy: Option<ServerSessionPolicyOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_budget: Option<OutputTruncation>,
 }
 
 pub type ServerOutput = EntityCrudOutput<Server, ServerExtra>;
@@ -96,8 +99,15 @@ enum ServerCommand {
         /// Server ID
         server_id: String,
     },
-    /// List all configured servers
-    List,
+    /// List configured servers as a bounded address summary
+    List {
+        /// Return complete redacted server records.
+        ///
+        /// The default summary is id, host, port, and user. Runner PATH, settings,
+        /// and resources stay behind this flag or `server show`.
+        #[arg(long)]
+        full: bool,
+    },
     /// Open a managed SSH control-master session for this server
     Connect {
         /// Server ID
@@ -239,7 +249,7 @@ pub fn run(args: ServerArgs) -> CmdResult<ServerOutput> {
         ServerCommand::Show { server_id } => show(&server_id),
         ServerCommand::Set { args } => set(args),
         ServerCommand::Delete { server_id } => delete(&server_id),
-        ServerCommand::List => list(),
+        ServerCommand::List { full } => list(full),
         ServerCommand::Connect { server_id } => session_connect(&server_id),
         ServerCommand::Status { server_id } => session_status(&server_id),
         ServerCommand::Disconnect { server_id } => session_disconnect(&server_id),
@@ -425,17 +435,61 @@ fn delete(server_id: &str) -> CmdResult<ServerOutput> {
     ))
 }
 
-fn list() -> CmdResult<ServerOutput> {
-    let servers = server::list()?;
+fn list(full: bool) -> CmdResult<ServerOutput> {
+    Ok(list_output(server::list()?, full))
+}
 
-    Ok((
+fn list_output(servers: Vec<Server>, full: bool) -> (ServerOutput, i32) {
+    if full {
+        return (
+            ServerOutput {
+                command: "server.list".to_string(),
+                entities: servers,
+                ..Default::default()
+            },
+            0,
+        );
+    }
+
+    let summaries = servers.iter().map(summary_server).collect::<Vec<_>>();
+    let total = summaries.len();
+    let (kept, output_budget) = budget_json_values(
+        summaries
+            .iter()
+            .filter_map(|server| serde_json::to_value(server).ok()),
+        total,
+        OutputBudget::COLLECTION,
+        "homeboy server list --full",
+        "homeboy server list --full --output <path>",
+    );
+    (
         ServerOutput {
             command: "server.list".to_string(),
-            entities: servers,
+            entities: summaries.into_iter().take(kept.len()).collect(),
+            extra: ServerExtra {
+                output_budget: Some(output_budget),
+                ..Default::default()
+            },
             ..Default::default()
         },
         0,
-    ))
+    )
+}
+
+fn summary_server(server: &Server) -> Server {
+    let policy = RedactionPolicy::default();
+    Server {
+        id: policy.redact_string(&server.id),
+        aliases: Vec::new(),
+        host: policy.redact_string(&server.host),
+        user: policy.redact_string(&server.user),
+        port: server.port,
+        identity_file: None,
+        kind: server.kind.as_ref().map(|kind| policy.redact_string(kind)),
+        auth: None,
+        env: std::collections::HashMap::new(),
+        runner: None,
+    }
 }
 
 fn key_generate(server_id: &str) -> CmdResult<ServerOutput> {
@@ -565,6 +619,7 @@ fn key_import(server_id: &str, private_key_path: &str) -> CmdResult<ServerOutput
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use homeboy::core::server::{ManagedSshSessionPersistSource, RunnerSecretEnvRef, ServerRunner};
     use std::collections::HashMap;
 
@@ -649,5 +704,106 @@ mod tests {
             output["persist_scope"],
             "local OpenSSH ControlMaster idle lifetime; not a remote server policy"
         );
+    }
+
+    #[test]
+    fn server_list_summary_keeps_address_and_full_redacts_secrets() {
+        let path = format!("/opt/runner/bin:{}", "PATH_MARKER_".repeat(4_000));
+        let secret = "sk-test-secret-value";
+        let resource = "RESOURCE_BLOB_".repeat(2_000);
+        let runner = Server {
+            id: "lab".to_string(),
+            aliases: Vec::new(),
+            host: "runner.example".to_string(),
+            user: "deploy".to_string(),
+            port: 2222,
+            identity_file: Some("/keys/lab".to_string()),
+            kind: Some("ssh".to_string()),
+            auth: None,
+            env: HashMap::from([("SERVER_TOKEN".to_string(), secret.to_string())]),
+            runner: Some(ServerRunner {
+                env: HashMap::from([
+                    ("PATH".to_string(), path.clone()),
+                    ("OPENAI_API_KEY".to_string(), secret.to_string()),
+                ]),
+                resources: HashMap::from([("plugin".to_string(), serde_json::json!(resource))]),
+                settings: homeboy::core::server::RunnerSettings {
+                    homeboy_path: Some(format!(
+                        "/usr/local/bin/{}",
+                        "HOMEBOY_BIN_MARKER_".repeat(200)
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        };
+        let mut servers = vec![runner.clone()];
+        servers.extend((0..25).map(|index| Server {
+            id: format!("extra-{index}"),
+            aliases: Vec::new(),
+            host: format!("extra-{index}.example"),
+            user: "deploy".to_string(),
+            port: 22,
+            identity_file: None,
+            kind: None,
+            auth: None,
+            env: HashMap::new(),
+            runner: None,
+        }));
+
+        let (summary, _) = map_server_output(Ok(list_output(servers, false))).expect("summary");
+        let value = serde_json::to_value(&summary).expect("serialize summary");
+        let rendered = value.to_string();
+        assert_eq!(value["entities"][0]["id"], "lab");
+        assert_eq!(value["entities"][0]["host"], "runner.example");
+        assert_eq!(value["entities"][0]["port"], 2222);
+        assert_eq!(value["entities"][0]["user"], "deploy");
+        assert_eq!(value["entities"][0]["kind"], "ssh");
+        assert!(value["entities"][0].get("runner").is_none());
+        assert!(value["entities"][0].get("env").is_none());
+        assert_eq!(
+            value["entities"].as_array().unwrap().len(),
+            OutputBudget::COLLECTION.max_items
+        );
+        assert_eq!(
+            value["output_budget"]["continue_command"],
+            "homeboy server list --full"
+        );
+        assert!(!rendered.contains("PATH_MARKER_"));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("RESOURCE_BLOB_"));
+        assert!(!rendered.contains("HOMEBOY_BIN_MARKER_"));
+        assert!(!rendered.contains("/keys/lab"));
+
+        let (full, _) = map_server_output(Ok(list_output(vec![runner], true))).expect("full");
+        let full_json = serde_json::to_value(&full).expect("serialize full list");
+        assert!(full.extra.output_budget.is_none());
+        assert_eq!(full_json["entities"][0]["runner"]["env"]["PATH"], path);
+        assert_eq!(
+            full_json["entities"][0]["runner"]["env"]["OPENAI_API_KEY"],
+            REDACTED_ENV_VALUE
+        );
+        assert_eq!(
+            full_json["entities"][0]["env"]["SERVER_TOKEN"],
+            REDACTED_ENV_VALUE
+        );
+        assert!(!full_json.to_string().contains(secret));
+    }
+
+    #[test]
+    fn server_list_defaults_to_summary_and_full_is_explicit() {
+        assert!(!list_flag(&["homeboy", "server", "list"]));
+        assert!(list_flag(&["homeboy", "server", "list", "--full"]));
+    }
+
+    fn list_flag(args: &[&str]) -> bool {
+        let cli = crate::cli_surface::Cli::try_parse_from(args).expect("parse server list");
+        let crate::cli_surface::Commands::Server(server) = cli.command else {
+            panic!("expected a server command");
+        };
+        match server.command {
+            ServerCommand::List { full } => full,
+            _ => panic!("expected server list"),
+        }
     }
 }

@@ -335,6 +335,15 @@ pub(super) fn runner_job_cancel_unsupported(runner_id: &str, reason: &str) -> Er
 }
 
 pub(super) fn parse_runner_job_cancel_body(body: Value) -> Result<(Job, Vec<JobEvent>)> {
+    // Direct daemon replies retain the HTTP API's canonical `body` envelope;
+    // the reverse broker already unwraps it. Normalize at the shared parser
+    // so neither transport can silently turn a real cancellation into a null
+    // `job` parse error after the runner has stopped the process.
+    let body = if body.get("body").is_some() {
+        canonical_daemon_body(&body, "daemon projection cancel response")?.clone()
+    } else {
+        body
+    };
     let job: Job = serde_json::from_value(body["job"].clone()).map_err(|err| {
         Error::internal_json(
             err.to_string(),

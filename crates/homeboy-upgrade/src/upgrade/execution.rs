@@ -2072,7 +2072,11 @@ fn active_binary_info() -> Result<Option<ActiveBinaryInfo>> {
 fn active_binary_info_at(exe_path: &Path) -> Result<Option<ActiveBinaryInfo>> {
     let mut command = Command::new(exe_path);
     command.arg("--version");
-    let output = command_output_with_timeout(&mut command, Duration::from_secs(5))?;
+    let output = command_output_with_timeout(
+        &mut command,
+        Duration::from_secs(5),
+        "verify active binary version",
+    )?;
 
     if !output.status.success() {
         return Ok(None);
@@ -2083,9 +2087,10 @@ fn active_binary_info_at(exe_path: &Path) -> Result<Option<ActiveBinaryInfo>> {
     ))))
 }
 
-fn command_output_with_timeout(
+pub(crate) fn command_output_with_timeout(
     command: &mut Command,
     timeout: Duration,
+    purpose: &str,
 ) -> Result<std::process::Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let program = PathBuf::from(command.get_program());
@@ -2111,10 +2116,7 @@ fn command_output_with_timeout(
             let _ = child.wait();
             return Err(verify_active_binary_io_error(
                 &program,
-                format!(
-                    "active binary did not answer --version within {}s",
-                    timeout.as_secs()
-                ),
+                format!("{purpose} did not finish within {}s", timeout.as_secs()),
             ));
         }
 

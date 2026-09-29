@@ -62,14 +62,14 @@ use super::cook_pre_execution::{
     terminal_executor_matches, with_pre_execution_phase, CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution_with_store, cook_report, finalize_or_load_cook_pr,
-    finalize_or_load_cook_pr_with_stores, is_moving_base_finalization_error,
-    moving_base_recovery_for_run_with_stores, moving_base_recovery_from_promotion_in_store,
-    moving_base_recovery_report, next_moving_base_recovery,
-    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
-    promote_or_load_attempt_in_store, recover_moving_base_cook_candidate_in_store,
-    refreshed_moving_base_recovery, retryable_provider_discovery_failure_with_store,
-    CookReportInput, MovingBaseCookRecovery,
+    attempt_needs_execution_with_store, cook_report, cook_report_with_stores,
+    finalize_or_load_cook_pr, finalize_or_load_cook_pr_with_stores,
+    is_moving_base_finalization_error, moving_base_recovery_for_run_with_stores,
+    moving_base_recovery_from_promotion_in_store, moving_base_recovery_report,
+    next_moving_base_recovery, persisted_promotion_for_attempt_in_store,
+    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
+    recover_moving_base_cook_candidate_in_store, refreshed_moving_base_recovery,
+    retryable_provider_discovery_failure_with_store, CookReportInput, MovingBaseCookRecovery,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_supervision::{resolve_supervision_policy, CookSupervisor};
@@ -704,6 +704,7 @@ fn report_cook_progress_with_activity(
     Ok(())
 }
 
+#[cfg(test)]
 fn admit_cook_runtime_generation(
     lifecycle_store: &AgentTaskLifecycleStore,
     durable_observer: Option<&CookProgressObserver<'_>>,
@@ -1193,7 +1194,7 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
         if !request.instructions.contains("reviewer-facing PR dossier") {
             request.instructions.push_str(
-                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Bounded checks are allowed when they reproduce the reported behavior, test a hypothesis, or help develop a regression; describe those as observations, never as authoritative final gate results. Homeboy runs the declared deterministic gates itself after harvest and records that evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `pr_title` (a specific PR title for the actual change, at most 256 characters), `summary` (the change and its purpose), `what_changed` (concrete change bullets), qualitative `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). Bounded checks are allowed when they reproduce the reported behavior, test a hypothesis, or help develop a regression; describe those as observations, never as authoritative final gate results. Homeboy runs the declared deterministic gates itself after harvest and records that evidence separately. A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
             );
         }
         let form_timeout_ms = review_form_timeout_ms(request);
@@ -2905,7 +2906,9 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
             .execution_budget
             .deadline_unix_ms = Some(deadline_unix_ms);
     }
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    // Lab placement proves provider readiness on the runner with the runner's
+    // credentials (#15198); only local placement is admitted live here.
+    match crate::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
         &options.identity.initial_plan,
         catalog,
         readiness_cache,
@@ -5405,6 +5408,15 @@ fn run_cook_with_runtime(
         // including when a durable request was assembled outside the CLI.
         options.finalization.draft_pr = true;
     }
+    if options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .is_none()
+    {
+        options.gates.gate_environment.admitted_component_id =
+            cook_repository_identity_component_id(&options.identity.initial_plan);
+    }
     let notification_options = options.clone();
     if let Some(result) = resume_provider_ci_if_ready(
         &mut options,
@@ -5813,6 +5825,31 @@ fn run_cook_reported(
     ) {
         Ok(result) => result,
         Err(mut error) => {
+            if error.details["concurrent_cook_creation_loser"] == Value::Bool(true) {
+                let mut report = cook_report_with_stores(
+                    Some(store),
+                    Some(lifecycle_store),
+                    CookReportInput {
+                        cook_id: failure_options.identity.cook_id.clone(),
+                        status: "durable_failure",
+                        disposition: CookDisposition::Terminal,
+                        attempts: Vec::new(),
+                        finalization: None,
+                        stop_reason: Some(format!(
+                            "another request already owns this Cook id; this request did not modify its durable plan: {}",
+                            error.message
+                        )),
+                        exit_code: 1,
+                        invocation_latest_run_id: None,
+                    },
+                );
+                // The collided identifier belongs to the elected creator. A
+                // loser may report the collision, but must not attach a
+                // controller failure to, reconcile, or otherwise terminalize
+                // the creator's lifecycle attempt.
+                report.value.failure_context = None;
+                return Ok(report);
+            }
             let admission_run_id = error
                 .details
                 .as_object_mut()
@@ -6298,6 +6335,15 @@ fn run_cook_spine(
             "materialized Cook lifecycle record does not match its initial run id",
         ));
     }
+    // Snapshot before report_cook_progress overwrites the phase. Older Cooks
+    // have no started notification marker, so a continuation must not label a
+    // previously running or completed attempt as newly started.
+    let previously_started = materialized_run
+        .metadata
+        .get("cook_progress")
+        .and_then(|progress| progress.get("phase"))
+        .and_then(Value::as_str)
+        .is_some_and(|phase| phase != "durable_identity");
     report_cook_progress(
         lifecycle_store,
         durable_observer,
@@ -6316,6 +6362,7 @@ fn run_cook_spine(
         &options.finalization.base,
         options.retry_policy.max_attempts,
         &options.ai_disclosure.ai_tool,
+        previously_started,
     );
     // Canonicalization and native-worktree discovery can block on provider
     // runtime state. The recipe and lifecycle attempt above must therefore own
@@ -6750,13 +6797,55 @@ fn run_cook_spine(
     // the shared flock.
     let pin_run_id = options.identity.initial_run_id.clone();
     let pin_cook_id = options.identity.cook_id.clone();
-    let _runtime_generation = match admit_cook_runtime_generation(
-        lifecycle_store,
-        durable_observer,
-        &pin_cook_id,
+    let _runtime_generation = match homeboy_core::runtime_promotion::try_pin_cook_generation(
         &pin_run_id,
     ) {
         Ok(pin) => pin,
+        Err(error)
+            if error.code == homeboy_core::ErrorCode::RuntimePromotionWaitTimeout
+                && error.details["wait_stage"] == "os_lock"
+                && error.details["holder_pid"].as_u64().is_some() =>
+        {
+            let owner = serde_json::json!({
+                "pid": error.details["holder_pid"],
+                "operation": error.details["holder_operation"],
+                "operation_id": error.details["holder_operation_id"],
+                "status_command": error.details["holder_status_command"],
+                "target": error.details["target"],
+                "generation": error.details["holder_generation"],
+            });
+            if agent_task_lifecycle::defer_cook_runtime_admission_in_store(
+                lifecycle_store,
+                &pin_run_id,
+                owner,
+            )? {
+                let detail = format!(
+                    "queued before provider execution behind pid {} operation `{}`; daemon will retry runtime admission",
+                    error.details["holder_pid"],
+                    error.details["holder_operation"].as_str().unwrap_or("unknown"),
+                );
+                let _ = report_cook_progress(
+                    lifecycle_store,
+                    durable_observer,
+                    &pin_cook_id,
+                    &pin_run_id,
+                    "runtime_promotion_wait",
+                    1,
+                    Some(&detail),
+                );
+                return Ok(cook_report(CookReportInput {
+                    cook_id: pin_cook_id,
+                    status: CookStatus::Queued.as_str(),
+                    disposition: CookDisposition::InFlight,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(detail),
+                    exit_code: 0,
+                    invocation_latest_run_id: Some(&pin_run_id),
+                }));
+            }
+            return Err(error);
+        }
         Err(error)
             if lifecycle_store
                 .read_record(&pin_run_id)
@@ -8084,6 +8173,11 @@ fn run_cook_spine(
                 std::path::Path::new(&repository_root),
                 &base_sha,
                 options.gates.gate_timeout(),
+                options
+                    .gates
+                    .gate_environment
+                    .admitted_component_id
+                    .as_deref(),
                 |_compared, _total| Ok(()),
             )?;
             lifecycle_store.record_promotion(
@@ -8436,6 +8530,18 @@ fn run_cook_spine(
                     .as_str()
                     .unwrap_or("unknown")
                     .to_string();
+                if matches!(final_status.as_str(), "review_ready" | "draft_published") {
+                    let absorbed_source_run_id = promotion
+                        .provenance
+                        .pointer("/cook_follow_up/source_run_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&run_id);
+                    super::cook_recipe::complete_absorbed_review_form_follow_ups(
+                        store,
+                        lifecycle_store,
+                        absorbed_source_run_id,
+                    )?;
+                }
                 let exit_code =
                     if matches!(final_status.as_str(), "review_ready" | "draft_published") {
                         0
@@ -9750,22 +9856,20 @@ fn materialize_pending_cook_workspace(
 /// need to resolve a review profile or component-scoped path for an
 /// already-admitted Cook should prefer this over re-deriving from the bare
 /// checkout path.
-pub(crate) fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
-    let component_id = plan
-        .metadata
-        .pointer("/cook_repository_identity/component_id")
-        .and_then(Value::as_str)?;
-    let requested_repository = plan
-        .metadata
-        .pointer("/cook_repository_identity/provenance")
-        .and_then(Value::as_str)
-        == Some("--repo:requested-repository");
-    let component_registered = plan
-        .metadata
-        .pointer("/cook_repository_identity/component_registered")
+pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
+    admitted_component_id(plan.metadata.get("cook_repository_identity"))
+}
+
+/// The registered component identity recorded at Cook admission. Callers that
+/// already have this identity must not re-resolve it from a worktree path.
+pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
+    let identity = identity?;
+    let component_id = identity.get("component_id").and_then(Value::as_str)?;
+    let component_registered = identity
+        .get("component_registered")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if requested_repository || !component_registered {
+    if !component_registered || component_id.is_empty() {
         return None;
     }
     Some(component_id.to_string())

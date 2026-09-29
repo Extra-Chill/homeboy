@@ -291,6 +291,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub verified_base_sha: Option<String>,
     pub head: Option<String>,
     pub title: String,
+    /// Validated Cook form title when no operator title was supplied.
+    pub cook_form_title: Option<String>,
     pub commit_message: String,
     pub gate_results: Vec<AgentTaskGateResult>,
     pub normalized_gate_results: Vec<HomeboyGateResult>,
@@ -512,6 +514,10 @@ pub trait AgentTaskPrFinalizationBackend {
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>>;
+    /// Live title of an existing PR, used to preserve operator edits on Cook reuse.
+    fn open_pr_title(&mut self, _path: &str, _number: u64) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Finds a prior merged publication for this exact base/head tuple.
     fn find_merged_pr(
         &mut self,

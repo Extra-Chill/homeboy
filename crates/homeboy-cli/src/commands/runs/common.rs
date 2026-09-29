@@ -34,6 +34,10 @@ pub struct RunSummary {
     pub status_note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_index: Option<RigRunArtifactIndex>,
+    /// Cook attempts and lab-hydration children nested under the Cook that owns
+    /// them. Empty for ordinary runs, and omitted from the wire document then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_runs: Vec<RunSummary>,
 }
 
 pub(crate) fn run_summaries_with_artifact_indexes(

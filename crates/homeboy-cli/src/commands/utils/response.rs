@@ -523,6 +523,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         // transient "busy" condition, not a hard failure — map it to the
         // general error code alongside the other internal/unexpected states.
         ErrorCode::InternalIoError
+        | ErrorCode::ReleaseDeadlineExceeded
         | ErrorCode::InternalJsonError
         | ErrorCode::InternalUnexpected => 1,
     }
@@ -756,6 +757,9 @@ fn failure_diagnostics_for_data(
     if let Some(diagnostics) = runner_disconnect_failure_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
+    if let Some(diagnostics) = deploy_failure_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
 
     let specialized_digest = release_failure_digest(data)
         .or_else(|| cook_batch_failure_digest(data))
@@ -789,6 +793,42 @@ fn failure_diagnostics_for_data(
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
     failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+}
+
+fn deploy_failure_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
+    if data.get("command").and_then(Value::as_str) != Some("deploy.run") {
+        return None;
+    }
+    let result = data.get("results")?.as_array()?.iter().find(|result| {
+        result.get("status").and_then(Value::as_str) == Some("failed")
+            && result
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| !error.trim().is_empty())
+    })?;
+    let id = result.get("id").and_then(Value::as_str)?;
+    let error = result.get("error").and_then(Value::as_str)?;
+    let hints = result
+        .get("deployment_provider")
+        .and_then(|provider| provider.get("remediation"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|hint| !hint.trim().is_empty())
+        .take(4)
+        .map(|message| Hint {
+            message: message.to_string(),
+        })
+        .collect::<Vec<_>>();
+    Some(CommandDiagnostics {
+        code: "command.failed".to_string(),
+        message: format!("deploy failed for {id}: {}", bounded_text(error, 1000)),
+        details: serde_json::json!({ "exit_code": exit_code }),
+        hints: (!hints.is_empty()).then_some(hints),
+        retryable: None,
+        failure_digest: None,
+    })
 }
 
 /// Cook reports retain controller and continuation refusals under the durable
@@ -2380,6 +2420,35 @@ fn append_python_json_string(json: &mut String, value: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn deploy_failure_promotes_provider_cause_and_remediation() {
+        let data = json!({
+            "command": "deploy.run",
+            "results": [{
+                "id": "site",
+                "status": "failed",
+                "error": "Deployment provider failed at preflight (dirty): checkout is dirty",
+                "deployment_provider": {
+                    "remediation": ["inspect checkout", "clean checkout"]
+                }
+            }]
+        });
+        let diagnostics = failure_diagnostics_for_data(1, &None, &[], &data).expect("diagnostics");
+        assert_eq!(
+            diagnostics.message,
+            "deploy failed for site: Deployment provider failed at preflight (dirty): checkout is dirty"
+        );
+        assert_eq!(
+            diagnostics
+                .hints
+                .expect("hints")
+                .into_iter()
+                .map(|hint| hint.message)
+                .collect::<Vec<_>>(),
+            vec!["inspect checkout", "clean checkout"]
+        );
+    }
 
     /// A bounded pass that left a resumable continuation must not surface to
     /// schedulers as a failure.

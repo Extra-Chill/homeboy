@@ -109,28 +109,12 @@ pub(super) fn controller(args: AgentTaskControllerArgs) -> CmdResult<Value> {
 fn controller_status_report_value(
     args: AgentTaskControllerStatusArgs,
 ) -> homeboy::core::Result<Value> {
-    let report =
-        homeboy::agents::agent_task_loop_controller::controller_status_report(&args.loop_id)?;
-    let resource_id =
-        homeboy::agents::agent_task_loop_controller::control_plane_run_id(&args.loop_id)?;
-    let resource = homeboy::core::control_plane::run(&resource_id)
-        .map_err(|error| homeboy::core::Error::internal_unexpected(error.message))?;
+    let report = homeboy::agents::agent_task_loop_controller::loop_status_read(
+        &args.loop_id,
+        &homeboy::core::control_plane::ControlPlaneInvocationContext::default(),
+    )?;
     let mut value = serde_json::to_value(report)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "resource".to_string(),
-            serde_json::to_value(resource)
-                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?,
-        );
-        object.insert(
-            "work".to_string(),
-            homeboy::agents::agent_task_loop_controller::loop_work_status(
-                &object["controller"]["metadata"],
-                &homeboy::core::control_plane::ControlPlaneInvocationContext::default(),
-            ),
-        );
-    }
     if args.spec.is_some()
         || args.dispatch.dispatch_backend.is_some()
         || args.dispatch.dispatch_selector.is_some()
@@ -303,28 +287,17 @@ fn loop_define(args: AgentTaskLoopDefineArgs) -> CmdResult<Value> {
 }
 
 fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
-    let report =
-        homeboy::agents::agent_task_loop_controller::controller_status_report(&args.loop_id)?;
-    let report = serde_json::to_value(report)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    let resource_id =
-        homeboy::agents::agent_task_loop_controller::control_plane_run_id(&args.loop_id)?;
-    let resource = homeboy::core::control_plane::run(&resource_id)
-        .map_err(|error| homeboy::core::Error::internal_unexpected(error.message))?;
-    let mut report = report;
-    report["resource"] = serde_json::to_value(resource)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-    report["work"] = homeboy::agents::agent_task_loop_controller::loop_work_status(
-        &report["controller"]["metadata"],
+    let report = homeboy::agents::agent_task_loop_controller::loop_status_read(
+        &args.loop_id,
         &homeboy::core::control_plane::ControlPlaneInvocationContext::default(),
-    );
+    )?;
     Ok((
         command_json_value(serde_json::json!({
             "schema": "homeboy/agent-task-loop-status-result/v1",
             "runtime": homeboy::agents::agent_task_loop_controller::loop_runtime_metadata(
-                &report["controller"]["metadata"],
+                &report.controller.metadata,
             ),
-            "work": report["work"],
+            "work": report.work,
             "status": report,
         }))?,
         0,
@@ -1550,6 +1523,121 @@ mod tests {
                 let _ = client.status(&job_id);
             }
             server.join().expect("join daemon");
+        });
+    }
+
+    #[test]
+    fn loop_status_and_stop_match_the_http_control_plane_route() {
+        with_isolated_home(|_| {
+            homeboy::agents::orchestration::register();
+            let loop_id = "daemon-loop-status";
+            let _record = agent_task_loop_controller::create_controller(loop_id, "repair", "v1")
+                .expect("created");
+            let path = agent_task_loop_controller::controller_record_path(loop_id).expect("path");
+            let before = std::fs::read(&path).expect("controller bytes");
+            let canonical =
+                agent_task_loop_controller::control_plane_run_id(loop_id).expect("canonical id");
+            let status_path = format!("/v1/control-plane/runs/{canonical}");
+
+            let (cli_status, exit_code) = loop_status(AgentTaskLoopStatusArgs {
+                loop_id: loop_id.to_string(),
+            })
+            .expect("CLI status");
+            assert_eq!(exit_code, 0);
+            assert_eq!(std::fs::read(&path).expect("controller bytes"), before);
+            let daemon_status =
+                homeboy::core::http_api::handle(homeboy::core::http_api::HttpApiRequest {
+                    method: homeboy::core::http_api::HttpMethod::Get,
+                    path: status_path.clone(),
+                    body: None,
+                })
+                .expect("HTTP status");
+            assert_eq!(daemon_status.status, 200);
+            assert_eq!(
+                daemon_status.body["resource"],
+                cli_status["status"]["resource"]
+            );
+            assert_eq!(cli_status["status"]["resource"]["owner"]["id"], loop_id);
+            assert_eq!(cli_status["status"]["controller"]["loop_id"], loop_id);
+
+            let (stopped, exit_code) = loop_stop(AgentTaskLoopStatusArgs {
+                loop_id: loop_id.to_string(),
+            })
+            .expect("CLI stop");
+            assert_eq!(exit_code, 0);
+            assert_eq!(stopped["on"], false);
+            let stopped_record =
+                agent_task_loop_controller::load_controller(loop_id).expect("stopped");
+            let repeated = homeboy::core::http_api::handle(
+                homeboy::core::http_api::HttpApiRequest {
+                    method: homeboy::core::http_api::HttpMethod::Post,
+                    path: format!("{status_path}/actions"),
+                    body: Some(serde_json::json!({
+                        "schema": "homeboy/control-plane-action-request/v1",
+                        "effect_id": format!("loop-stop:{canonical}:{}", stopped_record.updated_at),
+                        "action": "cancel",
+                        "idempotency_key": format!("loop-stop:{canonical}:{}", stopped_record.updated_at),
+                        "actor": "homeboy-agent-task-loop",
+                        "expected_updated_at": stopped_record.updated_at,
+                        "parameters": {
+                            "schema": "homeboy/control-plane-cancel-parameters/v1",
+                            "data": { "reason": "repeated daemon stop" }
+                        },
+                        "confirmed": true
+                    })),
+                },
+            )
+            .expect("HTTP repeated stop");
+            assert_eq!(repeated.status, 200);
+            assert_eq!(
+                repeated.body["resource"]["outcome"], "already_satisfied",
+                "{:?}",
+                repeated.body
+            );
+
+            let mut restarted =
+                agent_task_loop_controller::load_controller(loop_id).expect("reload");
+            agent_task_loop_controller::stamp_loop_runtime_metadata(
+                &mut restarted.metadata,
+                true,
+                Some(0),
+                false,
+            )
+            .expect("turn on");
+            restarted.updated_at = chrono::Utc::now().to_rfc3339();
+            agent_task_loop_controller::write_controller(&restarted).expect("persist on");
+            let resumed = homeboy::core::http_api::handle(
+                homeboy::core::http_api::HttpApiRequest {
+                    method: homeboy::core::http_api::HttpMethod::Post,
+                    path: format!("{status_path}/actions"),
+                    body: Some(serde_json::json!({
+                        "schema": "homeboy/control-plane-action-request/v1",
+                        "effect_id": format!("loop-resume:{canonical}:{}", restarted.updated_at),
+                        "action": "resume",
+                        "idempotency_key": format!("loop-resume:{canonical}:{}", restarted.updated_at),
+                        "actor": "homeboy-agent-task-loop",
+                        "expected_updated_at": restarted.updated_at,
+                        "parameters": {
+                            "schema": "homeboy/agent-task-loop-resume-parameters/v1",
+                            "data": { "revolution_limit": 0, "dispatch_defaults": {} }
+                        },
+                        "confirmed": true
+                    })),
+                },
+            )
+            .expect("HTTP resume");
+            assert_eq!(resumed.status, 200);
+            assert_eq!(
+                resumed.body["resource"]["outcome"], "already_satisfied",
+                "{:?}",
+                resumed.body
+            );
+            let (after, exit_code) = loop_status(AgentTaskLoopStatusArgs {
+                loop_id: loop_id.to_string(),
+            })
+            .expect("status after resume");
+            assert_eq!(exit_code, 0);
+            assert_eq!(after["runtime"]["on"], true);
         });
     }
 

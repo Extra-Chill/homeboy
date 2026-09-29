@@ -136,6 +136,16 @@ homeboy upgrade --skip-runners
 - `controller` / `extensions` / `runners`: Independent component statuses
 - `note`: Present when a running record's owner process is no longer alive
 
+Status reads reconcile an upgrade record whose foreground owner has exited to
+a non-success interrupted terminal state, projecting any pending binary
+replacement from its durable checkpoint. A proven controller replacement
+remains visible independently from incomplete extension or runner refresh.
+Controller replacement admission still waits for live runtime-generation pins.
+Upgrade currently has no detached worker, so a caller that exits while blocked
+does not leave a queued continuation to resume when a pin is released; deferred
+worker-backed continuation remains open, and the upgrade must be retried after
+the pin holder finishes.
+
 `homeboy upgrade` data payload:
 
 - `command`: `upgrade`
@@ -164,7 +174,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 - Version checking queries the GitHub Releases API. Network failures are handled gracefully.
 - On Unix platforms, successful source installs automatically restart into the new binary. Binary and package-manager installs do not require a restart.
-- Upgrade persists a durable operation before controller mutation. Long extension refresh emits bounded `[upgrade] phase=... elapsed=Ns` heartbeats. If the client times out, `homeboy upgrade status` still reports whether binary promotion completed; optional refresh may continue or show as interrupted.
+- Upgrade persists a durable operation before controller mutation. Long extension refresh emits bounded `[upgrade] phase=... elapsed=Ns` heartbeats. `homeboy upgrade status` reconciles dead foreground owners and reports whether a binary replacement checkpoint proves promotion; optional refresh is marked interrupted when its owner exits.
 
 ## Related
 

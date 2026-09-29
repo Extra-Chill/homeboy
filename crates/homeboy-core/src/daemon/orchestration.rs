@@ -32,6 +32,14 @@ pub trait OrchestrationDriver: Send + Sync {
 
     /// Resume one durable queued retry whose reservation survived its launcher.
     fn reconcile_queued_retries(&self) -> Result<Value>;
+
+    /// Consume at most one durable terminal Cook continuation per tick.
+    fn reconcile_terminal_cook_continuations(&self) -> Result<Value>;
+
+    /// Reconcile durable controller waits from locally observable evidence.
+    /// External-event waits must remain open until their event or declared
+    /// deadline is present.
+    fn reconcile_waiting_controllers(&self) -> Result<Value>;
 }
 
 /// CLI-owned execution seam for an already-fenced Cook admission replay.
@@ -44,6 +52,11 @@ pub trait CookAdmissionReplayDriver: Send + Sync {
     /// Start a replay worker. The worker must consume the supplied token at the
     /// lifecycle mutation boundary before it performs any route side effect.
     fn replay(&self, request: &Value) -> Result<Value>;
+
+    /// Admit terminal Cook continuation work as a durable controller job.
+    fn schedule_terminal_continuation(&self, _request: &Value) -> Result<Value> {
+        Ok(Value::Null)
+    }
 }
 
 /// CLI-owned execution seam for a durable retry reservation. The lifecycle
@@ -90,6 +103,14 @@ impl OrchestrationDriver for NoopOrchestrationDriver {
     }
 
     fn reconcile_queued_retries(&self) -> Result<Value> {
+        Ok(Value::Null)
+    }
+
+    fn reconcile_terminal_cook_continuations(&self) -> Result<Value> {
+        Ok(Value::Null)
+    }
+
+    fn reconcile_waiting_controllers(&self) -> Result<Value> {
         Ok(Value::Null)
     }
 }
@@ -155,6 +176,19 @@ pub fn reconcile_unmaterialized_cook_admissions() -> Result<Value> {
 /// Drive one queued-retry recovery pass.
 pub fn reconcile_queued_retries() -> Result<Value> {
     active_driver().reconcile_queued_retries()
+}
+
+pub fn reconcile_terminal_cook_continuations() -> Result<Value> {
+    active_driver().reconcile_terminal_cook_continuations()
+}
+
+pub fn schedule_terminal_cook_continuation(request: &Value) -> Result<Value> {
+    cook_replay_registry::active().schedule_terminal_continuation(request)
+}
+
+/// Drive one durable controller-wait reconciliation pass.
+pub fn reconcile_waiting_controllers() -> Result<Value> {
+    active_driver().reconcile_waiting_controllers()
 }
 
 /// Invoke the registered replay worker after agents has durably claimed it.

@@ -81,6 +81,35 @@ fn cancellation_defaults_to_agent_task_workloads_after_overrides() {
     ));
 }
 
+#[test]
+fn direct_projection_cancel_response_unwraps_daemon_body_and_keeps_cancel_event_data() {
+    let mut job = running_job();
+    job.status = JobStatus::Cancelled;
+    let cancellation_cause = json!({"reason": "controller_timeout", "attempt": 2});
+    let response = json!({
+        "body": {
+            "job": serde_json::to_value(&job).expect("job serializes"),
+            "events": [{
+                "sequence": 7,
+                "job_id": job.id,
+                "kind": "status",
+                "timestamp_ms": job.updated_at_ms,
+                "message": "cancelled",
+                "data": {"cause": cancellation_cause}
+            }]
+        }
+    });
+
+    let (parsed, events) = parse_runner_job_cancel_body(response)
+        .expect("production cancellation parser unwraps daemon response");
+
+    assert_eq!(parsed.status, JobStatus::Cancelled);
+    assert_eq!(
+        events[0].data.as_ref().expect("event data")["cause"],
+        cancellation_cause
+    );
+}
+
 fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
     let plan = homeboy_core::plan::HomeboyPlan::builder_for_description(
         homeboy_core::plan::PlanKind::LabOffload,
@@ -1341,8 +1370,10 @@ impl Drop for ReleaseBlockedWorkload {
     }
 }
 
-fn wait_for_path(path: &std::path::Path, description: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+/// Wait for a workload marker file. Returns as soon as it exists; the 30s
+/// bound only absorbs a loaded test host.
+pub(super) fn wait_for_path(path: &std::path::Path, description: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while !path.exists() {
         assert!(
             std::time::Instant::now() < deadline,

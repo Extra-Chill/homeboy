@@ -11,8 +11,8 @@ fn test_store() -> homeboy::core::observation::ObservationStore {
 mod export_import;
 
 use super::bench::bench_compare;
-use super::dossier::runs_dossier;
-use super::handlers::{artifact_get, artifacts, env, show_run};
+use super::dossier::runs_dossier_in_store;
+use super::handlers::{artifact_get, artifacts, env, show_run_in_store};
 use super::reconcile::{reconcile_runs, RunsReconcileArgs};
 use super::{
     dead_owned_run, findings, latest, list_runs, RunsArtifactGetArgs, RunsListArgs, RunsOutput,
@@ -749,7 +749,7 @@ fn run_show_includes_metadata_and_artifacts() {
             .record_artifact(&run.id, "bench_results", &artifact_path)
             .expect("record artifact");
 
-        let (output, _) = show_run(&run.id).expect("show");
+        let (output, _) = show_run_in_store(&store, &run.id).expect("show");
         let RunsOutput::Show(output) = output else {
             panic!("expected show output");
         };
@@ -814,7 +814,7 @@ fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
             .record_url_artifact(&run.id, "review", "https://example.test/evidence")
             .expect("record url");
 
-        let (output, _) = runs_dossier(&run.id).expect("dossier");
+        let (output, _) = runs_dossier_in_store(&store, &run.id).expect("dossier");
         let RunsOutput::Dossier(output) = output else {
             panic!("expected dossier output");
         };
@@ -872,7 +872,9 @@ fn runs_dossier_loads_artifacts_for_a_durable_run_label() {
             .expect("artifact");
         drop(store);
 
-        let (output, _) = runs_dossier("dossier-label").expect("dossier by durable label");
+        let store = test_store();
+        let (output, _) =
+            runs_dossier_in_store(&store, "dossier-label").expect("dossier by durable label");
         let RunsOutput::Dossier(output) = output else {
             panic!("expected dossier output");
         };
@@ -896,7 +898,7 @@ fn run_show_reconciles_its_requested_dead_owner_beyond_the_fleet_limit() {
         store
             .import_run(&dead_owned_run("dead-owned-run"))
             .expect("import stale fixture");
-        let (output, _) = show_run("dead-owned-run").expect("show");
+        let (output, _) = show_run_in_store(&store, "dead-owned-run").expect("show");
         let RunsOutput::Show(output) = output else {
             panic!("expected show output");
         };
@@ -1322,7 +1324,7 @@ fn runner_job_show_keeps_local_evidence_when_refresh_runner_is_unavailable() {
         };
         store.upsert_imported_run(&run).expect("runner run");
 
-        let (output, exit_code) = show_run(&run.id).expect("show local evidence");
+        let (output, exit_code) = show_run_in_store(&store, &run.id).expect("show local evidence");
 
         assert_eq!(exit_code, 0);
         let RunsOutput::Show(output) = output else {
@@ -1605,7 +1607,7 @@ fn show_run_field_selector_projects_run_detail_fields() {
             .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
             .expect("run");
 
-        let (output, _) = show_run(&run.id).expect("show");
+        let (output, _) = show_run_in_store(&store, &run.id).expect("show");
         let (selection_output, _) =
             super::handlers::apply_field_selection(output, &["$.status".to_string()])
                 .expect("apply field selection");
@@ -2138,6 +2140,125 @@ fn bench_history_orders_and_filters_by_scenario() {
 }
 
 #[test]
+fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
+    with_isolated_home(|_| {
+        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+
+        let cook_id = "agent-task-cook-watch";
+        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
+            .expect("parent");
+        let attempt_id = "agent-task-cook-watch-attempt-1-abcd1234";
+        let plan = AgentTaskPlan::new("watch-attempt", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(attempt_id)).expect("attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle, cook_id, 1, attempt_id)
+            .expect("index");
+
+        let store = test_store();
+        let (output, _) = show_run_in_store(&store, cook_id).expect("show indexed cook");
+        let RunsOutput::Show(show) = output else {
+            panic!("expected show output");
+        };
+        assert_eq!(show.run.summary.id, cook_id);
+        assert_ne!(
+            show.run.summary.status, "pass",
+            "admission bookkeeping must not report pass"
+        );
+
+        lifecycle
+            .mutate_record(attempt_id, |record| {
+                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                true
+            })
+            .expect("fail attempt");
+
+        let (output, _) = show_run_in_store(&store, cook_id).expect("show failed cook");
+        let RunsOutput::Show(show) = output else {
+            panic!("expected show output");
+        };
+        assert_eq!(show.run.summary.id, cook_id);
+        assert_eq!(show.run.summary.status, "fail");
+    });
+}
+
+#[test]
+fn runs_list_groups_cook_sub_runs_under_the_cook() {
+    with_isolated_home(|_| {
+        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+
+        let cook_id = "agent-task-cook-list";
+        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle");
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
+            .expect("parent");
+        let attempt_id = "agent-task-cook-list-attempt-1-abcd1234";
+        let plan = AgentTaskPlan::new("list-attempt", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(attempt_id)).expect("attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(&lifecycle, cook_id, 1, attempt_id)
+            .expect("index");
+
+        let store = ObservationStore::open_initialized().expect("store");
+        let hydration_id = format!("{attempt_id}-lab-hydration-0");
+        let mut hydration = dead_owned_run(&hydration_id);
+        hydration.started_at = "2099-01-01T00:00:00Z".to_string();
+        hydration.kind = "runner-exec".to_string();
+        store.import_run(&hydration).expect("hydration child");
+
+        let bare_id = "11111111-2222-3333-4444-555555555555";
+        let mut bare = dead_owned_run(bare_id);
+        bare.started_at = "2099-01-02T00:00:00Z".to_string();
+        bare.kind = "runner-exec".to_string();
+        bare.metadata_json["parent_run_id"] = Value::String(cook_id.to_string());
+        store.import_run(&bare).expect("bare child");
+
+        let (output, _) = list_runs(&test_store(), list_args(), "runs.list").expect("list");
+        let RunsOutput::List(output) = output else {
+            panic!("expected list output");
+        };
+        let top_level = output
+            .runs
+            .iter()
+            .map(|run| run.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            top_level.contains(&cook_id),
+            "cook should be a top-level row: {top_level:?}"
+        );
+        assert!(
+            !top_level.contains(&attempt_id),
+            "attempt should be grouped under the cook: {top_level:?}"
+        );
+        assert!(
+            !top_level.iter().any(|id| id.contains("-lab-hydration-")),
+            "hydration sub-run should be grouped under the cook: {top_level:?}"
+        );
+        assert!(
+            !top_level.contains(&bare_id),
+            "parent-linked sub-run should be grouped under the cook: {top_level:?}"
+        );
+        let cook = output
+            .runs
+            .iter()
+            .find(|run| run.id == cook_id)
+            .expect("cook row");
+        let nested = cook
+            .sub_runs
+            .iter()
+            .map(|run| run.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(nested.contains(&attempt_id), "nested: {nested:?}");
+        assert!(
+            nested.iter().any(|id| id.contains("-lab-hydration-")),
+            "nested: {nested:?}"
+        );
+        assert!(nested.contains(&bare_id), "nested: {nested:?}");
+    });
+}
+
+#[test]
 fn missing_and_mismatched_run_ids_return_clear_errors() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
@@ -2146,7 +2267,9 @@ fn missing_and_mismatched_run_ids_return_clear_errors() {
             .start_run(sample_run("trace", "homeboy", "studio", Value::Null))
             .expect("trace");
 
-        let missing = show_run("missing-run").err().expect("missing should fail");
+        let missing = show_run_in_store(&store, "missing-run")
+            .err()
+            .expect("missing should fail");
         assert_eq!(missing.code.as_str(), "validation.invalid_argument");
         assert!(missing.message.contains("run record not found"));
 
