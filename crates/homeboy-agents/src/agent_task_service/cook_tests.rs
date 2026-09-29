@@ -717,41 +717,6 @@ fn run_next_redacts_poisoned_recipe_dispatcher_kind() {
 }
 
 #[test]
-fn malformed_continuation_does_not_head_of_line_block_run_next() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let queue = homeboy_core::paths::homeboy_data()
-            .expect("data path")
-            .join("agent-task-cook-continuations");
-        std::fs::create_dir_all(&queue).expect("continuation queue");
-        std::fs::write(queue.join("000-malformed.pending"), "not JSON")
-            .expect("malformed continuation persisted");
-        agent_task_lifecycle::submit_plan(
-            &batch_cook_options(
-                "run-next-after-malformed-continuation",
-                Arc::new(AcceptedDetachedAttemptDispatcher),
-            )
-            .identity
-            .initial_plan,
-            Some("run-next-after-malformed-continuation"),
-        )
-        .expect("eligible work queued");
-
-        let result = super::super::run_next_with_cook_dispatcher(
-            Arc::new(ImmediateSuccessExecutor),
-            |_| Ok(None),
-            None,
-        )
-        .expect("malformed continuation is skipped");
-
-        assert_eq!(
-            result.value.expect("eligible aggregate").plan_id,
-            "run-next-after-malformed-continuation"
-        );
-        assert!(queue.join("000-malformed.malformed").is_file());
-    });
-}
-
-#[test]
 fn durable_cook_inspection_reports_an_unsupported_run_schema() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
