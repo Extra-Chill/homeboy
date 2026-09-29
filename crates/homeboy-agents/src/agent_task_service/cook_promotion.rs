@@ -5148,12 +5148,16 @@ fn cook_review_dossier_with_stores_and_review_form(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let command = gate.invocation().ok()?.reviewer_command();
-            (verification_promotion.has_visible_passed_gate_for_command(&command)
-                && crate::agent_task_review_dossier::reviewer_runnable_command(&command))
-            .then(|| AgentTaskReviewTestStep {
-                command,
-                expected: "passes as recorded by Cook's deterministic gate".to_string(),
+            let exact_command = gate.invocation().ok()?.reviewer_command();
+            if !verification_promotion.has_visible_passed_gate_for_command(&exact_command) {
+                return None;
+            }
+            let command = crate::agent_task_review_dossier::reviewer_safe_command(&exact_command)?;
+            crate::agent_task_review_dossier::reviewer_runnable_command(&command).then(|| {
+                AgentTaskReviewTestStep {
+                    command,
+                    expected: "passes as recorded by Cook's deterministic gate".to_string(),
+                }
             })
         })
         .collect::<Vec<_>>();

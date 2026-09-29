@@ -6195,6 +6195,18 @@ fn run_cook_spine(
     }
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
+    if !options.gates.verify.is_empty()
+        && !options.gates.verify.iter().any(|command| {
+            crate::agent_task_review_dossier::reviewer_safe_command(command).is_some()
+        })
+    {
+        return Err(Error::validation_invalid_argument(
+            "verification",
+            "Cook has no visible gate that can produce a reviewer-safe command; move machine-local values into gate environment configuration before provider work",
+            Some(options.identity.cook_id.clone()),
+            None,
+        ));
+    }
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
