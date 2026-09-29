@@ -494,12 +494,15 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         })?
     };
     let operation_key = pre_artifact_interruption_operation_key(run_id);
-    let recipe_next_attempt = || {
+    let recipe_next_attempt = |require_plan_match: bool| {
         recipe_store.load_recipe(cook_id).map(|recipe| {
             recipe
                 .attempts
                 .iter()
-                .find(|recorded| recorded.attempt == next_attempt && recorded.plan == *plan)
+                .find(|recorded| {
+                    recorded.attempt == next_attempt
+                        && (!require_plan_match || recorded.plan == *plan)
+                })
                 .map(|recorded| recorded.run_id.clone())
         })
     };
@@ -538,7 +541,11 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
             let recorded_attempt = result["next_attempt"].as_u64();
             let recorded_run_id = result["next_run_id"].as_str();
-            if let Some(next_run_id) = recipe_next_attempt()? {
+            // A completed claim and the immutable recipe attempt are already
+            // the authority. Concurrent base capture can enrich the recorded
+            // plan after this caller read its copy; comparing those copies
+            // would reject a legitimate replay of the same durable receipt.
+            if let Some(next_run_id) = recipe_next_attempt(false)? {
                 if recorded_attempt == Some(u64::from(next_attempt))
                     && recorded_run_id == Some(next_run_id.as_str())
                 {
@@ -554,7 +561,7 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
             // A crash after recipe append but before claim completion is safe to
             // finish: the immutable next attempt is already fully identified.
-            if let Some(next_run_id) = recipe_next_attempt()? {
+            if let Some(next_run_id) = recipe_next_attempt(true)? {
                 lifecycle_store.complete_cook_operation(
                     run_id,
                     &operation_key,

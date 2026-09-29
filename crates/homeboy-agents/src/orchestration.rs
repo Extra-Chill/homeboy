@@ -7758,13 +7758,11 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let submission = crate::agent_task_service::loop_work_job_execution_submission(
-                loop_id,
-                &record.updated_at,
-                json!({}),
-                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
-            )
-            .expect("build loop work submission");
+            let marker = tempfile::tempdir().expect("provider marker directory");
+            let started = marker.path().join("started");
+            let submission =
+                crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
+                    .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7775,8 +7773,11 @@ mod loop_control_plane_tests {
             let job = client.submit(submission).expect("submit work");
             let job_id = job.id.to_string();
             client.start(&job_id).expect("start work");
+            crate::agent_task_service::await_active_loop_stop_test_provider(loop_id, &started);
             let active = client.status(&job_id).expect("active status");
-            assert!(matches!(active.status.as_str(), "queued" | "running"));
+            assert_eq!(active.status.as_str(), "running");
+            let mut record = crate::agent_task_loop_controller::load_controller(loop_id)
+                .expect("reload active controller");
             record.metadata["work_job"] = json!({
                 "schema": "homeboy/agent-task-loop-work-ref/v1",
                 "job_id": job_id,
@@ -7791,6 +7792,7 @@ mod loop_control_plane_tests {
                 ControlPlaneActionOutcome::Succeeded
             );
             assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
+            crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }
@@ -7806,13 +7808,11 @@ mod loop_control_plane_tests {
             crate::agent_task_service::register_loop_work_job_handler();
             let loop_id = "loop-active-http-stop";
             let mut record = create_controller(loop_id, "repair", "v1").expect("created");
-            let submission = crate::agent_task_service::loop_work_job_execution_submission(
-                loop_id,
-                &record.updated_at,
-                json!({}),
-                crate::agent_task_provider::AgentTaskProviderCatalog::default(),
-            )
-            .expect("build loop work submission");
+            let marker = tempfile::tempdir().expect("provider marker directory");
+            let started = marker.path().join("started");
+            let submission =
+                crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
+                    .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
             let server = std::thread::spawn(move || {
                 homeboy_core::daemon::serve_listener_for_requests(listener, 10)
@@ -7823,7 +7823,17 @@ mod loop_control_plane_tests {
             let job = client.submit(submission).expect("submit work");
             let job_id = job.id.to_string();
             client.start(&job_id).expect("start work");
-            let _ = client.status(&job_id).expect("active status");
+            crate::agent_task_service::await_active_loop_stop_test_provider(loop_id, &started);
+            assert_eq!(
+                client
+                    .status(&job_id)
+                    .expect("active status")
+                    .status
+                    .as_str(),
+                "running"
+            );
+            let mut record = crate::agent_task_loop_controller::load_controller(loop_id)
+                .expect("reload active controller");
             record.metadata["work_job"] = json!({
                 "schema": "homeboy/agent-task-loop-work-ref/v1",
                 "job_id": job_id,
@@ -7857,6 +7867,7 @@ mod loop_control_plane_tests {
             .expect("HTTP stop action");
             assert_eq!(response.status, 200);
             assert_eq!(response.body["resource"]["outcome"], "succeeded");
+            crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
             for _ in 0..5 {
                 let _ = client.status(&job_id);
             }

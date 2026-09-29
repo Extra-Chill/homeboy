@@ -5395,7 +5395,7 @@ case "$1 $2" in
   "auth status"|"repo view") printf '%s\n' '{"nameWithOwner":"example/manual-finalization"}' ;;
   "pr list") printf '%s\n' '[]' ;;
   "pr create") printf '%s\n' 'https://github.com/example/manual-finalization/pull/1' ;;
-  "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"nameWithOwner":"example/manual-finalization"}}\n' "$sha" ;;
+  "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"name":"manual-finalization"},"headRepositoryOwner":{"login":"example"}}\n' "$sha" ;;
   *) [ "$1" = "--version" ] || exit 2 ;;
 esac
 "#,

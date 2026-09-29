@@ -841,6 +841,29 @@ pub fn record_runner_exec_directory_child_promotion_in_store(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
+/// Whether this run id owns a generic runner-exec observation row, as marked
+/// by `ensure_runner_exec_observation_run`. This is the ownership
+/// predicate `project_terminal_runner_result_in_store` reads before its
+/// runner-exec projection, so the observation branch owns every terminal
+/// snapshot for such a row — including the replay that arrives after the row is
+/// already terminal and reports `false` — instead of falling through to the
+/// agent-task `read_record`, which a row without `agent_task_run` metadata
+/// cannot satisfy (#14169).
+///
+/// Opened through [`AgentTaskLifecycleStore::open_observation_maintained`], the
+/// same opener the runner-exec projection itself uses, so both decide from the
+/// same row.
+pub(crate) fn is_generic_runner_exec_run_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let store = lifecycle_store.open_observation_maintained()?;
+    let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    Ok(run.metadata_json.get("kind").and_then(Value::as_str) == Some(RUNNER_EXEC_RUN_KIND))
+}
+
 /// This finalizes an observation run: it reads the row, decides from that row's
 /// own `kind`, terminal status, and artifact-promotion checkpoint whether to
 /// project at all, and then commits the result with `finish_run`. The decision
