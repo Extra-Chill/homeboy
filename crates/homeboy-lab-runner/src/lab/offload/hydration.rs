@@ -1119,7 +1119,7 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
-                "#!/bin/sh\nmkdir -p node_modules apps/cli/dist/cli\nprintf ready > apps/cli/dist/cli/main.mjs\n",
+                "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
             );
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
@@ -1152,7 +1152,7 @@ mod tests {
             write_detected_node_adapter(home.path());
             let path_guard = FakeBinGuard::install(
                 "npm",
-                "#!/bin/sh\nmkdir -p node_modules\nprintf x >> npm-runs\n",
+                "#!/bin/sh\nmkdir -p node_modules/example\nprintf installed > node_modules/example/index.js\nprintf x >> npm-runs\n",
             );
             crate::create(&path_guard.local_runner_spec("lab-detected-npm"), false)
                 .expect("create local runner");
@@ -1340,7 +1340,7 @@ mod tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
                 "fixture-tool",
-                "#!/bin/sh\nmkdir -p apps/cli/dist/cli\nprintf ready > apps/cli/dist/cli/main.mjs\n",
+                "#!/bin/sh\nmkdir -p node_modules/example apps/cli/dist/cli\nprintf installed > node_modules/example/index.js\nprintf ready > apps/cli/dist/cli/main.mjs\n",
             );
             crate::create(&path_guard.local_runner_spec("lab-local"), false)
                 .expect("create local runner");
@@ -1382,7 +1382,13 @@ mod tests {
             std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
             std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
                 .expect("marker");
-            std::fs::create_dir_all(remote.path().join("node_modules")).expect("dependency output");
+            std::fs::create_dir_all(remote.path().join("node_modules/example"))
+                .expect("dependency output");
+            std::fs::write(
+                remote.path().join("node_modules/example/index.js"),
+                "installed",
+            )
+            .expect("installed dependency");
             std::fs::create_dir_all(remote.path().join("apps/cli/dist/cli"))
                 .expect("build directory");
             std::fs::write(remote.path().join("apps/cli/dist/cli/main.mjs"), "ready")
