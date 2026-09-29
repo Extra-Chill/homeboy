@@ -156,36 +156,45 @@ pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
         }
     }
 
-    match agent_task_lifecycle::aggregate_source(spec) {
-        Ok((raw, path)) => return Ok((raw, Some(path))),
-        Err(aggregate_error) => {
-            let lifecycle_store =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-            let record =
-                agent_task_lifecycle::status(spec).or_else(|_| lifecycle_store.read_record(spec));
-            if let Ok(record) = record {
-                let (raw, path) =
-                    recover_executor_outcome_source(&lifecycle_store, &record, &aggregate_error)
-                        .map_err(|error| {
-                            Error::new(
-                                error.code,
-                                "failed to reconstruct the promotion aggregate",
-                                json!({
-                                    "run_id": record.run_id,
-                                    "cause": error.message,
-                                    "cause_details": error.details,
-                                }),
-                            )
-                        })?;
-                return Ok((raw, Some(path)));
-            }
-        }
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if let Some(source) = promotion_source_for_reader(&lifecycle_store, spec)? {
+        return Ok(source);
     }
 
     Ok((
         config::read_json_spec_to_string(spec)?,
         source_spec_path(spec),
     ))
+}
+
+fn promotion_source_for_reader(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    spec: &str,
+) -> Result<Option<(String, Option<PathBuf>)>> {
+    let resolved =
+        agent_task_lifecycle::resolve_cook_reader_run_id_in_store(lifecycle_store, spec)?;
+    let record = match lifecycle_store.read_record(&resolved) {
+        Ok(record) => record,
+        Err(_) if resolved == spec => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match agent_task_lifecycle::aggregate_source_in_store(lifecycle_store, &resolved) {
+        Ok((raw, path)) => Ok(Some((raw, Some(path)))),
+        Err(aggregate_error) => {
+            recover_executor_outcome_source(lifecycle_store, &record, &aggregate_error)
+                .map(|(raw, path)| Some((raw, Some(path))))
+                .map_err(|error| {
+                    promotion_reconstruction_error(
+                        lifecycle_store,
+                        spec,
+                        &record,
+                        &aggregate_error,
+                        &error,
+                    )
+                })
+        }
+    }
 }
 
 pub(crate) fn promotion_source_in_store(
@@ -207,25 +216,296 @@ pub(crate) fn promotion_source_in_store(
 pub fn recover_missing_promotion_aggregate(run_id: &str) -> Result<bool> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = lifecycle_store.read_record(run_id)?;
+    let resolved =
+        agent_task_lifecycle::resolve_cook_reader_run_id_in_store(&lifecycle_store, run_id)?;
+    let record = lifecycle_store.read_record(&resolved)?;
     let aggregate_error = match lifecycle_store.aggregate_source_exact(&record.run_id) {
         Ok(_) => return Ok(false),
         Err(error) => error,
     };
     recover_executor_outcome_source(&lifecycle_store, &record, &aggregate_error).map_err(
         |error| {
-            Error::new(
-                error.code,
-                "failed to reconstruct the promotion aggregate",
-                json!({
-                    "run_id": record.run_id,
-                    "cause": error.message,
-                    "cause_details": error.details,
-                }),
+            promotion_reconstruction_error(
+                &lifecycle_store,
+                run_id,
+                &record,
+                &aggregate_error,
+                &error,
             )
         },
     )?;
     Ok(true)
+}
+
+/// Replayable dry-run command for a recoverable Cook, or a structured reason
+/// that promotion cannot be reconstructed. Does not write aggregate state.
+pub fn promotion_replay_guidance(requested_id: &str) -> Value {
+    let lifecycle_store =
+        match agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment() {
+            Ok(store) => store,
+            Err(error) => return promotion_replay_unavailable(requested_id, requested_id, &error),
+        };
+    let resolved = match agent_task_lifecycle::resolve_cook_reader_run_id_in_store(
+        &lifecycle_store,
+        requested_id,
+    ) {
+        Ok(run_id) => run_id,
+        Err(error) => return promotion_replay_unavailable(requested_id, requested_id, &error),
+    };
+    let record = lifecycle_store.read_record(&resolved).ok();
+    let candidate = record
+        .as_ref()
+        .map(preserved_candidate_evidence)
+        .unwrap_or(Value::Null);
+    let gates = record
+        .as_ref()
+        .map(preserved_gate_evidence)
+        .unwrap_or(Value::Null);
+    if let Some(record) = record.as_ref() {
+        if lifecycle_store
+            .aggregate_source_exact(&record.run_id)
+            .is_ok()
+            || executor_outcome_available(&lifecycle_store, record)
+        {
+            let command = replay_promotion_command(requested_id, &resolved, record);
+            return json!({
+                "available": command.is_some(),
+                "requested_id": requested_id,
+                "run_id": resolved,
+                "command": command,
+                "candidate": candidate,
+                "gates": gates,
+                "reason": if command.is_some() {
+                    "replayable promotion dry-run"
+                } else {
+                    "promotion source is replayable but the cook recipe has no destination or base"
+                },
+            });
+        }
+    }
+    let aggregate_error = lifecycle_store
+        .aggregate_source_exact(&resolved)
+        .err()
+        .unwrap_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "agent-task run has no aggregate artifact yet",
+                Some(resolved.clone()),
+                None,
+            )
+        });
+    let recovery_error = record.as_ref().map_or_else(
+        || {
+            Error::validation_invalid_argument(
+                "run_id",
+                "the lifecycle record has no persisted executor outcome evidence",
+                Some(resolved.clone()),
+                None,
+            )
+        },
+        |record| {
+            missing_promotion_source_error(
+                &record.run_id,
+                &aggregate_error,
+                "the lifecycle record has no persisted executor outcome evidence",
+            )
+        },
+    );
+    let error = record.as_ref().map_or_else(
+        || recovery_error.clone(),
+        |record| {
+            promotion_reconstruction_error(
+                &lifecycle_store,
+                requested_id,
+                record,
+                &aggregate_error,
+                &recovery_error,
+            )
+        },
+    );
+    let mut guidance = promotion_replay_unavailable(requested_id, &resolved, &error);
+    if candidate != Value::Null {
+        guidance["candidate"] = candidate;
+    }
+    if gates != Value::Null {
+        guidance["gates"] = gates;
+    }
+    guidance
+}
+
+fn promotion_replay_unavailable(requested_id: &str, run_id: &str, error: &Error) -> Value {
+    json!({
+        "available": false,
+        "requested_id": requested_id,
+        "run_id": error.details.get("run_id").and_then(Value::as_str).unwrap_or(run_id),
+        "reason": error.message,
+        "aggregate_key": error.details.get("aggregate_key").cloned().unwrap_or(Value::Null),
+        "transports": error.details.get("transports").cloned().unwrap_or(Value::Null),
+        "candidate": error.details.get("candidate").cloned().unwrap_or(Value::Null),
+        "gates": error.details.get("gates").cloned().unwrap_or(Value::Null),
+        "remediation": error.details.get("remediation").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn replay_promotion_command(
+    requested_id: &str,
+    resolved: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<String> {
+    let cook_id = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_id);
+    let recipe = super::load_recipe(cook_id)
+        .ok()
+        .or_else(|| super::load_recipe_for_attempt(resolved).ok().flatten())?;
+    let to_worktree = recipe.finalization.get("to_worktree")?.as_str()?;
+    let base = recipe.finalization.get("base")?.as_str()?;
+    let mut command = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "promote".to_string(),
+        resolved.to_string(),
+        "--to-worktree".to_string(),
+        to_worktree.to_string(),
+        "--base".to_string(),
+        base.to_string(),
+        "--gates-from-cook-recipe".to_string(),
+        "--dry-run".to_string(),
+    ];
+    if let Some(task_id) = record
+        .metadata
+        .pointer("/latest_promotion/source/task_id")
+        .and_then(Value::as_str)
+    {
+        command.extend(["--task-id".to_string(), task_id.to_string()]);
+    }
+    if let Some(artifact_id) = record
+        .metadata
+        .pointer("/latest_promotion/patch_artifact/id")
+        .and_then(Value::as_str)
+    {
+        command.extend(["--artifact-id".to_string(), artifact_id.to_string()]);
+    }
+    Some(quote_args(&command))
+}
+
+fn executor_outcome_available(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    let referenced_outcome_available =
+        record
+            .latest_executor_evidence
+            .as_ref()
+            .is_some_and(|evidence| {
+                evidence
+                    .outcome_ref
+                    .uri
+                    .strip_prefix("file://")
+                    .is_some_and(|path| Path::new(path).is_file())
+            });
+    if referenced_outcome_available {
+        return true;
+    }
+    record.tasks.iter().any(|task| {
+        crate::agent_task_executor_evidence::executor_result_evidence_path(
+            &lifecycle_store.artifact_root(),
+            &record.run_id,
+            &task.task_id,
+        )
+        .is_file()
+    })
+}
+
+fn promotion_reconstruction_error(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    requested_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    aggregate_error: &Error,
+    recovery_error: &Error,
+) -> Error {
+    let transports = aggregate_transport_report(lifecycle_store, &record.run_id);
+    let missing = transports
+        .iter()
+        .filter(|transport| transport.get("available") != Some(&Value::Bool(true)))
+        .filter_map(|transport| transport.get("transport").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    let message = if missing.is_empty() {
+        format!(
+            "promotion source is unavailable: aggregate key `agent_task_aggregate` could not be reconstructed ({})",
+            recovery_error.message
+        )
+    } else {
+        format!(
+            "promotion source is unavailable: missing aggregate key `agent_task_aggregate` on transport {}",
+            missing.join(", ")
+        )
+    };
+    Error::new(
+        homeboy_core::ErrorCode::ValidationInvalidArgument,
+        message,
+        json!({
+            "requested_id": requested_id,
+            "run_id": record.run_id,
+            "aggregate_key": "agent_task_aggregate",
+            "transports": transports,
+            "candidate": preserved_candidate_evidence(record),
+            "gates": preserved_gate_evidence(record),
+            "cause": recovery_error.message,
+            "cause_details": recovery_error.details,
+            "aggregate_error": aggregate_error.to_string(),
+            "remediation": "retain or restore aggregate.json or the observation mirror key agent_task_aggregate, or the referenced executor-result evidence, before promotion",
+        }),
+    )
+}
+
+fn aggregate_transport_report(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Vec<Value> {
+    let path = lifecycle_store.aggregate_path(run_id);
+    let mirror_error = lifecycle_store
+        .read_aggregate_readonly(run_id)
+        .err()
+        .map(|error| error.message);
+    vec![
+        json!({
+            "transport": "aggregate.json",
+            "key": path.display().to_string(),
+            "available": path.is_file(),
+        }),
+        json!({
+            "transport": "observation_mirror",
+            "key": "agent_task_aggregate",
+            "available": mirror_error.is_none(),
+            "detail": mirror_error,
+        }),
+    ]
+}
+
+fn preserved_candidate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
+    let promotion = record.metadata.get("latest_promotion");
+    json!({
+        "status": promotion.and_then(|promotion| promotion.get("status")),
+        "task_id": promotion.and_then(|promotion| {
+            promotion
+                .pointer("/source/task_id")
+                .or_else(|| promotion.get("task_id"))
+        }),
+        "artifact_id": promotion.and_then(|promotion| promotion.pointer("/patch_artifact/id")),
+        "sha256": promotion.and_then(|promotion| promotion.pointer("/patch_artifact/sha256")),
+        "fingerprint": promotion.and_then(|promotion| promotion.pointer("/provenance/candidate")),
+    })
+}
+
+fn preserved_gate_evidence(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
+    record
+        .metadata
+        .pointer("/latest_promotion/deterministic_gates")
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn recover_executor_outcome_source(
@@ -233,21 +513,19 @@ fn recover_executor_outcome_source(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate_error: &Error,
 ) -> Result<(String, PathBuf)> {
-    let (task_id, path) = match record.latest_executor_evidence.as_ref() {
-        Some(evidence) => {
-            let raw_path = evidence
+    let (task_id, path) = match record
+        .latest_executor_evidence
+        .as_ref()
+        .and_then(|evidence| {
+            evidence
                 .outcome_ref
                 .uri
                 .strip_prefix("file://")
-                .ok_or_else(|| {
-                    missing_promotion_source_error(
-                        &record.run_id,
-                        aggregate_error,
-                        "the executor outcome evidence is not a local file reference",
-                    )
-                })?;
-            (evidence.task_id.as_str(), PathBuf::from(raw_path))
-        }
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+                .map(|path| (evidence.task_id.as_str(), path))
+        }) {
+        Some((task_id, path)) => (task_id, path),
         None => {
             let candidates = record
                 .tasks
@@ -267,10 +545,19 @@ fn recover_executor_outcome_source(
             match candidates.as_slice() {
                 [(task_id, path)] => (*task_id, path.clone()),
                 [] => {
+                    let reason = if record
+                        .latest_executor_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| !evidence.outcome_ref.uri.starts_with("file://"))
+                    {
+                        "the executor outcome evidence is not a local file reference"
+                    } else {
+                        "the lifecycle record has no persisted executor outcome evidence"
+                    };
                     return Err(missing_promotion_source_error(
                         &record.run_id,
                         aggregate_error,
-                        "the lifecycle record has no persisted executor outcome evidence",
+                        reason,
                     ));
                 }
                 _ => {

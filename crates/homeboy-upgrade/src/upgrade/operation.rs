@@ -183,6 +183,81 @@ impl UpgradeOperation {
         self.observation.as_ref().map(ActiveObservation::run_id)
     }
 
+    /// Persist an exact detached request before creating its worker process.
+    pub(super) fn prepare_detached(&mut self, request: Value) -> Result<()> {
+        self.metadata["detached_request"] = request;
+        self.set_phase_durable("detached_worker_pending")
+    }
+
+    /// Transfer the observation to the spawned worker. The parent must not
+    /// terminalize the run on drop after the owner identity is persisted.
+    pub(super) fn handoff_detached(&mut self, pid: u32) -> Result<()> {
+        let identity = homeboy_core::process::process_start_identity(pid)
+            .map_err(Error::internal_unexpected)?
+            .ok_or_else(|| {
+                Error::internal_unexpected("detached upgrade worker exited before handoff")
+            })?;
+        self.metadata["homeboy_run_owner"] = json!({
+            "pid": pid,
+            "process_start_identity": identity,
+        });
+        self.set_phase_durable("detached_worker_admitted")?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// The worker resumes exactly the parent's operation, not a second run.
+    pub(super) fn resume_detached(id: &str) -> Result<Option<Self>> {
+        let observation = ActiveObservation::resume(id)?;
+        let metadata = observation.run().metadata_json.clone();
+        if metadata["phase"] == "detached_worker_pending" {
+            return Ok(None);
+        }
+        if metadata["homeboy_run_owner"]["pid"].as_u64() != Some(std::process::id() as u64) {
+            return Err(Error::validation_invalid_argument(
+                "operation_id",
+                "detached upgrade is owned by another worker",
+                Some(id.to_string()),
+                None,
+            ));
+        }
+        let expected: homeboy_core::process::ProcessStartIdentity =
+            serde_json::from_value(metadata["homeboy_run_owner"]["process_start_identity"].clone())
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        if homeboy_core::process::process_start_identity(std::process::id())
+            .map_err(Error::internal_unexpected)?
+            != Some(expected)
+        {
+            return Err(Error::validation_invalid_argument(
+                "operation_id",
+                "detached worker process identity changed",
+                Some(id.to_string()),
+                None,
+            ));
+        }
+        Ok(Some(Self {
+            observation: Some(observation),
+            metadata,
+            started: Instant::now(),
+            finished: false,
+            pending_terminal: None,
+            controller_promoted: false,
+            persistence_error: None,
+            #[cfg(test)]
+            fail_terminal_writes_remaining: 0,
+            #[cfg(test)]
+            fail_next_progress_write: false,
+            #[cfg(test)]
+            before_terminal_writes: VecDeque::new(),
+            #[cfg(test)]
+            after_promotion_wait: None,
+        }))
+    }
+
+    pub(super) fn detached_request(&self) -> &Value {
+        &self.metadata["detached_request"]
+    }
+
     pub fn set_phase_durable(&mut self, phase: &str) -> Result<()> {
         emit_upgrade_phase(phase);
         self.metadata["phase"] = json!(phase);
@@ -585,6 +660,14 @@ impl Drop for UpgradeOperation {
                     "optional refresh did not finish after controller promotion",
                 );
             }
+            if self.metadata["runners"]["status"] == "pending"
+                || self.metadata["runners"]["status"] == "running"
+            {
+                self.metadata["runners"] = component(
+                    "interrupted",
+                    "runner refresh did not finish after controller promotion",
+                );
+            }
             self.finish(RunStatus::Pass);
             return;
         }
@@ -641,9 +724,9 @@ pub fn load_upgrade_operation_status(id: Option<&str>) -> Result<UpgradeOperatio
 fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Result<RunRecord> {
     if run.kind != UPGRADE_OPERATION_KIND
         || run.status != RunStatus::Running.as_str()
-        || homeboy_core::observation::running_status_note(&run).map_or(true, |note| {
-            !note.starts_with("owner process is not running")
-        })
+        || !(homeboy_core::observation::running_status_note(&run)
+            .is_some_and(|note| note.starts_with("owner process is not running"))
+            || detached_owner_identity_lost(&run))
     {
         return Ok(run);
     }
@@ -686,6 +769,30 @@ fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Res
             run.id
         ))
     })
+}
+
+fn detached_owner_identity_lost(run: &RunRecord) -> bool {
+    let owner = &run.metadata_json["homeboy_run_owner"];
+    let Some(pid) = owner["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return false;
+    };
+    let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+        owner["process_start_identity"].clone(),
+    ) else {
+        return false;
+    };
+    matches!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            Some(&identity)
+        ),
+        homeboy_core::process::ProcessIdentityState::Dead
+            | homeboy_core::process::ProcessIdentityState::IdentityMismatch
+    )
 }
 
 pub fn persist_extension_progress(
@@ -760,6 +867,29 @@ pub fn persist_upgrade_heartbeat(run_id: &str, elapsed: Duration) -> Result<()> 
 
 pub(crate) fn emit_upgrade_phase(phase: &str) {
     eprintln!("[upgrade] {phase}");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+pub(crate) fn upgrade_runner_progress_message(elapsed: Duration) -> String {
+    format!(
+        "phase=refreshing_configured_runners sub_phase=build elapsed={}s",
+        elapsed.as_secs()
+    )
+}
+
+pub(crate) fn persist_runner_progress(run_id: &str, elapsed: Duration) -> Result<()> {
+    emit_upgrade_phase(&upgrade_runner_progress_message(elapsed));
+    patch_metadata(run_id, |metadata| {
+        metadata["phase"] = json!("refreshing_configured_runners");
+        merge_elapsed_seconds(metadata, elapsed.as_secs());
+        metadata["runners"] = component(
+            "running",
+            format!(
+                "refreshing configured runners (build) elapsed={}s",
+                elapsed.as_secs()
+            ),
+        );
+    })
 }
 
 pub(crate) fn upgrade_extension_progress_message(
@@ -1504,6 +1634,39 @@ mod tests {
                     .as_ref()
                     .map(|component| component.status.as_str()),
                 Some("running")
+            );
+        });
+    }
+
+    #[test]
+    fn interrupting_during_runner_refresh_marks_runners_interrupted() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let id = {
+                let mut operation = UpgradeOperation::start("homeboy upgrade");
+                let id = operation.id().expect("persisted operation").to_string();
+                operation
+                    .mark_controller_promoted_durable("controller installation completed")
+                    .expect("persist controller promotion");
+                operation
+                    .mark_extensions_durable(
+                        "skipped",
+                        "dirty linked checkout skipped once (wordpress). remedy: homeboy extension update wordpress --force",
+                    )
+                    .expect("persist extension notice");
+                operation
+                    .set_phase_durable("refreshing configured runners")
+                    .expect("persist runner refresh");
+                id
+            };
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            assert_eq!(status.phase, "interrupted_after_controller");
+            assert_eq!(
+                status
+                    .runners
+                    .as_ref()
+                    .map(|component| component.status.as_str()),
+                Some("interrupted")
             );
         });
     }

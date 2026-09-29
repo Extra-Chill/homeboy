@@ -136,20 +136,25 @@ homeboy upgrade --skip-runners
 - `controller` / `extensions` / `runners`: Independent component statuses
 - `note`: Present when a running record's owner process is no longer alive
 
-Status reads reconcile an upgrade record whose foreground owner has exited to
+Status reads reconcile an upgrade record whose owner has exited to
 a non-success interrupted terminal state, projecting any pending binary
 replacement from its durable checkpoint. A proven controller replacement
 remains visible independently from incomplete extension or runner refresh.
 Controller replacement admission still waits for live runtime-generation pins.
-Upgrade currently has no detached worker, so a caller that exits while blocked
-does not leave a queued continuation to resume when a pin is released; deferred
-worker-backed continuation remains open, and the upgrade must be retried after
-the pin holder finishes.
+For a controller-only published binary upgrade (`--skip-extensions --skip-runners`),
+the selected release is frozen before admitting a detached worker. The command
+returns `status: queued` with an `operation_id`; this acknowledges durable worker
+ownership, **not** completed installation. The worker runs in its own process
+group rather than occupying a job on the daemon it may need to replace. Inspect
+the same operation with `homeboy upgrade status <id>` until it is terminal. A
+dead worker is marked interrupted on status read, retaining any binary
+replacement checkpoint; it is never silently retried after an ambiguous swap.
 
 `homeboy upgrade` data payload:
 
 - `command`: `upgrade`
 - `operation_id`: Durable observation-run id persisted before mutation. Inspect later with `homeboy upgrade status <id>`
+- `status: queued` and `selected_release_tag`: For detached controller-only binary upgrades, the exact release accepted by the worker. This is admission, not upgrade completion.
 - `install_method`: Installation method used for upgrade
 - `previous_version`: Version before upgrade
 - `new_version`: Version after upgrade (may be null)
@@ -167,7 +172,7 @@ Runner upgrade entries include the configured `homeboy_path`, observed configure
 
 ## Exit code
 
-- `0`: Success (upgrade completed or already at latest)
+- `0`: Successful admission of a detached controller-only binary upgrade, or successful completion of a foreground upgrade. Check the queued operation's terminal status separately.
 - Non-zero: Error during upgrade process
 
 ## Notes

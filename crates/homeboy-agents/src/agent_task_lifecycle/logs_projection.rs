@@ -70,7 +70,8 @@ fn event_stream_in_store(
     homeboy_control_plane_contract::RunId,
     Vec<homeboy_control_plane_contract::ControlPlaneEvent>,
 )> {
-    let record = status_in_store(lifecycle_store, run_id)?;
+    let run_id = resolve_cook_reader_run_id_in_store(lifecycle_store, run_id)?;
+    let record = lifecycle_store.read_record_bounded(&run_id)?;
     let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
         Error::validation_invalid_argument(
             "run_id",
