@@ -41,7 +41,40 @@ const CAPACITY_ROUTE_TIMEOUT_MS: u64 = 30_000;
 const MAX_CAPACITY_ROUTES: usize = 64;
 
 pub fn capacity(args: AgentTaskCapacityArgs) -> CmdResult<Value> {
-    capacity_with_catalog(args, AgentTaskProviderCatalog::discover())
+    let query = homeboy::core::control_plane::CapacityQuery {
+        backend: args.backend,
+        selector: args.selector,
+        model: args.model,
+    };
+    Ok((homeboy::core::control_plane::capacity_snapshot(&query)?, 0))
+}
+
+struct ProviderCapacitySnapshot;
+
+impl homeboy::core::control_plane::CapacitySnapshotProvider for ProviderCapacitySnapshot {
+    fn snapshot(
+        &self,
+        query: &homeboy::core::control_plane::CapacityQuery,
+    ) -> homeboy::core::Result<Value> {
+        capacity_with_catalog(
+            AgentTaskCapacityArgs {
+                backend: query.backend.clone(),
+                selector: query.selector.clone(),
+                model: query.model.clone(),
+            },
+            AgentTaskProviderCatalog::discover(),
+        )
+        .map(|(resource, _)| resource)
+    }
+}
+
+pub(crate) fn register_capacity_snapshot_provider() {
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        homeboy::core::control_plane::register_capacity_snapshot_provider(std::sync::Arc::new(
+            ProviderCapacitySnapshot,
+        ));
+    });
 }
 
 pub(crate) fn capacity_with_catalog(

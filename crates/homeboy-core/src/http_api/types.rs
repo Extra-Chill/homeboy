@@ -75,6 +75,9 @@ pub enum HttpEndpoint {
         id: String,
     },
     ControlPlaneCapabilities,
+    ControlPlaneCapacity {
+        query: crate::control_plane::CapacityQuery,
+    },
     ControlPlaneMissions {
         request: homeboy_control_plane_contract::ControlPlaneMissionListRequest,
     },
@@ -236,6 +239,7 @@ impl HttpEndpoint {
             Self::Activity => "activity.list",
             Self::ActivityItem { .. } => "activity.show",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
+            Self::ControlPlaneCapacity { .. } => "control_plane.capacity",
             Self::ControlPlaneMissions { .. } => "control_plane.missions.list",
             Self::ControlPlaneMission { .. } => "control_plane.missions.show",
             Self::ControlPlaneRuns { .. } => "control_plane.runs.list",

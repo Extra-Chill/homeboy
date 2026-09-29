@@ -5,7 +5,8 @@
 //! here so core stays agent-task-agnostic.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use homeboy_control_plane_contract::{
     ControlPlaneActionAcknowledgement, ControlPlaneActionFence, ControlPlaneActionIntent,
@@ -28,6 +29,104 @@ use homeboy_control_plane_contract::{
 
 use crate::observation::store::ControlPlaneEffectAdmission;
 use crate::observation::{ControlPlaneResourceProjection, ObservationStore, RunRecord};
+
+/// Filter for the existing `homeboy/agent-task-capacity/v1` resource.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CapacityQuery {
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+}
+
+pub trait CapacitySnapshotProvider: Send + Sync {
+    fn snapshot(&self, query: &CapacityQuery) -> crate::Result<serde_json::Value>;
+}
+
+static CAPACITY_PROVIDER: OnceLock<RwLock<Option<Arc<dyn CapacitySnapshotProvider>>>> =
+    OnceLock::new();
+static CAPACITY_CACHE: OnceLock<Mutex<BTreeMap<CapacityQuery, (Instant, serde_json::Value)>>> =
+    OnceLock::new();
+const CAPACITY_CACHE_TTL: Duration = Duration::from_secs(15);
+const CAPACITY_CACHE_MAX_ENTRIES: usize = 64;
+
+/// The CLI and HTTP adapters read the same provider-owned capacity resource.
+/// Core only owns bounded cache freshness, not provider/model semantics.
+pub fn register_capacity_snapshot_provider(provider: Arc<dyn CapacitySnapshotProvider>) {
+    *CAPACITY_PROVIDER
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("capacity provider registry poisoned") = Some(provider);
+    if let Some(cache) = CAPACITY_CACHE.get() {
+        cache.lock().expect("capacity cache poisoned").clear();
+    }
+}
+
+pub fn capacity_snapshot(query: &CapacityQuery) -> crate::Result<serde_json::Value> {
+    let cache = CAPACITY_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let provider = CAPACITY_PROVIDER
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .expect("capacity provider registry poisoned")
+        .clone()
+        .ok_or_else(|| {
+            crate::Error::internal_unexpected("provider capacity service is not registered")
+        })?;
+    capacity_snapshot_with_provider(query, cache, provider.as_ref())
+}
+
+fn capacity_snapshot_with_provider(
+    query: &CapacityQuery,
+    cache: &Mutex<BTreeMap<CapacityQuery, (Instant, serde_json::Value)>>,
+    provider: &dyn CapacitySnapshotProvider,
+) -> crate::Result<serde_json::Value> {
+    let cached = cache
+        .lock()
+        .expect("capacity cache poisoned")
+        .get(query)
+        .cloned();
+    if let Some((observed_at, snapshot)) = &cached {
+        if observed_at.elapsed() < CAPACITY_CACHE_TTL {
+            return Ok(with_capacity_freshness(
+                snapshot.clone(),
+                observed_at.elapsed(),
+                false,
+            ));
+        }
+    }
+    match provider.snapshot(query) {
+        Ok(snapshot) if snapshot["schema"] == "homeboy/agent-task-capacity/v1" => {
+            let observed_at = Instant::now();
+            let mut cache = cache.lock().expect("capacity cache poisoned");
+            if cache.len() >= CAPACITY_CACHE_MAX_ENTRIES && !cache.contains_key(query) {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, (observed_at, _))| *observed_at)
+                    .map(|(query, _)| query.clone())
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(query.clone(), (observed_at, snapshot.clone()));
+            Ok(with_capacity_freshness(snapshot, Duration::ZERO, false))
+        }
+        Ok(_) => Err(crate::Error::internal_unexpected(
+            "provider capacity returned an unrecognized resource schema",
+        )),
+        Err(error) => cached
+            .map(|(at, snapshot)| with_capacity_freshness(snapshot, at.elapsed(), true))
+            .ok_or(error),
+    }
+}
+
+fn with_capacity_freshness(
+    mut snapshot: serde_json::Value,
+    age: Duration,
+    stale: bool,
+) -> serde_json::Value {
+    snapshot["stale"] = serde_json::json!(stale);
+    snapshot["snapshot_age_seconds"] = serde_json::json!(age.as_secs());
+    snapshot
+}
 
 /// Canonical public reconciliation service for an ambiguous deployment-provider
 /// effect. Transport adapters call this rather than owning a second recovery
@@ -766,8 +865,10 @@ pub fn effect_status(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use super::{
         append_delegated_action_event, execute_delegated_action,
@@ -783,6 +884,45 @@ mod tests {
 
     static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
     static RECOVERIES: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn expired_capacity_snapshot_is_visible_as_stale_when_the_refresh_fails() {
+        struct FailingCapacity;
+        impl super::CapacitySnapshotProvider for FailingCapacity {
+            fn snapshot(&self, _query: &super::CapacityQuery) -> crate::Result<serde_json::Value> {
+                Err(crate::Error::internal_unexpected(
+                    "usage endpoint unavailable",
+                ))
+            }
+        }
+        let query = super::CapacityQuery {
+            backend: Some("test-cache-13697".to_string()),
+            ..Default::default()
+        };
+        let cached = serde_json::json!({
+            "schema": "homeboy/agent-task-capacity/v1",
+            "generated_at": "2026-09-29T00:00:00Z",
+            "routes": [],
+            "next_reset": null,
+        });
+        let cache = Mutex::new(BTreeMap::from([(
+            query.clone(),
+            (Instant::now() - Duration::from_secs(20), cached.clone()),
+        )]));
+        let stale = super::capacity_snapshot_with_provider(&query, &cache, &FailingCapacity)
+            .expect("last snapshot survives provider failure");
+        assert_eq!(stale["generated_at"], cached["generated_at"]);
+        assert_eq!(stale["stale"], true);
+        assert!(stale["snapshot_age_seconds"].as_u64().unwrap() >= 20);
+        assert!(super::capacity_snapshot_with_provider(
+            &super::CapacityQuery::default(),
+            &cache,
+            &FailingCapacity,
+        )
+        .unwrap_err()
+        .message
+        .contains("usage endpoint unavailable"));
+    }
 
     struct ProjectionFailureDelegate;
 

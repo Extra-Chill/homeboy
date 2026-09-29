@@ -96,6 +96,15 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
+        (HttpMethod::Get, ["v1", "control-plane", "capacity"]) => {
+            Ok(HttpEndpoint::ControlPlaneCapacity {
+                query: crate::control_plane::CapacityQuery {
+                    backend: query_value(path, "backend"),
+                    selector: query_value(path, "selector"),
+                    model: query_value(path, "model"),
+                },
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "missions"]) => {
             Ok(HttpEndpoint::ControlPlaneMissions {
                 request: control_plane_mission_list_request(path)?,
@@ -327,6 +336,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
+                "GET /v1/control-plane/capacity".to_string(),
                 "GET /v1/control-plane/missions".to_string(),
                 "GET /v1/control-plane/missions/:id".to_string(),
                 "GET /v1/control-plane/runs".to_string(),
@@ -500,6 +510,12 @@ where
         }
         HttpEndpoint::ControlPlaneCapabilities => {
             return control_plane_capabilities_response();
+        }
+        HttpEndpoint::ControlPlaneCapacity { query } => {
+            return control_plane_ok(
+                endpoint.clone(),
+                crate::control_plane::capacity_snapshot(query)?,
+            );
         }
         HttpEndpoint::ControlPlaneRunActions { id } => {
             return control_plane_action_response(
@@ -692,6 +708,9 @@ where
         | HttpEndpoint::ControlPlaneRunEventRetention { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
+            unreachable!("returned before store open")
+        }
+        HttpEndpoint::ControlPlaneCapacity { .. } => {
             unreachable!("returned before store open")
         }
         HttpEndpoint::Jobs => {
