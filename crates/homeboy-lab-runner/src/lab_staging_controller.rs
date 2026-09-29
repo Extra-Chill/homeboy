@@ -1330,21 +1330,6 @@ fn submit_deferred_runner_staging(
             None,
         )
     })?;
-    // The portable recipe is the sealed staging authority. It deliberately
-    // excludes the controller-local source path before crossing the runner API.
-    let sealed_payload = canonical_json_bytes(&serde_json::to_value(&recipe).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize deferred staging recipe".to_string()),
-        )
-    })?)
-    .map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("canonicalize deferred staging recipe".to_string()),
-        )
-    })?;
-    let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
     let (source_artifact, workspace) = match SourceArtifactTransfer::from_directory(
         format!("source-{run_id}"),
         &source_path,
@@ -1384,6 +1369,7 @@ fn submit_deferred_runner_staging(
                 &recipe.normalized_args,
                 Some(run_id),
             )?;
+            bind_recipe_to_materialized_workspace(&mut recipe, &stage.remote_command);
             (
                     None,
                     Some(ControllerWorkspaceMaterialization::new(
@@ -1406,6 +1392,23 @@ fn submit_deferred_runner_staging(
                 )
         }
     };
+    // Seal only after the workspace is resolved: a materialized workspace
+    // rewrites the recipe argv to its runner-local paths above.
+    // The portable recipe is the sealed staging authority. It deliberately
+    // excludes the controller-local source path before crossing the runner API.
+    let sealed_payload = canonical_json_bytes(&serde_json::to_value(&recipe).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize deferred staging recipe".to_string()),
+        )
+    })?)
+    .map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("canonicalize deferred staging recipe".to_string()),
+        )
+    })?;
+    let digest = format!("sha256:{}", content_hash::sha256_hex(&sealed_payload));
     let mut handoff = DirectLabHandoffEnvelope::new(
         homeboy_product_identity::build_identity().display,
         recipe,
@@ -1458,6 +1461,14 @@ fn submit_deferred_runner_staging(
         },
     )?;
     Ok(deferred_receipt)
+}
+
+/// A controller-materialized workspace runs the recipe argv on the runner, so
+/// the argv must be the stage's runner-local command. The controller argv still
+/// names controller paths (e.g. an inlined agent-task plan's workspace root)
+/// that do not exist on the runner (#15226).
+fn bind_recipe_to_materialized_workspace(recipe: &mut LabStagingRecipe, remote_command: &[String]) {
+    recipe.normalized_args = remote_command.to_vec();
 }
 
 fn source_artifact_exceeds_transfer_bounds(error: &Error) -> bool {
@@ -5195,6 +5206,42 @@ mod tests {
             LabStagingCheckpoint::initial(&envelope).phase,
             LabStagingPhase::AcceptedMaterializeWorkspace
         );
+    }
+
+    #[test]
+    fn materialized_workspace_recipe_dispatches_the_runner_local_command() {
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            r#"{"tasks":[{"workspace":{"root":"/controller/homeboy@fix-15226"}}]}"#.to_string(),
+        ];
+        let mut recipe = LabStagingRecipe::from_request(
+            "run-15226",
+            "lab-1",
+            &recipe_request(Some(recipe_command()), &args, HashMap::new()),
+        )
+        .expect("recipe");
+        let remote_command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            r#"{"tasks":[{"workspace":{"root":"/runner/_lab_workspaces/homeboy-fix-15226"}}]}"#
+                .to_string(),
+        ];
+
+        bind_recipe_to_materialized_workspace(&mut recipe, &remote_command);
+
+        assert_eq!(recipe.normalized_args, remote_command);
+        assert!(!recipe
+            .normalized_args
+            .iter()
+            .any(|arg| arg.contains("/controller/")));
+        recipe
+            .validate_with_source_requirement(false)
+            .expect("rebound recipe stays a valid portable recipe");
     }
 
     #[test]
