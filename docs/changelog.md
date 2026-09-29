@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.2] - 2026-09-29
+
+### Fixed
+- keep automatic Lab placement through resource admission
+- retain unsafe assignment rejection in gate review
+- use admitted component for PR publication
+- publish reviewer-safe gate commands
+- retain admitted component through finalization
+
 ## [0.397.1] - 2026-09-29
 
 ### Changed
