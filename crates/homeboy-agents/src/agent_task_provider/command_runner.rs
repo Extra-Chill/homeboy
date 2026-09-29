@@ -2898,11 +2898,16 @@ fn run_provider_readiness_invocation_with_timeout(
         ));
     }
     if !status.success() {
-        return Err(format!(
+        let mut message = format!(
             "provider '{}' readiness invocation exited with status {}",
             provider.id,
             status.code().unwrap_or(-1)
-        ));
+        );
+        if let Some(stderr) = readiness_failure_stderr_excerpt(&stderr.bytes, credential_env) {
+            message.push_str(": ");
+            message.push_str(&stderr);
+        }
+        return Err(message);
     }
     let result_value: Value = serde_json::from_slice(&stdout.bytes).map_err(|_| {
         format!(
@@ -2975,6 +2980,49 @@ fn receive_readiness_output(
         .recv_timeout(timeout)
         .map_err(|_| "provider readiness output pipe did not close after cleanup".to_string())?
         .map_err(|error| format!("failed to read provider readiness output: {error}"))
+}
+
+/// Longest stderr excerpt carried into a readiness failure reason.
+const READINESS_FAILURE_STDERR_MAX_CHARS: usize = 400;
+
+/// Bounded, credential-redacted stderr tail for a readiness invocation that
+/// exited non-zero.
+///
+/// A failed probe used to report only its exit status, so every runtime crash,
+/// missing executable, or misconfiguration was the same opaque
+/// `readiness invocation exited with status 1`. Providers already own not
+/// writing secret input to stderr; this still removes every request-scoped
+/// credential value and bounds the text because it becomes durable evidence.
+fn readiness_failure_stderr_excerpt(
+    stderr: &[u8],
+    credential_env: &[(String, String)],
+) -> Option<String> {
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    for (_, value) in credential_env {
+        if !value.is_empty() {
+            text = text.replace(value.as_str(), "[REDACTED]");
+        }
+    }
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let joined = lines.join(" | ");
+    let count = joined.chars().count();
+    Some(if count > READINESS_FAILURE_STDERR_MAX_CHARS {
+        // Keep the tail: the final lines name the failure.
+        let tail: String = joined
+            .chars()
+            .skip(count - READINESS_FAILURE_STDERR_MAX_CHARS)
+            .collect();
+        format!("…{tail}")
+    } else {
+        joined
+    })
 }
 
 fn redact_readiness_credentials(
@@ -3861,5 +3909,54 @@ mod readiness_process_tests {
             wait_until_not_running(pid),
             "descendant {pid} survived timeout cleanup"
         );
+    }
+}
+
+#[cfg(test)]
+mod readiness_failure_stderr_tests {
+    use super::*;
+
+    #[test]
+    fn failed_readiness_reason_carries_the_stderr_cause() {
+        let excerpt = readiness_failure_stderr_excerpt(
+            b"\nOpenCode provider readiness request could not be processed.\n",
+            &[],
+        );
+        assert_eq!(
+            excerpt.as_deref(),
+            Some("OpenCode provider readiness request could not be processed.")
+        );
+    }
+
+    #[test]
+    fn stderr_excerpt_redacts_every_request_credential_value() {
+        let credentials = vec![
+            ("AI_PROVIDER_OPENCODE_OPENAI_ACCESS".to_string(), "sk-access-123".to_string()),
+            ("AI_PROVIDER_OPENCODE_OPENAI_REFRESH".to_string(), "rt-refresh-456".to_string()),
+            ("EMPTY".to_string(), String::new()),
+        ];
+        let excerpt = readiness_failure_stderr_excerpt(
+            b"auth failed for sk-access-123\nrefresh rt-refresh-456 rejected\n",
+            &credentials,
+        )
+        .expect("stderr excerpt");
+        assert!(!excerpt.contains("sk-access-123"), "{excerpt}");
+        assert!(!excerpt.contains("rt-refresh-456"), "{excerpt}");
+        assert_eq!(
+            excerpt,
+            "auth failed for [REDACTED] | refresh [REDACTED] rejected"
+        );
+    }
+
+    #[test]
+    fn stderr_excerpt_is_bounded_to_the_tail_and_empty_stderr_is_omitted() {
+        let long = format!("{}\nFINAL: model gpt-6-luna not found", "noise ".repeat(500));
+        let excerpt = readiness_failure_stderr_excerpt(long.as_bytes(), &[]).expect("excerpt");
+        assert!(excerpt.chars().count() <= READINESS_FAILURE_STDERR_MAX_CHARS + 1);
+        assert!(excerpt.starts_with('…'), "{excerpt}");
+        assert!(excerpt.ends_with("FINAL: model gpt-6-luna not found"), "{excerpt}");
+
+        assert_eq!(readiness_failure_stderr_excerpt(b"  \n\t\n", &[]), None);
+        assert_eq!(readiness_failure_stderr_excerpt(b"", &[]), None);
     }
 }
