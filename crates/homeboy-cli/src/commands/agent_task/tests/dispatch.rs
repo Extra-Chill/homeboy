@@ -167,6 +167,94 @@ fn explicit_unregistered_repo_is_proven_by_the_workspace_remote() {
 
 #[cfg(unix)]
 #[test]
+fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
+    with_isolated_home(|_| {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root = tempfile::tempdir().expect("fixture root");
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).expect("repository directory");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+        git(&["add", "tracked"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "release"]);
+        let linked = root.path().join("linked");
+        git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ]);
+
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).expect("fake gh directory");
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("fake gh");
+        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let resolved = super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+            "homeboy".into(),
+            "agent-task".into(),
+            "cook".into(),
+            "--prompt".into(),
+            "update the existing pull request".into(),
+            "--repo".into(),
+            "fixture".into(),
+            "--cwd".into(),
+            linked.display().to_string(),
+            "--task-url".into(),
+            "https://github.com/example/repo/pull/1895".into(),
+            "--preview".into(),
+            "--no-finalize".into(),
+        ]))
+        .expect("resolve existing PR Cook request");
+
+        assert_eq!(resolved.base.as_deref(), Some("release"));
+        assert_eq!(resolved.head.as_deref(), Some("feature"));
+        assert_eq!(
+            resolved.base_resolution.as_ref().unwrap()["base"],
+            "release"
+        );
+        assert_eq!(
+            resolved.dispatch.task_url.as_deref(),
+            Some("https://github.com/example/repo/pull/1895")
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn cwd_only_unregistered_repo_fails_without_hydrating_unrelated_components() {
     use std::os::unix::fs::PermissionsExt;
 
