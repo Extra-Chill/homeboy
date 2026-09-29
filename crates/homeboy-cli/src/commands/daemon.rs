@@ -956,7 +956,21 @@ where
     if !output.plan.executable {
         // A read-only diagnosis, or evidence that authorizes nothing. The plan
         // and its reason are the answer; running it would be a guess.
-        output.blocked_on = Some(output.plan.reason.clone());
+        output.blocked_on = Some(
+            if output
+                .plan
+                .steps
+                .iter()
+                .any(|step| step.code == actions::DAEMON_RECONCILE_UNLEASED_CANDIDATES)
+            {
+                format!(
+                    "daemon_unleased_process_conflict: {}; review candidates before applying",
+                    output.plan.reason
+                )
+            } else {
+                output.plan.reason.clone()
+            },
+        );
         output.next_command = rendered_plan(&output.plan);
         return Ok((DaemonOutput::Recover(output), 1));
     }
@@ -982,13 +996,15 @@ where
     }
 
     if dry_run {
-        output.blocked_on = Some("recovery preview was not executed".to_string());
+        // A preview is a successful read-only operation. The executable plan
+        // remains available for the operator to apply; it is not a blocker.
+        output.blocked_on = None;
         output.next_command = if output.plan.required_confirmations.is_empty() {
             "homeboy daemon recover --yes".to_string()
         } else {
             rendered_plan(&output.plan)
         };
-        return Ok((DaemonOutput::Recover(output), 1));
+        return Ok((DaemonOutput::Recover(output), 0));
     }
 
     output.applied_steps = match execute(&output.plan, &lease_id, &job_ids) {
@@ -1004,10 +1020,10 @@ where
             output.lease_id = converged.freshness.lease_id.clone();
             output.active_jobs = converged.freshness.active_jobs;
             output.plan = actions::plan_recovery(&converged);
-            output.blocked_on = Some(
-                "lease retirement exposed unleased daemon candidates; the new plan requires explicit review before apply"
-                    .to_string(),
-            );
+            output.blocked_on = Some(format!(
+                "daemon_unleased_process_conflict: {}; review the exact candidates with `homeboy daemon reconcile-unleased-candidates` before applying",
+                output.plan.reason
+            ));
             output.next_command = rendered_plan(&output.plan);
             return Ok((DaemonOutput::Recover(output), 1));
         }
@@ -1471,16 +1487,13 @@ mod tests {
 
             let (output, exit_code) = run(args).expect("an isolated home still resolves a plan");
 
-            assert_eq!(exit_code, 1);
+            assert_eq!(exit_code, 0);
             let DaemonOutput::Recover(output) = output else {
                 panic!("expected recovery output");
             };
             assert!(!output.executed, "a bare recover must not mutate anything");
             assert_eq!(output.command, "daemon.recover");
-            assert_eq!(
-                output.blocked_on.as_deref(),
-                Some("recovery preview was not executed")
-            );
+            assert_eq!(output.blocked_on.as_deref(), None);
             assert_eq!(output.next_command, "homeboy daemon recover --yes");
             assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
         });
@@ -1674,6 +1687,97 @@ mod tests {
         assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
+    /// A recovery may replace a dead recorded owner and publish a new lease
+    /// before the final status read. The postcondition is the new reachable
+    /// lease, not equality with the obsolete planning lease.
+    #[test]
+    fn dead_old_pid_with_new_fresh_lease_is_successful_and_lease_bound() {
+        use daemon::recovery_actions as actions;
+
+        let old_lease = "dead-old-lease";
+        let new_lease = "fresh-replacement-lease";
+        let mut initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::PidDead),
+            vec![
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_STOP,
+                    actions::stop_for_lease(old_lease),
+                ),
+                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+            ],
+        );
+        initial.freshness.lease_id = Some(old_lease.to_string());
+        initial.freshness.pid = Some(4242); // fixture PID is dead; never signal by PID guesswork
+
+        let mut postcondition = recovery_status(true, None, Vec::new());
+        postcondition.freshness.lease_id = Some(new_lease.to_string());
+        postcondition.freshness.pid = Some(4243);
+
+        let (output, exit_code) = recover_from_status(
+            initial,
+            false,
+            false,
+            |plan, lease_id, _| {
+                assert_eq!(lease_id.as_deref(), Some(old_lease));
+                assert_eq!(plan.steps[0].code, actions::DAEMON_STOP);
+                assert!(plan.steps[0].command.contains(old_lease));
+                Ok(vec![
+                    actions::DAEMON_STOP.to_string(),
+                    actions::DAEMON_START.to_string(),
+                ])
+            },
+            || Ok(postcondition),
+        )
+        .expect("fresh replacement lease satisfies recovery");
+
+        assert_eq!(exit_code, 0);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(output.executed);
+        assert!(output.fresh);
+        assert_eq!(output.lease_id.as_deref(), Some(new_lease));
+        assert!(output.blocked_on.is_none());
+    }
+
+    #[test]
+    fn dry_run_returns_success_with_the_executable_lease_bound_plan() {
+        use daemon::recovery_actions as actions;
+
+        let initial = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_STOP,
+                    actions::stop_for_lease("lease-test"),
+                ),
+                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+            ],
+        );
+        let (output, exit_code) = recover_from_status(
+            initial,
+            true,
+            false,
+            |_, _, _| panic!("dry-run must never execute"),
+            || panic!("dry-run must not read an apply postcondition"),
+        )
+        .expect("dry-run returns its executable plan");
+
+        assert_eq!(exit_code, 0);
+        let DaemonOutput::Recover(output) = output else {
+            panic!("expected recovery output");
+        };
+        assert!(!output.executed);
+        assert!(output.plan.executable);
+        assert_eq!(output.plan.steps[0].code, actions::DAEMON_STOP);
+        assert!(output.plan.steps[0]
+            .command
+            .contains("--lease-id lease-test"));
+        assert!(output.blocked_on.is_none());
+    }
+
     #[test]
     fn executed_recovery_fails_when_authoritative_postcondition_is_stale() {
         use daemon::recovery_actions as actions;
@@ -1773,10 +1877,14 @@ mod tests {
             actions::DAEMON_RECONCILE_UNLEASED_CANDIDATES
         );
         assert!(!output.plan.executable);
-        assert!(output
-            .blocked_on
-            .as_deref()
-            .is_some_and(|reason| reason.contains("explicit review")));
+        assert!(output.blocked_on.as_deref().is_some_and(|reason| {
+            reason.contains("daemon_unleased_process_conflict")
+                && reason.contains("before applying")
+        }));
+        assert_eq!(
+            output.next_command, "homeboy daemon reconcile-unleased-candidates",
+            "typed candidate blocker carries its concrete review action"
+        );
     }
 
     #[test]
