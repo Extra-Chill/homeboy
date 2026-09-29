@@ -236,7 +236,10 @@ fn readiness_deadline_error(boundary: &str, deadline_unix_ms: Option<u64>) -> Er
         deadline_unix_ms.map(|value| value.to_string()),
         None,
     )
-    .with_retryable(false);
+    // Readiness is an admission check, not provider execution. Exhausting its
+    // bounded probe window is transient and must remain eligible for a later
+    // admission attempt rather than being classified as invalid credentials.
+    .with_retryable(true);
     error.details["classification"] = json!("timeout");
     error.details["zero_provider_executions"] = json!(true);
     error.details["deadline_unix_ms"] = json!(deadline_unix_ms);
@@ -259,7 +262,7 @@ fn map_readiness_result(
 }
 
 fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
-    Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "provider_runtime_readiness",
         format!(
             "provider '{}' readiness invocation failed: {}",
@@ -269,7 +272,10 @@ fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: Str
         Some(provider.backend.clone()),
         None,
     )
-    .with_retryable(true)
+    .with_retryable(true);
+    error.details["classification"] = json!("transient_failure");
+    error.details["zero_provider_executions"] = json!(true);
+    error
 }
 
 fn publish_readiness_result(
@@ -1722,5 +1728,52 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn delayed_ready_route_is_cached_across_repeated_admission_probes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let count = root.path().join("count");
+        let script = root.path().join("delayed-ready.js");
+        std::fs::write(
+            &script,
+            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'selected-openai-route',identity:{model:'selected-openai-route'}})),4000);",
+        )
+        .expect("readiness script");
+        let provider = provider(&script, &count);
+        let mut cache = test_cache();
+        let started = Instant::now();
+
+        assert!(
+            readiness_verdict_with_credentials_and_deadline(
+                &provider,
+                &json!({"model":"selected-openai-route"}),
+                &[],
+                &mut cache,
+                None,
+            )
+            .expect("delayed readiness")
+            .ready
+        );
+        assert!(started.elapsed() >= Duration::from_secs(3));
+        assert!(
+            readiness_verdict_with_credentials_and_deadline(
+                &provider,
+                &json!({"model":"selected-openai-route"}),
+                &[],
+                &mut cache,
+                None,
+            )
+            .expect("cached readiness")
+            .ready
+        );
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1,
+            "a route already proven ready must not be re-probed during rotation"
+        );
     }
 }

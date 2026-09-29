@@ -3914,7 +3914,15 @@ fn resource_policy_runner_hint<'a>(
 
 fn required_lab_placement(cli: &Cli, hot_command: resource_policy::HotCommand) -> bool {
     hot_command.lab_offload_supported
-        && (cli.runner.is_some() || cli.placement == crate::cli_surface::Placement::Lab)
+        && (cli.runner.is_some()
+            || cli.placement == crate::cli_surface::Placement::Lab
+            || (cli.placement == crate::cli_surface::Placement::Auto
+                && matches!(
+                    cli.command,
+                    Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+                        command: crate::commands::agent_task::AgentTaskCommand::Cook(_),
+                    })
+                )))
 }
 
 fn run_startup_update_checks(command: &Commands) {

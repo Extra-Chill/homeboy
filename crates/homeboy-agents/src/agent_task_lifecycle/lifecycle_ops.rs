@@ -5838,6 +5838,16 @@ fn reconcile_candidate_adoption_terminal_state_in_store(
 /// Called from the terminal Lab projection path so it does not depend on a
 /// later status read or explicit resume command.
 pub fn reconcile_terminal_cook_provider_result(run_id: &str) -> Result<AgentTaskRunRecord> {
+    reconcile_terminal_cook_provider_result_with_scheduler(
+        run_id,
+        homeboy_core::daemon::orchestration::schedule_terminal_cook_continuation,
+    )
+}
+
+pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
+    run_id: &str,
+    schedule: impl FnOnce(&Value) -> Result<Value>,
+) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
     let record = lifecycle_store.read_record(run_id)?;
     if !record.state.is_terminal() {
@@ -5875,6 +5885,27 @@ pub fn reconcile_terminal_cook_provider_result(run_id: &str) -> Result<AgentTask
         );
         true
     })?;
+    let record = lifecycle_store.read_record(run_id)?;
+    if record.metadata["cook_continuation"]["state"] == "pending" {
+        // Submit from the terminal event, not from a later status read. The
+        // durable pending continuation remains available to the daemon's
+        // recovery pass if submission fails after the lifecycle write.
+        let request = json!({
+            "schema": "homeboy/terminal-cook-continuation-request/v1",
+            "cook_id": cook_id,
+            "run_id": run_id,
+            "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
+        });
+        let receipt = schedule(&request)?;
+        if receipt["scheduled"] == true {
+            lifecycle_store.mutate_record(run_id, |stored| {
+                stored.metadata["cook_continuation_scheduler"]["status"] = json!("scheduled");
+                stored.metadata["cook_continuation_scheduler"]["job_id"] =
+                    receipt["job_id"].clone();
+                true
+            })?;
+        }
+    }
     lifecycle_store.read_record(run_id)
 }
 

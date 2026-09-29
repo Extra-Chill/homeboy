@@ -625,53 +625,9 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
     }
 
     fn reconcile_terminal_cook_continuations(&self) -> Result<serde_json::Value> {
-        let (mut records, _) = agent_task_lifecycle::read_all_records_with_health()?;
-        records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-        if records.iter().any(|record| {
-            let continuation = &record.metadata["cook_continuation"];
-            continuation["state"] == "claimed"
-                && continuation["owner_pid"]
-                    .as_u64()
-                    .is_some_and(|pid| homeboy_core::process::pid_is_running(pid as u32))
-        }) {
-            return Ok(serde_json::json!({ "scheduled": false, "active_continuation": true }));
-        }
-        let Some(mut record) = records.into_iter().find(|record| {
-            let continuation = &record.metadata["cook_continuation"];
-            let pending = continuation["state"] == "pending";
-            let abandoned_claim = continuation["state"] == "claimed"
-                && continuation["owner_pid"]
-                    .as_u64()
-                    .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32));
-            (pending || abandoned_claim)
-                && continuation["cook_id"].is_string()
-                && continuation["run_id"].as_str() == Some(record.run_id.as_str())
-        }) else {
-            return Ok(serde_json::json!({ "scheduled": false }));
-        };
-        if record.metadata["cook_continuation"]["state"] == "claimed" {
-            let recipe_store =
-                crate::agent_task_service::CookRecipeStore::from_current_data_root()?;
-            if let Some(abandoned) = recipe_store.claim_continuation_for(
-                record.metadata["cook_continuation"]["cook_id"]
-                    .as_str()
-                    .expect("validated cook id"),
-                &record.run_id,
-            )? {
-                // Dropping this exact reclaimed ownership durably records the
-                // abandonment, increments retry_epoch, and makes it pending.
-                drop(abandoned);
-            }
-            record = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
-                .read_record(&record.run_id)?;
-        }
-        let request = serde_json::json!({
-            "schema": "homeboy/terminal-cook-continuation-request/v1",
-            "cook_id": record.metadata["cook_continuation"]["cook_id"],
-            "run_id": record.run_id,
-            "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
-        });
-        homeboy_core::daemon::orchestration::schedule_terminal_cook_continuation(&request)
+        reconcile_terminal_cook_continuations_with(
+            homeboy_core::daemon::orchestration::schedule_terminal_cook_continuation,
+        )
     }
 
     fn reconcile_waiting_controllers(&self) -> Result<serde_json::Value> {
@@ -679,6 +635,59 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
         serde_json::to_value(report)
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
     }
+}
+
+/// Recover the commit-to-submission crash window. The event path submits the
+/// WorkJob immediately; the daemon retries only continuations left pending.
+pub(crate) fn reconcile_terminal_cook_continuations_with(
+    schedule: impl FnOnce(&serde_json::Value) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let (mut records, _) = agent_task_lifecycle::read_all_records_with_health()?;
+    records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    if records.iter().any(|record| {
+        let continuation = &record.metadata["cook_continuation"];
+        continuation["state"] == "claimed"
+            && continuation["owner_pid"]
+                .as_u64()
+                .is_some_and(|pid| homeboy_core::process::pid_is_running(pid as u32))
+    }) {
+        return Ok(serde_json::json!({ "scheduled": false, "active_continuation": true }));
+    }
+    let Some(mut record) = records.into_iter().find(|record| {
+        let continuation = &record.metadata["cook_continuation"];
+        let pending = continuation["state"] == "pending";
+        let abandoned_claim = continuation["state"] == "claimed"
+            && continuation["owner_pid"]
+                .as_u64()
+                .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32));
+        (pending || abandoned_claim)
+            && continuation["cook_id"].is_string()
+            && continuation["run_id"].as_str() == Some(record.run_id.as_str())
+    }) else {
+        return Ok(serde_json::json!({ "scheduled": false }));
+    };
+    if record.metadata["cook_continuation"]["state"] == "claimed" {
+        let recipe_store = crate::agent_task_service::CookRecipeStore::from_current_data_root()?;
+        if let Some(abandoned) = recipe_store.claim_continuation_for(
+            record.metadata["cook_continuation"]["cook_id"]
+                .as_str()
+                .expect("validated cook id"),
+            &record.run_id,
+        )? {
+            // Dropping this exact reclaimed ownership durably records the
+            // abandonment, increments retry_epoch, and makes it pending.
+            drop(abandoned);
+        }
+        record = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
+            .read_record(&record.run_id)?;
+    }
+    let request = serde_json::json!({
+        "schema": "homeboy/terminal-cook-continuation-request/v1",
+        "cook_id": record.metadata["cook_continuation"]["cook_id"],
+        "run_id": record.run_id,
+        "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
+    });
+    schedule(&request)
 }
 
 /// Resume one retry reservation after the accepting process dies between the
@@ -2100,6 +2109,52 @@ mod tests {
             assert!(!retained.state.is_terminal());
             assert!(retained.metadata.get("cancel_reason").is_none());
             assert!(retained.has_live_pending_local_cook_supervisor(now));
+        });
+    }
+
+    #[test]
+    fn live_local_retry_child_survives_reconcile_when_daemon_supervisor_is_unavailable() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-live-local-retry-child";
+            let plan = AgentTaskPlan::new("live-local-retry-child", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            let child_pid = std::process::id();
+            let child_start_identity = homeboy_core::process::process_start_identity(child_pid)
+                .expect("read process start identity")
+                .expect("current process identity");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_process_start_identity");
+                record.metadata["cook_id"] = serde_json::json!("live-local-retry-cook");
+                record.metadata["local_cook_supervisor"] = serde_json::json!({
+                    "state": "child_spawned",
+                    "pinned_run_id": run_id,
+                    "child_pid": child_pid,
+                    "child_start_identity": child_start_identity,
+                });
+                record.updated_at =
+                    Some((chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
+            })
+            .expect("persist retry child identity");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("retry record");
+            assert!(!record.owner_process_is_running());
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("reconcile after observer/daemon outage");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
+            assert!(!retained.state.is_terminal());
+            assert!(retained.metadata.get("cancel_reason").is_none());
         });
     }
 

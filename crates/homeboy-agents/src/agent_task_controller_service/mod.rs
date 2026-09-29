@@ -1227,6 +1227,38 @@ where
     D: ControllerDispatchHook,
 {
     let mut record = controller::load_controller(loop_id)?;
+    let operator_retry = record
+        .next_actions
+        .iter()
+        .find(|action| action.action_id == action_id)
+        .is_some_and(|action| {
+            matches!(
+                action.status,
+                AgentTaskLoopActionStatus::Failed
+                    | AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+                    | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+                    | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
+            )
+        });
+    if operator_retry {
+        if let Some(action) = record
+            .next_actions
+            .iter_mut()
+            .find(|action| action.action_id == action_id)
+        {
+            action.status = AgentTaskLoopActionStatus::Pending;
+            action.reason = "explicit operator recovery requested".to_string();
+        }
+        record.state = AgentTaskLoopControllerState::Running;
+        record.history.push(AgentTaskLoopHistoryEvent {
+            event_id: format!("operator-retry-{}", record.history.len() + 1),
+            event_type: "controller.action.operator_retry_requested".to_string(),
+            recorded_at: controller::now_timestamp(),
+            entity_id: None,
+            payload: serde_json::json!({ "action_id": action_id }),
+        });
+        controller::write_controller(&record)?;
+    }
     execute_controller_action(&mut record, action_id, executor, dispatch)
 }
 
@@ -1276,7 +1308,32 @@ where
                 exit_code: 0,
             });
         }
+        if record.state == AgentTaskLoopControllerState::Running
+            && record.next_actions.iter().any(action_is_failed_or_blocked)
+        {
+            return Ok(AgentTaskRunResult {
+                value: ControllerResumeReport {
+                    schema: RESUME_RESULT_SCHEMA,
+                    loop_id: record.loop_id.clone(),
+                    claimed: !results.is_empty(),
+                    stopped_reason: "action_failed".to_string(),
+                    results,
+                    controller: record,
+                },
+                exit_code: 1,
+            });
+        }
         let Some(action_id) = first_pending_action_id(&record) else {
+            if record.state == AgentTaskLoopControllerState::Running
+                && record.open_wait_count() == 0
+                && record
+                    .next_actions
+                    .iter()
+                    .all(|action| !action.status.is_open())
+            {
+                record.state = AgentTaskLoopControllerState::Waiting;
+                controller::write_controller(&record)?;
+            }
             return Ok(AgentTaskRunResult {
                 value: ControllerResumeReport {
                     schema: RESUME_RESULT_SCHEMA,
@@ -1346,6 +1403,16 @@ fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
             | AgentTaskLoopControllerState::Abandoned
             | AgentTaskLoopControllerState::Escalated
             | AgentTaskLoopControllerState::Failed
+    )
+}
+
+fn action_is_failed_or_blocked(action: &AgentTaskLoopPolicyActionRecord) -> bool {
+    matches!(
+        action.status,
+        AgentTaskLoopActionStatus::Failed
+            | AgentTaskLoopActionStatus::BlockedRunnerUnavailable
+            | AgentTaskLoopActionStatus::BlockedRemoteMaterialization
+            | AgentTaskLoopActionStatus::BlockedLocalFallbackDenied
     )
 }
 

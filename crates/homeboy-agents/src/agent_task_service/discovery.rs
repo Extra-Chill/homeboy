@@ -1071,6 +1071,14 @@ fn classify_liveness(
     if durable_queued_retry_is_live(record) {
         return AgentTaskLiveness::Active;
     }
+    // The retry child is the local execution owner, while the controller job is
+    // only its supervisor. Daemon recovery can temporarily make the job store
+    // unreachable or stale; do not let that observer outage override the exact
+    // child PID plus process-start identity persisted at spawn. This check is
+    // intentionally local-only and never treats PID presence alone as proof.
+    if live_local_cook_retry_child(record) {
+        return AgentTaskLiveness::Active;
+    }
     // A local Cook retry owns a queued lifecycle reservation before its child
     // begins provider execution. Its current daemon job is the authoritative
     // owner, so test it before generic queued-record staleness.
@@ -1210,6 +1218,36 @@ fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord) -> bool {
         )
         && job.daemon_lease_id.as_deref() == Some(lease.as_str())
         && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+}
+
+fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
+    let supervisor = &record.metadata["local_cook_supervisor"];
+    if !matches!(
+        supervisor["state"].as_str(),
+        Some("child_spawned" | "supervising")
+    ) || supervisor["pinned_run_id"].as_str() != Some(record.run_id.as_str())
+    {
+        return false;
+    }
+    let Some(pid) = supervisor["child_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return false;
+    };
+    let Ok(start_identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+        supervisor["child_start_identity"].clone(),
+    ) else {
+        return false;
+    };
+    matches!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            Some(&start_identity),
+        ),
+        homeboy_core::process::ProcessIdentityState::Live
+    )
 }
 
 /// Label where a run executes so an operator can trace the runner process.
