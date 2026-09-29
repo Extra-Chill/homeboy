@@ -802,10 +802,11 @@ fn portable_component_for_checkout(
 ) -> Result<Component> {
     let manifest_path = checkout_path.join("homeboy.json");
     let Some(discovered) = try_discover_from_portable(checkout_path)? else {
-        // A registration without a primary portable manifest is legacy
-        // machine-local metadata, not checkout-owned configuration. Keep that
+        // A registration whose primary checkout does not own its manifest is
+        // machine-local metadata, not checkout-owned configuration: another
+        // checkout of the repository cannot be expected to carry it. Keep that
         // behavior for legacy consumers; otherwise a target manifest is required.
-        if try_discover_from_portable(Path::new(&registered.local_path))?.is_none() {
+        if !checkout_owns_manifest(Path::new(&registered.local_path))? {
             let mut component = registered.clone();
             component.local_path = checkout_path.to_string_lossy().to_string();
             resolve_remote_path_at(config_root, &mut component);
@@ -848,6 +849,32 @@ fn portable_component_for_checkout(
     component.local_path = checkout_path.to_string_lossy().to_string();
     resolve_remote_path_at(config_root, &mut component);
     Ok(component)
+}
+
+/// Whether `checkout`'s `homeboy.json` is configuration the repository owns.
+///
+/// A manifest the repository owns travels with it, so every other checkout of
+/// the same repository can be expected to carry one. A manifest present on
+/// disk but untracked (commonly listed in `.git/info/exclude` for a repository
+/// that does not accept Homeboy config) exists only on this machine, in this
+/// checkout: it is machine-local configuration, like a registry entry. A
+/// checkout outside any git work tree has no tracking to consult, so a manifest
+/// there stays checkout-owned.
+fn checkout_owns_manifest(checkout: &Path) -> Result<bool> {
+    if try_discover_from_portable(checkout)?.is_none() {
+        return Ok(false);
+    }
+    let in_work_tree =
+        crate::git::output_optional(checkout, &["rev-parse", "--is-inside-work-tree"])
+            .is_some_and(|value| value == "true");
+    if !in_work_tree {
+        return Ok(true);
+    }
+    Ok(crate::git::output_optional(
+        checkout,
+        &["ls-files", "--error-unmatch", "--", "homeboy.json"],
+    )
+    .is_some())
 }
 
 /// Apply only manifest-declared values. Objects merge recursively so a checkout
@@ -2937,6 +2964,70 @@ mod tests {
                 worktree.canonicalize().expect("canonical worktree")
             );
             assert_ne!(component.remote_path, "wp-content/plugins/other");
+        });
+    }
+
+    #[test]
+    fn untracked_primary_manifest_does_not_require_one_in_another_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@task");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(primary.join("README.md"), "fixture\n").expect("readme");
+            git(&primary, &["add", "README.md"]);
+            git(&primary, &["commit", "-m", "fixture"]);
+            // Machine-local config the repository does not accept: on disk, excluded.
+            fs::write(
+                primary.join("homeboy.json"),
+                r#"{"id":"fixture","env":{"MACHINE_LOCAL":"primary"}}"#,
+            )
+            .expect("primary manifest");
+            fs::write(primary.join(".git/info/exclude"), "/homeboy.json\n").expect("exclude");
+            add_worktree(&primary, &worktree, "task");
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let component = resolve_effective(Some("fixture"), worktree.to_str(), None)
+                .expect("a worktree of a repository without a tracked manifest resolves");
+
+            assert_eq!(component.id, "fixture");
+            assert_eq!(
+                Path::new(&component.local_path),
+                worktree.canonicalize().expect("canonical worktree")
+            );
+            assert_eq!(component.remote_path, "wp-content/plugins/fixture");
+        });
+    }
+
+    #[test]
+    fn tracked_primary_manifest_still_requires_one_in_another_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@task");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            fs::write(primary.join("homeboy.json"), r#"{"id":"fixture"}"#)
+                .expect("primary manifest");
+            git(&primary, &["add", "homeboy.json"]);
+            git(&primary, &["commit", "-m", "manifest"]);
+            add_worktree(&primary, &worktree, "task");
+            git(&worktree, &["rm", "-q", "homeboy.json"]);
+            git(&worktree, &["commit", "-m", "drop manifest"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let error = resolve_effective(Some("fixture"), worktree.to_str(), None)
+                .expect_err("a revision without the repository's manifest is refused");
+
+            assert!(
+                error.to_string().contains("has no portable manifest"),
+                "unexpected error: {error}"
+            );
         });
     }
 
