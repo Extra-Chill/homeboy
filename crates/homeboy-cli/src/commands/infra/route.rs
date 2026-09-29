@@ -2141,10 +2141,11 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
         _invocation: crate::agents::agent_task_service::WorkJobInvocation,
     ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
         let request = parse_terminal_cook_job(&checkpoint)?;
-        let result = run_terminal_cook_continuation(&request)?;
-        Ok(crate::agents::agent_task_service::WorkJobStep::Complete(
-            result,
-        ))
+        run_terminal_cook_continuation(
+            &request,
+            checkpoint.clone(),
+            self.initial_progress(&checkpoint)?,
+        )
     }
 
     fn cancelled(
@@ -2161,10 +2162,38 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
 
 fn run_terminal_cook_continuation(
     request: &TerminalCookJobRequest,
-) -> homeboy::core::Result<serde_json::Value> {
+    checkpoint: serde_json::Value,
+    progress: serde_json::Value,
+) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
+    use crate::agents::agent_task_service::{CookContinuationState, WorkJobStep};
+
     let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
     let Some(claim) = store.claim_continuation_for(&request.cook_id, &request.run_id)? else {
-        return Ok(serde_json::json!({ "claimed": false, "completed": true }));
+        // A second consumer can own the continuation while this WorkJob is
+        // recovered. Only a completed claim is a completed job; an active claim
+        // must remain supervised until that consumer settles its durable state.
+        let state = crate::agents::agent_task_service::continuation_state_in_store(
+            &store,
+            &request.cook_id,
+            &request.run_id,
+        )?;
+        return match state {
+            CookContinuationState::Pending | CookContinuationState::Claimed => {
+                Ok(WorkJobStep::Continue {
+                    checkpoint,
+                    progress,
+                    wait: Duration::from_millis(250),
+                })
+            }
+            CookContinuationState::Completed => Ok(WorkJobStep::Complete(
+                serde_json::json!({ "claimed": false, "completed": true }),
+            )),
+            CookContinuationState::Absent | CookContinuationState::Failed => {
+                Err(Error::internal_unexpected(format!(
+                    "terminal Cook continuation is {state:?} without a claim"
+                )))
+            }
+        };
     };
     let exit_code = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
         claim,
@@ -2190,12 +2219,12 @@ fn run_terminal_cook_continuation(
             "terminal Cook continuation exited with status {exit_code}"
         )));
     }
-    Ok(serde_json::json!({
+    Ok(WorkJobStep::Complete(serde_json::json!({
         "claimed": true,
         "cook_id": request.cook_id,
         "run_id": request.run_id,
         "exit_code": exit_code,
-    }))
+    })))
 }
 
 fn terminal_cook_work_submission(
