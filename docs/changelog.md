@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.10] - 2026-09-29
+
+### Changed
+- remove obsolete continuation sidecar importer
+- recover terminal work from indexed intents
+
+### Fixed
+- surface runner resource-guard stops as typed blockers
+
 ## [0.397.9] - 2026-09-29
 
 ### Changed
