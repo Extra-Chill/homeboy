@@ -127,24 +127,6 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
         && record.has_expired_pending_lab_handoff(now)
 }
 
-// The ambient `has_expired_unaccepted_lab_handoff()` shim that used to sit here is
-// gone; the reconciler was its only caller and now asks the store it is about to act on (#7505).
-
-/// [`has_expired_unaccepted_lab_handoff`] against an explicitly injected root.
-///
-/// The reconciler decides whether to expire a handoff from this answer and then
-/// expires it; both halves must read the same installation or it expires a
-/// handoff it never observed (#7505).
-pub(crate) fn has_expired_unaccepted_lab_handoff_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    Ok(has_expired_pending_runner_submission_intent(
-        &lifecycle_store.read_record(&sanitize_run_id(run_id))?,
-        chrono::Utc::now(),
-    ))
-}
-
 fn has_complete_pending_runner_submission_intent(record: &AgentTaskRunRecord) -> bool {
     // The reverse broker can start the runner-side workload before its accepted
     // job projection reaches this controller record. That transient `Running`

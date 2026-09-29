@@ -1885,10 +1885,14 @@ mod tests {
             !rejected.load(Ordering::SeqCst),
             "unmatched path fails before provider"
         );
-        assert!(failed.outcomes[0]
-            .summary
-            .as_deref()
-            .is_some_and(|summary| summary.contains("observed")));
+        assert!(
+            failed.outcomes[0]
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("observed")),
+            "{:?}",
+            failed.outcomes[0]
+        );
     }
 
     #[test]

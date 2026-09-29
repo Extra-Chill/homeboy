@@ -624,70 +624,11 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
         reconcile_queued_retries()
     }
 
-    fn reconcile_terminal_cook_continuations(&self) -> Result<serde_json::Value> {
-        reconcile_terminal_cook_continuations_with(
-            homeboy_core::daemon::orchestration::schedule_terminal_cook_continuation,
-        )
-    }
-
     fn reconcile_waiting_controllers(&self) -> Result<serde_json::Value> {
         let report = crate::agent_task_controller_service::reconcile_waiting_controllers()?;
         serde_json::to_value(report)
             .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
     }
-}
-
-/// Recover the commit-to-submission crash window. The event path submits the
-/// WorkJob immediately; the daemon retries only continuations left pending.
-pub(crate) fn reconcile_terminal_cook_continuations_with(
-    schedule: impl FnOnce(&serde_json::Value) -> Result<serde_json::Value>,
-) -> Result<serde_json::Value> {
-    let (mut records, _) = agent_task_lifecycle::read_all_records_with_health()?;
-    records.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-    if records.iter().any(|record| {
-        let continuation = &record.metadata["cook_continuation"];
-        continuation["state"] == "claimed"
-            && continuation["owner_pid"]
-                .as_u64()
-                .is_some_and(|pid| homeboy_core::process::pid_is_running(pid as u32))
-    }) {
-        return Ok(serde_json::json!({ "scheduled": false, "active_continuation": true }));
-    }
-    let Some(mut record) = records.into_iter().find(|record| {
-        let continuation = &record.metadata["cook_continuation"];
-        let pending = continuation["state"] == "pending";
-        let abandoned_claim = continuation["state"] == "claimed"
-            && continuation["owner_pid"]
-                .as_u64()
-                .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32));
-        (pending || abandoned_claim)
-            && continuation["cook_id"].is_string()
-            && continuation["run_id"].as_str() == Some(record.run_id.as_str())
-    }) else {
-        return Ok(serde_json::json!({ "scheduled": false }));
-    };
-    if record.metadata["cook_continuation"]["state"] == "claimed" {
-        let recipe_store = crate::agent_task_service::CookRecipeStore::from_current_data_root()?;
-        if let Some(abandoned) = recipe_store.claim_continuation_for(
-            record.metadata["cook_continuation"]["cook_id"]
-                .as_str()
-                .expect("validated cook id"),
-            &record.run_id,
-        )? {
-            // Dropping this exact reclaimed ownership durably records the
-            // abandonment, increments retry_epoch, and makes it pending.
-            drop(abandoned);
-        }
-        record = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
-            .read_record(&record.run_id)?;
-    }
-    let request = serde_json::json!({
-        "schema": "homeboy/terminal-cook-continuation-request/v1",
-        "cook_id": record.metadata["cook_continuation"]["cook_id"],
-        "run_id": record.run_id,
-        "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
-    });
-    schedule(&request)
 }
 
 /// Resume one retry reservation after the accepting process dies between the

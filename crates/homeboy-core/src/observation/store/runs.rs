@@ -1849,7 +1849,32 @@ impl ObservationStore {
         resource_projection: Option<&ControlPlaneResourceProjection>,
         events: &[PreparedControlPlaneEventAppend],
     ) -> Result<()> {
+        self.upsert_imported_run_with_events_and_intents(
+            run,
+            preserve_terminal,
+            mission_id,
+            resource_projection,
+            events,
+            &[],
+        )
+    }
+
+    /// Commit generic work intents in the same transaction as their source run.
+    /// A daemon restart after this write can submit the pending job from the
+    /// indexed outbox, without scanning terminal lifecycle records.
+    pub fn upsert_imported_run_with_events_and_intents(
+        &self,
+        run: &RunRecord,
+        preserve_terminal: bool,
+        mission_id: Option<&str>,
+        resource_projection: Option<&ControlPlaneResourceProjection>,
+        events: &[PreparedControlPlaneEventAppend],
+        intents: &[WorkIntent],
+    ) -> Result<()> {
         validate_required("run.id", &run.id)?;
+        for intent in intents {
+            intent.validate(&run.id)?;
+        }
         let mut run = run.clone();
         if crate::notification_route::NotificationRoute::from_metadata(&run.metadata_json).is_none()
         {
@@ -1904,6 +1929,17 @@ impl ObservationStore {
                                 Err(rollback_error) => Err(rollback_error),
                             };
                         }
+                    }
+                }
+                for intent in intents {
+                    if let Err(error) =
+                        super::work_intents::append_work_intent_on(&transaction, intent)
+                    {
+                        captured = Some(error);
+                        return match transaction.rollback() {
+                            Ok(()) => Ok(()),
+                            Err(rollback_error) => Err(rollback_error),
+                        };
                     }
                 }
             }

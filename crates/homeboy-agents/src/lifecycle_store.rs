@@ -1864,12 +1864,14 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     };
     let resource_projection = agent_task_record_write_projection(lifecycle_store, &store, &record)?;
     let mission = crate::agent_task_lifecycle::canonical_mission(&record)?;
-    store.upsert_imported_run_with_events(
+    let intents = work_intents_for_record(&record)?;
+    store.upsert_imported_run_with_events_and_intents(
         &projected,
         preserve_terminal,
         mission.as_ref().map(|mission| mission.as_str()),
         Some(&resource_projection),
         &events,
+        &intents,
     )?;
     let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
         Error::internal_unexpected(format!(
@@ -1880,6 +1882,33 @@ fn write_record_with_aggregate_without_workspace_authority_mode(
     record_from_run(&committed)
 }
 
+fn work_intents_for_record(
+    record: &AgentTaskRunRecord,
+) -> Result<Vec<homeboy_core::observation::WorkIntent>> {
+    let continuation = &record.metadata["cook_continuation"];
+    if continuation["state"] != "pending" {
+        return Ok(Vec::new());
+    }
+    let Some(cook_id) = continuation["cook_id"].as_str() else {
+        return Ok(Vec::new());
+    };
+    if continuation["run_id"].as_str() != Some(record.run_id.as_str()) {
+        return Ok(Vec::new());
+    }
+    let generation = continuation["generation"].as_u64().unwrap_or(0);
+    Ok(vec![homeboy_core::observation::WorkIntent {
+        id: format!("terminal-cook:{cook_id}:{}:{generation}", record.run_id),
+        run_id: record.run_id.clone(),
+        kind: "terminal-cook-continuation".to_string(),
+        version: 1,
+        payload: json!({
+            "schema": "homeboy/terminal-cook-continuation-request/v1",
+            "cook_id": cook_id,
+            "run_id": record.run_id,
+            "generation": generation,
+        }),
+    }])
+}
 /// Rebuild one record's projection without disturbing Cook alias ownership.
 ///
 /// An ordinary record write knows its own lifecycle state but nothing about
