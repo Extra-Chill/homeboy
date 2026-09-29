@@ -2104,6 +2104,52 @@ mod tests {
     }
 
     #[test]
+    fn live_local_retry_child_survives_reconcile_when_daemon_supervisor_is_unavailable() {
+        with_isolated_home(|_| {
+            register_orchestration_driver();
+            let run_id = "reconcile-live-local-retry-child";
+            let plan = AgentTaskPlan::new("live-local-retry-child", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            let child_pid = std::process::id();
+            let child_start_identity = homeboy_core::process::process_start_identity(child_pid)
+                .expect("read process start identity")
+                .expect("current process identity");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_pid");
+                record
+                    .metadata
+                    .as_object_mut()
+                    .expect("metadata object")
+                    .remove("runner_process_start_identity");
+                record.metadata["cook_id"] = serde_json::json!("live-local-retry-cook");
+                record.metadata["local_cook_supervisor"] = serde_json::json!({
+                    "state": "child_spawned",
+                    "pinned_run_id": run_id,
+                    "child_pid": child_pid,
+                    "child_start_identity": child_start_identity,
+                });
+                record.updated_at =
+                    Some((chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
+            })
+            .expect("persist retry child identity");
+
+            let record = agent_task_lifecycle::exact_record(run_id).expect("retry record");
+            assert!(!record.owner_process_is_running());
+            let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
+                .expect("reconcile after observer/daemon outage");
+            assert_eq!(report["reconciled"], 0, "{report}");
+            let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
+            assert!(!retained.state.is_terminal());
+            assert!(retained.metadata.get("cancel_reason").is_none());
+        });
+    }
+
+    #[test]
     fn fenced_recheck_preserves_local_owner_recorded_after_stale_discovery_snapshot() {
         with_isolated_home(|_| {
             let run_id = "reconcile-local-owner-after-snapshot";
