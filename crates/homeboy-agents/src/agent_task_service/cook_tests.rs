@@ -12050,20 +12050,39 @@ fn terminal_lab_cook_provider_result_queues_continuation_without_status_or_resum
                     .metadata["cook_continuation"]["state"],
                 "pending"
             );
+            let accepted_before_ack = std::cell::Cell::new(0);
+            let lost_ack = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+                assert_eq!(intent.run_id, run_id);
+                accepted_before_ack.set(accepted_before_ack.get() + 1);
+                Err(homeboy_core::Error::internal_unexpected(
+                    "daemon stopped after accepting WorkJob before ACK",
+                ))
+            })
+            .expect_err("unacknowledged intent remains visible after daemon interruption");
+            assert!(lost_ack.message.contains("before ACK"));
+            assert_eq!(accepted_before_ack.get(), 1);
             let scheduled = std::cell::Cell::new(0);
-            let recovery =
-                super::super::reconcile::reconcile_terminal_cook_continuations_with(|request| {
-                    scheduled.set(scheduled.get() + 1);
-                    assert_eq!(request["cook_id"], cook_id);
-                    assert_eq!(request["run_id"], run_id);
-                    assert_eq!(request["generation"], 0);
-                    Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
-                })
-                .expect("daemon recovers durable pending work after interrupted event submission");
+            let recovery = homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+                scheduled.set(scheduled.get() + 1);
+                let request = &intent.payload;
+                assert_eq!(request["cook_id"], cook_id);
+                assert_eq!(request["run_id"], run_id);
+                assert_eq!(request["generation"], 0);
+                assert_eq!(intent.run_id, run_id);
+                Ok(serde_json::json!({ "scheduled": true, "job_id": "shared-work-job" }))
+            })
+            .expect("daemon recovers durable pending work after interrupted event submission");
             assert_eq!(recovery["scheduled"], true);
             let reconciled = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
             assert_eq!(reconciled.run_id, run_id);
             assert_eq!(scheduled.get(), 1);
+            assert_eq!(
+                homeboy_core::daemon::orchestration::drain_work_intents_with(|_| {
+                    panic!("an acknowledged intent must not schedule a second job")
+                })
+                .expect("ACK settles indexed intent")["scheduled"],
+                false
+            );
             let claim = recipe_store
                 .claim_continuation_for(cook_id, run_id)
                 .expect("claim terminal continuation")
