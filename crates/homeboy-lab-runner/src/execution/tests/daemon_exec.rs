@@ -726,12 +726,28 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
     let job = wait_for_job(&store, &job_id);
     assert_eq!(job.status, JobStatus::Failed);
 
-    let events = store.events(job.id).expect("events");
+    // The terminal job status can become visible before the event stream does.
+    // Wait for both records, but still fail if the Result never arrives.
+    let mut events = store.events(job.id).expect("events");
+    for _ in 0..1500 {
+        let has_result = events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Result);
+        let has_failed_status = events.iter().any(|event| {
+            event.kind == JobEventKind::Status
+                && event.data.as_ref().and_then(|data| data["status"].as_str()) == Some("failed")
+        });
+        if has_result && has_failed_status {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        events = store.events(job.id).expect("events");
+    }
     let result = events
         .iter()
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data.as_ref())
-        .expect("result event");
+        .expect("result event after bounded wait");
     assert_eq!(result["exit_code"], 7);
     assert_eq!(result["stdout"], "out");
     assert_eq!(result["stderr"], "err");
