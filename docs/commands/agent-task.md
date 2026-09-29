@@ -1141,18 +1141,25 @@ backend. Narrow the walk with `--backend`, `--model`, or `--selector`.
 homeboy agent-task capacity
 ```
 
+Desktop and other local daemon clients can read the same capacity service over
+`GET /v1/control-plane/capacity` (optional `backend`, `model`, and `selector`
+query parameters). The daemon caches snapshots for 15 seconds; repeated reads
+return `snapshot_age_seconds`, while a failed refresh returns the last snapshot
+with `stale: true` rather than presenting it as current.
+
 Each route's readiness invocation runs with `mode: "capacity"`. Runtimes that
 support this mode answer from provider usage lookups only, so the command
 spends no inference. The OpenCode runtime supports it. For runtimes that don't,
 the command reports only what the capacity result contains.
 
-- Routes run in parallel, each with a bounded timeout. A route that fails is
+- Route probes are bounded. A route that fails is
   reported as `unknown` with its diagnostic, and the other routes still
   return.
 - Routes that report the same `capacity.scope` share one account pool, so they
   appear as a single entry that lists all of their models.
 - The result schema is `homeboy/agent-task-capacity/v1`:
   - `generated_at`
+  - `stale` and `snapshot_age_seconds` on the shared CLI/HTTP service projection.
   - `routes[]`, each with `backend`, `selector`, `models[]`, `scope`, and
     `capacity`. `capacity` carries `state`, `remaining`, `limit`, `unit`,
     `reset_at`, and per-account `accounts[]`.
