@@ -20,13 +20,28 @@ write_phase() {
   outcome=passed
   printf '%s' "${results}" | jq -e '."review test" == "fail"' >/dev/null && outcome=failed
   execution_fingerprint=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-  inventory_fingerprint=9dbf5642740c6245489c5fa9cd655f95d5592393289bd250a4689dbe72e43333
   if [ "${phase}" = baseline ]; then
     execution_fingerprint=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-    inventory_fingerprint=b8281a5f59c43e3363b01fd17084972db2178833a4626a7088ee1ea4911369f3
   fi
-  jq -cn --arg command 'review test' --arg outcome "${outcome}" --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-outcomes/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,failed_test_ids:(if $outcome == "failed" then ["stable"] else [] end)}' > "${dir}/homeboy-ci-results/review-test.test-outcomes.json"
-  jq -cn --arg command 'review test' --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-inventory/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,tests:[{id:"stable"}]}' > "${dir}/homeboy-ci-results/review-test.test-inventory.json"
+  inventory_fingerprint="$(python3 - "${execution_fingerprint}" <<'PY'
+import hashlib
+import json
+import sys
+
+inventory = {
+    "command": "review test",
+    "execution_fingerprint": sys.argv[1],
+    "runner": "nextest",
+    "runner_fingerprint": "a" * 64,
+    "workspace_fingerprint": "b" * 64,
+    "schema": "homeboy/test-inventory/v1",
+    "tests": [{"id": "fixture::lib::fixture::stable"}],
+}
+print(hashlib.sha256(json.dumps(inventory, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+PY
+)"
+  jq -cn --arg command 'review test' --arg outcome "${outcome}" --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-outcomes/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,failed_test_ids:(if $outcome == "failed" then ["fixture::lib::fixture::stable"] else [] end)}' > "${dir}/homeboy-ci-results/review-test.test-outcomes.json"
+  jq -cn --arg command 'review test' --arg execution_fingerprint "${execution_fingerprint}" --arg inventory_fingerprint "${inventory_fingerprint}" '{schema:"homeboy/test-inventory/v1",command:$command,runner:"nextest",runner_fingerprint:("a" * 64),workspace_fingerprint:("b" * 64),execution_fingerprint:$execution_fingerprint,inventory_fingerprint:$inventory_fingerprint,tests:[{id:"fixture::lib::fixture::stable"}]}' > "${dir}/homeboy-ci-results/review-test.test-inventory.json"
   jq -cn --arg phase "${phase}" --arg repository example/repo --arg candidate_sha candidate --arg base_sha base --arg checkout_sha "${checkout_sha}" --arg command 'review test' --arg component "${component}" --arg action_revision action-sha --arg cli_revision "${cli}" --arg binary_sha256 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' --argjson run_attempt 2 --argjson results "${results}" '{phase:$phase,repository:$repository,candidate_sha:$candidate_sha,base_sha:$base_sha,checkout_sha:$checkout_sha,command:$command,component:$component,action_revision:$action_revision,cli_revision:$cli_revision,binary_sha256:$binary_sha256,run_attempt:$run_attempt,results:$results}' > "${dir}/manifest.json"
 }
 
@@ -88,7 +103,7 @@ grep -F '"baseline_red"' "${tmp}/output" >/dev/null || { printf 'FAIL: baseline 
 # failures before the gate blames the PR. Absence (every case above) is a
 # no-op; these cases exercise the hook itself. Extra-Chill/homeboy#14984.
 #
-# write_phase's fixed test identity is "stable"; the fake `cargo-nextest`
+# write_phase's fixed test identity is "fixture::lib::fixture::stable"; the fake `cargo-nextest`
 # plugin below reads its filter argument to decide pass/fail per identity,
 # exactly like a real one would.
 retry_bin_dir="${tmp}/retry-bin"
@@ -101,10 +116,11 @@ install_fake_nextest() {
 #!/usr/bin/env bash
 id=""
 for arg in "\$@"; do
-  case "\${arg}" in
-    test\\(=*\\)) id="\${arg#test(=}"; id="\${id%)}" ;;
-  esac
+  if [[ "\${arg}" == *'package(=fixture)'* && "\${arg}" == *'kind(=lib)'* && "\${arg}" == *'binary(=fixture)'* && "\${arg}" =~ test\\(=([^\\)]*)\\) ]]; then
+    id="\${BASH_REMATCH[1]}"
+  fi
 done
+[ "\${id}" = stable ] || { echo '0 tests run'; exit 4; }
 case "${behavior}" in
   flaky)
     state="${retry_workspace}/\${id//[:\\/]/_}.count"
