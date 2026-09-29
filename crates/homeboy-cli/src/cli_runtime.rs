@@ -5857,7 +5857,7 @@ mod tests {
         let script = scripts_dir.join("fingerprint.sh");
         std::fs::write(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"aggregate_literals\":[{\"type_name\":\"Policy\",\"fields\":[\"allow\"],\"line\":1}]}'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"aggregate_literals\":[{\"type_name\":\"Policy\",\"fields\":[\"allow\"],\"line\":1}]}'\n",
         )
         .expect("audit fingerprint script");
         let mut permissions = std::fs::metadata(&script)

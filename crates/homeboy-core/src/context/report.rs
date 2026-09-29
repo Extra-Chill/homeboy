@@ -451,8 +451,8 @@ fn build_component_states(
                     total,
                     unfinished: state.unfinished.clone(),
                 };
-                drop(state);
                 progress(event);
+                drop(state);
                 let release_state = release_provider::calculate_release_state(&component);
                 let gaps = cwd
                     .as_ref()
@@ -476,8 +476,8 @@ fn build_component_states(
                     total,
                     unfinished: state.unfinished.clone(),
                 };
-                drop(state);
                 progress(event);
+                drop(state);
             });
         }
     });
