@@ -590,6 +590,35 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
     }
 }
 
+pub(crate) fn cook_terminal_for_attempt(
+    cook_id: &str,
+    attempt_run_id: &str,
+    status: &str,
+    exit_code: i32,
+) {
+    let report = AgentTaskCookReport {
+        schema: "homeboy/agent-task-cook/v1",
+        cook_id: cook_id.to_string(),
+        latest_run_id: Some(attempt_run_id.to_string()),
+        history_run_ids: Vec::new(),
+        invocation_run_ids: Vec::new(),
+        status: status.to_string(),
+        disposition: homeboy_core::cook_status::CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        intentional_no_change: None,
+        selected_candidate: None,
+        stop_reason: None,
+        terminal_phase: None,
+        terminal_failure_classification: None,
+        primary_failure: None,
+        moving_base_recovery: None,
+        failure_context: None,
+        report_stores: None,
+    };
+    cook_terminal(&report, None, exit_code);
+}
+
 // ---------------------------------------------------------------------------
 // Batch / wave terminal (W3-5)
 // ---------------------------------------------------------------------------

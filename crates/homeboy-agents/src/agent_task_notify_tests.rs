@@ -510,11 +510,8 @@ fn detached_attempt_terminal_preserves_cook_notification_for_final_report() {
             attempt.state,
             crate::agent_task_lifecycle::AgentTaskRunState::Failed
         );
-        let mut failed = report("gate_failed", None);
-        failed.cook_id = cook_id.to_string();
-        failed.latest_run_id = Some(attempt_id.to_string());
-        failed.stop_reason = Some("gate fix pending".to_string());
-        cook_terminal(&failed, None, 1);
+        crate::agent_task_service::finalize_detached_cook_attempt(cook_id, attempt_id)
+            .expect("detached finalizer");
         let delivery = latest_delivery(cook_id);
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport"], "test.cook");

@@ -41,7 +41,56 @@ const CAPACITY_ROUTE_TIMEOUT_MS: u64 = 30_000;
 const MAX_CAPACITY_ROUTES: usize = 64;
 
 pub fn capacity(args: AgentTaskCapacityArgs) -> CmdResult<Value> {
-    capacity_with_catalog(args, AgentTaskProviderCatalog::discover())
+    let query = json!({"backend": args.backend, "selector": args.selector, "model": args.model});
+    Ok((
+        homeboy::core::control_plane::read_resource("capacity", &query)?,
+        0,
+    ))
+}
+
+struct ProviderCapacitySnapshot;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapacityFilter {
+    backend: Option<String>,
+    selector: Option<String>,
+    model: Option<String>,
+}
+
+impl homeboy::core::control_plane::ControlPlaneReadResourceProvider for ProviderCapacitySnapshot {
+    fn resource_type(&self) -> &'static str {
+        "capacity"
+    }
+
+    fn read(&self, query: &Value) -> homeboy::core::Result<Value> {
+        let query: CapacityFilter = serde_json::from_value(query.clone()).map_err(|error| {
+            homeboy::core::Error::validation_invalid_argument(
+                "capacity.query",
+                error.to_string(),
+                None,
+                None,
+            )
+        })?;
+        capacity_with_catalog(
+            AgentTaskCapacityArgs {
+                backend: query.backend,
+                selector: query.selector,
+                model: query.model,
+            },
+            AgentTaskProviderCatalog::discover(),
+        )
+        .map(|(resource, _)| resource)
+    }
+}
+
+pub(crate) fn register_capacity_snapshot_provider() {
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        homeboy::core::control_plane::register_read_resource_provider(std::sync::Arc::new(
+            ProviderCapacitySnapshot,
+        ));
+    });
 }
 
 pub(crate) fn capacity_with_catalog(

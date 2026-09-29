@@ -18,6 +18,11 @@ pub struct RunnerValidationDependencySyncOutput {
     pub role: String,
     pub local_path: String,
     pub remote_path: String,
+    /// How the prepared tree was obtained (`hit`, `miss`, `disabled`,
+    /// `uncacheable`), so staging evidence shows whether a dependency build
+    /// ran (#15253).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare_cache: Option<String>,
 }
 
 pub(super) fn sync_validation_dependency_workspaces(
@@ -47,6 +52,7 @@ pub(super) fn sync_validation_dependency_workspaces(
             role: "validation_dependency".to_string(),
             local_path: dependency.local_path.display().to_string(),
             remote_path: remote_dependency_path,
+            prepare_cache: Some(dependency.prepared.outcome.as_str().to_string()),
         });
     }
     Ok(synced)
@@ -57,7 +63,7 @@ struct PreparedValidationDependencyWorkspace {
     remote_name: String,
     local_path: PathBuf,
     prepared_path: PathBuf,
-    _tempdir: tempfile::TempDir,
+    prepared: crate::validation_dependency_cache::PreparedDependencyCopy,
 }
 
 fn validation_dependency_workspaces(
@@ -77,11 +83,20 @@ fn validation_dependency_workspaces(
         return Ok(Vec::new());
     };
 
-    dependency_ids
+    unique_dependency_ids(dependency_ids)
         .into_iter()
         .map(|dependency_id| {
             prepare_validation_dependency_workspace(parent, &dependency_id, excludes)
         })
+        .collect()
+}
+
+/// Drop repeated dependency ids, keeping first-declared order, so one sync
+/// prepares each dependency at most once.
+fn unique_dependency_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.into_iter()
+        .filter(|id| seen.insert(id.clone()))
         .collect()
 }
 
@@ -140,33 +155,31 @@ fn prepare_validation_dependency_workspace(
 
     prepare_dependency_git_state(&component, &path)?;
 
-    let tempdir = tempfile::tempdir().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "create validation dependency workspace {}",
-                component.id
-            )),
-        )
-    })?;
-    let prepared_path = tempdir.path().join(sanitize_path_segment(&component.id));
-    crate::copy_snapshot_to_directory(&path, &prepared_path, excludes)?;
-
-    component.local_path = prepared_path.display().to_string();
-    run_dependency_lifecycle(&component, &prepared_path)?;
+    // The copy + install + build is content-addressed and shared across calls,
+    // transport retries, transitive syncs, and concurrent Cooks (#15253).
+    // Every consumer still gets a private copy, because the source evidence
+    // below is written into it.
+    let prepared = crate::validation_dependency_cache::prepare_with_cache(
+        &component,
+        &path,
+        excludes,
+        |prepared_component, prepared_path| {
+            run_dependency_lifecycle(prepared_component, prepared_path)
+        },
+    )?;
     homeboy_core::hygiene::write_validation_dependency_source_evidence(
         &component.id,
         &path,
-        &prepared_path,
+        &prepared.path,
     )?;
 
-    let prepared_path = canonicalize_dependency_path(&prepared_path, dependency_id)?;
+    let prepared_path = canonicalize_dependency_path(&prepared.path, dependency_id)?;
 
     Ok(PreparedValidationDependencyWorkspace {
         remote_name: component.id,
         local_path: path,
         prepared_path,
-        _tempdir: tempdir,
+        prepared,
     })
 }
 
@@ -625,6 +638,182 @@ mod tests {
                 "shared-runtime"
             );
             assert!(!Path::new(&remote_parent).join("Users").exists());
+        });
+    }
+
+    /// Write a component checkout whose build appends to an external counter,
+    /// so lifecycle runs can be counted across prepared copies.
+    fn counting_dependency(
+        parent: &Path,
+        id: &str,
+        validation_dependencies: &[&str],
+        counter: &Path,
+    ) -> (PathBuf, tempfile::TempDir) {
+        let path = parent.join(id);
+        fs::create_dir_all(&path).expect("dependency dir");
+        let mut manifest = serde_json::json!({
+            "id": id,
+            "scripts": {
+                "build": [format!("sh -c 'printf \"{id} \" >> {}'", counter.display())]
+            }
+        });
+        if !validation_dependencies.is_empty() {
+            manifest["validation_dependencies"] = serde_json::json!(validation_dependencies);
+        }
+        fs::write(path.join("homeboy.json"), manifest.to_string()).expect("manifest");
+        fs::write(path.join("lib.php"), format!("<?php // {id}\n")).expect("source");
+        let remote = init_checkout_with_upstream(&path);
+        (path, remote)
+    }
+
+    fn snapshot_sync(runner: &str, path: &Path) -> crate::workspace::RunnerWorkspaceSyncOutput {
+        let (output, exit_code) = sync_workspace(
+            runner,
+            RunnerWorkspaceSyncOptions {
+                path: path.display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Snapshot,
+                controller_routed_git: false,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
+                run_isolation_token: None,
+            },
+        )
+        .expect("sync workspace");
+        assert_eq!(exit_code, 0);
+        output
+    }
+
+    fn built_ids(counter: &Path) -> Vec<String> {
+        fs::read_to_string(counter)
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn repeated_and_transitive_syncs_build_each_dependency_once() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            let counter = workspace_parent.path().join("build-count.txt");
+
+            // host-app -> [core-runtime, core-runtime (duplicate), addon]
+            // addon    -> [core-runtime]   (transitive, like staging's extra workspaces)
+            let (_core, _core_remote) =
+                counting_dependency(workspace_parent.path(), "core-runtime", &[], &counter);
+            let (addon, _addon_remote) = counting_dependency(
+                workspace_parent.path(),
+                "addon",
+                &["core-runtime"],
+                &counter,
+            );
+            let source = workspace_parent.path().join("host-app");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "host-app",
+                    "extensions": { "wordpress": { "settings": {
+                        "validation_dependencies": ["core-runtime", "core-runtime", "addon"]
+                    } } }
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
+
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-cache","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            let first = snapshot_sync("lab-local-cache", &source);
+            assert_eq!(
+                first
+                    .validation_dependencies
+                    .iter()
+                    .map(|dependency| dependency.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["addon", "core-runtime"],
+                "duplicate declarations are prepared once"
+            );
+            // Staging syncs each dependency as its own workspace, which prepares
+            // that dependency's validation dependencies again.
+            snapshot_sync("lab-local-cache", &addon);
+            // A transport retry repeats the whole primary sync.
+            let retried = snapshot_sync("lab-local-cache", &source);
+
+            let mut built = built_ids(&counter);
+            built.sort();
+            assert_eq!(built, vec!["addon", "core-runtime"]);
+            assert!(
+                retried
+                    .validation_dependencies
+                    .iter()
+                    .all(|dependency| dependency.prepare_cache.as_deref() == Some("hit")),
+                "the retried sync reports every dependency as a cache hit"
+            );
+
+            let remote_parent = parent_remote_path(&retried.remote_path);
+            assert!(Path::new(&remote_parent)
+                .join("core-runtime/lib.php")
+                .exists());
+            assert!(Path::new(&remote_parent).join("addon/lib.php").exists());
+        });
+    }
+
+    #[test]
+    fn source_change_rebuilds_only_the_changed_dependency() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            homeboy_core::extension::component_script::register_component_script_runner();
+            homeboy_core::extension::build::register_component_build_runner();
+            let workspace_parent = tempfile::tempdir().expect("workspace parent");
+            let runner_root = tempfile::tempdir().expect("runner root tempdir");
+            let counter = workspace_parent.path().join("build-count.txt");
+            let (core, _core_remote) =
+                counting_dependency(workspace_parent.path(), "core-runtime", &[], &counter);
+            let (_addon, _addon_remote) =
+                counting_dependency(workspace_parent.path(), "addon", &[], &counter);
+            let source = workspace_parent.path().join("host-app");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::write(
+                source.join("homeboy.json"),
+                serde_json::json!({
+                    "id": "host-app",
+                    "extensions": { "wordpress": { "settings": {
+                        "validation_dependencies": ["core-runtime", "addon"]
+                    } } }
+                })
+                .to_string(),
+            )
+            .expect("source manifest");
+            super::super::create(
+                &format!(
+                    r#"{{"id":"lab-local-cache-change","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+
+            snapshot_sync("lab-local-cache-change", &source);
+            fs::write(core.join("lib.php"), "<?php // v2\n").expect("edit");
+            git(&core, &["commit", "-q", "-am", "v2"]);
+            git(&core, &["push", "-q"]);
+            snapshot_sync("lab-local-cache-change", &source);
+
+            let mut built = built_ids(&counter);
+            built.sort();
+            assert_eq!(built, vec!["addon", "core-runtime", "core-runtime"]);
         });
     }
 

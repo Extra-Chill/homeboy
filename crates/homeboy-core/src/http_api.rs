@@ -96,6 +96,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Get, ["v1", "control-plane", "capabilities"]) => {
             Ok(HttpEndpoint::ControlPlaneCapabilities)
         }
+        (HttpMethod::Get, ["v1", "control-plane", "capacity"]) => {
+            Ok(HttpEndpoint::ControlPlaneCapacity {
+                query: read_resource_query(path),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "missions"]) => {
             Ok(HttpEndpoint::ControlPlaneMissions {
                 request: control_plane_mission_list_request(path)?,
@@ -327,6 +332,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /activity".to_string(),
                 "GET /activity/:id".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
+                "GET /v1/control-plane/capacity".to_string(),
                 "GET /v1/control-plane/missions".to_string(),
                 "GET /v1/control-plane/missions/:id".to_string(),
                 "GET /v1/control-plane/runs".to_string(),
@@ -500,6 +506,12 @@ where
         }
         HttpEndpoint::ControlPlaneCapabilities => {
             return control_plane_capabilities_response();
+        }
+        HttpEndpoint::ControlPlaneCapacity { query } => {
+            return control_plane_ok(
+                endpoint.clone(),
+                crate::control_plane::read_resource("capacity", query)?,
+            );
         }
         HttpEndpoint::ControlPlaneRunActions { id } => {
             return control_plane_action_response(
@@ -692,6 +704,9 @@ where
         | HttpEndpoint::ControlPlaneRunEventRetention { .. }
         | HttpEndpoint::ControlPlaneRunActions { .. }
         | HttpEndpoint::ControlPlaneCapabilities => {
+            unreachable!("returned before store open")
+        }
+        HttpEndpoint::ControlPlaneCapacity { .. } => {
             unreachable!("returned before store open")
         }
         HttpEndpoint::Jobs => {
@@ -2663,6 +2678,18 @@ fn reconciled_stale_status_note(run: &RunRecord) -> Option<String> {
 
 fn query_value(path: &str, key: &str) -> Option<String> {
     query_values(path, key).into_iter().next()
+}
+
+fn read_resource_query(path: &str) -> Value {
+    let mut query = serde_json::Map::new();
+    if let Ok(url) = reqwest::Url::parse(&format!("http://localhost{path}")) {
+        for (key, value) in url.query_pairs() {
+            if !value.is_empty() {
+                query.insert(key.into_owned(), Value::String(value.into_owned()));
+            }
+        }
+    }
+    Value::Object(query)
 }
 
 fn query_values(path: &str, key: &str) -> Vec<String> {
