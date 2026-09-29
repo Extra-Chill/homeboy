@@ -235,8 +235,13 @@ pub fn project_terminal_runner_result_in_store(
 
     // Ad hoc runner-exec runs are observation records, not agent-task records.
     // Their daemon terminal result is complete without an inner task aggregate.
-    if project_terminal_runner_exec_result_in_store(lifecycle_store, run_id, snapshot)? {
-        return Ok(true);
+    // Recognize the generic runner-exec kind before projecting so this branch
+    // owns the run for every terminal snapshot: a repeated snapshot reports
+    // `false` here (the observation row is already terminal) rather than
+    // falling through to `read_record`, which requires `agent_task_run`
+    // metadata an observation row does not carry (#14169).
+    if is_generic_runner_exec_run_in_store(lifecycle_store, run_id)? {
+        return project_terminal_runner_exec_result_in_store(lifecycle_store, run_id, snapshot);
     }
 
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;

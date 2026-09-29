@@ -740,6 +740,103 @@ pub fn loop_work_job_execution_submission(
     )
 }
 
+/// Give daemon-boundary stop tests an actual, long-running provider to cancel.
+#[cfg(any(test, feature = "test-support"))]
+pub fn active_loop_stop_test_submission(
+    record: &mut crate::agent_task_loop_controller::AgentTaskLoopControllerRecord,
+    marker: &std::path::Path,
+) -> Result<Value> {
+    use crate::agent_task_loop_controller::{
+        AgentTaskLoopControllerState, AgentTaskLoopPolicyAction,
+    };
+
+    record.state = AgentTaskLoopControllerState::Running;
+    record.record_action(
+        AgentTaskLoopPolicyAction::SpawnTask {
+            dedupe_key: "loop-stop-provider".to_string(),
+            entity_id: None,
+            request: json!({
+                "mode": "dispatch",
+                "dispatch": { "backend": "loop-stop-provider", "prompt": "wait" }
+            }),
+        },
+        "active loop stop fixture",
+    );
+    crate::agent_task_loop_controller::write_controller(record)?;
+    let provider = serde_json::from_value(json!({
+        "id": "loop-stop-provider",
+        "backend": "loop-stop-provider",
+        "command_argv": [
+            "sh", "-c", "touch \"$1\"; exec sleep 30", "loop-stop-fixture",
+            marker.display().to_string()
+        ],
+        "capabilities": ["structured_outcome"]
+    }))
+    .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
+    loop_work_job_execution_submission(
+        &record.loop_id,
+        &record.updated_at,
+        json!({ "backend": "loop-stop-provider" }),
+        AgentTaskProviderCatalog {
+            providers: vec![provider],
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn await_active_loop_stop_test_provider(loop_id: &str, marker: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let admitted = crate::agent_task_loop_controller::load_controller(loop_id)
+            .expect("read loop controller")
+            .metadata
+            .get("active_provider_runs")
+            .and_then(Value::as_array)
+            .is_some_and(|runs| !runs.is_empty());
+        if admitted && marker.exists() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "provider never became active"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Observe the real daemon job after stop without consuming the test listener's
+/// finite HTTP request budget. A cancellation request may precede the worker's
+/// durable terminal transition.
+#[cfg(any(test, feature = "test-support"))]
+pub fn await_cancelled_loop_stop_test_job(job_id: &str) {
+    use homeboy_core::api_jobs::{JobStatus, JobStore};
+
+    let id = uuid::Uuid::parse_str(job_id).expect("daemon job id");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let store = JobStore::open_without_reconciliation(
+            homeboy_core::paths::daemon_jobs_file().expect("daemon jobs path"),
+        )
+        .expect("read durable daemon jobs");
+        let job = store.get(id).expect("read daemon job");
+        if job.status == JobStatus::Cancelled {
+            return;
+        }
+        assert!(
+            matches!(job.status, JobStatus::Queued | JobStatus::Running),
+            "active job finished without cancellation: {:?}",
+            job.status
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "active daemon job did not become cancelled: {:?}",
+            job.status
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn admitted_dispatch_defaults(value: Value) -> Result<Value> {
     let object = value
         .as_object()
