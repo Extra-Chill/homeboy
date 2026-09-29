@@ -9835,7 +9835,15 @@ fn materialize_pending_cook_workspace(
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
     validate_pending_cook_repository_identity(&options.identity.initial_plan, &target)?;
-    bind_materialized_cook_component_workspace(&mut options.identity.initial_plan, &target)?;
+    bind_materialized_cook_component_workspace(
+        &mut options.identity.initial_plan,
+        &target,
+        options
+            .gates
+            .gate_environment
+            .admitted_component_id
+            .as_deref(),
+    )?;
     // Deferred provider materialization has no checkout at initial recipe
     // persistence. Capture and persist this immutable boundary before Cook can
     // admit or dispatch the materialized destination.
@@ -9888,8 +9896,12 @@ pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
 fn bind_materialized_cook_component_workspace(
     plan: &mut AgentTaskPlan,
     repository_root: &Path,
+    selected_component_id: Option<&str>,
 ) -> Result<()> {
-    let Some(component_id) = cook_repository_identity_component_id(plan) else {
+    let Some(component_id) = selected_component_id
+        .map(str::to_string)
+        .or_else(|| cook_repository_identity_component_id(plan))
+    else {
         return Ok(());
     };
     let Some(component) = homeboy_core::component::registered_by_id(&component_id)? else {
