@@ -220,6 +220,7 @@ mod source_materialization;
 mod tool_registry;
 mod transport;
 mod validation_dependencies;
+mod validation_dependency_cache;
 pub use runner_cache::{
     prune_homeboy_binary_cache, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
     RunnerBinaryCachePruneOutput,
