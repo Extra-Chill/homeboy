@@ -363,17 +363,32 @@ pub(crate) fn cook_retrying(
 
 /// Build the terminal payload from the report the cook already produced.
 ///
-/// `exit_code` decides success, not the status string: the status vocabulary
-/// (`succeeded`, `durable_failure`, `attempts_exhausted`, `moving_base`, ...)
-/// is open, while the exit code is the contract every caller already branches
-/// on.
+/// The exit code is the process result; a requested PR also needs a durable
+/// completion receipt before the notification may announce success.
+fn cook_published(report: &AgentTaskCookReport, exit_code: i32) -> bool {
+    exit_code == 0
+        && report
+            .finalization
+            .as_ref()
+            .is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt)
+}
+
+fn cook_completed(report: &AgentTaskCookReport, exit_code: i32) -> bool {
+    cook_published(report, exit_code)
+        || (exit_code == 0
+            && matches!(
+                report.status.as_str(),
+                "intentional_no_change" | "green_no_finalize"
+            ))
+        || report.status == "cancelled"
+}
+
 fn terminal_payload(
     report: &AgentTaskCookReport,
     component: Option<&str>,
     exit_code: i32,
 ) -> NotifyPayload {
-    let cancelled = report.status == "cancelled";
-    let kind = if exit_code == 0 || cancelled {
+    let kind = if cook_completed(report, exit_code) {
         NotifyEventKind::Completed
     } else {
         NotifyEventKind::NeedsAttention
@@ -399,12 +414,43 @@ fn terminal_payload(
             report.terminal_failure_classification.clone(),
         );
 
+    if let Some(completion) = report.completion() {
+        payload = payload.with_fact("Completion", completion.state);
+    }
+    if let Some(promotion) = report
+        .attempts
+        .iter()
+        .rev()
+        .find_map(|attempt| attempt.promotion.as_ref())
+    {
+        let gate_status = if promotion.deterministic_gates.is_empty() {
+            "not_run"
+        } else if promotion.finalization_eligible(false) {
+            "passed"
+        } else if promotion
+            .deterministic_gates
+            .iter()
+            .any(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+        {
+            "failed"
+        } else {
+            "unverified"
+        };
+        payload = payload.with_fact("Gates", gate_status);
+    } else if matches!(report.status.as_str(), "gate_failed" | "no_op_gate_failed") {
+        payload = payload.with_fact("Gates", "failed");
+    } else if report.status == "gates_deferred" {
+        payload = payload.with_fact("Gates", "deferred");
+    }
+
     // The pull request link is the single most useful thing a completed cook
     // can hand a reviewer, and it was previously discarded along with the rest
     // of the finalization report.
     if let Some(finalization) = &report.finalization {
-        if let Some(url) = finalization.get("pr_url").and_then(|url| url.as_str()) {
-            payload = payload.with_link(NotifyLink::new("pull request", url));
+        if crate::agent_task_service::cook_finalization_is_pr_receipt(finalization) {
+            if let Some(url) = finalization.get("pr_url").and_then(|url| url.as_str()) {
+                payload = payload.with_link(NotifyLink::new("pull request", url));
+            }
         }
         payload = payload.with_optional_fact(
             "Pull request",
@@ -474,7 +520,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
     if !claimed {
         return;
     }
-    let succeeded = exit_code == 0;
+    let succeeded = cook_completed(report, exit_code) && report.status != "cancelled";
     // The cook id resolves through the same alias index when a report carries
     // no latest attempt, so a terminal event is never left unroutable.
     let route_run_id = report
@@ -539,96 +585,6 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
             let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
                 &lifecycle_store,
                 &report.cook_id,
-            );
-        }
-    }
-}
-
-/// A detached Cook's latest attempt reached a terminal state outside the
-/// launching `run_cook_with_runtime` call.
-///
-/// Admission marks the printed Cook id succeeded so an exit observer cannot
-/// fail the placeholder. That bookkeeping transition is not the Cook outcome.
-/// The attempt's terminal state is, and it has to reach the configured
-/// transport even when the launching process already exited.
-pub(crate) fn notify_detached_cook_terminal(
-    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
-    attempt_run_id: &str,
-    status: &str,
-    exit_code: i32,
-) {
-    let claimed = crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
-        lifecycle_store,
-        cook_id,
-        COOK_TERMINAL_DELIVERED_BY,
-    )
-    .unwrap_or(false);
-    if !claimed {
-        return;
-    }
-    let kind = if exit_code == 0 || status == "cancelled" {
-        NotifyEventKind::Completed
-    } else {
-        NotifyEventKind::NeedsAttention
-    };
-    let payload = cook_actions(
-        NotifyPayload::new(
-            kind,
-            cook_subject(cook_id, attempt_run_id, None).with_phase("terminal"),
-        )
-        .with_fact("Status", status.to_string()),
-        cook_id,
-    );
-    let event = NotifyEvent::lifecycle(kind, cook_id, status)
-        .with_title(format!(
-            "cook {} — {cook_id}",
-            if exit_code == 0 {
-                "succeeded"
-            } else if status == "cancelled" {
-                "cancelled"
-            } else {
-                "needs attention"
-            }
-        ))
-        .with_payload(payload);
-    let route = effective_route(attempt_run_id).or_else(|| effective_route(cook_id));
-    let dispatch = notify_outbox::dispatch_with_outbox(
-        &event.with_route(route.as_ref()),
-        Some(NotifyOnceMarker::new(
-            COOK_SUBJECT_KIND,
-            cook_id,
-            COOK_TERMINAL_DELIVERED_BY,
-        )),
-    );
-    let persisted = terminal_outcome(
-        cook_id,
-        route.is_some(),
-        &dispatch.outcome,
-        &dispatch.disposition,
-    );
-    let _ = crate::agent_task_lifecycle::record_cook_terminal_notification_outcome_in_store(
-        lifecycle_store,
-        cook_id,
-        persisted,
-    );
-    match dispatch.disposition {
-        NotifyOutboxDisposition::Delivered | NotifyOutboxDisposition::Queued { .. } => {
-            let _ = crate::agent_task_lifecycle::confirm_cook_terminal_notification_in_store(
-                lifecycle_store,
-                cook_id,
-                COOK_TERMINAL_DELIVERED_BY,
-            );
-            if let Ok(store) =
-                lifecycle_store.open_observation_initialized_without_historical_import()
-            {
-                let _ = store.mark_notification_delivered(cook_id, COOK_TERMINAL_DELIVERED_BY);
-            }
-        }
-        NotifyOutboxDisposition::Dropped | NotifyOutboxDisposition::Rejected { .. } => {
-            let _ = crate::agent_task_lifecycle::release_cook_terminal_notification_claim_in_store(
-                lifecycle_store,
-                cook_id,
             );
         }
     }
