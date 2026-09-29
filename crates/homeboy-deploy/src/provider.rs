@@ -37,7 +37,10 @@ struct PreparedProviderComponent {
 }
 
 enum PreparedProviderInput {
-    Layered(tempfile::NamedTempFile),
+    Layered {
+        file: tempfile::NamedTempFile,
+        resolved_sha: String,
+    },
     Repository(PathBuf),
 }
 
@@ -303,11 +306,12 @@ fn prepare_component(
 
     let dry_run = config.dry_run || config.check;
     let input = if layered.is_some() {
-        PreparedProviderInput::Layered(layered_payload(
+        let (file, resolved_sha) = layered_payload(
             component,
             attachment.policy.as_ref().expect("validated inline policy"),
             target_input,
-        )?)
+        )?;
+        PreparedProviderInput::Layered { file, resolved_sha }
     } else {
         PreparedProviderInput::Repository(repository_contract(
             component,
@@ -383,23 +387,29 @@ fn apply_component(
             observation.phase("provider_execute", true)?;
         }
     }
-    let (input, is_layered) = match &input {
-        PreparedProviderInput::Layered(payload) => (payload.path(), true),
-        PreparedProviderInput::Repository(contract) => (contract.as_path(), false),
+    let (input, is_layered, resolved_sha) = match &input {
+        PreparedProviderInput::Layered { file, resolved_sha } => {
+            (file.path(), true, Some(resolved_sha.as_str()))
+        }
+        PreparedProviderInput::Repository(contract) => (contract.as_path(), false, None),
     };
-    let effect_id = EffectId(match observation.as_deref() {
-        Some(observation) => format!(
-            "deploy-provider:{}:{}:{}",
-            observation.run_id(),
-            project_id,
-            component.id
-        ),
-        None => format!(
-            "deploy-provider:manual:{}",
-            homeboy_engine_primitives::content_hash::sha256_hex(
-                format!("{project_id}:{extension}:{provider}:{}", component.id).as_bytes(),
-            )
-        ),
+    let effect_id = EffectId(if dry_run {
+        format!("deploy-provider:dry-run:{}", uuid::Uuid::new_v4())
+    } else {
+        match observation.as_deref() {
+            Some(observation) => format!(
+                "deploy-provider:{}:{}:{}",
+                observation.run_id(),
+                project_id,
+                component.id
+            ),
+            None => format!(
+                "deploy-provider:manual:{}",
+                homeboy_engine_primitives::content_hash::sha256_hex(
+                    format!("{project_id}:{extension}:{provider}:{}", component.id).as_bytes(),
+                )
+            ),
+        }
     });
     let status = provider_api.status_api(&ExtensionApiDeploymentProviderStatusRequest {
         schema: EXTENSION_API_DEPLOYMENT_PROVIDER_STATUS_REQUEST_SCHEMA.to_string(),
@@ -480,6 +490,7 @@ fn apply_component(
         result.local_path = None;
     }
     result.deploy_exit_code = Some(run.exit_code);
+    result.resolved_sha = resolved_sha.map(str::to_string);
     result.error = run.error;
     result.deployment_provider = Some(run.evidence);
     Ok(result)
@@ -523,7 +534,7 @@ fn layered_payload(
     component: &Component,
     policy: &serde_json::Value,
     target: Option<&serde_json::Value>,
-) -> Result<tempfile::NamedTempFile> {
+) -> Result<(tempfile::NamedTempFile, String)> {
     let policy_bytes = homeboy_engine_primitives::canonical_json::canonical_json_bytes(policy)
         .map_err(|error| Error::from_json_error(&error, Some(ENCODE_POLICY_CONTEXT.to_string())))?;
     let revision = clean_head_revision(component)?;
@@ -562,7 +573,7 @@ fn layered_payload(
         .map_err(|error| Error::from_json_error(&error, Some(WRITE_INPUT_CONTEXT.to_string())))?;
     file.flush()
         .map_err(|error| Error::from_io_error(&error, Some(FLUSH_INPUT_CONTEXT.to_string())))?;
-    Ok(file)
+    Ok((file, revision))
 }
 
 fn provider_policy_error(component: &Component, message: &str) -> Error {
@@ -880,7 +891,7 @@ mod tests {
         .expect("extension manifest");
         std::fs::write(
             extension.join("run.sh"),
-            "#!/bin/sh\nif [ \"$1\" = apply ]; then touch \"$HOMEBOY_COMPONENT_PATH/applied\"; fi\nprintf '%s' '{\"status\":\"checked\"}'\n",
+            "#!/bin/sh\nif [ \"$1\" = apply ]; then touch \"$HOMEBOY_COMPONENT_PATH/applied\"; fi\nif [ \"$1\" = check ]; then printf x >> \"$(dirname \"$0\")/check-count\"; fi\nprintf '%s' '{\"status\":\"checked\"}'\n",
         )
         .expect("provider script");
     }
@@ -925,6 +936,39 @@ mod tests {
                 "opaque"
             );
             assert!(!repository.path().join("applied").exists());
+        });
+    }
+
+    #[test]
+    fn consecutive_provider_dry_runs_execute_the_provider_each_time() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = provider_repository("fixture");
+            write_provider_extension(
+                home.path(),
+                Some("sh {{extension_path}}/run.sh check {{payload.contract}}"),
+            );
+            let project = provider_project(repository.path());
+            let mut config = DeployConfig::check_all_no_pull_head();
+            config.all = false;
+            config.check = false;
+            config.component_ids = vec!["fixture".to_string()];
+            config.dry_run = true;
+
+            run_if_configured("site", &project, &config, None)
+                .expect("first provider dry run")
+                .expect("provider-owned result");
+            run_if_configured("site", &project, &config, None)
+                .expect("second provider dry run")
+                .expect("provider-owned result");
+
+            assert_eq!(
+                std::fs::read_to_string(
+                    home.path()
+                        .join(".config/homeboy/extensions/fixture-provider/check-count")
+                )
+                .expect("provider invocation count"),
+                "xx"
+            );
         });
     }
 
@@ -1287,6 +1331,7 @@ mod tests {
             Some(&serde_json::json!({ "target": "one" })),
         )
         .expect("payload");
+        let (payload, resolved_sha) = payload;
         let path = payload.path().to_path_buf();
         assert!(!path.starts_with(repository.path()));
         let value: serde_json::Value =
@@ -1304,12 +1349,14 @@ mod tests {
         );
         assert_eq!(value["target"], serde_json::json!({ "target": "one" }));
         assert_eq!(value["source"]["revision"].as_str().map(str::len), Some(40));
+        assert_eq!(value["source"]["revision"], resolved_sha);
         let second = layered_payload(
             &component,
             &policy,
             Some(&serde_json::json!({ "target": "two" })),
         )
         .expect("second payload");
+        let (second, _) = second;
         let second_value: serde_json::Value =
             serde_json::from_reader(second.reopen().expect("reopen")).expect("payload json");
         assert_eq!(second_value["policy"], value["policy"]);

@@ -3837,6 +3837,149 @@ fn aggregate_source_loads_completed_run_without_path_spelunking() {
 /// cancellation reads and rewrites, so the reclaim evidence asserted below
 /// cannot have been produced by another home holding this run id.
 #[test]
+fn operator_cancellation_preserves_existing_runner_event_provenance() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "run-15200-runner-cancellation-provenance";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    let mut record = lifecycle_store.read_record(run_id).expect("record");
+    record.state = AgentTaskRunState::Running;
+    record.tasks[0].state = AgentTaskState::Running;
+    let provenance = json!({
+        "actor": "runner",
+        "cause": "pre_provider_cancellation",
+        "reason": "runner job was cancelled before provider execution",
+        "timestamp": "2026-09-28T00:00:00Z",
+        "recovery_action": "inspect runner diagnostics",
+    });
+    record.metadata["cancellation_provenance"] = provenance.clone();
+    lifecycle_store
+        .write_record(&record)
+        .expect("runner evidence stored");
+
+    let original_events = logs_in_store(&lifecycle_store, run_id)
+        .expect("runner event")
+        .events;
+    let original = original_events
+        .iter()
+        .find(|event| event.kind == "run.cancelled")
+        .expect("runner cancellation event")
+        .clone();
+    assert_eq!(original.data["provenance"], provenance);
+    assert_eq!(
+        lifecycle_store.read_record(run_id).expect("record").state,
+        AgentTaskRunState::Running
+    );
+
+    let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
+        .expect("operator cancellation converges");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(
+        cancelled.metadata["cancel_reason"],
+        "operator requested stop"
+    );
+    assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
+    assert_eq!(
+        lifecycle_store
+            .read_record(run_id)
+            .expect("committed")
+            .state,
+        AgentTaskRunState::Cancelled
+    );
+
+    let repeated = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
+        .expect("repeated cancellation");
+    assert_eq!(repeated.state, AgentTaskRunState::Cancelled);
+    let events = logs_in_store(&lifecycle_store, run_id)
+        .expect("events")
+        .events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "run.cancelled")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events.iter().find(|event| event.kind == "run.cancelled"),
+        Some(&original)
+    );
+}
+
+#[test]
+fn operator_cancellation_recovers_provenance_missing_from_running_record() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "run-15200-cancellation-event-outlived-record";
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    let mut record = lifecycle_store.read_record(run_id).expect("record");
+    record.state = AgentTaskRunState::Running;
+    record.tasks[0].state = AgentTaskState::Running;
+    let provenance = json!({
+        "actor": "runner",
+        "cause": "runner_job_cancelled",
+        "reason": "runner job was cancelled",
+        "timestamp": "2026-09-28T17:35:25.655849+00:00",
+        "recovery_action": "inspect retained runner cancellation evidence",
+    });
+    record.metadata["cancellation_provenance"] = provenance.clone();
+    lifecycle_store
+        .write_record(&record)
+        .expect("runner event emitted");
+    let original = logs_in_store(&lifecycle_store, run_id)
+        .expect("events")
+        .events
+        .into_iter()
+        .find(|event| event.kind == "run.cancelled")
+        .expect("canonical cancellation event");
+
+    // The live Lab transport retry retained the append-only event but lost its
+    // cancellation provenance from the still-running authoritative record.
+    record
+        .metadata
+        .as_object_mut()
+        .expect("metadata")
+        .remove("cancellation_provenance");
+    lifecycle_store
+        .write_record(&record)
+        .expect("stale record persisted");
+    assert!(lifecycle_store
+        .read_record(run_id)
+        .expect("record")
+        .metadata
+        .get("cancellation_provenance")
+        .is_none());
+
+    let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
+        .expect("operator cancellation restores immutable event provenance");
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
+    assert_eq!(
+        cancelled.metadata["cancel_reason"],
+        "operator requested stop"
+    );
+    let events = logs_in_store(&lifecycle_store, run_id)
+        .expect("events")
+        .events;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "run.cancelled")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events.iter().find(|event| event.kind == "run.cancelled"),
+        Some(&original)
+    );
+}
+
+#[test]
 fn cancel_run_reclaims_stale_running_record() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =

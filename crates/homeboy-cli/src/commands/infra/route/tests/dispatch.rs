@@ -3,6 +3,55 @@
 use super::*;
 
 #[test]
+fn runner_provider_query_refuses_durable_staging_with_runner_exec_replay() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+            "--model".to_string(),
+            "xai/grok-4.7".to_string(),
+            "--validate-readiness".to_string(),
+        ],
+    );
+
+    assert!(error.message.contains("no offload was created"));
+    assert!(error.message.contains("runner exec"));
+    assert_eq!(
+        error.details["tried"][0],
+        "Run `homeboy runner exec homeboy-lab -- homeboy agent-task providers --backend opencode --model xai/grok-4.7 --validate-readiness` to query the selected runner directly."
+    );
+}
+
+#[test]
+fn runner_provider_query_replay_does_not_forward_controller_runner_environment() {
+    let error = runner_provider_query_requires_runner_exec(
+        "homeboy-lab",
+        &[
+            "homeboy".to_string(),
+            "--runner".to_string(),
+            "homeboy-lab".to_string(),
+            "--runner-env".to_string(),
+            "TOKEN=secret-value".to_string(),
+            "agent-task".to_string(),
+            "providers".to_string(),
+            "--backend".to_string(),
+            "opencode".to_string(),
+        ],
+    );
+
+    let replay = error.details["id"].as_str().expect("replay command");
+    assert!(replay.contains("homeboy agent-task providers --backend opencode"));
+    assert!(!replay.contains("TOKEN"));
+    assert!(!replay.contains("secret-value"));
+}
+
+#[test]
 fn automatic_local_trace_does_not_target_an_agent_task_lifecycle_record() {
     assert!(placement_outcome_target(None, None).is_none());
 }
@@ -2064,6 +2113,100 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
                 .iter()
                 .all(|attempt| attempt.run_id == run_id),
             "the router must not reserve a standalone retry before Cook resumes it"
+        );
+    });
+}
+
+#[test]
+fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_completion() {
+    use crate::agents::agent_task_service::{WorkJobHandler, WorkJobInvocation, WorkJobStep};
+
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path());
+        let cook_id = "cook-shared-terminal-claim";
+        let run_id = "cook-shared-terminal-claim-attempt-1";
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            run_id,
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "provider",
+                "executor": { "backend": "fixture" },
+                "instructions": "terminal continuation",
+                "workspace": { "root": workspace.path() }
+            }))
+            .expect("task")],
+        );
+        let options = crate::agents::agent_task_service::CookRequest {
+            identity: crate::agents::agent_task_service::CookIdentity {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: plan.clone(),
+            },
+            workspace: crate::agents::agent_task_service::CookWorkspace {
+                to_worktree: workspace.path().display().to_string(),
+                source_worktree_path: Some(workspace.path().to_path_buf()),
+                task_base_sha: None,
+                source_refs: Vec::new(),
+            },
+            provider_transport: crate::agents::agent_task_service::CookProviderTransport {
+                provider_command: None,
+                provider_invocation: None,
+                attempt_dispatcher: None,
+            },
+            gates: Default::default(),
+            retry_policy: crate::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
+            finalization: crate::agents::agent_task_service::CookFinalization {
+                no_finalize: true,
+                draft_pr: false,
+                provider_ci: None,
+                base: "main".to_string(),
+                head: None,
+                title: "Terminal claim".to_string(),
+                commit_message: "test".to_string(),
+                protected_branches: Vec::new(),
+            },
+            ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
+                ai_tool: "fixture".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+            },
+            harvest_context:
+                homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                    .expect("harvest context"),
+        };
+        let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()
+            .expect("recipe store");
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist attempt");
+        store
+            .enqueue_terminal_continuation(cook_id, run_id)
+            .expect("enqueue continuation");
+        let claim = store
+            .claim_continuation_for(cook_id, run_id)
+            .expect("claim lookup")
+            .expect("other owner claims work");
+        let checkpoint = serde_json::json!({
+            "schema": "homeboy/terminal-cook-continuation-request/v1",
+            "cook_id": cook_id,
+            "run_id": run_id,
+            "generation": 0,
+        });
+        let handler = TerminalCookWorkHandler;
+        let waiting = handler
+            .advance(checkpoint.clone(), WorkJobInvocation::Resume)
+            .expect("other owner remains active");
+        assert!(
+            matches!(waiting, WorkJobStep::Continue { checkpoint: next, .. } if next == checkpoint)
+        );
+
+        claim.complete().expect("first owner completes");
+        let replay = handler
+            .advance(checkpoint, WorkJobInvocation::Resume)
+            .expect("completed claim is observed");
+        assert!(
+            matches!(replay, WorkJobStep::Complete(result) if result["completed"] == true && result["claimed"] == false)
         );
     });
 }

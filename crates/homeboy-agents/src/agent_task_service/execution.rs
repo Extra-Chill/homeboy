@@ -904,7 +904,10 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
         });
     };
 
-    if record.metadata["cook_id"].is_string() && record.metadata["retry_of"].is_string() {
+    if record.metadata["cook_id"].is_string()
+        && (record.metadata["retry_of"].is_string()
+            || record.metadata["cook_runtime_admission"].is_object())
+    {
         let store = super::CookRecipeStore::from_current_data_root()?;
         let cook_id = record.metadata["cook_id"]
             .as_str()

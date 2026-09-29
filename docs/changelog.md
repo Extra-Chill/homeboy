@@ -4,6 +4,115 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.397.1] - 2026-09-29
+
+### Changed
+- cargo fmt
+- route terminal continuation through WorkJob
+
+### Fixed
+- wait for live terminal continuation claims
+- include redacted stderr in failed provider readiness reasons
+- keep a running provider's effect lease alive
+
+## [0.397.0] - 2026-09-29
+
+### Added
+- prune exact terminal controller jobs
+
+### Fixed
+- surface daemon error details in failed exec requests
+- give readiness its declared probe budget
+- report lease recovery outcome accurately
+- inherit existing pull request base before preview
+- explain stale checkout in dry-run preview
+- persist actual replacement plan in retry recipe
+- retain live local retry owner during reconciliation
+- notify only after terminal publication outcome
+- surface bounded failed-gate evidence
+
+## [0.396.8] - 2026-09-29
+
+### Fixed
+- dedupe Cook start notifications across continuations
+- recover cancellation from durable event ledger
+
+## [0.396.7] - 2026-09-28
+
+### Fixed
+- preserve first cancellation provenance
+- admit Lab-placed cooks against runner, not controller, credentials
+
+## [0.396.6] - 2026-09-28
+
+### Fixed
+- honor Cook progress while Lab binding is pending
+
+## [0.396.5] - 2026-09-28
+
+### Fixed
+- cook homeboy
+- allow durable gate environment corrections
+- report manual finalization preflight progress
+
+## [0.396.4] - 2026-09-28
+
+### Fixed
+- surface layered provider failure cause and record the deployed revision
+
+## [0.396.3] - 2026-09-28
+
+### Fixed
+- recover exact rebased candidate
+- preserve provider failure over harvest error
+- retain cancellation response and explicit component
+- reject staged runner provider query
+
+## [0.396.2] - 2026-09-28
+
+### Fixed
+- schedule Lab terminal continuation as durable controller work
+- prove merged PR ancestry before release convergence
+- retain live capacity despite delayed job projection
+
+## [0.396.1] - 2026-09-28
+
+### Changed
+- remove unused ambient-store wrappers
+
+### Fixed
+- disclose deferred Cargo gate selection in preview
+- resume upgrade-blocked attempts from durable admission
+- scope retry staging idempotency to request
+
+## [0.396.0] - 2026-09-28
+
+### Added
+- author Cook PR titles in the review form
+- add cook convenience aliases
+
+### Fixed
+- bound retained storage filesystem inventory
+- bound duplicate artifacts in status
+- route queued Lab retries through runner owner
+- derive candidate-bound feedback defaults
+- no-op subtree replay on later source tree
+
+## [0.395.4] - 2026-09-28
+
+### Fixed
+- scope Lab systemd service and binary by controller
+
+## [0.395.3] - 2026-09-28
+
+### Fixed
+- contain escaped installer descendants on timeout
+
+## [0.395.2] - 2026-09-28
+
+### Fixed
+- surface durable Lab JSON staging cause
+
 ## [0.395.1] - 2026-09-27
 
 ### Fixed

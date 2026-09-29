@@ -175,7 +175,11 @@ impl CookFeedbackStore {
             .iter()
             .find(|item| item.idempotency_key == idempotency_key)
         {
-            if existing.candidate_identity != candidate_identity || existing.text != text {
+            if existing.candidate_identity != candidate_identity
+                || existing.text != text
+                || existing.author != author
+                || existing.source != source
+            {
                 return Err(Error::validation_invalid_argument(
                     "cook_feedback.idempotency_key",
                     "idempotency key is already bound to different feedback",

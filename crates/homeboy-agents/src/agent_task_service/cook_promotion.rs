@@ -2446,7 +2446,17 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         )
     })?;
-    if candidate_fingerprint(path)? != expected {
+    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
+    let current = candidate_fingerprint(path)?;
+    if current != expected
+        && !is_exact_rebased_candidate(
+            path,
+            &expected,
+            &current,
+            &recovery.prior_verified_base,
+            &fresh_base,
+        )?
+    {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content",
@@ -2454,10 +2464,10 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
             None,
         ));
     }
-    let fresh_base = observe_and_fetch_base(path, &options.finalization.base)?;
     apply_immutable_candidate_to_base(
         path,
         &expected,
+        &current,
         &recovery.prior_verified_base,
         &recovery.promotion.changed_files,
         &fresh_base,
@@ -2506,6 +2516,60 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
     Ok(refreshed)
 }
 
+/// Accept an operator-rebased candidate only when its single commit is based on
+/// the newly observed base and its complete patch is byte-for-byte identical to
+/// the authenticated original candidate delta. This lets recovery survive a
+/// base fast-forward without treating arbitrary destination edits as authority.
+fn is_exact_rebased_candidate(
+    path: &str,
+    expected: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    current: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    prior_base: &str,
+    fresh_base: &str,
+) -> Result<bool> {
+    let (
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: expected,
+        },
+        crate::agent_task_promotion::AgentTaskPromotionCandidate::Git {
+            fingerprint: current,
+        },
+    ) = (expected, current)
+    else {
+        return Ok(false);
+    };
+    if current.head == expected.head
+        || current.base != *fresh_base
+        || git_changed_files(path, fresh_base, &current.tree)?
+            != git_changed_files(path, prior_base, &expected.tree)?
+    {
+        return Ok(false);
+    }
+    let original = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            prior_base,
+            &expected.tree,
+        ],
+    )?;
+    let rebased = git_output_bytes(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            fresh_base,
+            &current.tree,
+        ],
+    )?;
+    Ok(original == rebased)
+}
+
 /// Re-materialize an authenticated dirty candidate on a newer base. The
 /// temporary index proves both applicability and candidate-owned file scope
 /// before the destination is reset, so intervening base changes never become a
@@ -2513,6 +2577,7 @@ pub(crate) fn recover_moving_base_cook_candidate_in_store(
 fn apply_immutable_candidate_to_base(
     path: &str,
     candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    destination_candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
     prior_verified_base: &str,
     recorded_changed_files: &[String],
     fresh_base: &str,
@@ -2617,7 +2682,7 @@ fn apply_immutable_candidate_to_base(
             None,
         ));
     }
-    if &candidate_fingerprint(path)? != candidate {
+    if &candidate_fingerprint(path)? != destination_candidate {
         return Err(Error::validation_invalid_argument(
             "path",
             "moving-base recovery destination changed while projecting the authenticated candidate",
@@ -2887,6 +2952,7 @@ mod moving_base_tests {
         let error = apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
             &expected,
+            &expected,
             &git(&seed, &["rev-parse", "HEAD"]),
             &["candidate.txt".to_string()],
             &fresh_base,
@@ -2960,6 +3026,7 @@ mod moving_base_tests {
 
         apply_immutable_candidate_to_base(
             destination.to_str().unwrap(),
+            &candidate,
             &candidate,
             &prior_verified_base,
             &["committed.txt".to_string(), "dirty.txt".to_string()],
@@ -3271,13 +3338,25 @@ fn cook_finalization_options_with_stores_and_review_form(
         &path,
     )?;
     review_dossier.validate(&review_profile)?;
+    let form_title = if options.finalization.title.is_empty() {
+        Some(terminal_form_title(
+            lifecycle_store,
+            successful_run_id,
+            review_form,
+        )?)
+    } else {
+        None
+    };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
         head: options.finalization.head.clone(),
-        title: options.finalization.title.clone(),
+        title: form_title
+            .clone()
+            .unwrap_or_else(|| options.finalization.title.clone()),
+        cook_form_title: form_title,
         commit_message: options.finalization.commit_message.clone(),
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
@@ -3319,6 +3398,19 @@ fn cook_finalization_options_with_stores_and_review_form(
         draft_pr: options.finalization.draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
+}
+
+fn terminal_form_title(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    supplied: Option<&AgentTaskSuppliedReviewForm>,
+) -> Result<String> {
+    let form = match supplied {
+        Some(supplied) => supplied.form.clone(),
+        None => review_form_for_finalization_in_store(lifecycle_store, run_id)?,
+    };
+    form.validate()?;
+    Ok(form.pr_title)
 }
 
 /// Persist only a controller-validated manual preflight dossier for recovery.
@@ -4890,6 +4982,7 @@ fn manual_finalization_options(
         verified_base_sha,
         head,
         title: report.title,
+        cook_form_title: None,
         // An immutable recovered candidate must never reach commit mutation.
         commit_message: "recovered manual finalization".to_string(),
         gate_results: report.gate_results,
@@ -6500,12 +6593,14 @@ pub(crate) fn cook_failure_context_with_stores(
             "gate_failed" | "no_op_gate_failed" | "deterministic_gate_failure"
         )
     {
-        let diagnostic = promotion.and_then(gate_failure_diagnostic).or_else(|| {
-            Some(json!({
-                "class": "agent_task.promotion_gate_failed",
-                "message": "Deterministic promotion gate failed",
-            }))
-        });
+        let diagnostic = promotion
+            .and_then(|promotion| gate_failure_diagnostic(promotion, record_run_id))
+            .or_else(|| {
+                Some(json!({
+                    "class": "agent_task.promotion_gate_failed",
+                    "message": "Deterministic promotion gate failed",
+                }))
+            });
         (
             "deterministic_gate".to_string(),
             "gate_failed".to_string(),
@@ -6681,7 +6776,7 @@ pub(crate) fn cook_failure_context_with_stores(
 /// Project the first failed controller-owned gate into the Cook-wide bounded
 /// cause. Provider output is evidence of candidate production, not the cause
 /// after promotion has reached deterministic verification.
-fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
+fn gate_failure_diagnostic(promotion: &Value, run_id: &str) -> Option<Value> {
     let gate = promotion
         .get("deterministic_gates")
         .or_else(|| promotion.get("gate_results"))
@@ -6694,30 +6789,118 @@ fn gate_failure_diagnostic(promotion: &Value) -> Option<Value> {
             )
         })?;
     let evidence = gate.get("failure_evidence");
-    let message = evidence
-        .and_then(|evidence| {
-            evidence
-                .get("summary")
-                .or_else(|| evidence.get("agent_feedback"))
-        })
+    let termination = gate
+        .get("termination")
         .and_then(Value::as_str)
-        .or_else(|| gate.get("message").and_then(Value::as_str))
-        .or_else(|| {
-            evidence
-                .and_then(|evidence| evidence.get("stderr_tail"))
-                .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let exit_code = gate.get("exit_code").and_then(Value::as_i64).or_else(|| {
+        evidence
+            .and_then(|evidence| evidence.get("exit_code"))
+            .and_then(Value::as_i64)
+    });
+    let message = if termination == "no_progress" {
+        "Deterministic gate made no progress before its deadline; inspect the last progress marker and output tail, then split or increase the gate's progress cadence.".to_string()
+    } else {
+        evidence
+            .and_then(|evidence| {
+                evidence
+                    .get("summary")
+                    .or_else(|| evidence.get("agent_feedback"))
+            })
+            .and_then(Value::as_str)
+            .or_else(|| gate.get("message").and_then(Value::as_str))
+            .or_else(|| {
+                evidence
+                    .and_then(|evidence| evidence.get("stderr_tail"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("Deterministic promotion gate failed")
+            .to_string()
+    };
+    let command = gate
+        .get("command")
+        .or_else(|| evidence.and_then(|evidence| evidence.get("command")));
+    let output_tail = |field: &str| {
+        evidence
+            .and_then(|evidence| evidence.get(field))
+            .and_then(Value::as_str)
+            .map(|value| bounded_gate_detail(&homeboy_core::redaction::redact_string(value)))
+    };
+    let private_summary_only = gate.get("visibility").and_then(Value::as_str) == Some("private")
+        && gate.get("reveal_policy").and_then(Value::as_str) != Some("full_evidence");
+    let command = (!private_summary_only)
+        .then(|| {
+            command.map(|value| {
+                bounded_gate_detail(&homeboy_core::redaction::redact_string(&value.to_string()))
+            })
         })
-        .unwrap_or("Deterministic promotion gate failed");
+        .flatten();
     Some(json!({
         "class": "agent_task.promotion_gate_failed",
         "message": message,
         "details": {
             "gate": gate.get("id").or_else(|| gate.get("name")),
-            "command": gate.get("command").or_else(|| evidence.and_then(|evidence| evidence.get("command"))),
-            "exit_code": gate.get("exit_code").or_else(|| evidence.and_then(|evidence| evidence.get("exit_code"))),
-            "failure_evidence": evidence,
+            "command": command,
+            "exit_code": exit_code,
+            "termination": termination,
+            "timed_out": termination == "timed_out" || termination == "no_progress",
+            "elapsed_ms": gate.get("elapsed_ms"),
+            "last_progress_ms_ago": gate.get("last_progress_ms_ago"),
+            "stdout_tail": if private_summary_only { None } else { output_tail("stdout_tail") },
+            "stderr_tail": if private_summary_only { None } else { output_tail("stderr_tail") },
+            "candidate_checkout": gate.get("candidate_checkout"),
+            "evidence_ref": format!("homeboy://agent-task/run/{run_id}/gates#gate={}",
+                gate.get("id").and_then(Value::as_str).unwrap_or("unknown")),
         },
     }))
+}
+
+fn bounded_gate_detail(value: &str) -> String {
+    const LIMIT: usize = 4096;
+    if value.len() <= LIMIT {
+        return value.to_string();
+    }
+    let mut boundary = LIMIT;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    format!("{}…[truncated]", &value[..boundary])
+}
+
+#[cfg(test)]
+mod gate_failure_diagnostic_tests {
+    use super::gate_failure_diagnostic;
+    use serde_json::json;
+
+    #[test]
+    fn failed_gate_diagnostic_is_bounded_actionable_and_candidate_bound() {
+        let promotion = json!({
+            "deterministic_gates": [{
+                "id": "gate-1", "status": "failed", "command": ["sh", "-lc", "cargo test"],
+                "exit_code": 125, "termination": "no_progress", "elapsed_ms": 12000,
+                "last_progress_ms_ago": 11000,
+                "candidate_checkout": {"commit":"abc", "tree":"tree", "candidate_sha256":"digest"},
+                "failure_evidence": {"command":"cargo test", "exit_code":125,
+                    "stdout_tail":"last test output", "stderr_tail":"stalled"}
+            }]
+        });
+        let diagnostic = gate_failure_diagnostic(&promotion, "cook-run").expect("failure detail");
+        let details = &diagnostic["details"];
+        assert_eq!(details["exit_code"], 125);
+        assert_eq!(details["termination"], "no_progress");
+        assert_eq!(details["timed_out"], true);
+        assert_eq!(details["stdout_tail"], "last test output");
+        assert_eq!(details["candidate_checkout"]["commit"], "abc");
+        assert_eq!(
+            details["evidence_ref"],
+            "homeboy://agent-task/run/cook-run/gates#gate=gate-1"
+        );
+        assert!(diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains("no progress"));
+        assert!(!diagnostic.to_string().contains("provider transcript"));
+    }
 }
 
 fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bool {

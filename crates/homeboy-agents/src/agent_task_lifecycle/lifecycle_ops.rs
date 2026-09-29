@@ -4023,6 +4023,64 @@ pub fn mark_running_in_store(
     .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
+/// Return a materialized Cook attempt to the durable queue when runtime
+/// promotion admission is unavailable before provider work begins. This keeps
+/// the attempt identity and provider budget intact; queued execution claims it
+/// through the normal fenced lifecycle transition on a later daemon tick.
+pub fn defer_cook_runtime_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    owner: Value,
+) -> Result<bool> {
+    let run_id = sanitize_run_id(run_id);
+    let now = now_timestamp();
+    let deferred = lifecycle_store.mutate_record(&run_id, |record| {
+        if !matches!(
+            record.state,
+            AgentTaskRunState::Queued | AgentTaskRunState::Running
+        ) || record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .is_some_and(|consumed| consumed != 0)
+            || record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        {
+            return false;
+        }
+        let fence = record.metadata["cook_runtime_admission"]["fence"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_add(1);
+        record.metadata["cook_runtime_admission"] = json!({
+            "schema": "homeboy/cook-runtime-admission/v1",
+            "state": "queued",
+            "fence": fence,
+            "owner": owner,
+            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
+            "provider_executions_consumed": 0,
+        });
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Queued);
+        record.lifecycle.execution.started_at = None;
+        record.lifecycle.execution.finished_at = None;
+        for task in &mut record.tasks {
+            task.state = AgentTaskState::Queued;
+        }
+        for key in [
+            "runner_pid",
+            "runner_process_start_identity",
+            "runner_started_at",
+        ] {
+            record
+                .metadata
+                .as_object_mut()
+                .map(|metadata| metadata.remove(key));
+        }
+        true
+    })?;
+    Ok(deferred.is_some())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderExecutionReservation {
     Acquired,
@@ -4247,7 +4305,7 @@ pub fn record_cook_progress_in_store(
 
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
-pub(crate) fn record_cook_controller_failure(
+pub fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
@@ -5774,6 +5832,81 @@ fn reconcile_candidate_adoption_terminal_state_in_store(
     }
     set_run_state(record, AgentTaskRunState::Failed);
     Ok(true)
+}
+
+/// Admit terminal provider results to the durable Cook continuation queue.
+/// Called from the terminal Lab projection path so it does not depend on a
+/// later status read or explicit resume command.
+pub fn reconcile_terminal_cook_provider_result(run_id: &str) -> Result<AgentTaskRunRecord> {
+    reconcile_terminal_cook_provider_result_with_scheduler(
+        run_id,
+        homeboy_core::daemon::orchestration::schedule_terminal_cook_continuation,
+    )
+}
+
+pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
+    run_id: &str,
+    schedule: impl FnOnce(&Value) -> Result<Value>,
+) -> Result<AgentTaskRunRecord> {
+    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = lifecycle_store.read_record(run_id)?;
+    if !record.state.is_terminal() {
+        return Ok(record);
+    }
+    let recipe_store =
+        crate::agent_task_service::CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe = match record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .map(|cook_id| recipe_store.load_recipe(cook_id))
+        .transpose()?
+    {
+        Some(recipe) => recipe,
+        None => match recipe_store.load_recipe_for_attempt(run_id)? {
+            Some(recipe) => recipe,
+            // Terminal Lab runs are also used outside Cook. They have no
+            // continuation to enqueue and must leave their normal projection
+            // path untouched.
+            None => return Ok(record),
+        },
+    };
+    let cook_id = recipe.cook_id;
+    let enqueued = recipe_store.enqueue_terminal_continuation(&cook_id, run_id)?;
+    lifecycle_store.mutate_record(run_id, |stored| {
+        stored.ensure_metadata_object().insert(
+            "cook_continuation_scheduler".to_string(),
+            json!({
+                "status": if enqueued { "queued" } else { "already_queued_or_completed" },
+                "cook_id": cook_id,
+                "run_id": run_id,
+                "phase": "continuation",
+            }),
+        );
+        true
+    })?;
+    let record = lifecycle_store.read_record(run_id)?;
+    if record.metadata["cook_continuation"]["state"] == "pending" {
+        // Submit from the terminal event, not from a later status read. The
+        // durable pending continuation remains available to the daemon's
+        // recovery pass if submission fails after the lifecycle write.
+        let request = json!({
+            "schema": "homeboy/terminal-cook-continuation-request/v1",
+            "cook_id": cook_id,
+            "run_id": run_id,
+            "generation": record.metadata["cook_continuation"]["generation"].as_u64().unwrap_or(0),
+        });
+        let receipt = schedule(&request)?;
+        if receipt["scheduled"] == true {
+            lifecycle_store.mutate_record(run_id, |stored| {
+                stored.metadata["cook_continuation_scheduler"]["status"] = json!("scheduled");
+                stored.metadata["cook_continuation_scheduler"]["job_id"] =
+                    receipt["job_id"].clone();
+                true
+            })?;
+        }
+    }
+    lifecycle_store.read_record(run_id)
 }
 
 pub fn reconcile_status_in_store(

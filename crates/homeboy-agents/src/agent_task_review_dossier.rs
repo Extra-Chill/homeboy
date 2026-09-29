@@ -183,8 +183,9 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
         schema: AI_REVIEW_FORM_OUTPUT_SCHEMA.to_string(),
         structural_schema: serde_json::json!({
             "type": "object",
-            "required": ["summary", "what_changed", "compatibility", "used_for"],
+            "required": ["pr_title", "summary", "what_changed", "compatibility", "used_for"],
             "properties": {
+                "pr_title": { "type": "string", "minLength": 1, "maxLength": 256 },
                 "summary": { "type": "string" },
                 "what_changed": {
                     "type": "array",
@@ -208,6 +209,9 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
 /// prose the model authors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AiFilledReviewForm {
+    /// Specific title of the verified change, rather than a task or repository label.
+    #[serde(default)]
+    pub pr_title: String,
     /// What is changing in this PR and why.
     #[serde(deserialize_with = "prose_field")]
     pub summary: String,
@@ -322,7 +326,7 @@ impl AiFilledReviewForm {
     /// Surfaced to the agent when the form is missing or incomplete so the
     /// nudge loop can converge.
     pub fn requirement_feedback() -> &'static str {
-        "Return a `review_form` object in your task outputs with: `summary` (what is changing and why), \
+        "Return a `review_form` object in your task outputs with: `pr_title` (a specific, single-line PR title for the actual change, at most 256 characters; not a generic Cook title), `summary` (what is changing and why), \
 `what_changed` (a non-empty list of concrete change bullets), `compatibility` (a qualitative impact/compatibility \
  assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct from the \
 summary of what changed). Do not run or report verification commands: Homeboy runs the declared deterministic \
@@ -333,6 +337,21 @@ successful `used_for` is a genuine process reflection."
     /// Validate that the agent filled every required slot with real content.
     /// `Err` carries actionable, agent-facing feedback for the nudge loop.
     pub fn validate(&self) -> Result<()> {
+        let title = self.pr_title.trim();
+        if title.is_empty()
+            || title.chars().count() > 256
+            || title != self.pr_title
+            || title.chars().any(char::is_control)
+            || title.contains("<!--")
+            || title.contains("</")
+            || matches!(
+                title.to_ascii_lowercase().as_str(),
+                "n/a" | "na" | "none" | "tbd" | "untitled" | "pr title" | "title"
+            )
+            || (title.starts_with("Cook ") && title.split_whitespace().count() == 2)
+        {
+            return Err(review_form_gap("review_form.pr_title", "pr_title must be a specific, bounded, single-line title for the actual change (not a placeholder or generic Cook title)"));
+        }
         if self.summary.trim().is_empty() {
             return Err(review_form_gap("review_form.summary", "summary is empty"));
         }
@@ -1397,6 +1416,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": ["Adds the guard.", "Refs #12386."],
+                "pr_title": "Guard the reload render path",
                 "what_changed": ["one", "two"],
                 "compatibility": ["No breaking changes.", "Default is off."],
                 "used_for": ["Diagnosed the failure.", "Wrote the regression test."],
@@ -1426,6 +1446,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": "s",
+                "pr_title": "Guard the reload render path",
                 "what_changed": "first line\nsecond line\n",
                 "compatibility": "c",
                 "used_for": "Investigated, then implemented and verified the change.",
@@ -1450,6 +1471,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": "s",
+                "pr_title": "Guard the reload render path",
                 "what_changed": ["one"],
                 "compatibility": "c",
                 "used_for": "Investigated, then implemented and verified the change.",
@@ -1549,6 +1571,7 @@ mod tests {
 
     fn valid_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
+            pr_title: "Guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
             compatibility: "No compatibility impact; internal only.".into(),
@@ -1599,6 +1622,44 @@ mod tests {
     #[test]
     fn valid_review_form_passes_validation() {
         assert!(valid_form().validate().is_ok());
+    }
+
+    #[test]
+    fn title_contract_and_actionable_validation() {
+        let declaration = review_form_output_declaration();
+        assert!(declaration.structural_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("pr_title")));
+        assert_eq!(
+            declaration.structural_schema["properties"]["pr_title"]["maxLength"],
+            256
+        );
+        for title in [
+            "",
+            "TBD",
+            "Cook homeboy",
+            "two\nlines",
+            " padded ",
+            &"x".repeat(257),
+        ] {
+            let mut form = valid_form();
+            form.pr_title = title.to_string();
+            let error = form.validate().expect_err("title must be actionable");
+            assert!(error.to_string().contains("review_form.pr_title"));
+            assert!(error.to_string().contains("`pr_title`"));
+        }
+        let mut missing = serde_json::to_value(valid_form()).unwrap();
+        missing.as_object_mut().unwrap().remove("pr_title");
+        let parsed =
+            AiFilledReviewForm::from_outcome_outputs(&serde_json::json!({"review_form": missing}))
+                .unwrap()
+                .unwrap();
+        assert!(parsed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("review_form.pr_title"));
     }
 
     #[test]

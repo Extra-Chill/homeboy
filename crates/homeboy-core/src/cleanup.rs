@@ -4078,8 +4078,9 @@ mod tests {
                 error.details["_homeboy_actions"][0]["args"][4],
                 "--all-worktrees"
             );
+            assert_eq!(error.details["_homeboy_actions"][0]["args"][5], "--sort");
             assert_eq!(
-                error.details["_homeboy_actions"][0]["args"][5],
+                error.details["_homeboy_actions"][1]["args"][5],
                 "--merged-only"
             );
             assert!(repo.path().join("target/debug/app").exists());

@@ -615,7 +615,7 @@ pub(crate) fn preview_cook(
     }
     resolve_cook_execution_budget(&args, &mut plan)?;
     eprintln!("{}", cook_effective_plan_disclosure(&plan));
-    plan.metadata["gate_contract_validation"] = serde_json::to_value(gate_contract_validation)
+    plan.metadata["gate_contract_validation"] = serde_json::to_value(&gate_contract_validation)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     preflight_preview_lab_provider_secret_env(&placement, &plan)?;
 
@@ -632,6 +632,8 @@ pub(crate) fn preview_cook(
         capacity.as_ref(),
         args.repository_identity.as_ref(),
     );
+    resolved["gate_contract_validation"] =
+        preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;
     resolved["retry_budget"] = plan.metadata["cook_retry_policy"].clone();
     resolved["notification_resolution"] = serde_json::to_value(notification_resolution)
@@ -793,6 +795,37 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
             "ai_tool": args.ai_tool,
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
+    })
+}
+
+fn preview_gate_contract_disclosure(
+    validation: &crate::commands::agent_task::gate_contract::GateContractValidation,
+    public_gates: &[String],
+) -> Value {
+    let mut entries = Vec::new();
+    let mut private_deferred = 0usize;
+    for gate in &validation.gates {
+        if gate.status != "selection_deferred" {
+            continue;
+        }
+        if !public_gates.iter().any(|public| public == &gate.command) {
+            private_deferred += 1;
+            continue;
+        }
+        entries.push(serde_json::json!({
+            "kind": gate.kind,
+            "status": gate.status,
+            "filter_interpretation": gate.filter_interpretation,
+            "filter": gate.filter,
+            "selected_count": gate.selected_count,
+            "selected_ids": gate.selected_ids,
+            "validation": gate.validation,
+        }));
+    }
+    serde_json::json!({
+        "schema": "homeboy/cook-preview-gate-validation/v1",
+        "deferred_public": entries,
+        "deferred_private_count": private_deferred,
     })
 }
 
@@ -5582,6 +5615,32 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
         .flatten()
         .map(|component| PathBuf::from(component.local_path));
     let destination = args.to_worktree.as_deref().map(Path::new);
+    // An existing PR is the durable task identity for linked-worktree Cook.
+    // Resolve its canonical refs before preview/provider admission; branch
+    // upstream metadata on a linked worktree is commonly the feature branch.
+    let existing_pr = workspace
+        .and_then(|_| args.dispatch.task_url.as_deref())
+        .filter(|url| url.contains("/pull/"))
+        .map(|url| cook_pull_request_refs(workspace.expect("workspace checked"), url))
+        .transpose()?;
+    if let Some((base, head)) = existing_pr {
+        if args.base.is_none() {
+            args.base = Some(base);
+        }
+        if args
+            .head
+            .as_deref()
+            .is_some_and(|explicit| explicit != head)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "head",
+                "explicit Cook --head must match the existing pull request head",
+                args.head.clone(),
+                None,
+            ));
+        }
+        args.head = Some(head);
+    }
     let resolution = resolve_default_branch(DefaultBranchRequest {
         explicit_base: args.base.as_deref(),
         explicit_from: None,
@@ -5596,7 +5655,118 @@ fn resolve_cook_base(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> 
             "serialize Cook default-branch resolution: {error}"
         ))
     })?);
+    if args.head.as_deref() == args.base.as_deref() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "head",
+            "Cook PR head must differ from its base",
+            args.head.clone(),
+            None,
+        ));
+    }
     Ok(())
+}
+
+fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(String, String)> {
+    let output = std::process::Command::new("gh")
+        .args(["pr", "view", url, "--json", "baseRefName,headRefName"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
+        })?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "could not resolve canonical pull request refs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    let refs: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let base = refs["baseRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    let head = refs["headRefName"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty());
+    match (base, head) {
+        (Some(base), Some(head)) => Ok((base.to_string(), head.to_string())),
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "pull request lookup returned no canonical base/head refs",
+            Some(url.to_string()),
+            None,
+        )),
+    }
+}
+
+#[cfg(test)]
+mod cook_pull_request_ref_tests {
+    use super::cook_pull_request_refs;
+    use std::process::Command;
+
+    #[cfg(unix)]
+    #[test]
+    fn hydrates_existing_pr_refs_from_linked_git_worktree_with_fake_gh() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).expect("repository directory");
+        let run_git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run_git(&["init", "-q", "--initial-branch=main"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "Test"]);
+        std::fs::write(repository.join("tracked"), "base\n").expect("tracked file");
+        run_git(&["add", "tracked"]);
+        run_git(&["commit", "-qm", "base"]);
+        let linked = root.path().join("linked");
+        run_git(&[
+            "worktree",
+            "add",
+            "-qb",
+            "feature",
+            linked.to_str().unwrap(),
+        ]);
+
+        let bin = tempfile::tempdir().expect("fake gh bin");
+        let gh = bin.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
+        )
+        .expect("fake gh");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&gh).expect("gh metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gh, permissions).expect("executable gh");
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        assert_eq!(
+            cook_pull_request_refs(&linked, "https://github.com/example/repo/pull/1895")
+                .expect("canonical PR refs"),
+            ("release".to_string(), "feature".to_string())
+        );
+    }
 }
 
 fn validate_cook_base_before_provisioning(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -7286,7 +7456,8 @@ fn run_preflight_cook_execution(
     if let Some(prepared_base_sha) = &args.prepared_base_sha {
         initial_plan.metadata["cook_prepared_base_sha"] = Value::String(prepared_base_sha.clone());
     }
-    let title = default_loop_title(&args, source_worktree_path.as_deref());
+    // Empty recipe title delegates to the validated agent form after candidate gates.
+    let title = args.title.clone().unwrap_or_default();
     let commit_message = args
         .commit_message
         .clone()
@@ -8180,8 +8351,10 @@ fn validate_cook_provider_execution_plan(
 ) -> homeboy::core::Result<()> {
     let mut readiness_cache =
         homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
+    // A Lab-placed Cook proves provider readiness on the runner with the
+    // runner's credentials; controller-local credentials must not reject it.
     let selected_plan =
-        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+        homeboy::agents::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
             &plan,
             &catalog,
             &mut readiness_cache,
@@ -10384,64 +10557,6 @@ fn git_head_sha(path: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn default_loop_title(args: &AgentTaskCookArgs, source_worktree_path: Option<&Path>) -> String {
-    if let Some(title) = &args.title {
-        return title.clone();
-    }
-    if let Some(title) = args.goal.as_deref().and_then(bounded_cook_title) {
-        return title;
-    }
-    if let Some(title) = source_worktree_path
-        .zip(
-            args.base_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.get("sha"))
-                .and_then(Value::as_str),
-        )
-        .and_then(|(path, base_sha)| existing_candidate_title(path, base_sha))
-    {
-        return title;
-    }
-    let target = args
-        .dispatch
-        .repo
-        .as_deref()
-        .or(args.dispatch.task_url.as_deref())
-        .unwrap_or("agent task");
-    bounded_cook_title(&format!("Cook {target}")).unwrap_or_else(|| "Cook agent task".to_string())
-}
-
-fn existing_candidate_title(path: &Path, base_sha: &str) -> Option<String> {
-    let head_sha = git_head_sha(path)?;
-    if head_sha == base_sha
-        || !Command::new("git")
-            .args(["merge-base", "--is-ancestor", base_sha, &head_sha])
-            .current_dir(path)
-            .status()
-            .ok()?
-            .success()
-    {
-        return None;
-    }
-    let output = Command::new("git")
-        .args(["show", "-s", "--format=%s", &head_sha])
-        .current_dir(path)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-        .and_then(|subject| bounded_cook_title(&subject))
-}
-
-fn bounded_cook_title(value: &str) -> Option<String> {
-    const MAX_PR_TITLE_CHARS: usize = 256;
-
-    let title = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!title.is_empty()).then(|| title.chars().take(MAX_PR_TITLE_CHARS).collect())
-}
-
 fn default_loop_commit_message(args: &AgentTaskCookArgs) -> String {
     let target = args.dispatch.repo.as_deref().unwrap_or("agent task");
     format!("fix: cook {target}")
@@ -10883,11 +10998,11 @@ fn explicit_local_retry_admission_refusal(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_preview_worktree_capacity, bounded_cook_title, cook_continuation_status,
+        apply_preview_worktree_capacity, cook_continuation_status, cook_preview_result,
         cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure, default_loop_title,
-        detached_cook_route_less_warning, durable_cook_identity_lines, existing_candidate_title,
-        preflight_continue_cook, project_preview_dirty_admission,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
+        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
+        preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::args::CookContinueArgs;
@@ -11002,6 +11117,71 @@ mod tests {
         });
     }
 
+    #[test]
+    fn preview_result_render_discloses_public_exact_filter_and_withholds_private_gate() {
+        let validation = crate::commands::agent_task::gate_contract::GateContractValidation {
+            schema: "homeboy/gate-contract-validation/v1",
+            status: "valid",
+            gates: vec![
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test public::test_id -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("public::test_id".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+                crate::commands::agent_task::gate_contract::GateContractValidationEntry {
+                    command: "cargo test private-command-secret -- --exact".to_string(),
+                    kind: "cargo",
+                    status: "selection_deferred",
+                    mode: Some("focused".to_string()),
+                    filter_interpretation: Some("exact".to_string()),
+                    filter: Some("private-command-secret".to_string()),
+                    selected_count: None,
+                    selected_ids: None,
+                    validation: Some("test_inventory_unavailable_without_build".to_string()),
+                },
+            ],
+        };
+        let mut resolved = serde_json::json!({
+            "placement": { "requested": "local" },
+            "provider": { "backend": "fixture", "model": "test-model" },
+            "workspace": { "path": "/tmp/worktree" },
+            "gates": { "public": 1, "private": 1 },
+        });
+        resolved["gate_contract_validation"] = preview_gate_contract_disclosure(
+            &validation,
+            &["cargo test public::test_id -- --exact".to_string()],
+        );
+        let preview = cook_preview_result(
+            resolved,
+            Vec::new(),
+            PreviewReplayArgv {
+                argv: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook".to_string(),
+                ],
+                requires: Vec::new(),
+            },
+            None,
+            None,
+        );
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
+            &preview,
+        )
+        .expect("rendered preview summary");
+        assert!(summary.contains("filter `public::test_id` (exact)"));
+        assert!(summary.contains("test inventory unavailable without building test binaries"));
+        assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
+        assert!(!summary.contains("private-command-secret"));
+    }
+
     fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {
         let mut argv = vec![
             "homeboy",
@@ -11099,64 +11279,13 @@ mod tests {
     }
 
     #[test]
-    fn cook_title_precedence_keeps_explicit_goal_candidate_and_fallback_semantics() {
+    fn only_explicit_cook_title_is_immutable_recipe_title() {
         let explicit = title_cook_args(&["--title", "Explicit title", "--goal", "Goal title"]);
-        assert_eq!(default_loop_title(&explicit, None), "Explicit title");
-
+        assert_eq!(explicit.title.as_deref(), Some("Explicit title"));
         let goal = title_cook_args(&["--goal", "  Restore\n cold\t reconstruction  "]);
-        assert_eq!(
-            default_loop_title(&goal, None),
-            "Restore cold reconstruction"
-        );
-
+        assert!(goal.title.is_none());
         let fallback = title_cook_args(&["--repo", "fixture-repository"]);
-        assert_eq!(
-            default_loop_title(&fallback, None),
-            "Cook fixture-repository"
-        );
-    }
-
-    #[test]
-    fn cook_title_semantics_are_bounded_and_candidate_aware() {
-        assert_eq!(
-            bounded_cook_title("  Restore\n cold\t reconstruction  ").as_deref(),
-            Some("Restore cold reconstruction")
-        );
-        assert_eq!(
-            bounded_cook_title(&"x".repeat(300))
-                .expect("bounded title")
-                .chars()
-                .count(),
-            256
-        );
-
-        let workspace = tempfile::tempdir().expect("workspace");
-        let git = |args: &[&str]| {
-            assert!(std::process::Command::new("git")
-                .args(args)
-                .current_dir(workspace.path())
-                .status()
-                .expect("run git")
-                .success());
-        };
-        git(&["init", "--initial-branch=main"]);
-        git(&["config", "user.email", "agent@example.test"]);
-        git(&["config", "user.name", "Agent"]);
-        std::fs::write(workspace.path().join("candidate.txt"), "base\n").expect("write base");
-        git(&["add", "candidate.txt"]);
-        git(&["commit", "-m", "base"]);
-        let base = super::git_head_sha(workspace.path()).expect("base sha");
-        assert_eq!(existing_candidate_title(workspace.path(), &base), None);
-
-        std::fs::write(workspace.path().join("candidate.txt"), "candidate\n")
-            .expect("write candidate");
-        git(&["commit", "-am", "fix: restore schema\n\nuntrusted body"]);
-        let mut candidate = title_cook_args(&["--repo", "fixture-repository"]);
-        candidate.base_resolution = Some(serde_json::json!({ "sha": base }));
-        assert_eq!(
-            default_loop_title(&candidate, Some(workspace.path())),
-            "fix: restore schema"
-        );
+        assert!(fallback.title.is_none());
     }
 
     #[test]

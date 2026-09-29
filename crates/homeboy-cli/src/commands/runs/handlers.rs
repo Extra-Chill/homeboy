@@ -782,11 +782,6 @@ fn active_runner_job_run_summary_if_durable(
     })
 }
 
-pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    show_run_in_store(&store, run_id)
-}
-
 pub(crate) fn show_run_in_store(store: &ObservationStore, run_id: &str) -> CmdResult<RunsOutput> {
     let run = runs_service::require_run(store, run_id)?;
     runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&run);

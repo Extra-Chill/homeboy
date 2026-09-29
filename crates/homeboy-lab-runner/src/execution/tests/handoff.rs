@@ -81,6 +81,35 @@ fn cancellation_defaults_to_agent_task_workloads_after_overrides() {
     ));
 }
 
+#[test]
+fn direct_projection_cancel_response_unwraps_daemon_body_and_keeps_cancel_event_data() {
+    let mut job = running_job();
+    job.status = JobStatus::Cancelled;
+    let cancellation_cause = json!({"reason": "controller_timeout", "attempt": 2});
+    let response = json!({
+        "body": {
+            "job": serde_json::to_value(&job).expect("job serializes"),
+            "events": [{
+                "sequence": 7,
+                "job_id": job.id,
+                "kind": "status",
+                "timestamp_ms": job.updated_at_ms,
+                "message": "cancelled",
+                "data": {"cause": cancellation_cause}
+            }]
+        }
+    });
+
+    let (parsed, events) = parse_runner_job_cancel_body(response)
+        .expect("production cancellation parser unwraps daemon response");
+
+    assert_eq!(parsed.status, JobStatus::Cancelled);
+    assert_eq!(
+        events[0].data.as_ref().expect("event data")["cause"],
+        cancellation_cause
+    );
+}
+
 fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
     let plan = homeboy_core::plan::HomeboyPlan::builder_for_description(
         homeboy_core::plan::PlanKind::LabOffload,
@@ -1917,6 +1946,85 @@ fn daemon_exec_request_failed_error_surfaces_payload_detail() {
     assert!(err.message.contains("validation.invalid_argument"));
     assert!(err.message.contains("bad cwd"));
     assert!(!err.message.contains("null"));
+}
+
+#[test]
+fn daemon_exec_request_failed_error_surfaces_io_error_cause_from_details() {
+    // `internal.io_error` always carries the literal message "IO error"; the
+    // real OS error and failing operation live only in `details` (the daemon's
+    // `error_response` body). The controller must not reduce it to "IO error".
+    let envelope = DaemonEnvelope {
+        success: false,
+        data: None,
+        error: Some(serde_json::json!({
+            "error": "internal.io_error",
+            "message": "IO error",
+            "details": {
+                "error": "No such file or directory (os error 2)",
+                "context": "read /home/lab/.config/homeboy/secrets/opencode-openai-access"
+            },
+            "hints": []
+        })),
+    };
+    let err = daemon_exec_request_failed_error("lab", 500, &envelope);
+    assert!(
+        err.message.contains("internal.io_error: IO error"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("No such file or directory (os error 2)"),
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message
+            .contains("read /home/lab/.config/homeboy/secrets/opencode-openai-access"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn daemon_exec_request_failed_error_bounds_and_ignores_non_text_details() {
+    let long = "x".repeat(5_000);
+    let bounded = daemon_exec_request_failed_error(
+        "lab",
+        500,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": "internal.io_error",
+                "message": "IO error",
+                "details": { "error": long }
+            })),
+        },
+    );
+    assert!(
+        bounded.message.chars().count() < 1_000,
+        "detail must be bounded"
+    );
+    assert!(bounded.message.ends_with("…)"), "{}", bounded.message);
+
+    let structured = daemon_exec_request_failed_error(
+        "lab",
+        400,
+        &DaemonEnvelope {
+            success: false,
+            data: None,
+            error: Some(serde_json::json!({
+                "error": "validation.invalid_argument",
+                "message": "bad cwd",
+                "details": { "field": "cwd", "id": 7 }
+            })),
+        },
+    );
+    assert_eq!(
+        structured.message,
+        "daemon exec request failed: validation.invalid_argument: bad cwd"
+    );
 }
 
 #[test]

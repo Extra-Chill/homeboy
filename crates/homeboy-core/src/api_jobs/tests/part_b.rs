@@ -10,6 +10,155 @@ use super::*;
 use uuid::Uuid;
 
 #[test]
+fn terminal_controller_job_releases_active_key_for_next_retry_epoch() {
+    let store = JobStore::default();
+    let active_key = "terminal-cook:cook-1:run-1";
+    let submit_epoch = |epoch: u32| {
+        let request = json!({ "cook_id": "cook-1", "run_id": "run-1", "retry_epoch": epoch });
+        let outcome = store
+            .admit_controller_job(
+                "controller.agent-task-cook-terminal-continuation".to_string(),
+                format!("terminal-cook:cook-1:run-1:retry-{epoch}"),
+                ControllerJobState {
+                    job_type: "agent-task-cook-terminal-continuation".to_string(),
+                    version: 1,
+                    request: request.clone(),
+                    public_request: request.clone(),
+                    request_digest: crate::daemon::hex_digest(&request).unwrap(),
+                    active_idempotency_key: Some(active_key.to_string()),
+                    linked_durable_run_id: Some("run-1".to_string()),
+                    checkpoint: None,
+                    cancellation_requested: false,
+                    cancellation_reason: None,
+                    execution_claim_id: None,
+                    recovery_attempted: false,
+                },
+            )
+            .expect("admit retry epoch");
+        match outcome {
+            ControllerJobSubmissionOutcome::Submitted(id) => id,
+            ControllerJobSubmissionOutcome::Existing(job) => job.id,
+        }
+    };
+
+    let first = submit_epoch(0);
+    assert_eq!(submit_epoch(0), first, "duplicate tick reuses active job");
+    store
+        .start_controller_execution(first)
+        .expect("start first controller job");
+    store
+        .fail_controller_error(first, "fixture worker failed".to_string(), json!({}))
+        .expect("terminalize first controller job as failed");
+    assert_eq!(store.get(first).unwrap().status, JobStatus::Failed);
+
+    let retry = submit_epoch(1);
+    assert_ne!(
+        retry, first,
+        "a new retry epoch gets a distinct durable job"
+    );
+    assert_eq!(
+        submit_epoch(1),
+        retry,
+        "duplicate retry tick reuses the new job"
+    );
+}
+
+#[test]
+fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombstones() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("durable store");
+    let request = json!({ "cook_id": "cook", "run_id": "run" });
+    let submission = || ControllerJobState {
+        job_type: "agent-task-cook-terminal-continuation".to_string(),
+        version: 1,
+        request: request.clone(),
+        public_request: request.clone(),
+        request_digest: crate::daemon::hex_digest(&request).unwrap(),
+        active_idempotency_key: None,
+        linked_durable_run_id: Some("run".to_string()),
+        checkpoint: None,
+        cancellation_requested: false,
+        cancellation_reason: None,
+        execution_claim_id: None,
+        recovery_attempted: false,
+    };
+    let submit = |key: &str| match store
+        .admit_controller_job(
+            "controller.agent-task-cook-terminal-continuation".to_string(),
+            key.to_string(),
+            submission(),
+        )
+        .expect("admit exact controller job")
+    {
+        ControllerJobSubmissionOutcome::Submitted(id) => id,
+        ControllerJobSubmissionOutcome::Existing(_) => panic!("unexpected replay"),
+    };
+    let first = submit("legacy-first");
+    let second = submit("legacy-second");
+    store
+        .start_controller_execution(first)
+        .expect("first starts");
+    store
+        .fail_controller_error(first, "done".to_string(), json!({}))
+        .expect("first terminal");
+    let unrelated = store.create("unrelated");
+    store.start(unrelated.id).expect("other starts");
+    store.complete(unrelated.id, None).expect("other terminal");
+    assert!(
+        store
+            .terminal_controller_job_ids("agent-task-cook-terminal-continuation", 1)
+            .is_err(),
+        "active v1 job cannot be hidden from preview"
+    );
+    assert!(store
+        .prune_terminal_controller_jobs("agent-task-cook-terminal-continuation", 1, &[first])
+        .is_err());
+    assert!(
+        store.get(first).is_ok(),
+        "failed prune retains exact evidence"
+    );
+    store
+        .start_controller_execution(second)
+        .expect("second starts");
+    store
+        .fail_controller_error(second, "done".to_string(), json!({}))
+        .expect("second terminal");
+    assert!(
+        store
+            .prune_terminal_controller_jobs("agent-task-cook-terminal-continuation", 1, &[first])
+            .is_err(),
+        "stale expected set cannot remove another terminal job"
+    );
+    let ids = store
+        .terminal_controller_job_ids("agent-task-cook-terminal-continuation", 1)
+        .expect("all terminal");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        store
+            .prune_terminal_controller_jobs("agent-task-cook-terminal-continuation", 1, &ids)
+            .expect("exact prune"),
+        ids
+    );
+    let reopened = JobStore::open_without_reconciliation(&path).expect("reopen after prune");
+    assert!(reopened
+        .terminal_controller_job_ids("agent-task-cook-terminal-continuation", 1)
+        .unwrap()
+        .is_empty());
+    assert!(reopened.get(first).is_err());
+    assert!(reopened.get(second).is_err());
+    assert_eq!(
+        reopened.get(unrelated.id).unwrap().status,
+        JobStatus::Succeeded
+    );
+    assert!(matches!(reopened.admit_controller_job(
+        "controller.agent-task-cook-terminal-continuation".to_string(),
+        "legacy-first".to_string(),
+        submission(),
+    ).expect("lost response replay"), ControllerJobSubmissionOutcome::Existing(job) if job.id == first));
+}
+
+#[test]
 fn remote_runner_submission_lookup_is_non_mutating() {
     let store = JobStore::default();
     let missing = store.lookup_remote_runner_submission("missing-key");

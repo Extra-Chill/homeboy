@@ -1344,6 +1344,64 @@ pub fn preflight_plan_provider_dispatchability_with_providers(
     selected_plan_provider_dispatchability_with_providers(plan, catalog, cache).map(|_| ())
 }
 
+/// Whether this process already selected Lab placement for its workload.
+///
+/// A Lab-placed Cook runs its provider on the runner, with the runner's own
+/// credentials. Lab staging proves those through the runner-side readiness
+/// preflight (`providers --validate-readiness` on the runner). Controller-local
+/// live readiness only proves the controller's credentials, so it must not
+/// gate Lab admission (#15198).
+pub fn provider_readiness_is_runner_owned() -> bool {
+    homeboy_core::parsed_command_preflight::captured_result().is_some_and(|result| {
+        result.placement.selected == homeboy_lab_runner_contract::EffectiveExecutionPlacement::Lab
+    })
+}
+
+/// Admit a compiled plan for the execution placement this process selected.
+///
+/// Local placement keeps full live admission and route selection. Lab placement
+/// defers live readiness to the runner and applies only the deterministic,
+/// probe-free contract checks here, returning the plan unchanged so the runner
+/// selects the effective route.
+pub fn admit_plan_provider_dispatchability_for_placement(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+    cache: &mut ProviderRuntimeReadinessCache,
+) -> homeboy_core::Result<AgentTaskPlan> {
+    admit_plan_provider_dispatchability_for_runner_ownership(
+        plan,
+        catalog,
+        cache,
+        provider_readiness_is_runner_owned(),
+    )
+}
+
+/// Placement-explicit form of [`admit_plan_provider_dispatchability_for_placement`]
+/// so callers and tests do not depend on process-global preflight state.
+pub fn admit_plan_provider_dispatchability_for_runner_ownership(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+    cache: &mut ProviderRuntimeReadinessCache,
+    runner_owned: bool,
+) -> homeboy_core::Result<AgentTaskPlan> {
+    if !runner_owned {
+        return admit_plan_provider_dispatchability_with_providers(plan, catalog, cache);
+    }
+    // A rotation plan is judged as a complete effective chain on the runner, so
+    // an unavailable primary cannot hide a valid fallback here either.
+    let has_rotation = plan
+        .options
+        .rotation
+        .as_ref()
+        .is_some_and(|rotation| !rotation.entries.is_empty());
+    if !has_rotation {
+        preflight_plan_provider_dispatchability_without_runtime_with_providers(
+            plan, catalog, cache,
+        )?;
+    }
+    Ok(plan.clone())
+}
+
 fn selected_plan_provider_dispatchability_with_providers(
     plan: &AgentTaskPlan,
     catalog: &AgentTaskProviderCatalog,
@@ -1384,7 +1442,14 @@ fn selected_plan_provider_dispatchability_with_providers(
         let mut selected = None;
         let mut first_failure = None;
         for (mut candidate, next_rotation_index) in candidates {
-            candidate.limits.execution_deadline_unix_ms = admission_deadline;
+            // Readiness has its own bounded invocation budget (the provider
+            // declaration, normally 20s). A task execution deadline is not a
+            // per-phase readiness deadline: passing it here can leave only a
+            // few seconds after preview/materialization and falsely reject a
+            // route that validates within its declared probe window. Retain a
+            // plan-level deadline, which bounds admission as a whole.
+            candidate.limits.execution_deadline_unix_ms =
+                plan.options.execution_budget.deadline_unix_ms;
             if super::is_fixture_backend(&candidate.executor.backend)
                 || crate::agent_task_gate_executor::is_repo_local_gate_request(&candidate)
             {
@@ -1474,7 +1539,7 @@ fn selected_plan_provider_dispatchability_with_providers(
                 deadline.map(|value| value.to_string()),
                 hints,
             )
-            .with_retryable(false);
+            .with_retryable(true);
             error.details["classification"] = serde_json::json!("timeout");
             error.details["zero_provider_executions"] = serde_json::json!(true);
             error.details["deadline_unix_ms"] = serde_json::json!(deadline);
@@ -1606,8 +1671,8 @@ mod tests {
         let mut task = request("model");
         task.executor.backend = "missing".to_string();
         let deadline = crate::agent_task_timeout::now_unix_ms() + 30;
-        task.limits.execution_deadline_unix_ms = Some(deadline);
         let mut plan = AgentTaskPlan::new("deadline", vec![task]);
+        plan.options.execution_budget.deadline_unix_ms = Some(deadline);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
                 backend: Some("test".to_string()),
@@ -1790,6 +1855,99 @@ mod tests {
              verification"
         );
         assert_eq!(verdict.reason, "all dispatchability checks passed");
+    }
+
+    /// Controller whose provider-owned credential is present but whose live
+    /// readiness probe rejects it (the #15198 shape: a controller-local OAuth
+    /// token returning 401). The probe appends to `count` on every run.
+    fn controller_with_rejected_live_credentials(
+        root: &std::path::Path,
+    ) -> (AgentTaskProviderCatalog, std::path::PathBuf) {
+        let auth = root.join("auth.json");
+        let count = root.join("count");
+        let script = root.join("readiness.js");
+        std::fs::write(&auth, r#"{"token":"controller-token-rejected"}"#).expect("write auth");
+        std::fs::write(
+            &script,
+            "require('fs').appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:false,remediation:'Sign in again.',reason:'Token refresh failed: 401',cache_key:'k',identity:{}}));",
+        )
+        .expect("readiness script");
+        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
+        provider.readiness_invocation = Some(
+            CommandInvocation {
+                argv: vec![
+                    "node".to_string(),
+                    script.display().to_string(),
+                    count.display().to_string(),
+                ],
+                ..CommandInvocation::default()
+            }
+            .into(),
+        );
+        (catalog(provider), count)
+    }
+
+    fn revocable_plan() -> AgentTaskPlan {
+        let mut task = request("model");
+        task.executor.backend = "revocable".to_string();
+        AgentTaskPlan::new("lab-admission", vec![task])
+    }
+
+    #[test]
+    fn local_placement_still_rejects_controller_credentials_the_live_probe_refuses() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (catalog, count) = controller_with_rejected_live_credentials(root.path());
+
+        let error = admit_plan_provider_dispatchability_for_runner_ownership(
+            &revocable_plan(),
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+            false,
+        )
+        .expect_err("local placement must keep live admission");
+
+        assert_eq!(error.details["field"], "provider_dispatchability");
+        assert!(count.exists(), "local admission must run the live probe");
+    }
+
+    #[test]
+    fn lab_placement_does_not_gate_on_controller_live_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (catalog, count) = controller_with_rejected_live_credentials(root.path());
+        let plan = revocable_plan();
+
+        let admitted = admit_plan_provider_dispatchability_for_runner_ownership(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+            true,
+        )
+        .expect("Lab placement defers live readiness to the runner");
+
+        assert!(
+            !count.exists(),
+            "Lab admission must not probe controller-local credentials"
+        );
+        assert_eq!(admitted.tasks.len(), plan.tasks.len());
+        assert_eq!(admitted.tasks[0].executor.backend, "revocable");
+    }
+
+    #[test]
+    fn lab_placement_still_rejects_static_route_defects() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (catalog, count) = controller_with_rejected_live_credentials(root.path());
+        let mut plan = revocable_plan();
+        plan.tasks[0].executor.backend = "missing".to_string();
+
+        admit_plan_provider_dispatchability_for_runner_ownership(
+            &plan,
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+            true,
+        )
+        .expect_err("an unresolvable route is a deterministic defect on any placement");
+
+        assert!(!count.exists());
     }
 
     #[test]

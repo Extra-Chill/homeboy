@@ -353,7 +353,7 @@ impl DeploymentProviderApi {
                     &request.effect_id,
                     &format!("deployment-provider:{}", std::process::id()),
                     &now.to_rfc3339(),
-                    &(now + chrono::Duration::seconds(30)).to_rfc3339(),
+                    &(now + provider_lease_duration()).to_rfc3339(),
                 )
             }) {
                 Ok(Some(lease)) => lease,
@@ -367,7 +367,10 @@ impl DeploymentProviderApi {
                 Err(error) => return submit_failure(request, internal_failure(error.to_string())),
             };
         let quoted_input = homeboy_engine_primitives::shell::quote_path(input_path);
-        let execution = match execute_extension_command(
+        // The provider runs for as long as its deploy takes; keep the lease live
+        // for exactly that long so only a crashed owner lets it expire.
+        let heartbeat = ProviderLeaseHeartbeat::start(request.effect_id.clone(), lease.lease_fence);
+        let execution = execute_extension_command(
             command,
             &[
                 ("extension_path", extension_path),
@@ -385,7 +388,9 @@ impl DeploymentProviderApi {
                 Some(component_path),
             ),
             ExtensionExecutionMode::Captured,
-        ) {
+        );
+        heartbeat.stop();
+        let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
                 return submit_diagnostic(
@@ -400,17 +405,19 @@ impl DeploymentProviderApi {
         };
         let evidence =
             provider_evidence(&execution.output.stdout, &execution.output.stderr, provider);
+        let error = (execution.exit_code != 0).then(|| {
+            if provider.layered_input.is_some() {
+                layered_failure_error(&evidence)
+                    .unwrap_or_else(|| "Deployment provider failed".to_string())
+            } else {
+                format!("{}{}", execution.output.stdout, execution.output.stderr)
+            }
+        });
 
         let result = ExtensionApiDeploymentProviderResult {
             exit_code: execution.exit_code,
             evidence,
-            error: (execution.exit_code != 0).then(|| {
-                if provider.layered_input.is_some() {
-                    "Deployment provider failed".to_string()
-                } else {
-                    format!("{}{}", execution.output.stdout, execution.output.stderr)
-                }
-            }),
+            error,
         };
         if let Err(error) = terminalize_provider_effect(request, &lease, result.clone()) {
             return submit_failure(request, internal_failure(error.to_string()));
@@ -622,6 +629,32 @@ fn provider_evidence(
             value.get("schema").and_then(serde_json::Value::as_str) == Some(expected_schema)
         })
         .unwrap_or_else(|| serde_json::json!({ "status": "opaque" }))
+}
+
+fn layered_failure_error(evidence: &serde_json::Value) -> Option<String> {
+    let failure = evidence.get("failure")?.as_object()?;
+    let message = failure.get("message")?.as_str()?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let stage = failure
+        .get("stage")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let code = failure
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let location = match (stage, code) {
+        (Some(stage), Some(code)) => format!(" at {stage} ({code})"),
+        (Some(stage), None) => format!(" at {stage}"),
+        (None, Some(code)) => format!(" ({code})"),
+        (None, None) => String::new(),
+    };
+    Some(format!(
+        "Deployment provider failed{location}: {}",
+        message.chars().take(1000).collect::<String>()
+    ))
 }
 
 fn diagnostic(
@@ -958,6 +991,51 @@ fn provider_request_digest(
     ))
 }
 
+/// How long a provider effect lease lasts before a missing owner is treated
+/// as crashed. The owner renews it every third of this window.
+#[cfg(not(test))]
+const PROVIDER_LEASE_SECONDS: i64 = 30;
+#[cfg(test)]
+const PROVIDER_LEASE_SECONDS: i64 = 1;
+
+fn provider_lease_duration() -> chrono::Duration {
+    chrono::Duration::seconds(PROVIDER_LEASE_SECONDS)
+}
+
+/// Renews a provider effect lease on a background thread while the provider
+/// command runs, and stops as soon as the lease is no longer this owner's.
+struct ProviderLeaseHeartbeat {
+    stop: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl ProviderLeaseHeartbeat {
+    fn start(effect_id: homeboy_control_plane_contract::EffectId, lease_fence: u64) -> Self {
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let interval = std::time::Duration::from_millis((PROVIDER_LEASE_SECONDS * 1000 / 3) as u64);
+        let thread = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(interval)
+            {
+                let expires_at = (chrono::Utc::now() + provider_lease_duration()).to_rfc3339();
+                let renewed =
+                    crate::observation::ObservationStore::open_initialized().and_then(|store| {
+                        store.renew_control_plane_effect_lease(&effect_id, lease_fence, &expires_at)
+                    });
+                if !matches!(renewed, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        Self { stop, thread }
+    }
+
+    fn stop(self) {
+        let _ = self.stop.send(());
+        let _ = self.thread.join();
+    }
+}
+
 fn terminalize_provider_effect(
     request: &ExtensionApiDeploymentProviderSubmitRequest,
     lease: &crate::observation::store::ControlPlaneEffectStatus,
@@ -1035,6 +1113,29 @@ mod tests {
     use homeboy_extension_contract::api::v1::{
         ExtensionApiDeploymentProviderResolveRequest, EXTENSION_API_CATALOG_REQUEST_SCHEMA,
     };
+
+    #[test]
+    fn structured_layered_failure_is_operator_facing() {
+        let evidence = serde_json::json!({
+            "failure": {
+                "stage": "remote_preflight",
+                "code": "remote_checkout_dirty",
+                "message": "The remote checkout has local changes."
+            }
+        });
+        assert_eq!(
+            layered_failure_error(&evidence).as_deref(),
+            Some("Deployment provider failed at remote_preflight (remote_checkout_dirty): The remote checkout has local changes.")
+        );
+    }
+
+    #[test]
+    fn opaque_layered_failure_has_no_untrusted_cause() {
+        assert_eq!(
+            layered_failure_error(&serde_json::json!({"status": "opaque"})),
+            None
+        );
+    }
 
     fn write_extension(id: &str, providers: serde_json::Value, script: &str) {
         let extension = crate::paths::extensions()
@@ -1447,6 +1548,128 @@ mod tests {
                 ExtensionApiDeploymentProviderEffectState::Failed
             );
             assert_eq!(failed.result.expect("failed result").exit_code, 1);
+        });
+    }
+
+    #[test]
+    fn provider_outliving_its_lease_window_still_succeeds() {
+        crate::test_support::with_isolated_home(|_home| {
+            // Runs for several lease windows while another process keeps expiring
+            // stale leases, as a concurrent `homeboy deploy` status read does.
+            write_extension(
+                "slow-provider",
+                serde_json::json!([{"id":"fixture.deploy","command":"sleep 3"}]),
+                "",
+            );
+            let api = discover();
+            let request = ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "slow-provider".to_string(),
+                provider_id: "fixture.deploy".to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId(
+                    "test:long-provider".to_string(),
+                ),
+                project_id: "site".to_string(),
+                component_id: "fixture".to_string(),
+                dry_run: false,
+            };
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let expirer = {
+                let done = std::sync::Arc::clone(&done);
+                std::thread::spawn(move || {
+                    while !done.load(std::sync::atomic::Ordering::Acquire) {
+                        crate::observation::ObservationStore::open_initialized()
+                            .expect("store")
+                            .expire_control_plane_effect_leases(&chrono::Utc::now().to_rfc3339())
+                            .expect("expire stale leases");
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                })
+            };
+            let input = tempfile::NamedTempFile::new().expect("input");
+            let component = tempfile::tempdir().expect("component");
+
+            let response = api.submit_api(
+                &request,
+                DeploymentProviderInvocationContext {
+                    component_path: component.path(),
+                    input_path: input.path(),
+                },
+            );
+            done.store(true, std::sync::atomic::Ordering::Release);
+            expirer.join().expect("expirer");
+
+            assert!(response.failure.is_none(), "{:?}", response.failure);
+            assert_eq!(
+                response.state,
+                ExtensionApiDeploymentProviderEffectState::Succeeded
+            );
+            let effect = crate::observation::ObservationStore::open_initialized()
+                .expect("store")
+                .control_plane_effect_status(&request.effect_id)
+                .expect("effect")
+                .expect("effect exists");
+            assert!(effect.terminal.is_some());
+            assert!(!effect.recovery_required);
+        });
+    }
+
+    #[test]
+    fn a_lease_renews_only_for_its_live_fence() {
+        crate::test_support::with_isolated_home(|_home| {
+            write_extension(
+                "renew-provider",
+                serde_json::json!([{"id":"fixture.deploy","command":"true"}]),
+                "",
+            );
+            let request = ExtensionApiDeploymentProviderSubmitRequest {
+                schema: EXTENSION_API_DEPLOYMENT_PROVIDER_SUBMIT_REQUEST_SCHEMA.to_string(),
+                api_version: EXTENSION_API_V1,
+                extension_id: "renew-provider".to_string(),
+                provider_id: "fixture.deploy".to_string(),
+                effect_id: homeboy_control_plane_contract::EffectId("test:renew".to_string()),
+                project_id: "site".to_string(),
+                component_id: "fixture".to_string(),
+                dry_run: false,
+            };
+            admit_provider_effect(&request).expect("admit intent");
+            let store = crate::observation::ObservationStore::open_initialized().expect("store");
+            let lease = store
+                .lease_control_plane_effect_by_id(
+                    &request.effect_id,
+                    "owner",
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:30Z",
+                )
+                .expect("lease")
+                .expect("leased");
+
+            assert!(store
+                .renew_control_plane_effect_lease(
+                    &request.effect_id,
+                    lease.lease_fence,
+                    "2026-01-01T00:01:00Z"
+                )
+                .expect("renew"));
+            assert!(!store
+                .renew_control_plane_effect_lease(
+                    &request.effect_id,
+                    lease.lease_fence + 1,
+                    "2026-01-01T00:02:00Z"
+                )
+                .expect("stale fence"));
+
+            store
+                .expire_control_plane_effect_leases("2026-01-01T00:05:00Z")
+                .expect("expire");
+            assert!(!store
+                .renew_control_plane_effect_lease(
+                    &request.effect_id,
+                    lease.lease_fence,
+                    "2026-01-01T00:06:00Z"
+                )
+                .expect("expired lease"));
         });
     }
 
