@@ -285,6 +285,8 @@ impl AgentTaskPrRuntimeGuardrails {
 #[derive(Debug, Clone)]
 pub struct AgentTaskPrFinalizationOptions {
     pub path: String,
+    /// Component admitted by Cook; publication must not rediscover it from a shared path.
+    pub component_id: Option<String>,
     pub run_id: String,
     pub base: String,
     /// Immutable commit SHA recorded before the declared verification gates ran.
@@ -510,17 +512,24 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<AgentTaskPublicationGitTracking>;
     fn find_open_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         base: &str,
         head: &str,
     ) -> Result<Option<AgentTaskPrRef>>;
     /// Live title of an existing PR, used to preserve operator edits on Cook reuse.
-    fn open_pr_title(&mut self, _path: &str, _number: u64) -> Result<Option<String>> {
+    fn open_pr_title(
+        &mut self,
+        _component_id: Option<&str>,
+        _path: &str,
+        _number: u64,
+    ) -> Result<Option<String>> {
         Ok(None)
     }
     /// Finds a prior merged publication for this exact base/head tuple.
     fn find_merged_pr(
         &mut self,
+        _component_id: Option<&str>,
         _path: &str,
         _base: &str,
         _head: &str,
@@ -546,6 +555,7 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<AgentTaskPrQuarantineCapability>;
     fn create_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         base: &str,
         head: &str,
@@ -555,6 +565,7 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<AgentTaskPrRef>;
     fn update_pr(
         &mut self,
+        component_id: Option<&str>,
         path: &str,
         number: u64,
         title: &str,

@@ -3332,11 +3332,15 @@ fn cook_finalization_options_with_stores_and_review_form(
     // admitted the run against, so finalization must reuse that identity
     // rather than re-deriving it ambiguously from the bare worktree path
     // (#14725).
-    let review_profile = resolve_review_profile(
-        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan)
-            .as_deref(),
-        &path,
-    )?;
+    let recorded_component_id =
+        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
+    let selected_component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .as_deref()
+        .or(recorded_component_id.as_deref());
+    let review_profile = resolve_review_profile(selected_component_id, &path)?;
     review_dossier.validate(&review_profile)?;
     let form_title = if options.finalization.title.is_empty() {
         Some(terminal_form_title(
@@ -3349,6 +3353,7 @@ fn cook_finalization_options_with_stores_and_review_form(
     };
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: selected_component_id.map(str::to_string),
         run_id: successful_run_id.to_string(),
         base: options.finalization.base.clone(),
         verified_base_sha: Some(verified_base.sha.clone()),
@@ -4977,6 +4982,7 @@ fn manual_finalization_options(
     let path = path.expect("validated path");
     Ok(AgentTaskPrFinalizationOptions {
         path: path.clone(),
+        component_id: component_id.map(str::to_string),
         run_id: report.run_id,
         base: base.expect("validated base"),
         verified_base_sha,
@@ -5142,12 +5148,16 @@ fn cook_review_dossier_with_stores_and_review_form(
         .deterministic_gates
         .iter()
         .filter_map(|gate| {
-            let command = gate.invocation().ok()?.reviewer_command();
-            (verification_promotion.has_visible_passed_gate_for_command(&command)
-                && crate::agent_task_review_dossier::reviewer_runnable_command(&command))
-            .then(|| AgentTaskReviewTestStep {
-                command,
-                expected: "passes as recorded by Cook's deterministic gate".to_string(),
+            let exact_command = gate.invocation().ok()?.reviewer_command();
+            if !verification_promotion.has_visible_passed_gate_for_command(&exact_command) {
+                return None;
+            }
+            let command = crate::agent_task_review_dossier::reviewer_safe_command(&exact_command)?;
+            crate::agent_task_review_dossier::reviewer_runnable_command(&command).then(|| {
+                AgentTaskReviewTestStep {
+                    command,
+                    expected: "passes as recorded by Cook's deterministic gate".to_string(),
+                }
             })
         })
         .collect::<Vec<_>>();
