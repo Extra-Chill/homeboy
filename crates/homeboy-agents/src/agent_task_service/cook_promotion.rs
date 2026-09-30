@@ -1409,6 +1409,9 @@ pub(crate) fn promote_or_load_attempt_in_store(
 ) -> Result<AgentTaskPromotionReport> {
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if promotion.status != AgentTaskPromotionStatus::VerificationPending {
+            if promotion.provenance.get("replacement_gate_proof").is_some() {
+                validate_replacement_promotion_in_store(lifecycle_store, &promotion)?;
+            }
             return Ok(promotion);
         }
     }
@@ -1742,6 +1745,94 @@ fn canonical_candidate_fingerprint(candidate: Option<&Value>) -> Value {
         // Preserve malformed legacy data verbatim so an identity mismatch is
         // still inspectable rather than silently treated as equivalent.
         .unwrap_or_else(|_| candidate.clone())
+}
+
+/// Both continuation and adoption consume the same admitted proof and candidate.
+/// A green projection alone cannot authorize recovery of a failed provider run.
+pub(super) fn validate_replacement_promotion_in_store(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<()> {
+    let run_id = promotion.source.run_id.as_deref().unwrap_or_default();
+    let record = store.read_record(run_id)?;
+    let proof = &promotion.provenance["replacement_gate_proof"];
+    let reference = &proof["original_history"];
+    let original = reference["index"]
+        .as_u64()
+        .and_then(|index| record.metadata["promotions"].get(index as usize));
+    let valid_history = original.is_some_and(|original| {
+        reference["run_id"] == run_id
+            && reference["metadata_key"] == "promotions"
+            && canonical_json_bytes(original)
+                .is_ok_and(|bytes| reference["sha256"] == content_hash::sha256_hex(&bytes))
+            && serde_json::from_value::<AgentTaskPromotionReport>(original.clone()).is_ok_and(
+                |original| {
+                    matches!(
+                        original.status,
+                        AgentTaskPromotionStatus::GateFailed
+                            | AgentTaskPromotionStatus::VerificationPending
+                    ) && original.source.run_id == promotion.source.run_id
+                        && original.source.task_id == promotion.source.task_id
+                        && original.target.worktree == promotion.target.worktree
+                        && original.target.path == promotion.target.path
+                        && original.to_worktree == promotion.to_worktree
+                        && original.patch_artifact.id == promotion.patch_artifact.id
+                        && original.patch_artifact.kind == promotion.patch_artifact.kind
+                        && original.patch_artifact.sha256 == promotion.patch_artifact.sha256
+                        && original.changed_files == promotion.changed_files
+                        && original.verified_base == promotion.verified_base
+                        && canonical_candidate_fingerprint(original.provenance.get("candidate"))
+                            == canonical_candidate_fingerprint(
+                                promotion.provenance.get("candidate"),
+                            )
+                },
+            )
+    });
+    if !crate::agent_task_finalization::authorized_replacement_gate_proof(promotion)
+        || !valid_history
+        || selected_candidate_task_id_in_store(store, run_id)?.as_deref()
+            != Some(promotion.source.task_id.as_str())
+    {
+        return Err(Error::validation_invalid_argument(
+            "replacement_gate_proof",
+            "recovery requires authorized proof bound to the selected candidate and immutable original promotion",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    validate_replacement_proof_finalization_eligibility(
+        run_id,
+        promotion,
+        proof["accept_inherited_failures"]
+            .as_bool()
+            .unwrap_or(false),
+    )?;
+    // A completed publication can change HEAD and consume the dirty candidate.
+    // Its durable receipt, rather than the pre-publication tree, owns replay.
+    if record.metadata.get("cook_finalization").is_none() {
+        let path = promotion.target.path.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.target.path",
+                "corrected-gate recovery requires its recorded candidate destination",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        let current =
+            serde_json::to_value(crate::agent_task_promotion::candidate_fingerprint(path)?)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        if canonical_candidate_fingerprint(Some(&current))
+            != canonical_candidate_fingerprint(promotion.provenance.get("candidate"))
+        {
+            return Err(Error::validation_invalid_argument(
+                "candidate",
+                "corrected-gate candidate changed after verification",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Older failed promotions did not retain the checkout used by their gates.

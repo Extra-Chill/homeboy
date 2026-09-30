@@ -18038,6 +18038,253 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
     });
 }
 
+fn with_corrected_gate_candidate(
+    test: impl FnOnce(CookRequest, PathBuf, AgentTaskPromotionReport),
+) {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("candidate");
+        std::fs::create_dir(&target).unwrap();
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&target)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(target.join("Cargo.toml"), "[package]\nname = \"corrected-gate-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+        std::fs::write(target.join(".gitignore"), "target/\nCargo.lock\n").unwrap();
+        std::fs::write(target.join("lib.rs"), "#[cfg(test)] mod tests { #[test] fn provider_one() {} #[test] fn provider_two() {} }\n").unwrap();
+        std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "base"],
+            vec!["checkout", "--quiet", "-b", "fix/8058"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&target)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let invalid = "cargo test -p corrected-gate-fixture provider";
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&target)
+            .current_dir(&target)
+            .status()
+            .unwrap()
+            .success());
+        let invalid_gate = crate::agent_task_gate::run_gate_command(&target, 0, invalid).unwrap();
+        assert_eq!(
+            invalid_gate
+                .failure_evidence
+                .as_ref()
+                .unwrap()
+                .classification,
+            crate::agent_task_gate::AgentTaskGateFailureClassification::ZeroTestsSelected
+        );
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        let mut options = batch_cook_options(
+            "cook-corrected-gate",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.identity.initial_run_id = "run-corrected-gate".to_string();
+        options.ai_disclosure.ai_model = Some("openai/gpt-6.1-sol".to_string());
+        options.identity.initial_plan.tasks[0].executor.model =
+            Some("openai/gpt-6.1-sol".to_string());
+        options.workspace.to_worktree = "fixture@fix-8058".to_string();
+        options.workspace.source_worktree_path = Some(target.clone());
+        options.finalization.head = Some("fix/8058".to_string());
+        options.finalization.no_finalize = false;
+        options.gates.verify = vec![invalid.to_string()];
+        persist_initial_recipe(&options).unwrap();
+        record_tracked_promotion_continuation(&options, &target);
+        let run_id = &options.identity.initial_run_id;
+        let patch_path = temp.path().join("candidate.patch");
+        let patch = std::fs::read_to_string(&patch_path).unwrap();
+        seed_patch_alias_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &[("patch", &patch_path, &patch)],
+        );
+        let store = test_lifecycle_store();
+        let mut aggregate = store.read_aggregate(run_id).unwrap();
+        aggregate.status = AgentTaskAggregateStatus::CandidateRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.recoverable_candidates = 1;
+        aggregate.outcomes[0].status =
+            crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+        store
+            .record_run_aggregate(run_id, &options.identity.initial_plan, &aggregate)
+            .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.lifecycle.provider_runtime = vec![ProviderRuntimeLifecycle {
+                task_id: options.identity.initial_plan.tasks[0].task_id.clone(),
+                backend: "opencode".to_string(), state: ProviderRuntimeState::Failed,
+                stream_uri: None, external_runtime_ids: Vec::new(),
+                metadata: serde_json::json!({"model": "openai/gpt-6.1-sol", "evidence_source": "durable_provider_execution"}),
+            }];
+        }).unwrap();
+        let mut failed = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        failed.source.task_id = options.identity.initial_plan.tasks[0].task_id.clone();
+        failed.verified_base.as_mut().unwrap().sha =
+            git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+        failed.deterministic_gates = vec![invalid_gate];
+        failed.normalize_gate_outcome();
+        store
+            .record_promotion(run_id, serde_json::to_value(&failed).unwrap())
+            .unwrap();
+        let replacement = verify_replacement_gates(
+            run_id,
+            VerifyGateOptions {
+                verify: vec!["test \"$(cat tracked.txt)\" = promoted".to_string()],
+                ..Default::default()
+            },
+            "operator authorized corrected candidate-bound gates".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+        test(options, target, replacement);
+    });
+}
+
+#[test]
+fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_replays() {
+    with_corrected_gate_candidate(|options, _, _| {
+        let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+        let lifecycle_store = test_lifecycle_store();
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let runtime = CookRuntime::with_finalizer(
+                Arc::new(UnusedExecutor),
+                &recipe_store,
+                &lifecycle_store,
+                |store, options, run_id, promotion| {
+                    finalize_or_load_cook_pr_with_backend_with_stores(
+                        &recipe_store,
+                        store,
+                        options,
+                        run_id,
+                        promotion,
+                        &mut backend,
+                    )
+                },
+                &noop_cook_progress_observer,
+            );
+            let result =
+                CookService::run(options.clone(), runtime, CookMode::ContinueTerminal).unwrap();
+            assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+            assert_eq!(result.exit_code, 0);
+        }
+        assert_eq!(backend.create_count, 1);
+        assert!(backend
+            .body
+            .contains("test \"$(cat tracked.txt)\" = promoted"));
+        assert!(!backend
+            .body
+            .contains("cargo test -p corrected-gate-fixture provider"));
+    });
+}
+
+#[test]
+fn corrected_gate_adoption_reuses_proof_instead_of_original_declaration() {
+    with_corrected_gate_candidate(|options, target, replacement| {
+        let candidate = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let result = adopt_cook_candidate_with_dispatcher_and_backend(
+                &options.identity.cook_id,
+                &candidate,
+                AgentTaskCandidateAdoptionOptions::default(),
+                |_| Ok(None),
+                Arc::new(UnusedExecutor),
+                &mut backend,
+            )
+            .unwrap();
+            assert_eq!(result.value.status, "review_ready");
+            assert_eq!(
+                serde_json::to_value(
+                    &result.value.attempts[0]
+                        .promotion
+                        .as_ref()
+                        .unwrap()
+                        .deterministic_gates
+                )
+                .unwrap(),
+                serde_json::to_value(&replacement.deterministic_gates).unwrap()
+            );
+        }
+        assert_eq!(backend.create_count, 1);
+    });
+}
+
+#[test]
+fn corrected_gate_recovery_rejects_missing_authority_history_and_candidate_drift() {
+    with_corrected_gate_candidate(|options, target, replacement| {
+        let store = test_lifecycle_store();
+        let run_id = &options.identity.initial_run_id;
+        for pointer in [
+            "/provenance/replacement_gate_proof/operator_authorization",
+            "/provenance/replacement_gate_proof/original_history/sha256",
+        ] {
+            let mut invalid = serde_json::to_value(&replacement).unwrap();
+            *invalid.pointer_mut(pointer).unwrap() = Value::Null;
+            store.record_promotion(run_id, invalid).unwrap();
+            assert!(promote_or_load_attempt_in_store(&store, &options, run_id).is_err());
+        }
+        store
+            .record_promotion(run_id, serde_json::to_value(&replacement).unwrap())
+            .unwrap();
+        std::fs::write(target.join("tracked.txt"), "drift\n").unwrap();
+        assert!(promote_or_load_attempt_in_store(&store, &options, run_id).is_err());
+        let candidate = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+        assert!(adopt_cook_candidate_with_dispatcher_and_backend(
+            &options.identity.cook_id,
+            &candidate,
+            AgentTaskCandidateAdoptionOptions::default(),
+            |_| Ok(None),
+            Arc::new(UnusedExecutor),
+            &mut CaptureBackend::default(),
+        )
+        .is_err());
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+        let mut missing = replacement;
+        missing
+            .provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_gate_proof");
+        store
+            .record_promotion(run_id, serde_json::to_value(&missing).unwrap())
+            .unwrap();
+        let error = finalize_cook_pr_with_backend(
+            &options,
+            run_id,
+            &missing,
+            &mut CaptureBackend {
+                hydrate_run_id: Some(run_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.message.contains("durable run must have succeeded"));
+    });
+}
+
 #[test]
 fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning() {
     homeboy_core::test_support::with_isolated_home(|_| {

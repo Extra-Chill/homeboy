@@ -657,6 +657,12 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     }
     let candidate_base_sha = promotion.provenance["base_ref"]
         .as_str()
+        .or_else(|| {
+            promotion
+                .verified_base
+                .as_ref()
+                .map(|base| base.sha.as_str())
+        })
         .map(str::to_string)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -1081,6 +1087,30 @@ fn reusable_applied_adoption_promotion(
         Ok(_) => return None,
         Err(error) => return Some(Err(error)),
     };
+    if promotion.provenance.get("replacement_gate_proof").is_some() {
+        // Corrected proof belongs to the provider-selected candidate, whether or
+        // not it has ever passed through the adoption adapter.
+        if promotion
+            .provenance
+            .pointer("/candidate/fingerprint/head")
+            .and_then(Value::as_str)
+            != Some(candidate_sha)
+        {
+            return Some(Err(Error::validation_invalid_argument(
+                "candidate_ref",
+                "candidate does not match the corrected-gate promotion",
+                Some(candidate_sha.to_string()),
+                None,
+            )));
+        }
+        return Some(
+            super::cook_promotion::validate_replacement_promotion_in_store(
+                lifecycle_store,
+                &promotion,
+            )
+            .map(|_| promotion),
+        );
+    }
     if applied_adoption_promotion_candidate_sha(&promotion) != Some(candidate_sha) {
         return None;
     }
@@ -1092,8 +1122,7 @@ fn reusable_applied_adoption_promotion(
             None,
         )));
     };
-    let baseline = promotion.provenance.get("gate_feedback_baseline").cloned();
-    let Some(mut baseline) = baseline else {
+    let Some(mut baseline) = promotion.provenance.get("gate_feedback_baseline").cloned() else {
         return Some(Err(Error::validation_invalid_argument(
             "latest_promotion",
             "applied candidate adoption has no authenticated gate-feedback baseline",
@@ -1114,8 +1143,7 @@ fn reusable_applied_adoption_promotion(
             .map(|_| promotion),
         );
     }
-    // The checkpoint records the complete candidate diff; bind it to the exact
-    // promoted artifact before handing it to the shared dirty-destination check.
+    // Bind the checkpoint's complete candidate diff to its promoted artifact.
     baseline["patch_artifact"] = match serde_json::to_value(&promotion.patch_artifact) {
         Ok(artifact) => artifact,
         Err(error) => {

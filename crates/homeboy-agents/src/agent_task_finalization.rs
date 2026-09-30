@@ -153,6 +153,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &gate_proof.promotion.changed_files,
             ));
         }
+        let recovered_model_task = authorized_replacement_gate_proof(&gate_proof.promotion)
+            .then_some(gate_proof.promotion.source.task_id.as_str());
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -166,7 +168,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             && !review_form_only_follow_up
             && !options.composed_ai_model_disclosure
         {
-            options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
+            options.review_dossier.ai_assistance.model =
+                durable_model(&lifecycle, recovered_model_task)?;
         }
         options.evidence.lifecycle = Some(lifecycle);
     }
@@ -1521,6 +1524,24 @@ enum DurablePublicationEligibility {
     AuthenticatedExternalCandidateAdoption,
 }
 
+pub(crate) fn authorized_replacement_gate_proof(promotion: &AgentTaskPromotionReport) -> bool {
+    let proof = &promotion.provenance["replacement_gate_proof"];
+    proof["schema"] == "homeboy/agent-task-replacement-gate-proof/v1"
+        && proof["externally_produced"] == true
+        && proof["operator_authorization"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && proof["original_history"]["run_id"].as_str() == promotion.source.run_id.as_deref()
+        && proof["original_history"]["sha256"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64)
+        && promotion.finalization_eligible(
+            proof["accept_inherited_failures"]
+                .as_bool()
+                .unwrap_or(false),
+        )
+}
+
 fn validate_durable_publication_eligibility(
     lifecycle: &RunLifecycleRecord,
     promotion: &AgentTaskPromotionReport,
@@ -1564,11 +1585,18 @@ fn validate_durable_publication_eligibility(
         RunExecutionState::PartialFailure
             | RunExecutionState::CandidateRecoverable
             | RunExecutionState::PartialRecoverable
-    ) && all_provider_runtimes_succeeded
+    ) && ((all_provider_runtimes_succeeded
         && lifecycle
             .provider_runtime
             .iter()
-            .all(|runtime| runtime.metadata["evidence_source"] == "durable_provider_execution");
+            .all(|runtime| runtime.metadata["evidence_source"] == "durable_provider_execution"))
+        || (fingerprinted_candidate
+            && producing_runtime.is_some_and(|runtime| {
+                runtime.metadata["model"]
+                    .as_str()
+                    .is_some_and(is_concrete_model)
+            })
+            && authorized_replacement_gate_proof(promotion)));
     if (lifecycle.execution.state == RunExecutionState::Succeeded
         && (all_provider_runtimes_succeeded || successful_provider_produced_candidate))
         || authenticated_partial_provider_recovery
@@ -1666,12 +1694,15 @@ fn is_full_git_commit_identity(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn durable_model(lifecycle: &RunLifecycleRecord) -> Result<String> {
+fn durable_model(lifecycle: &RunLifecycleRecord, recovered_task: Option<&str>) -> Result<String> {
     let model = lifecycle
         .provider_runtime
         .iter()
         .rev()
-        .filter(|runtime| runtime.state == ProviderRuntimeState::Succeeded)
+        .filter(|runtime| match recovered_task {
+            Some(task_id) => runtime.task_id == task_id,
+            None => runtime.state == ProviderRuntimeState::Succeeded,
+        })
         .find_map(|runtime| {
             runtime
                 .metadata
