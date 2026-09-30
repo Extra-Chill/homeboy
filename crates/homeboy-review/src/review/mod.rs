@@ -12,6 +12,7 @@ use homeboy_core::ObservationOutputMetadata;
 use homeboy_extension_contract::{LintCommandOutput, TestCommandOutput};
 use homeboy_finding::HomeboyFinding;
 
+pub mod ai;
 mod artifact_findings;
 pub mod render;
 pub mod top_n;
@@ -79,6 +80,8 @@ pub struct ReviewCommandOutput {
     pub test: ReviewStage<TestCommandOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_profile: Option<ReviewStage<CiRunOutput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai: Option<ai::AiReviewResult>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
@@ -191,6 +194,7 @@ impl ReviewService {
             lint: stages.lint,
             test: stages.test,
             ci_profile: stages.ci_profile,
+            ai: None,
             actionable: None,
         };
 

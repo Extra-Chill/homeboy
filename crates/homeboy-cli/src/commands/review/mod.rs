@@ -48,6 +48,8 @@ use super::{audit, audit_baseline, build, ci, lint, test, CmdResult};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
+#[cfg(all(test, unix))]
+mod ai_tests;
 mod observation;
 pub(super) mod raw_output;
 
@@ -122,6 +124,14 @@ pub struct ReviewArgs {
     #[arg(long, value_name = "ID")]
     pub ci_profile: Option<String>,
 
+    /// Add the linked extension's independent advisory AI review.
+    #[arg(long)]
+    pub ai: bool,
+
+    /// Maximum independent reviewer runtime in seconds.
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub ai_timeout_seconds: u64,
+
     /// Audit detector profile for the audit stage. Defaults to `pr` for
     /// changed-file review and `full` for full review.
     #[arg(
@@ -156,6 +166,8 @@ pub struct ReviewArgs {
 
 #[derive(Subcommand)]
 pub enum ReviewCommand {
+    /// Review a committed candidate with an operator-installed AI reviewer
+    Ai(ReviewAiArgs),
     /// Audit code conventions and detect architectural drift
     Audit(ReviewAuditArgs),
     /// Internal target for normalized `review audit baseline ...` invocations
@@ -185,6 +197,7 @@ struct ReviewChildReadinessEvidence {
 impl ReviewCommand {
     fn lab_label(&self) -> &'static str {
         match self {
+            Self::Ai(_) => "review ai",
             Self::Audit(_) => "review audit",
             Self::AuditBaseline(_) => "review audit-baseline",
             Self::Lint(_) => "review lint",
@@ -193,6 +206,20 @@ impl ReviewCommand {
             Self::Ci(_) => "review ci",
         }
     }
+}
+
+#[derive(Args)]
+pub struct ReviewAiArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+    #[command(flatten)]
+    pub changed: ChangedScopeArgs,
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
+    #[command(flatten)]
+    pub settings: super::utils::args::SettingArgs,
+    #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub ai_timeout_seconds: u64,
 }
 
 #[derive(Args)]
@@ -227,13 +254,30 @@ impl ReviewArgs {
         if self.run_id.is_some() {
             return Err(unsupported_nested_option("--run-id"));
         }
-        if self.report.is_some() || !self.banner.is_empty() || self.ci_profile.is_some() {
+        if (self.report.is_some() && !matches!(command, ReviewCommand::Ai(_)))
+            || !self.banner.is_empty()
+            || self.ci_profile.is_some()
+        {
             return Err(unsupported_nested_option(
                 "--report, --banner, or --ci-profile",
             ));
         }
 
         self.command = Some(match command {
+            ReviewCommand::Ai(mut child) => {
+                merge_component_args(&mut self.comp, &mut child.comp)?;
+                merge_changed_scope(&mut self.changed, &mut child.changed)?;
+                merge_extension_ids(&mut self.extension_override, &mut child.extension_override);
+                if self.changed.changed_only {
+                    return Err(unsupported_nested_option(
+                        "--changed-only for committed AI review",
+                    ));
+                }
+                if self.ai_timeout_seconds != 600 {
+                    child.ai_timeout_seconds = self.ai_timeout_seconds;
+                }
+                ReviewCommand::Ai(child)
+            }
             ReviewCommand::Audit(mut args) => {
                 let changed_only = merge_flag(self.changed.changed_only, args.changed_only);
                 merge_changed_since(&mut self.changed, &mut args.audit.changed)?;
@@ -331,6 +375,7 @@ impl ReviewArgs {
 
     pub(crate) fn nested_component_args(&self) -> Option<&PositionalComponentArgs> {
         match self.command.as_ref()? {
+            ReviewCommand::Ai(args) => Some(&args.comp),
             ReviewCommand::Audit(args) => Some(&args.audit.comp),
             ReviewCommand::Lint(args) => Some(&args.comp),
             ReviewCommand::Test(args) => Some(&args.comp),
@@ -342,6 +387,7 @@ impl ReviewArgs {
 
     pub(crate) fn effective_extension_override_ids(&self) -> &[String] {
         match self.command.as_ref() {
+            Some(ReviewCommand::Ai(args)) => &args.extension_override.extensions,
             Some(ReviewCommand::Audit(args)) => &args.audit.extension_override.extensions,
             Some(ReviewCommand::Lint(args)) => &args.extension_override.extensions,
             Some(ReviewCommand::Test(args)) => &args.extension_override.extensions,
@@ -364,6 +410,12 @@ impl ReviewArgs {
     }
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
+        if self.ai {
+            return Some(LabCommandContract::local_only(
+                "review",
+                "the AI review provider and authentication are installed on the invoking host",
+            ));
+        }
         if self.changed.changed_only {
             return Some(LabCommandContract::local_only(
                 self.command
@@ -374,6 +426,8 @@ impl ReviewArgs {
         }
         if let Some(command) = &self.command {
             return match command {
+                ReviewCommand::Ai(_) => Some(LabCommandContract::local_only(
+                    "review ai", "AI reviewers use operator-installed packages and authentication on this host; invoke on the runner after installing its private provider")),
                 ReviewCommand::Audit(args) => args
                     .audit
                     .lab_contract()
@@ -420,7 +474,8 @@ fn unsupported_nested_option(option: &str) -> homeboy::core::Error {
 /// the structured JSON envelope. Used by the top-level dispatcher to route
 /// the response through `RawOutputMode::Markdown`.
 pub(crate) fn is_markdown_mode(args: &ReviewArgs) -> bool {
-    args.command.is_none() && args.report.as_deref() == Some("pr-comment")
+    (args.command.is_none() || matches!(args.command, Some(ReviewCommand::Ai(_))))
+        && args.report.as_deref() == Some("pr-comment")
 }
 
 struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
@@ -535,6 +590,64 @@ fn dispatch_review_plan_step(
 
 pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
     match args.command.take() {
+        Some(ReviewCommand::Ai(child)) => {
+            let ctx = execution_context::resolve(&ResolveOptions {
+                component_id: child.comp.component,
+                path_override: child.comp.path,
+                extension_overrides: child.extension_override.extensions,
+                settings_overrides: child.settings.settings_overrides()?,
+                settings_profile_json_overrides: child
+                    .settings
+                    .settings_profile_json_overrides()?,
+                settings_json_overrides: child.settings.setting_json.clone(),
+                ..Default::default()
+            })?;
+            let base = child
+                .changed
+                .changed_since()
+                .ok_or_else(|| unsupported_nested_option("AI review requires --changed-since"))?;
+            args.ai = true;
+            let review_observation =
+                Some(observation::start(observation::ReviewObservationStart {
+                    component_id: Some(&ctx.component_id),
+                    component_label: Some(&ctx.component_id),
+                    source_path: Some(&ctx.source_path),
+                    args: &args,
+                    scope: "changed-since",
+                    changed_file_count: None,
+                })?);
+            observation::emit_early_lifecycle(&review_observation);
+            let result =
+                match review::ai::run(&ctx, base, Duration::from_secs(child.ai_timeout_seconds)) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        observation::finish_error(review_observation, &error);
+                        return Err(error);
+                    }
+                };
+            let code = result.command_exit();
+            let mut artifact = review::build_artifact(
+                &ctx.component_id,
+                &result.request.base_sha,
+                &result.request.head_sha,
+                vec![result.artifact_command()],
+            );
+            let metadata = review_observation.as_ref().map(|o| o.output_metadata());
+            artifact.observation = metadata.clone();
+            observation::finish_ai(review_observation, &result, &artifact);
+            if args.report.as_deref() == Some("pr-comment") {
+                Ok((
+                    Value::String(review::render::render_ai_review(&result)),
+                    code,
+                ))
+            } else {
+                Ok((
+                    serde_json::json!({"command": "review ai", "ai": result, "artifact": artifact, "observation": metadata,
+                        "failure": if code != 0 { Some(serde_json::json!({"summary":result.reason.as_deref().unwrap_or("AI review did not complete")})) } else { None }}),
+                    code,
+                ))
+            }
+        }
         Some(ReviewCommand::Audit(review_audit)) => {
             let deadline = ReviewPreflightDeadline::start();
             let requested_source = review_audit.audit.release_readiness_source.clone();
@@ -771,6 +884,11 @@ fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
 }
 
 pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
+    if args.ai && (args.changed.changed_only || args.changed.changed_since().is_none()) {
+        return Err(unsupported_nested_option(
+            "--ai requires a committed --changed-since range",
+        ));
+    }
     if let Some(run_id) = args.run_id.as_deref() {
         return attach_to_persisted_review(run_id);
     }
@@ -813,6 +931,20 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     };
     let component_label = component.id.clone();
     let source_path = component.local_path.clone();
+    let ai_candidate = if args.ai {
+        match review::ai::candidate(
+            Path::new(&source_path),
+            args.changed.changed_since().expect("validated base"),
+        ) {
+            Ok(candidate) => Some(candidate),
+            Err(error) => {
+                observation::finish_error(review_observation, &error);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
 
     progress(
         &review_observation,
@@ -832,7 +964,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
 
     let quality_plan = build_quality_plan(QualityPlanOptions::review(&component_label));
 
-    if let Some(0) = changed_file_count {
+    if changed_file_count == Some(0) && !args.ai {
         let scope_label = if let Some(r) = args.changed.changed_since() {
             format!("since {}", r)
         } else {
@@ -1046,6 +1178,37 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             ci_profile: ci_profile_stage,
         },
     );
+    let overall_exit = if args.ai {
+        let reviewed = (|| {
+            let ctx = execution_context::resolve(&ResolveOptions {
+                component_id: args.comp.component.clone(),
+                path_override: args.comp.path.clone(),
+                extension_overrides: args.extension_override.extensions.clone(),
+                ..Default::default()
+            })?;
+            let base = args
+                .changed
+                .changed_since()
+                .ok_or_else(|| unsupported_nested_option("--ai requires --changed-since"))?;
+            if ai_candidate.as_ref() != Some(&review::ai::candidate(&ctx.source_path, base)?) {
+                let error = unsupported_nested_option(
+                    "candidate changed during deterministic verification; rerun review",
+                );
+                return Err(error);
+            }
+            review::ai::run(&ctx, base, Duration::from_secs(args.ai_timeout_seconds))
+        })();
+        let result = match reviewed {
+            Ok(result) => result,
+            Err(error) => {
+                observation::finish_error(review_observation, &error);
+                return Err(error);
+            }
+        };
+        overall_exit.max(result.attach(&mut output))
+    } else {
+        overall_exit
+    };
     let overall_exit =
         if manual_changelog_edit.is_some() || !manual_release_owned_mutations.is_empty() {
             output.summary.passed = false;
@@ -2472,6 +2635,8 @@ mod tests {
             },
             summary: false,
             ci_profile: None,
+            ai: false,
+            ai_timeout_seconds: 600,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
@@ -2503,6 +2668,8 @@ mod tests {
             },
             summary: false,
             ci_profile: None,
+            ai: false,
+            ai_timeout_seconds: 600,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
@@ -2557,6 +2724,8 @@ mod tests {
             },
             summary: false,
             ci_profile: None,
+            ai: false,
+            ai_timeout_seconds: 600,
             audit_profile: None,
             report: None,
             banner: Vec::new(),
@@ -2780,6 +2949,8 @@ mod tests {
             },
             summary: false,
             ci_profile: None,
+            ai: false,
+            ai_timeout_seconds: 600,
             audit_profile: None,
             report: None,
             banner: Vec::new(),

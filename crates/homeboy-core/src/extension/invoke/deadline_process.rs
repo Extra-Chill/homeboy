@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 use homeboy_engine_primitives::command::ExecutionOwner;
 use tempfile::NamedTempFile;
 
-pub(crate) struct DeadlineProcessOutput {
+pub struct DeadlineProcessOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
 
 #[derive(Debug)]
-pub(crate) struct DeadlineProcessFailure {
+pub struct DeadlineProcessFailure {
     pub message: String,
 }
 
@@ -83,7 +83,7 @@ impl CaptureFiles {
     }
 }
 
-pub(crate) fn execute_deadline_process(
+pub fn execute_deadline_process(
     mut command: Command,
     input: &[u8],
     deadline: Instant,
@@ -96,33 +96,40 @@ pub(crate) fn execute_deadline_process(
     }
     let captures = CaptureFiles::create(capture_limit, label)?;
     let (stdout, stderr) = captures.stdio(label)?;
-    command.stdin(Stdio::piped()).stdout(stdout).stderr(stderr);
+    // File-backed input cannot block the controller when a provider never reads
+    // stdin. The execution deadline applies from spawn through process cleanup.
+    let mut stdin = NamedTempFile::new()
+        .map_err(|error| failure(format!("{label} stdin capture failed: {error}")))?;
+    stdin
+        .write_all(input)
+        .and_then(|_| stdin.write_all(b"\n"))
+        .map_err(|error| failure(format!("{label} stdin write failed: {error}")))?;
+    command
+        .stdin(Stdio::from(stdin.reopen().map_err(|error| {
+            failure(format!("{label} stdin setup failed: {error}"))
+        })?))
+        .stdout(stdout)
+        .stderr(stderr);
     let mut owner = ExecutionOwner::spawn(&mut command).map_err(|error| {
         failure(format!(
             "{label} spawn failed; capture files will be removed: {error}"
         ))
     })?;
-    let mut stdin = owner.take_stdin().ok_or_else(|| {
-        let errors = drain_owner(&mut owner, cleanup_budget);
-        failure(format!(
-            "{label} stdin was unavailable.{}",
-            cleanup_diagnostic(&errors)
-        ))
-    })?;
-    if stdin
-        .write_all(input)
-        .and_then(|_| stdin.write_all(b"\n"))
-        .is_err()
-    {
-        let errors = drain_owner(&mut owner, cleanup_budget);
-        return Err(failure(format!(
-            "{label} stdin write failed.{}",
-            cleanup_diagnostic(&errors)
-        )));
-    }
-    drop(stdin);
-
     loop {
+        for file in [&captures.stdout, &captures.stderr] {
+            if file
+                .as_file()
+                .metadata()
+                .map(|m| m.len() > capture_limit as u64)
+                .unwrap_or(true)
+            {
+                let errors = drain_owner(&mut owner, cleanup_budget);
+                return Err(failure(format!(
+                    "{label} output exceeded the {capture_limit} byte limit{}",
+                    cleanup_diagnostic(&errors)
+                )));
+            }
+        }
         match owner.try_wait() {
             Ok(Some(status)) => {
                 return Ok(DeadlineProcessOutput {

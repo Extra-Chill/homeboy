@@ -268,6 +268,29 @@ pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeb
     finish_if_running(&observation.0, RunStatus::Error, Some(metadata));
 }
 
+pub(super) fn finish_ai(
+    observation: Option<ReviewObservation>,
+    result: &homeboy_review::review::ai::AiReviewResult,
+    artifact: &homeboy_review::review::ReviewArtifact,
+) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let status = match result.execution {
+        homeboy_review::review::ai::AiReviewExecution::Completed => RunStatus::Pass,
+        homeboy_review::review::ai::AiReviewExecution::Skipped => RunStatus::Skipped,
+        homeboy_review::review::ai::AiReviewExecution::Failed => RunStatus::Error,
+    };
+    let metadata = merge_metadata(
+        observation.0.initial_metadata().clone(),
+        serde_json::json!({
+            "observation_status": artifact.status, "exit_code": result.command_exit(),
+            "artifact": artifact, "ai": result,
+        }),
+    );
+    finish_if_running(&observation.0, status, Some(metadata));
+}
+
 fn finish_if_running(
     observation: &ActiveObservation,
     status: RunStatus,
@@ -318,6 +341,9 @@ fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
     if args.summary {
         parts.push("--summary".to_string());
     }
+    if args.ai {
+        parts.push("--ai".to_string());
+    }
     if let Some(report) = args.report.as_ref() {
         parts.push(format!("--report={report}"));
     }
@@ -338,6 +364,7 @@ pub(super) fn review_observation_initial_metadata(
         "changed_only": args.changed.changed_only,
         "summary": args.summary,
         "ci_profile": args.ci_profile,
+        "ai": args.ai,
         "report": args.report,
         "changed_file_count": changed_file_count,
         "execution_provenance": crate::commands::utils::execution_provenance::captured(),
@@ -358,6 +385,10 @@ pub(super) fn review_observation_finish_metadata(
     ];
     if let Some(ref stage) = output.ci_profile {
         stages.push(stage_observation(stage));
+    }
+    if let Some(result) = &output.ai {
+        stages.push(serde_json::json!({"name":"ai","execution":result.execution,
+            "verdict":result.verdict,"finding_count":result.findings.len(),"exit_code":result.command_exit()}));
     }
 
     merge_metadata(
@@ -433,6 +464,8 @@ mod tests {
             },
             summary: true,
             ci_profile: None,
+            ai: false,
+            ai_timeout_seconds: 600,
             audit_profile: None,
             report: Some("pr-comment".to_string()),
             banner: Vec::new(),
@@ -651,6 +684,7 @@ mod tests {
             lint,
             test,
             ci_profile: None,
+            ai: None,
             actionable: None,
         };
 

@@ -20,7 +20,7 @@ pub mod action_api;
 mod api;
 mod component_env_api;
 mod context;
-pub(crate) mod deadline_process;
+pub mod deadline_process;
 pub(crate) mod env_provider;
 mod environment;
 mod environment_api;
