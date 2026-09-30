@@ -626,16 +626,28 @@ impl InstallerStartGate {
     }
 
     fn command(&self, script: &str) -> Command {
+        use std::os::unix::process::CommandExt;
+        let read_fd = self.read_fd;
         let mut command = Command::new("sh");
         command
             .args([
                 "-c",
-                &format!(
-                    "IFS= read -r _ <&{} || exit 125; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
-                    self.read_fd
-                ),
+                "IFS= read -r _ <&3 || exit 125; exec 3<&-; exec sh -c \"$HOMEBOY_INSTALLER_SCRIPT\"",
             ])
             .env("HOMEBOY_INSTALLER_SCRIPT", script);
+        // POSIX shells need not accept multi-digit redirection descriptors.
+        // Bind only in the child: the parent's gate still owns its original FD.
+        unsafe {
+            command.pre_exec(move || {
+                if read_fd != 3 {
+                    if libc::dup2(read_fd, 3) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    libc::close(read_fd);
+                }
+                Ok(())
+            });
+        }
         command
     }
 
