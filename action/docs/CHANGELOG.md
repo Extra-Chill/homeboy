@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.12] - 2026-09-30
+
+### Fixed
+- build workspace member on nextest retry
+
 ## [2.20.11] - 2026-09-29
 
 ### Changed
