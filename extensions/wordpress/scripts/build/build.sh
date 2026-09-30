@@ -539,10 +539,14 @@ apply_local_workspace_overrides() {
         ""|"{}") return 0 ;;
     esac
 
-    # Cheap pre-check: only engage the helper when overrides are actually
-    # declared. The helper does full validation; this just avoids requiring it
-    # for the common case where nothing is declared.
-    if ! printf '%s' "$HOMEBOY_SETTINGS_JSON" | grep -q 'local_workspace_dependencies'; then
+    # Settings include schema defaults; an empty default needs no sibling helper.
+    # Nonempty or malformed declarations still go through helper validation.
+    if node -e '
+        try {
+            const entries = JSON.parse(process.argv[1]).local_workspace_dependencies;
+            process.exit(entries === undefined || (Array.isArray(entries) && entries.length === 0) ? 0 : 1);
+        } catch { process.exit(1); }
+    ' "$HOMEBOY_SETTINGS_JSON"; then
         return 0
     fi
 

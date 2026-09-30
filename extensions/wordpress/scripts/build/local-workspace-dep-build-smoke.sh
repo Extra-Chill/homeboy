@@ -148,4 +148,33 @@ grep -Fq 'helper not found' "$missing_out" \
 
 echo "ok: declared override with missing helper fails the build"
 
+empty_dir="${TMP_DIR}/empty-plugin"
+mkdir -p "$empty_dir"
+cp "${component_dir}/lwd-plugin.php" "${empty_dir}/empty-plugin.php"
+cat > "${empty_dir}/package.json" <<'JSON'
+{
+  "name": "empty-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "build": "node -e \"require('fs').mkdirSync('build',{recursive:true});require('fs').writeFileSync('build/ok.txt','built');\"" }
+}
+JSON
+for empty_settings in '{"local_workspace_dependencies":[]}' '{"description":"local_workspace_dependencies"}'; do
+    empty_out="${TMP_DIR}/empty.out"
+    (
+        cd "$empty_dir"
+        HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+        HOMEBOY_COMPONENT_ID="empty-plugin" \
+        HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_CORE_HELPER" \
+        HOMEBOY_SKIP_TESTS=1 \
+        HOMEBOY_REQUIRE_FRONTEND=1 \
+        HOMEBOY_SETTINGS_JSON="$empty_settings" \
+        HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS="${TMP_DIR}/does-not-exist.sh" \
+            bash "${EXTENSION_DIR}/scripts/build/build.sh" > "$empty_out" 2>&1
+    ) || { sed 's/^/  /' "$empty_out" >&2; fail "build without workspace overrides required a sibling helper"; }
+    unzip -l "${empty_dir}/build/empty-plugin.zip" | grep -Fq 'empty-plugin/build/ok.txt' \
+        || fail "frontend build output missing for empty workspace settings"
+done
+echo "ok: empty defaults and unrelated settings build without a workspace helper"
+
 echo "WordPress local workspace dependency build smoke passed."
