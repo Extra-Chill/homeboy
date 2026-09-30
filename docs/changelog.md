@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.8] - 2026-09-30
+
+### Fixed
+- hydrate partial-clone bundle objects in one batched fetch
+- retire exact closed generations after absent lease stop
+
 ## [0.398.7] - 2026-09-30
 
 ### Changed
