@@ -2455,6 +2455,17 @@ fn delegate_cook_continue_to_pinned_runtime(
 ) -> homeboy::core::Result<Option<i32>> {
     let run_id =
         crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
+    let record = crate::agents::agent_tasks::lifecycle::exact_record(&run_id)?;
+    if let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(&run_id)? {
+        if crate::agents::agent_tasks::service::pre_execution_runtime_recovery_is_eligible(
+            &recipe, &record,
+        ) {
+            crate::agents::agent_tasks::service::validate_recipe_attempt_record(
+                &recipe, &run_id, &record,
+            )?;
+            return Ok(None);
+        }
+    }
     if current_runtime_owns_terminal_cook_continuation(&run_id)? {
         return Ok(None);
     }

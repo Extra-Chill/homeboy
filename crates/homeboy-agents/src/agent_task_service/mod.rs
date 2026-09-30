@@ -50,7 +50,9 @@ pub(crate) use cook_job::finalize_detached_cook_attempt;
 pub use cook_job::*;
 #[cfg(test)]
 pub(crate) use cook_pre_execution::*;
-pub use cook_pre_execution::{recover_recipe_attempt, retryable_pre_execution_failure};
+pub use cook_pre_execution::{
+    rebind_queued_cook_runtime_in_store, recover_recipe_attempt, retryable_pre_execution_failure,
+};
 pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
