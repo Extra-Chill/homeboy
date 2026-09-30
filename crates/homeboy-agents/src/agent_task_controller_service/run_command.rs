@@ -103,8 +103,20 @@ pub(super) fn execute_run_command_action(
     process.env("HOMEBOY_LOOP_ACTION_DEDUPE_KEY", dedupe_key);
 
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let owner_pid = std::process::id();
+    record.metadata["command_recovery"] = serde_json::json!({
+        "schema": "homeboy/loop-command-ownership/v1", "action_id": action.action_id,
+        "owner_pid": owner_pid,
+        "owner_start": homeboy_core::process::process_start_identity(owner_pid)
+            .map_err(Error::internal_unexpected)?,
+        "state": "preparing",
+    });
+    controller::write_controller(record)?;
     let output =
         run_controller_command_with_timeout(process, &command, timeout_seconds, &record.loop_id)?;
+    record.metadata["command_recovery"] =
+        controller::load_controller(&record.loop_id)?.metadata["command_recovery"].clone();
+    record.metadata["command_recovery"]["state"] = serde_json::json!("reaped");
     if output.cancelled {
         return Ok((
             serde_json::json!({
@@ -170,15 +182,24 @@ fn run_controller_command_with_timeout(
     timeout_seconds: u64,
     loop_id: &str,
 ) -> Result<ControllerCommandOutput> {
-    configure_controller_command_process_group(&mut process);
-    let mut child = process.spawn().map_err(|error| {
-        Error::internal_io(
-            format!("failed to execute controller command '{command}': {error}"),
-            None,
-        )
-    })?;
-    let stdout = child.stdout.take().map(read_capped_command_output);
-    let stderr = child.stderr.take().map(read_capped_command_output);
+    let mut child = homeboy_engine_primitives::command::ExecutionOwner::spawn(&mut process)
+        .map_err(|error| {
+            Error::internal_io(
+                format!("failed to execute controller command '{command}': {error}"),
+                None,
+            )
+        })?;
+    let identity = child.identity();
+    let mut receipt = controller::load_controller(loop_id)?;
+    receipt.metadata["command_recovery"]["root_pid"] = serde_json::json!(identity.root_pid);
+    receipt.metadata["command_recovery"]["root_start"] = serde_json::json!(
+        homeboy_core::process::process_start_identity(identity.root_pid)
+            .map_err(Error::internal_unexpected)?
+    );
+    receipt.metadata["command_recovery"]["state"] = serde_json::json!("running");
+    controller::write_controller(&receipt)?;
+    let stdout = child.take_stdout().map(read_capped_command_output);
+    let stderr = child.take_stderr().map(read_capped_command_output);
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut timed_out = false;
     let mut cancelled = false;
@@ -186,8 +207,7 @@ fn run_controller_command_with_timeout(
         let current = match controller::load_controller(loop_id) {
             Ok(current) => current,
             Err(error) => {
-                kill_controller_command_process_group(&mut child);
-                let _ = child.wait();
+                let _ = child.drain_and_reap();
                 return Err(error);
             }
         };
@@ -195,9 +215,9 @@ fn run_controller_command_with_timeout(
             || current.metadata.pointer("/runtime/on") == Some(&Value::Bool(false))
         {
             cancelled = true;
-            kill_controller_command_process_group(&mut child);
             break child
-                .wait()
+                .drain_and_reap()
+                .and_then(homeboy_engine_primitives::command::ExecutionOutcome::into_root_status)
                 .map_err(|error| Error::internal_io(error.to_string(), None))?;
         }
         if let Some(status) = child.try_wait().map_err(|error| {
@@ -210,13 +230,15 @@ fn run_controller_command_with_timeout(
         }
         if Instant::now() >= deadline {
             timed_out = true;
-            kill_controller_command_process_group(&mut child);
-            break child.wait().map_err(|error| {
-                Error::internal_io(
-                    format!("failed to reap timed out controller command '{command}': {error}"),
-                    None,
-                )
-            })?;
+            break child
+                .drain_and_reap()
+                .and_then(homeboy_engine_primitives::command::ExecutionOutcome::into_root_status)
+                .map_err(|error| {
+                    Error::internal_io(
+                        format!("failed to reap timed out controller command '{command}': {error}"),
+                        None,
+                    )
+                })?;
         }
         thread::sleep(Duration::from_millis(25));
     };
@@ -228,34 +250,6 @@ fn run_controller_command_with_timeout(
         stdout: collect_capped_command_output(stdout, command, "stdout")?,
         stderr: collect_capped_command_output(stderr, command, "stderr")?,
     })
-}
-
-#[cfg(unix)]
-fn configure_controller_command_process_group(process: &mut Command) {
-    use std::os::unix::process::CommandExt;
-
-    process.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configure_controller_command_process_group(_process: &mut Command) {}
-
-#[cfg(unix)]
-fn kill_controller_command_process_group(child: &mut std::process::Child) {
-    let pid = child.id();
-    if pid > i32::MAX as u32 {
-        let _ = child.kill();
-        return;
-    }
-    let pgid = -(pid as i32);
-    unsafe {
-        libc::kill(pgid, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_controller_command_process_group(child: &mut std::process::Child) {
-    let _ = child.kill();
 }
 
 #[cfg(unix)]
