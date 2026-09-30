@@ -320,8 +320,11 @@ fn sha256_file(path: &Path) -> Result<String> {
 /// Resolve the exact object closure locally before `git bundle` can invoke a
 /// promisor remote itself. The controller is the only participant allowed to
 /// use the source checkout's authenticated transport.
-fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
+pub(super) fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
     repair_controller_bundle_commit_closure(local_path, refs)?;
+    if let Some(remote) = promisor_remote(local_path)? {
+        return hydrate_promisor_bundle_objects(local_path, &remote, refs);
+    }
     let mut object_list = Command::new("git")
         // A stale commit graph can name promisor objects that do not exist in
         // the local database. Walk the repaired closure from real objects so
@@ -395,21 +398,128 @@ fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Resu
         );
     }
 
-    if let Some(remote) = promisor_remote(local_path)? {
-        let missing = missing_promisor_objects(local_path, refs)?;
-        if !missing.is_empty() {
+    Ok(())
+}
+
+/// Hydrate a partial clone's bundle closure with one batched fetch.
+///
+/// Piping the closure into `git cat-file --batch-check` made Git lazy-fetch
+/// each missing blob separately: one network round trip and one tiny promisor
+/// pack per object. Repeated stagings of a blob:none checkout grew the
+/// controller's store past 20,000 packs, which then made every later object
+/// walk crawl. Instead, list the missing objects without lazy fetching and
+/// fetch exactly those ids in one request, the same shape as Git's own
+/// promisor fetch. One staging adds at most one pack, and the porcelain fetch
+/// runs Git's automatic maintenance, which consolidates packs over time.
+fn hydrate_promisor_bundle_objects(local_path: &Path, remote: &str, refs: &[String]) -> Result<()> {
+    let missing = all_missing_promisor_objects(local_path, refs)?;
+    if !missing.is_empty() {
+        if let Err(status) = fetch_promisor_objects(local_path, remote, &missing) {
             return Err(controller_object_closure_error(
-                "hydrate git bundle objects completed with required promisor objects still unavailable",
-                None,
+                "batched fetch of required promisor objects failed",
+                status,
                 local_path,
-                &remote,
+                remote,
                 refs,
-                &missing,
+                &missing[..missing.len().min(MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT)],
             ));
         }
     }
 
+    let still_missing = missing_promisor_objects(local_path, refs)?;
+    if !still_missing.is_empty() {
+        return Err(controller_object_closure_error(
+            "hydrate git bundle objects completed with required promisor objects still unavailable",
+            None,
+            local_path,
+            remote,
+            refs,
+            &still_missing,
+        ));
+    }
     Ok(())
+}
+
+/// Every object id in `refs`' closure that is absent locally, listed without
+/// triggering lazy fetches. Unbounded, unlike the diagnostic probe.
+fn all_missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "core.commitGraph=false",
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+        ])
+        .args(refs)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .current_dir(local_path)
+        .output()
+        .map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some("list missing git bundle objects".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(git_command_failure(
+            "list missing git bundle objects",
+            output.status.code(),
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('?'))
+        .filter(|object_id| seen.insert((*object_id).to_string()))
+        .map(str::to_string)
+        .collect())
+}
+
+/// Fetch explicit object ids from the promisor remote in one request.
+/// Mirrors Git's own lazy-fetch invocation (noop negotiation, no tags, no
+/// FETCH_HEAD) for the whole set at once. The transport's output stays out of
+/// errors because it can carry credentials or remote details.
+fn fetch_promisor_objects(
+    local_path: &Path,
+    remote: &str,
+    object_ids: &[String],
+) -> std::result::Result<(), Option<i32>> {
+    use std::io::Write as _;
+
+    let mut child = Command::new("git")
+        .args([
+            "-c",
+            "fetch.negotiationAlgorithm=noop",
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--recurse-submodules=no",
+            "--filter=blob:none",
+            "--stdin",
+        ])
+        .arg(remote)
+        .current_dir(local_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| None)?;
+    let mut body = object_ids.join("\n");
+    body.push('\n');
+    let wrote = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(body.as_bytes()).is_ok())
+        .unwrap_or(false);
+    let status = child.wait().map_err(|_| None)?;
+    if wrote && status.success() {
+        Ok(())
+    } else {
+        Err(status.code())
+    }
 }
 
 fn repair_controller_bundle_commit_closure(local_path: &Path, refs: &[String]) -> Result<()> {
