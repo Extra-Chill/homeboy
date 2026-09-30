@@ -365,30 +365,12 @@ pub(crate) fn cook_retrying(
 ///
 /// The exit code is the process result; a requested PR also needs a durable
 /// completion receipt before the notification may announce success.
-fn cook_published(report: &AgentTaskCookReport, exit_code: i32) -> bool {
-    exit_code == 0
-        && report
-            .finalization
-            .as_ref()
-            .is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt)
-}
-
-fn cook_completed(report: &AgentTaskCookReport, exit_code: i32) -> bool {
-    cook_published(report, exit_code)
-        || (exit_code == 0
-            && matches!(
-                report.status.as_str(),
-                "intentional_no_change" | "green_no_finalize"
-            ))
-        || report.status == "cancelled"
-}
-
 fn terminal_payload(
     report: &AgentTaskCookReport,
     component: Option<&str>,
     exit_code: i32,
 ) -> NotifyPayload {
-    let kind = if cook_completed(report, exit_code) {
+    let kind = if exit_code == 0 && report.completed_successfully() {
         NotifyEventKind::Completed
     } else {
         NotifyEventKind::NeedsAttention
@@ -520,7 +502,7 @@ pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str
     if !claimed {
         return;
     }
-    let succeeded = cook_completed(report, exit_code) && report.status != "cancelled";
+    let succeeded = exit_code == 0 && report.completed_successfully();
     // The cook id resolves through the same alias index when a report carries
     // no latest attempt, so a terminal event is never left unroutable.
     let route_run_id = report
