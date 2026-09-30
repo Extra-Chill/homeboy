@@ -2050,6 +2050,20 @@ pub(super) fn read_record_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
+    // Scheduler cancellation/heartbeat polls address an exact canonical run.
+    // Re-importing every historical Cook index on each poll performs unrelated
+    // alias projections and database scans for as long as the provider runs.
+    let exact = lifecycle_store.open_observation_initialized_without_historical_import()?;
+    if let Some(run) = exact.get_run(run_id)? {
+        if exact
+            .control_plane_resource_projection_exact("agent_task_run", run_id)?
+            .is_some()
+        {
+            return record_from_run(&run);
+        }
+    }
+    drop(exact);
+    // Legacy rows still receive the original one-time projection/alias import.
     let store = lifecycle_store.open_observation_initialized()?;
     let run = store.get_run(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(

@@ -112,6 +112,7 @@ pub(super) fn daemon_process_candidates(jobs_path: &Path) -> Result<Vec<DaemonPr
 /// Supervise one daemon child and persist its bounded termination evidence.
 /// This is shared by local and SSH launches because SSH invokes the same CLI.
 pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> Result<()> {
+    let idle_timeout = super::lifetime::configured_idle_timeout()?;
     let exe = std::env::current_exe().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -138,7 +139,7 @@ pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> R
             startup_token,
             "--state-dir",
         ])
-        .arg(state_dir)
+        .arg(&state_dir)
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -150,12 +151,66 @@ pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> R
                 Some("spawn supervised daemon".to_string()),
             )
         })?;
-    supervise_child(child)
+    supervise_child_with_lifetime(child, idle_timeout, &state_dir.join("state.json"))
 }
 
 /// Own the post-spawn supervisor lifecycle. Kept separate so the real child
 /// pipes and persisted evidence can be exercised without replacing the CLI.
-fn supervise_child(mut child: std::process::Child) -> Result<()> {
+#[cfg(test)]
+fn supervise_child(child: std::process::Child) -> Result<()> {
+    supervise_child_with_lifetime(child, None, &crate::paths::daemon_state_file()?)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
+    crate::test_support::with_isolated_home(|_| {
+        for explicit_error in [false, true] {
+            let token = uuid::Uuid::new_v4().to_string();
+            let state_path = crate::paths::daemon_state_file().unwrap();
+            std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+            std::fs::write(&state_path, b"corrupt startup lease").unwrap();
+            let child = Command::new("sh")
+                .args([
+                    "-c",
+                    "trap 'exit 0' TERM; while :; do sleep 0.1; done",
+                    "homeboy",
+                    "--startup-token",
+                    &token,
+                ])
+                .env(DAEMON_STARTUP_TOKEN_ENV, &token)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let mut attempt = StartupAttempt::new(child, &token, &state_path);
+            if explicit_error {
+                let error = attempt
+                    .finish(Err(Error::internal_unexpected("original startup failure")))
+                    .unwrap_err();
+                assert!(error.to_string().contains("original startup failure"));
+                assert!(error.details["startup_cleanup"].is_array());
+            }
+            drop(attempt);
+            assert!(
+                !pid_is_running(pid),
+                "unpublished owned launcher must be reaped"
+            );
+            assert_eq!(
+                std::fs::read(&state_path).unwrap(),
+                b"corrupt startup lease"
+            );
+        }
+    });
+}
+
+fn supervise_child_with_lifetime(
+    mut child: std::process::Child,
+    idle_timeout: Option<Duration>,
+    state_path: &Path,
+) -> Result<()> {
     let pid = child.id();
     // A daemon can run indefinitely. Drain both pipes while it runs, retaining
     // only a diagnostic tail so supervisor RSS cannot grow with child output.
@@ -163,7 +218,7 @@ fn supervise_child(mut child: std::process::Child) -> Result<()> {
     let child_stderr = child.stderr.take().expect("piped stderr");
     let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
     let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
-    let status = child.wait();
+    let status = wait_for_daemon_with_lifetime(&mut child, idle_timeout, state_path);
     let stdout = join_output_reader(stdout, "stdout");
     let stderr = join_output_reader(stderr, "stderr");
     let status = status.map_err(|error| {
@@ -194,6 +249,74 @@ fn supervise_child(mut child: std::process::Child) -> Result<()> {
         stdout, stderr, stop_requested,
     };
     super::write_termination_evidence(&evidence)
+}
+
+/// Reuse the lease-scoped stop primitive rather than inventing another
+/// proof-and-signal path. It fences pending admissions and revalidates durable
+/// work and startup-token ownership immediately before every signal.
+fn wait_for_daemon_with_lifetime(
+    child: &mut std::process::Child,
+    idle_timeout: Option<Duration>,
+    state_path: &Path,
+) -> std::io::Result<std::process::ExitStatus> {
+    let mut idle = super::lifetime::IdleLifetime::new(idle_timeout);
+    let launcher = super::lifetime::LauncherIdentity::inherited();
+    let mut stopper: Option<std::process::Child> = None;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            // Do not wait for our stop command: it observes this supervisor's
+            // exit after reaping the serving child. Waiting would be circular.
+            return Ok(status);
+        }
+        let state = super::validate_lease_file(state_path)
+            .ok()
+            .and_then(|validation| validation.state)
+            .filter(|state| state.pid == child.id());
+        if let Some(state) = state {
+            let draining = generation_store::admitting()
+                .ok()
+                .flatten()
+                .is_some_and(|endpoint| endpoint.lease_id != state.lease_id);
+            let idle_jobs =
+                super::JobStore::active_count_at_path(state_path.with_file_name("jobs.json"))
+                    .is_ok_and(|count| count == 0);
+            let idle_schedules = crate::schedule::list_health(chrono::Utc::now())
+                .is_ok_and(|schedules| schedules.iter().all(|schedule| !schedule.running));
+            if !idle_jobs
+                || !idle_schedules
+                || launcher.as_ref().is_some_and(|launcher| launcher.is_live())
+            {
+                idle.touch();
+            } else if idle.expired(draining) {
+                if stopper
+                    .as_mut()
+                    .is_some_and(|stopper| stopper.try_wait().ok().flatten().is_some())
+                {
+                    stopper = None;
+                }
+                if stopper.is_none() {
+                    stopper = Command::new(std::env::current_exe()?)
+                        .args(["daemon", "stop", "--lease-id", &state.lease_id])
+                        .env(
+                            crate::paths::DAEMON_STATE_DIR_ENV,
+                            state_path.parent().expect("state parent"),
+                        )
+                        .env(DAEMON_ROUTER_BYPASS_ENV, "1")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .ok();
+                    // A fenced or failed stop is retried after another complete
+                    // idle window, not in a subprocess-spawning hot loop.
+                    idle.touch();
+                }
+            }
+        } else {
+            idle.touch();
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
@@ -1384,7 +1507,7 @@ fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryRece
 pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
-    start_or_return_live_unlocked(addr)
+    start_or_return_live_unlocked_with_idle_timeout(addr, &uuid::Uuid::new_v4().to_string(), 0)
 }
 
 /// Return a live daemon under the lifecycle lock, or start one when its lease
@@ -1464,39 +1587,49 @@ fn rotate_stale_generation(addr: &str, current: &super::DaemonState) -> Result<D
         .env(crate::paths::DAEMON_STATE_DIR_ENV, &state_dir)
         .env(DAEMON_ROUTER_DIR_ENV, &router_dir)
         .env(DAEMON_STARTUP_TOKEN_ENV, &startup_token)
+        .env(
+            super::lifetime::IDLE_TIMEOUT_ENV,
+            super::lifetime::launch_idle_timeout(super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)?
+                .to_string(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    super::lifetime::LauncherIdentity::configure(&mut command);
     detach_from_launcher_session(&mut command);
-    let _child = command.spawn().map_err(|error| {
+    let child = command.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("spawn daemon generation".to_string()),
         )
     })?;
     let state_path = state_dir.join("state.json");
-    for _ in 0..STARTUP_LEASE_OBSERVATIONS {
-        let validation = super::validate_lease_file(&state_path)?;
-        if validation.fresh && validation.running && validation.reachable {
-            let state = validation.state.expect("fresh lease has state");
-            if state.startup_token != startup_token {
-                return Err(Error::internal_unexpected(
-                    "replacement daemon published a mismatched startup token",
-                ));
+    let mut attempt = StartupAttempt::new(child, &startup_token, &state_path);
+    let result = (|| {
+        for _ in 0..STARTUP_LEASE_OBSERVATIONS {
+            let validation = super::validate_lease_file(&state_path)?;
+            if validation.fresh && validation.running && validation.reachable {
+                let state = validation.state.expect("fresh lease has state");
+                if state.startup_token != startup_token {
+                    return Err(Error::internal_unexpected(
+                        "replacement daemon published a mismatched startup token",
+                    ));
+                }
+                generation_store::activate(&state)?;
+                return Ok(DaemonStartResult {
+                    pid: state.pid,
+                    address: state.address,
+                    state_path: state.state_path,
+                    lease_id: state.lease_id,
+                });
             }
-            generation_store::activate(&state)?;
-            return Ok(DaemonStartResult {
-                pid: state.pid,
-                address: state.address,
-                state_path: state.state_path,
-                lease_id: state.lease_id,
-            });
+            thread::sleep(STARTUP_LEASE_POLL);
         }
-        thread::sleep(STARTUP_LEASE_POLL);
-    }
-    Err(Error::internal_unexpected(
-        "replacement daemon did not publish a fresh isolated lease",
-    ))
+        Err(Error::internal_unexpected(
+            "replacement daemon did not publish a fresh isolated lease",
+        ))
+    })();
+    attempt.finish(result)
 }
 
 /// Retire only a registry-authorized drained generation through its own
@@ -2523,6 +2656,19 @@ fn start_or_return_live_unlocked_with_startup_token(
     addr: &str,
     startup_token: &str,
 ) -> Result<DaemonStartResult> {
+    start_or_return_live_unlocked_with_idle_timeout(
+        addr,
+        startup_token,
+        super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS,
+    )
+}
+
+fn start_or_return_live_unlocked_with_idle_timeout(
+    addr: &str,
+    startup_token: &str,
+    default_idle_timeout: u64,
+) -> Result<DaemonStartResult> {
+    let idle_timeout = super::lifetime::launch_idle_timeout(default_idle_timeout)?;
     let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     reattach_exact_live_owner()?;
     refuse_unleased_process_conflict()?;
@@ -2530,7 +2676,7 @@ fn start_or_return_live_unlocked_with_startup_token(
         read_status,
         try_acquire_daemon_owner_lock,
         stop_stale_generation_for_start,
-        || spawn_and_wait_for_lease(addr, startup_token),
+        || spawn_and_wait_for_lease_attempt(addr, startup_token, idle_timeout, true, Vec::new()),
     )
 }
 
@@ -2753,17 +2899,75 @@ where
     Ok(Err(observed))
 }
 
-fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>> {
+struct StartupAttempt {
+    child: std::process::Child,
+    token: String,
+    state_path: PathBuf,
+    armed: bool,
+}
+
+impl StartupAttempt {
+    fn new(child: std::process::Child, token: &str, state_path: &Path) -> Self {
+        Self {
+            child,
+            token: token.to_string(),
+            state_path: state_path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn cleanup(&mut self) -> Vec<String> {
+        self.armed = false;
+        let evidence =
+            cleanup_startup_attempt_at_path(self.child.id(), &self.token, &self.state_path)
+                .unwrap_or_else(|error| {
+                    vec![format!("startup cleanup could not complete: {error}")]
+                });
+        let _ = self.child.try_wait();
+        evidence
+    }
+
+    fn finish(&mut self, result: Result<DaemonStartResult>) -> Result<DaemonStartResult> {
+        match result {
+            Ok(result) => {
+                self.armed = false;
+                Ok(result)
+            }
+            Err(mut error) => {
+                if self.armed {
+                    error.details["startup_cleanup"] = serde_json::json!(self.cleanup());
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for StartupAttempt {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+fn cleanup_startup_attempt_at_path(
+    pid: u32,
+    startup_token: &str,
+    state_path: &Path,
+) -> Result<Vec<String>> {
     let mut cleanup = Vec::new();
-    let state_path = crate::paths::daemon_state_file()?;
-    let status = read_status()?;
-    if let Some(state) = status
-        .state
-        .filter(|state| state.startup_token == startup_token)
-    {
+    let state = match super::validate_lease_file(state_path) {
+        Ok(validation) => validation.state,
+        Err(error) => {
+            cleanup.push(format!("startup lease could not be inspected: {error}"));
+            None
+        }
+    };
+    if let Some(state) = state.filter(|state| state.startup_token == startup_token) {
         let identity = super::DaemonLeaseIdentity::from_state(&state);
         if !pid_is_running(state.pid) {
-            super::remove_lease_if_identity_matches(&state_path, &identity)?;
+            super::remove_lease_if_identity_matches(state_path, &identity)?;
             cleanup.push(format!(
                 "startup cleanup observed an exit race and removed the stale token lease for pid {}",
                 state.pid
@@ -2771,7 +2975,7 @@ fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>>
         } else if pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
             match terminate_token_owned_startup_process(state.pid, startup_token) {
                 Ok(StartupCleanupOutcome::Terminated(signal)) => {
-                    super::remove_lease_if_identity_matches(&state_path, &identity)?;
+                    super::remove_lease_if_identity_matches(state_path, &identity)?;
                     cleanup.push(format!(
                         "terminated token-owned daemon pid {} with {signal}",
                         state.pid
@@ -2794,6 +2998,28 @@ fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>>
             cleanup.push(format!(
                 "retained lease for pid {} because live token ownership could not be proven",
                 state.pid
+            ));
+        }
+    }
+    // Lease publication is not guaranteed on a failed launch. Discover only
+    // serving children carrying this exact random attempt token and store.
+    let candidates = daemon_process_candidates(&state_path.with_file_name("jobs.json"))
+        .unwrap_or_else(|error| {
+            cleanup.push(format!(
+                "startup child discovery could not complete: {error}"
+            ));
+            Vec::new()
+        });
+    for candidate in candidates {
+        if candidate.startup_token.as_deref() == Some(startup_token)
+            && candidate.durable_store_path.as_deref()
+                == state_path.with_file_name("jobs.json").to_str()
+            && pid_is_running(candidate.pid)
+        {
+            let outcome = terminate_token_owned_startup_process(candidate.pid, startup_token);
+            cleanup.push(format!(
+                "token-owned unpublished daemon pid {} cleanup: {outcome:?}",
+                candidate.pid
             ));
         }
     }
@@ -3035,16 +3261,14 @@ fn can_recover_startup_attempt(
             .any(|entry| entry.contains("could not be proven"))
 }
 
-fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonStartResult> {
-    spawn_and_wait_for_lease_attempt(addr, startup_token, true, Vec::new())
-}
-
 fn spawn_and_wait_for_lease_attempt(
     addr: &str,
     startup_token: &str,
+    idle_timeout: u64,
     allow_retry: bool,
     mut cleanup_evidence: Vec<String>,
 ) -> Result<DaemonStartResult> {
+    let state_path = crate::paths::daemon_state_file()?;
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -3060,77 +3284,83 @@ fn spawn_and_wait_for_lease_attempt(
             addr,
             "--startup-token",
             startup_token,
+            "--state-dir",
         ])
+        .arg(state_path.parent().expect("daemon state parent"))
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .env(super::lifetime::IDLE_TIMEOUT_ENV, idle_timeout.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    super::lifetime::LauncherIdentity::configure(&mut command);
     detach_from_launcher_session(&mut command);
     let child = command
         .spawn()
         .map_err(|e| Error::internal_io(e.to_string(), Some("spawn daemon".to_string())))?;
     let pid = child.id();
-
-    match observe_startup_lease(
-        pid,
-        startup_token,
-        STARTUP_LEASE_OBSERVATIONS,
-        read_status,
-        || thread::sleep(STARTUP_LEASE_POLL),
-    )? {
-        Ok(result) => {
-            let validation = super::validate_lease_file(Path::new(&result.state_path))?;
-            let state = validation
-                .state
-                .filter(|state| {
-                    validation.fresh
-                        && validation.running
-                        && validation.reachable
-                        && state.lease_id == result.lease_id
-                        && state.startup_token == startup_token
-                })
-                .ok_or_else(|| {
-                    Error::internal_unexpected(
-                        "daemon startup lease changed before generation activation",
-                    )
-                })?;
-            // A restart can leave a registry naming the dead generation. Publish
-            // the verified replacement before accepting controller submissions.
-            generation_store::activate(&state)?;
-            Ok(result)
-        }
-        Err(observation) => {
-            // Cleanup is evidence about the failed attempt, not a replacement
-            // for the startup failure that caused this control path.
-            let cleanup = cleanup_startup_attempt(pid, startup_token).unwrap_or_else(|error| {
-                vec![format!("startup cleanup could not complete: {error}")]
-            });
-            cleanup_evidence.extend(cleanup);
-            if can_recover_startup_attempt(
-                allow_retry,
-                startup_token,
-                &observation,
-                &cleanup_evidence,
-            ) {
-                // The token is the durable admission identity for this
-                // startup. A bounded recovery restarts only the same proven
-                // attempt, so receipt replay and concurrent callers can never
-                // mistake a replacement for a second daemon.
-                return spawn_and_wait_for_lease_attempt(
-                    addr,
-                    startup_token,
-                    false,
-                    cleanup_evidence,
-                );
+    let mut attempt = StartupAttempt::new(child, startup_token, &state_path);
+    let result = (|| {
+        match observe_startup_lease(
+            pid,
+            startup_token,
+            STARTUP_LEASE_OBSERVATIONS,
+            read_status,
+            || thread::sleep(STARTUP_LEASE_POLL),
+        )? {
+            Ok(result) => {
+                let validation = super::validate_lease_file(Path::new(&result.state_path))?;
+                let state = validation
+                    .state
+                    .filter(|state| {
+                        validation.fresh
+                            && validation.running
+                            && validation.reachable
+                            && state.lease_id == result.lease_id
+                            && state.startup_token == startup_token
+                    })
+                    .ok_or_else(|| {
+                        Error::internal_unexpected(
+                            "daemon startup lease changed before generation activation",
+                        )
+                    })?;
+                // A restart can leave a registry naming the dead generation. Publish
+                // the verified replacement before accepting controller submissions.
+                generation_store::activate(&state)?;
+                Ok(result)
             }
-            Err(startup_timeout_error(
-                pid,
-                startup_token,
-                observation,
-                cleanup_evidence,
-            ))
+            Err(observation) => {
+                // Cleanup is evidence about the failed attempt, not a replacement
+                // for the startup failure that caused this control path.
+                let cleanup = attempt.cleanup();
+                cleanup_evidence.extend(cleanup);
+                if can_recover_startup_attempt(
+                    allow_retry,
+                    startup_token,
+                    &observation,
+                    &cleanup_evidence,
+                ) {
+                    // The token is the durable admission identity for this
+                    // startup. A bounded recovery restarts only the same proven
+                    // attempt, so receipt replay and concurrent callers can never
+                    // mistake a replacement for a second daemon.
+                    return spawn_and_wait_for_lease_attempt(
+                        addr,
+                        startup_token,
+                        idle_timeout,
+                        false,
+                        cleanup_evidence,
+                    );
+                }
+                Err(startup_timeout_error(
+                    pid,
+                    startup_token,
+                    observation,
+                    cleanup_evidence,
+                ))
+            }
         }
-    }
+    })();
+    attempt.finish(result)
 }
 
 /// Keep the daemon and its workload children alive when a transient launcher

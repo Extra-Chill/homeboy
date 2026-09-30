@@ -38,6 +38,34 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
 }
 
 #[test]
+fn canonical_run_polls_do_not_reimport_unrelated_historical_cook_indexes() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    store
+        .write_record(&record(&store, "active-provider", "canonical"))
+        .expect("commit canonical run and projection");
+    let historical = store.cook_index_path("unrelated-history");
+    std::fs::create_dir_all(historical.parent().unwrap()).unwrap();
+    std::fs::write(&historical, b"invalid unrelated historical index").unwrap();
+    crate::agent_task_lifecycle::reset_historical_cook_index_import_invocations_for_test();
+    for _ in 0..32 {
+        let current = store
+            .read_record("active-provider")
+            .expect("poll exact provider run");
+        assert_eq!(current.metadata["store_marker"], "canonical");
+        assert_eq!(current.state, AgentTaskRunState::Queued);
+    }
+    assert_eq!(
+        crate::agent_task_lifecycle::historical_cook_index_import_invocations_for_test(),
+        0
+    );
+    assert!(
+        store.open_observation_initialized().is_err(),
+        "explicit historical migration still validates its input"
+    );
+}
+
+#[test]
 fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
     let right_context = homeboy_core::test_support::HermeticTestContext::new();
