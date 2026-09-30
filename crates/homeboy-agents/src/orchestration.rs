@@ -885,11 +885,12 @@ impl LifecycleStoreLookup {
 
 impl RunLookup for LifecycleStoreLookup {
     fn get(&self, id: &RunId) -> Result<Option<RunSnapshot>, ControlPlaneError> {
-        let record = match self.store.read_record_bounded(id.as_str()) {
-            Ok(record) => record,
-            Err(error) if is_run_not_found(&error) => return Ok(None),
-            Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
-        };
+        let record =
+            match crate::agent_task_service::cook_observation_in_store(&self.store, id.as_str()) {
+                Ok(record) => record,
+                Err(error) if is_run_not_found(&error) => return Ok(None),
+                Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
+            };
         let plan = self.plan(&record.run_id)?;
         Ok(Some(RunSnapshot { record, plan }))
     }
@@ -5053,6 +5054,20 @@ impl<L: EventLookup> OrchestrationService<L> {
 }
 
 /// Read one canonical run resource from the current controller installation.
+pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
+    let requested_id = parse_run_id(run_id)?;
+    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let record = store.read_record_bounded(requested_id.as_str())?;
+    let record = crate::agent_task_service::project_cook_observation(&store, &record);
+    let lookup = LifecycleStoreLookup::new(store);
+    let plan = lookup
+        .plan(&record.run_id)
+        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
+    project_record(&record, plan.as_ref())
+        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))
+}
+
+/// Read a logical Cook or exact run through the shared subject resolver.
 pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
     let requested_id = parse_run_id(run_id)?;
     if let Some(batch) = batch_resource_from_current_environment(&requested_id)
@@ -5589,7 +5604,7 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
         .map_err(|error| ControlPlaneError::invalid_argument(error.message))
 }
 
-fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
     if (record.state == AgentTaskRunState::CandidateRecoverable
         && record.owner_process_is_running())
         || record.has_live_pending_local_cook_supervisor(Utc::now())

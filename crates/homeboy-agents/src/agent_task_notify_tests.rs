@@ -114,7 +114,7 @@ fn green_no_finalize_is_completed_without_a_pull_request_link() {
 }
 
 #[test]
-fn cancelled_cook_is_completed_without_failure_recovery_actions() {
+fn cancelled_cook_cannot_render_as_success_without_failure_recovery_actions() {
     let mut cancelled = report("cancelled", None);
     cancelled.stop_reason = Some("Cook was cancelled: operator replacement".to_string());
     cancelled.terminal_phase = Some("cancellation".to_string());
@@ -122,10 +122,12 @@ fn cancelled_cook_is_completed_without_failure_recovery_actions() {
 
     let payload = terminal_payload(&cancelled, None, 1);
 
-    assert_eq!(payload.kind, NotifyEventKind::Completed);
+    assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
     let body = payload.render_body();
     assert!(body.contains("Status: cancelled"), "{body}");
     assert!(body.contains("operator replacement"), "{body}");
+    assert!(!body.contains("cook succeeded"), "{body}");
+    assert!(!cancelled.completed_successfully());
     assert!(!payload.actions.iter().any(
         |action| action.command.contains("resume") || action.command.contains("cook-continue")
     ));

@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.11] - 2026-09-30
+
+### Fixed
+- bound detached lifetime and isolate background ownership
+
+## [0.398.10] - 2026-09-30
+
+### Fixed
+- bind installer start gate to a POSIX shell descriptor
+
 ## [0.398.9] - 2026-09-30
 
 ### Changed

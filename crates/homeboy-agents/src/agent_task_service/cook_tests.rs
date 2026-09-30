@@ -17296,6 +17296,158 @@ fn canonical_completion_requires_a_valid_review_form() {
     assert!(!canonical_finalization_eligible(&green, false, false));
 }
 
+#[test]
+fn cook_observation_agrees_across_real_stores_without_mutation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::agent_task_lifecycle::activity_provider::register();
+        let store = test_lifecycle_store();
+        let recipes = CookRecipeStore::new(store.roots().clone());
+        for (name, gate_status, no_finalize, receipt, success, live_owner) in [
+            ("pending", "deferred", false, false, false, false),
+            ("failed", "failed", false, true, false, false),
+            (
+                "missing-finalization",
+                "succeeded",
+                false,
+                false,
+                false,
+                false,
+            ),
+            ("no-finalize", "succeeded", true, false, true, false),
+            ("finalized", "succeeded", false, true, true, false),
+            (
+                "intentional-no-change",
+                "succeeded",
+                false,
+                false,
+                true,
+                false,
+            ),
+            ("live-verification", "deferred", false, false, false, true),
+            ("live-finalization", "succeeded", false, false, false, true),
+        ] {
+            let mut options = compile_options(&format!("observe-{name}"));
+            options.finalization.no_finalize = no_finalize;
+            let run_id = &options.identity.initial_run_id;
+            recipes.persist_initial_recipe(&options).unwrap();
+            agent_task_lifecycle::record_completed_run(
+                &options.identity.initial_plan,
+                &review_form_aggregate(&options.identity.initial_plan),
+                Some(run_id),
+            )
+            .unwrap();
+            let mut proof = serde_json::to_value(promotion(run_id)).unwrap();
+            proof["deterministic_gates"][0]["status"] = serde_json::json!(gate_status);
+            proof["deterministic_gates"][0]["exit_code"] =
+                serde_json::json!(if gate_status == "failed" { 1 } else { 0 });
+            store
+                .mutate_record(run_id, |record| {
+                    record.metadata["cook_id"] = serde_json::json!(options.identity.cook_id);
+                    record.metadata["latest_promotion"] = proof.clone();
+                    if name == "intentional-no-change" {
+                        record.metadata["cook_progress"] = serde_json::json!({
+                            "phase": "terminal", "terminal_status": "intentional_no_change",
+                            "terminal_success": true, "exit_code": 0,
+                        });
+                    }
+                    if live_owner {
+                        let pid = std::process::id();
+                        record.metadata["runner_pid"] = serde_json::json!(pid);
+                        record.metadata["runner_process_start_identity"] = serde_json::json!(
+                            homeboy_core::process::process_start_identity(pid).unwrap()
+                        );
+                    }
+                    if receipt {
+                        record.metadata["cook_finalization"] = serde_json::json!({
+                            "status": "review_ready", "pr_url": "https://example.test/pull/42",
+                        });
+                    }
+                    true
+                })
+                .unwrap();
+            store
+                .record_cook_attempt(&options.identity.cook_id, 1, run_id)
+                .unwrap();
+            let retry_id = format!("{}-retry", options.identity.cook_id);
+            submit_plan_in_test_store(&store, &options.identity.initial_plan, Some(&retry_id))
+                .unwrap();
+            recipes
+                .record_recipe_attempt(
+                    &options.identity.cook_id,
+                    2,
+                    &retry_id,
+                    &options.identity.initial_plan,
+                )
+                .unwrap();
+            store
+                .record_cook_attempt(&options.identity.cook_id, 2, &retry_id)
+                .unwrap();
+            let retry_before = store.read_record_bounded(&retry_id).unwrap();
+            let before = store.read_record_bounded(run_id).unwrap();
+            let recipe_before = recipes.load_recipe(&options.identity.cook_id).unwrap();
+            let index_before = store.read_cook_index(&options.identity.cook_id).unwrap();
+            let events_before =
+                serde_json::to_value(agent_task_lifecycle::logs(run_id).unwrap()).unwrap();
+            for requested in [run_id.as_str(), options.identity.cook_id.as_str()] {
+                let observed = cook_observation_in_store(&store, requested).unwrap();
+                let canonical = crate::agent_task_service::control_plane_run(requested).unwrap();
+                let activity = homeboy_core::activity::show_activity(requested).unwrap();
+                assert_eq!(observed.run_id, *run_id);
+                assert_eq!(canonical.run.as_str(), run_id);
+                assert_eq!(
+                    observed.state == agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                    success,
+                    "{name}"
+                );
+                assert_eq!(
+                    canonical.state
+                        == homeboy_control_plane_contract::ControlPlaneRunState::Succeeded,
+                    success,
+                    "{name}"
+                );
+                assert_eq!(
+                    activity.items[0].state == homeboy_core::activity::ActivityState::Succeeded,
+                    success,
+                    "{name}"
+                );
+                assert_eq!(
+                    canonical.state.is_terminal(),
+                    !homeboy_core::activity::is_active(activity.items[0].state)
+                );
+                if live_owner {
+                    assert_eq!(
+                        canonical.state,
+                        homeboy_control_plane_contract::ControlPlaneRunState::Running
+                    );
+                    assert_eq!(
+                        activity.items[0].state,
+                        homeboy_core::activity::ActivityState::Running
+                    );
+                }
+            }
+            assert_eq!(store.read_record_bounded(run_id).unwrap(), before);
+            assert_eq!(store.read_record_bounded(&retry_id).unwrap(), retry_before);
+            assert_eq!(
+                cook_observation_in_store(&store, &retry_id).unwrap().run_id,
+                retry_id
+            );
+            assert_eq!(
+                recipes.load_recipe(&options.identity.cook_id).unwrap(),
+                recipe_before
+            );
+            assert_eq!(
+                serde_json::to_value(store.read_cook_index(&options.identity.cook_id).unwrap())
+                    .unwrap(),
+                serde_json::to_value(index_before).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(agent_task_lifecycle::logs(run_id).unwrap()).unwrap(),
+                events_before
+            );
+        }
+    });
+}
+
 fn tracked_promotion_continuation_options(
     cook_id: &str,
     run_id: &str,

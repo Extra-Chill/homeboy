@@ -7822,7 +7822,7 @@ pub(crate) fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandid
     select_cook_candidate_from_index(cook_id, index, None)
 }
 
-pub(crate) fn select_cook_candidate_in_store(
+pub fn select_cook_candidate_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<AgentTaskCookCandidateSelection> {

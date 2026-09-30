@@ -17,8 +17,7 @@ use homeboy_core::activity::{
     ActivityTaskIdentity,
 };
 
-use super::{load_controller_plan, plan_has_retry_materialization_identity, resolve_run_id};
-use homeboy_core::run_lifecycle_record::RunExecutionState;
+use super::{load_controller_plan, plan_has_retry_materialization_identity};
 use homeboy_core::Result;
 
 struct AgentTaskActivityProvider;
@@ -111,33 +110,10 @@ fn compact_health_samples(
     (records, health)
 }
 
-/// Resolve an id the way every operator-facing action already claims to.
-///
-/// A durable run id resolves directly. A **Cook id** does not: attempts are
-/// stored under `{cook_id}-attempt-{n}-{suffix}`, so `exact_record(cook_id)`
-/// is always a miss and `activity watch <cook_id>` reported
-/// `activity item not found` — even though the cook notification that handed
-/// the operator that command emitted it next to `agent-task status <cook_id>`,
-/// which *does* resolve because it routes through the same Cook alias index
-/// (#11112). The two actions disagreed about what a cook id is.
-///
-/// The fallback is additive: run ids keep their existing single-read
-/// behaviour and only an id that missed pays for the alias lookup.
-///
-/// Both steps are pure reads. `resolve_run_id` is an indexed
-/// `read_cook_index`, not `reconcile_status()` — resolving one id must
-/// still never mutate persisted state (#10308).
+/// Cook aliases precede launcher rows; exact attempt IDs retain their identity.
 fn record_for_id(id: &str) -> Option<AgentTaskRunRecord> {
-    if let Ok(record) = agent_task_lifecycle::exact_record(id) {
-        return Some(record);
-    }
-    let resolved = resolve_run_id(id).ok()?;
-    if resolved == id {
-        // Not a Cook alias: `resolve_run_id` echoed the id back, so a second
-        // `exact_record` would repeat the miss above.
-        return None;
-    }
-    agent_task_lifecycle::exact_record(&resolved).ok()
+    let store = super::AgentTaskLifecycleStore::from_current_environment().ok()?;
+    crate::agent_task_service::cook_observation_in_store(&store, id).ok()
 }
 
 fn metadata_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -155,10 +131,15 @@ fn action(label: impl Into<String>, command: impl Into<String>) -> ActivityNextA
 }
 
 fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
+    let record = super::AgentTaskLifecycleStore::from_current_environment()
+        .map(|store| crate::agent_task_service::project_cook_observation(&store, &record))
+        .unwrap_or(record);
     let runner_id = metadata_string(&record.metadata, &["runner_id"]);
     let job_id = metadata_string(&record.metadata, &["runner_job_id", "job_id"]);
     let remote_run_id = metadata_string(&record.metadata, &["remote_run_id"]);
-    let state = ActivityState::from(RunExecutionState::from(record.state));
+    let state = serde_json::to_value(crate::orchestration::run_state(&record))
+        .and_then(serde_json::from_value::<ActivityState>)
+        .unwrap_or(ActivityState::Unknown);
     ActivityItem {
         id: record.run_id.clone(),
         kind: "agent-task".to_string(),
@@ -488,30 +469,69 @@ mod tests {
     }
 
     #[test]
-    fn probe_by_id_still_prefers_an_exact_run_id_over_the_alias_fallback() {
-        // The fallback is additive. A run id that resolves directly must never
-        // be redirected to whatever a same-named cook index happens to point at.
+    fn successful_launcher_cannot_shadow_queued_or_running_attempts() {
         with_isolated_home(|_| {
-            let direct = seed_record("cook-alias-attempt-2-bbbb");
-            let other = seed_record("cook-alias-attempt-9-cccc");
+            let direct = seed_record("cook-alias");
+            let other = agent_task_lifecycle::seed_queued_run_for_tests(
+                &test_plan(),
+                Some("cook-alias-attempt-9-cccc"),
+            )
+            .unwrap()
+            .run_id;
             agent_task_lifecycle::replace_cook_index_for_test(
                 &crate::agent_task_lifecycle::AgentTaskCookIndex {
                     schema: crate::agent_task_lifecycle::schemas::COOK_INDEX.to_string(),
                     cook_id: direct.clone(),
-                    latest_run_id: other,
+                    latest_run_id: other.clone(),
                     latest_substantive_candidate: None,
                     cancellation_fence: None,
-                    attempts: Vec::new(),
+                    attempts: vec![crate::agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                        attempt: 9,
+                        run_id: other.clone(),
+                        recorded_at: "2026-01-01T00:00:00Z".to_string(),
+                    }],
                 },
             )
             .expect("durable cook index");
 
-            let item = AgentTaskActivityProvider
-                .probe_by_id(&direct)
-                .expect("probe")
-                .expect("run id resolves exactly");
-
-            assert_eq!(item.id, direct);
+            let store = super::super::AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let launcher = store.read_record(&direct).unwrap();
+            for state in [
+                super::super::AgentTaskRunState::Queued,
+                super::super::AgentTaskRunState::Running,
+            ] {
+                let mut attempt = store.read_record(&other).unwrap();
+                attempt.state = state;
+                attempt.metadata["runner_pid"] = serde_json::json!(std::process::id());
+                store.write_record(&attempt).unwrap();
+                let events = agent_task_lifecycle::logs(&other).unwrap();
+                let item = AgentTaskActivityProvider
+                    .probe_by_id(&direct)
+                    .unwrap()
+                    .unwrap();
+                let run = crate::agent_task_service::control_plane_run(&direct).unwrap();
+                assert_eq!(item.id, other);
+                assert!(is_active(item.state));
+                assert!(!run.state.is_terminal());
+                assert_eq!(run.run.as_str(), other);
+                let exact = crate::orchestration::run_exact_from_current_environment(&direct)
+                    .expect("explicit exact reads preserve the launcher identity");
+                assert_eq!(exact.run.as_str(), direct);
+                assert_eq!(
+                    AgentTaskActivityProvider
+                        .probe_by_id(&other)
+                        .unwrap()
+                        .unwrap()
+                        .id,
+                    other
+                );
+                assert_eq!(store.read_record(&other).unwrap(), attempt);
+                assert_eq!(store.read_record(&direct).unwrap(), launcher);
+                assert_eq!(
+                    serde_json::to_value(agent_task_lifecycle::logs(&other).unwrap()).unwrap(),
+                    serde_json::to_value(events).unwrap()
+                );
+            }
         });
     }
 
