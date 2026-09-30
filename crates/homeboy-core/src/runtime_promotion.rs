@@ -170,6 +170,10 @@ struct RuntimeGenerationPin {
     process_start_identity: Option<crate::process::ProcessStartIdentity>,
     #[serde(default)]
     transaction: Option<SubprocessLeaseCapability>,
+    /// Manifest-validated immutable executable this process is running.
+    /// This is retention ownership, not a lifetime replacement barrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    immutable_executable: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -207,7 +211,7 @@ pub struct RuntimePromotionSubprocessFence {
     _admission_lock: fs::File,
 }
 
-/// Pins the generation required by a cook until its lifecycle finalizes.
+/// Owns Cook execution retention or mutable replacement protection until drop.
 #[derive(Debug)]
 pub struct RuntimeGenerationPinGuard {
     path: PathBuf,
@@ -1091,8 +1095,8 @@ impl RuntimePromotionLease {
     }
 }
 
-/// Pin the current generation for the complete cook lifecycle. Promotion is
-/// deliberately conservative: any live pin blocks a writer until finalization.
+/// Pin mutable/unverified execution for the complete Cook lifecycle. Its live
+/// pin blocks replacement until finalization.
 pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
     pin_cook_generation_waiting(cook_id, COOK_ADMISSION_WAIT_TIMEOUT, || false, |_| {})
 }
@@ -1100,8 +1104,13 @@ pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
 /// Acquire the Cook generation pin without waiting. A promotion owner is
 /// returned as a retryable admission error so the lifecycle layer can durably
 /// queue the same attempt and let the daemon retry it later.
-pub fn try_pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
-    pin_cook_generation_waiting(cook_id, Duration::ZERO, || false, |_| {})
+/// Immutable execution retains its exact binary while future selection proceeds.
+/// Missing, unverified, or non-executing manifests retain the mutable barrier.
+pub fn try_pin_cook_generation(
+    cook_id: &str,
+    runtime: &serde_json::Value,
+) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_runtime_waiting(cook_id, Some(runtime), Duration::ZERO, || false, |_| {})
 }
 
 /// Pin a cook generation without blocking indefinitely behind a promotion.
@@ -1112,6 +1121,16 @@ pub fn try_pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuar
 /// blocked. The lock is never stolen.
 pub fn pin_cook_generation_waiting(
     cook_id: &str,
+    timeout: Duration,
+    is_cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_runtime_waiting(cook_id, None, timeout, is_cancelled, progress)
+}
+
+fn pin_cook_runtime_waiting(
+    cook_id: &str,
+    runtime: Option<&serde_json::Value>,
     timeout: Duration,
     mut is_cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(RuntimePromotionWaitEvent),
@@ -1174,6 +1193,10 @@ pub fn pin_cook_generation_waiting(
     } else {
         None
     };
+    let immutable_admission = runtime
+        .map(crate::controller_runtime::admit_immutable_execution)
+        .transpose()?
+        .flatten();
     let root = promotion_root.join(PIN_DIR);
     fs::create_dir_all(&root).map_err(io("create runtime generation pin directory"))?;
     prune_pins(&root)?;
@@ -1194,6 +1217,13 @@ pub fn pin_cook_generation_waiting(
             .flatten(),
         process_start_identity: crate::process::process_start_identity(pid).ok().flatten(),
         transaction,
+        immutable_executable: immutable_admission.as_ref().and_then(|admission| {
+            admission
+                .runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+        }),
     };
     fs::write(
         &path,
@@ -1843,6 +1873,9 @@ fn pin_reclaimable_with(
 }
 
 fn pin_blocks_lease(pin: &RuntimeGenerationPin, lease: &RuntimePromotionLease) -> bool {
+    if pin.immutable_executable.is_some() {
+        return false;
+    }
     pin.transaction.as_ref().is_none_or(|transaction| {
         transaction.owner_pid != lease.owner_pid
             || transaction.target != lease.target
@@ -1865,6 +1898,38 @@ fn validated_pin_transaction(root: &Path) -> Option<SubprocessLeaseCapability> {
         subprocess_capability_from_env()
             .filter(|capability| capability_matches_record(capability, &lease))
     })
+}
+
+/// Cleanup scans execution ownership under controller-runtime admission after
+/// durable lifecycle inventory. Cancellation cannot prune a still-running binary.
+pub(crate) fn immutable_execution_references(
+    promotion_root: &Path,
+) -> Result<Vec<crate::controller_pin_reference::ReferencedControllerPin>> {
+    use crate::controller_pin_reference::{ControllerPinProtectionReason, ReferencedControllerPin};
+    let root = promotion_root.join(PIN_DIR);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut references = Vec::new();
+    for entry in fs::read_dir(&root).map_err(io("read runtime generation pins"))? {
+        let path = entry.map_err(io("read runtime generation pin"))?.path();
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io("read runtime execution retention")(error)),
+        };
+        let pin: RuntimeGenerationPin = serde_json::from_str(&content)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        if !pin_reclaimable(&pin) {
+            if let Some(path) = pin.immutable_executable {
+                references.push(ReferencedControllerPin {
+                    path,
+                    reason: ControllerPinProtectionReason::ProtectedInFlight,
+                });
+            }
+        }
+    }
+    Ok(references)
 }
 
 fn capability_matches_record(
@@ -2307,7 +2372,7 @@ mod tests {
                     operation_id: "upgrade-contender".to_string(),
                     status_command: "homeboy upgrade status upgrade-contender".to_string(),
                 },
-                Duration::from_millis(25),
+                Duration::from_millis(250),
                 |event| events.lock().expect("collect admission events").push(event),
             )
             .expect_err("the shared OS lock consumes the same bounded deadline");
@@ -2431,11 +2496,17 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let mut owner = cook_pin_admission_owner();
             let (events_tx, events_rx) = std::sync::mpsc::channel();
+            let release = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join("cook-pin-owner-release");
             let pin = pin_cook_generation_waiting(
                 "queued-cook",
                 Duration::from_secs(1),
                 || false,
-                |event| events_tx.send(event).expect("report cook admission wait"),
+                |event| {
+                    events_tx.send(event).expect("report cook admission wait");
+                    fs::write(&release, b"release").expect("release observed process owner");
+                },
             )
             .expect("cook pin admits after the owner disappears");
 
@@ -2579,11 +2650,11 @@ mod tests {
             ])
             .spawn()
             .expect("start process promotion owner");
-        let lease = paths::runtime_promotion_dir()
+        let ready = paths::runtime_promotion_dir()
             .expect("runtime promotion directory")
-            .join(LEASE_DIR);
+            .join("cook-pin-owner-ready");
         for _ in 0..100 {
-            if lease.exists() {
+            if ready.exists() {
                 return child;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -2596,7 +2667,16 @@ mod tests {
     fn cook_pin_admission_owner_child() {
         let _lease = acquire("process promotion owner", "controller")
             .expect("process owner acquires promotion lease");
-        std::thread::sleep(Duration::from_millis(250));
+        let root = paths::runtime_promotion_dir().expect("runtime promotion directory");
+        fs::write(root.join("cook-pin-owner-ready"), b"ready").expect("publish acquired owner");
+        let started = Instant::now();
+        while !root.join("cook-pin-owner-release").exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "parent releases owner"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -2626,11 +2706,11 @@ mod tests {
             ])
             .spawn()
             .expect("start duplicate admission owner");
-        let lease = paths::runtime_promotion_dir()
+        let ready = paths::runtime_promotion_dir()
             .expect("runtime promotion directory")
-            .join(LEASE_DIR);
+            .join("duplicate-wait-ready");
         for _ in 0..100 {
-            if lease.exists() {
+            if ready.exists() {
                 return child;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -2643,6 +2723,13 @@ mod tests {
     fn duplicate_cook_admission_owner_child() {
         let _lease = acquire("duplicate-wait owner", "controller")
             .expect("duplicate admission owner acquires lease");
+        fs::write(
+            paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join("duplicate-wait-ready"),
+            b"ready",
+        )
+        .expect("publish acquired duplicate admission owner");
         let release = paths::runtime_promotion_dir()
             .expect("runtime promotion directory")
             .join("duplicate-wait-release");
@@ -2671,6 +2758,7 @@ mod tests {
                     linux_starttime_ticks: None,
                     process_start_identity: None,
                     transaction: None,
+                    immutable_executable: None,
                 })
                 .expect("serialize foreign pin"),
             )
@@ -2684,7 +2772,7 @@ mod tests {
                     operation_id: "upgrade-contender".to_string(),
                     status_command: "homeboy upgrade status upgrade-contender".to_string(),
                 },
-                Duration::from_millis(25),
+                Duration::from_millis(250),
                 |event| events.lock().expect("collect admission events").push(event),
             )
             .expect_err("foreign pins consume the same bounded deadline");
@@ -2804,7 +2892,7 @@ mod tests {
             .expect("runtime promotion directory")
             .join(LEASE_DIR);
         for _ in 0..50 {
-            if lock.exists() {
+            if read_record(&lock).is_ok_and(|record| record.pid == child.id()) {
                 return child;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -2860,6 +2948,7 @@ mod tests {
             linux_starttime_ticks: None,
             process_start_identity: None,
             transaction: None,
+            immutable_executable: None,
         }
     }
 
@@ -3092,6 +3181,7 @@ mod tests {
                     linux_starttime_ticks: None,
                     process_start_identity: None,
                     transaction: None,
+                    immutable_executable: None,
                 })
                 .expect("serialize foreign pin"),
             )
@@ -3106,6 +3196,156 @@ mod tests {
             foreign_owner.kill().expect("stop foreign pin owner");
             foreign_owner.wait().expect("reap foreign pin owner");
         });
+    }
+
+    #[test]
+    fn immutable_execution_retains_binary_without_draining_for_future_selection() {
+        crate::test_support::with_isolated_home(|_| {
+            use crate::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
+            let runtime = controller_runtime::pin_executable(
+                &std::env::current_exe().expect("test executable"),
+                &build_identity::current().display,
+            )
+            .expect("seal real executing test binary");
+            let binary = PathBuf::from(
+                runtime["originating"]["pinned_executable"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let root = paths::runtime_promotion_dir().expect("promotion root");
+            let mutable = try_pin_cook_generation("mutable-copy", &runtime)
+                .expect("admit process running outside the immutable store");
+            assert!(immutable_execution_references(&root).unwrap().is_empty());
+            drop(mutable);
+            fs::create_dir_all(&root).unwrap();
+            fs::write(
+                root.join("execution.json"),
+                serde_json::to_vec(&runtime).unwrap(),
+            )
+            .unwrap();
+            let child_test =
+                crate::test_support::harness_test_name(module_path!(), "immutable_execution_child");
+            let mut child = Command::new(&binary)
+                .args(["--ignored", "--exact", &child_test])
+                .spawn()
+                .expect("execute sealed binary");
+            let wait = |name: &str| {
+                let started = Instant::now();
+                while !root.join(name).exists() {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(20),
+                        "child signal {name}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            wait("unverified-ready");
+            let error = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "test-upgrade".into(),
+                    status_command: "test status".into(),
+                },
+                Duration::from_millis(25),
+                |_| {},
+            )
+            .expect_err("unverified manifest retains replacement protection");
+            assert_eq!(error.details["wait_stage"], "foreign_generation_pins");
+            fs::write(root.join("validate"), b"").unwrap();
+            wait("immutable-ready");
+            let pins = fs::read_dir(root.join(PIN_DIR))
+                .unwrap()
+                .map(|entry| {
+                    serde_json::from_slice::<RuntimeGenerationPin>(
+                        &fs::read(entry.unwrap().path()).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(pins.len(), 1);
+            assert_eq!(pins[0].pid, child.id());
+            assert!(pins[0].process_start_identity.is_some());
+            assert!(!pin_reclaimable(&pins[0]));
+            assert_eq!(pins[0].immutable_executable.as_ref(), Some(&binary));
+            let upgrade = acquire_waiting_for_target_with_status(
+                "controller upgrade",
+                "controller",
+                RuntimePromotionOwnerStatus {
+                    operation_id: "test-upgrade".into(),
+                    status_command: "test status".into(),
+                },
+                Duration::from_secs(1),
+                |_| {},
+            )
+            .expect("future selection does not drain immutable execution");
+            let future = controller_runtime::activate_installed_generation(
+                &crate::test_support::controller_runtime_test_executable(),
+            )
+            .expect("publish future generation");
+            assert_ne!(
+                future["originating"]["pinned_executable"],
+                runtime["originating"]["pinned_executable"]
+            );
+            drop(upgrade);
+            let purge = ControllerRuntimeRetentionOverrides {
+                ignore_retention: true,
+                limit: None,
+            };
+            let retained =
+                controller_runtime::prune_pins(true, purge).expect("real cleanup while executing");
+            assert!(!retained.removed.contains(&binary));
+            controller_runtime::validate(&runtime).expect("executing runtime remains intact");
+            fs::write(root.join("cancel"), b"").unwrap();
+            wait("released");
+            assert!(immutable_execution_references(&root).unwrap().is_empty());
+            let pruned = controller_runtime::prune_pins(true, purge)
+                .expect("cleanup after cancellation/drop");
+            assert!(pruned.removed.contains(&binary));
+            fs::write(root.join("exit"), b"").unwrap();
+            assert!(child.wait().unwrap().success());
+        });
+    }
+
+    #[test]
+    #[ignore = "executed from a sealed binary by immutable execution test"]
+    fn immutable_execution_child() {
+        let root = paths::runtime_promotion_dir().unwrap();
+        let runtime: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("execution.json")).unwrap()).unwrap();
+        let wait = |name: &str| {
+            let started = Instant::now();
+            while !root.join(name).exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "parent signal {name}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert_eq!(
+            std::env::current_exe().unwrap().to_str(),
+            runtime["originating"]["pinned_executable"].as_str()
+        );
+        let mut unverified = runtime.clone();
+        unverified["originating"]["sha256"] = serde_json::json!("unverified");
+        let pin = try_pin_cook_generation("unverified-execution", &unverified).unwrap();
+        assert!(immutable_execution_references(&root).unwrap().is_empty());
+        fs::write(root.join("unverified-ready"), b"").unwrap();
+        wait("validate");
+        drop(pin);
+        let pin = try_pin_cook_generation("immutable-execution", &runtime).unwrap();
+        fs::write(root.join("immutable-ready"), b"").unwrap();
+        wait("cancel");
+        assert_eq!(
+            std::env::current_exe().unwrap().to_str(),
+            runtime["originating"]["pinned_executable"].as_str()
+        );
+        crate::controller_runtime::validate(&runtime)
+            .expect("same executable after future selection");
+        drop(pin);
+        fs::write(root.join("released"), b"").unwrap();
+        wait("exit");
     }
 
     #[test]
@@ -3129,6 +3369,7 @@ mod tests {
                     linux_starttime_ticks: None,
                     process_start_identity: None,
                     transaction: None,
+                    immutable_executable: None,
                 })
                 .expect("serialize existing pin"),
             )

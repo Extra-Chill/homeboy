@@ -525,6 +525,11 @@ pub fn protected_executables() -> Result<Vec<PathBuf>> {
         .map(|pin| pin.path)
         .collect();
     protected.extend(active_generation_executables()?);
+    protected.extend(
+        crate::runtime_promotion::immutable_execution_references(&paths::runtime_promotion_dir()?)?
+            .into_iter()
+            .map(|pin| pin.path),
+    );
     Ok(protected.into_iter().collect())
 }
 
@@ -566,6 +571,10 @@ fn retention_report_with_references_at(
     referenced: &[ReferencedControllerPin],
     now: SystemTime,
 ) -> Result<ControllerRuntimeRetentionReport> {
+    let execution_references = crate::runtime_promotion::immutable_execution_references(
+        &root.with_file_name("runtime-promotion"),
+    )?;
+    let referenced = referenced.iter().chain(execution_references.iter());
     let mut retained = BTreeSet::new();
     let mut referenced_reasons = BTreeMap::new();
     for pin in referenced {
@@ -916,6 +925,30 @@ fn discover_pin_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
 pub struct RuntimeAdmission {
     _lock: AdmissionLock,
     pub runtime: Value,
+}
+
+/// Validate the executing process, not merely a copy with the same identity.
+/// Hold cleanup admission until its execution reference has been published.
+pub(crate) fn admit_immutable_execution(runtime: &Value) -> Result<Option<RuntimeAdmission>> {
+    let Some(pinned) = runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let root = runtime_root()?;
+    let _lock = acquire_admission_lock(&root.join(ADMISSION_LOCK_DIR))?;
+    let path = Path::new(pinned);
+    if !content_addressed_pin_path(&root, path)
+        || std::env::current_exe().ok().as_deref() != Some(path)
+        || validate_pin(runtime).is_err()
+    {
+        return Ok(None);
+    }
+    Ok(Some(RuntimeAdmission {
+        _lock,
+        runtime: runtime.clone(),
+    }))
 }
 
 #[derive(Debug)]

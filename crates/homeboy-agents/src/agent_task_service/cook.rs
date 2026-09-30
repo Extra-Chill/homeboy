@@ -6962,8 +6962,11 @@ fn run_cook_spine(
     // the shared flock.
     let pin_run_id = options.identity.initial_run_id.clone();
     let pin_cook_id = options.identity.cook_id.clone();
+    let runtime_record = lifecycle_store.read_record(&pin_run_id)?;
+    let runtime = &runtime_record.metadata["controller_runtime"];
     let _runtime_generation = match homeboy_core::runtime_promotion::try_pin_cook_generation(
         &pin_run_id,
+        runtime,
     ) {
         Ok(pin) => pin,
         Err(error)
