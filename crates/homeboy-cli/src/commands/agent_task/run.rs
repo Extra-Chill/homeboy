@@ -4142,7 +4142,9 @@ where
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
-    if execute_queued_attempt && record.state == agent_task_lifecycle::AgentTaskRunState::Queued {
+    if (execute_queued_attempt || record.metadata["cook_runtime_admission"].is_object())
+        && record.state == agent_task_lifecycle::AgentTaskRunState::Queued
+    {
         return dispatch_queued_cook_retry(
             &recipe,
             &run_id,
@@ -4394,9 +4396,11 @@ where
         }
         agent_task_lifecycle::ClaimOutcome::Acquired => {
             let dispatched: CmdResult<Value> = (|| {
-                let record = lifecycle_store.read_record(run_id)?;
-                let pre_execution_runtime_recovery =
-                    agent_task_service::pre_execution_runtime_recovery_is_eligible(recipe, &record);
+                let record = agent_task_service::rebind_queued_cook_runtime_in_store(
+                    recipe,
+                    &lifecycle_store,
+                    run_id,
+                )?;
                 let dispatcher =
                     reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
                 let attempt = recipe
@@ -4411,13 +4415,10 @@ where
                             None,
                         )
                     })?;
-                let mut options = if pre_execution_runtime_recovery {
-                    agent_task_service::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-                        recipe, dispatcher,
-                    )?
-                } else {
-                    agent_task_service::reconstruct_options_with_dispatcher(recipe, dispatcher)?
-                };
+                let mut options =
+                    agent_task_service::reconstruct_options_for_record_with_dispatcher(
+                        recipe, &record, dispatcher,
+                    )?;
                 options.identity.initial_run_id = attempt.run_id.clone();
                 options.identity.initial_plan = attempt.plan.clone();
                 agent_task_service::authorize_cook_continue_route(&options)?;

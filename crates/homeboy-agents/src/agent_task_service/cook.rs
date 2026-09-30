@@ -5317,6 +5317,7 @@ fn record_cook_disk_pressure_advisory(
 
 fn reconstruct_existing_cook_options(
     recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     attempt_dispatcher: Option<Arc<dyn AgentTaskCookAttemptDispatcher>>,
     adoption_or_historical_continuation: bool,
     pre_execution_runtime_recovery: bool,
@@ -5327,17 +5328,19 @@ fn reconstruct_existing_cook_options(
     } else if local_placement_override {
         super::cook_recipe::reconstruct_options_with_local_placement_override(recipe)
     } else if pre_execution_runtime_recovery {
-        match attempt_dispatcher {
-            Some(dispatcher) => {
-                super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
-                    recipe,
-                    Some(dispatcher),
-                )
-            }
-            None => super::reconstruct_options_for_pre_execution_recovery(recipe),
-        }
+        super::reconstruct_options_for_pre_execution_recovery_with_dispatcher(
+            recipe,
+            attempt_dispatcher,
+        )
     } else {
-        super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher)
+        match record {
+            Some(record) => super::cook_recipe::reconstruct_options_for_record_with_dispatcher(
+                recipe,
+                record,
+                attempt_dispatcher,
+            ),
+            None => super::reconstruct_options_with_dispatcher(recipe, attempt_dispatcher),
+        }
     }
 }
 
@@ -6442,6 +6445,7 @@ fn run_cook_spine(
     let mut options = if existing_recipe {
         let mut reconstructed = reconstruct_existing_cook_options(
             &recipe,
+            requested_record.as_ref(),
             options.provider_transport.attempt_dispatcher,
             adopted_model.is_some() || matches!(mode, CookMode::Adopt | CookMode::ContinueTerminal),
             pre_execution_runtime_recovery,

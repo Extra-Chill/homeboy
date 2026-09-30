@@ -12352,11 +12352,11 @@ fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
         let mut recipe = super::super::load_recipe(cook_id).expect("load recipe");
         recipe.runtime_generation = "homeboy 0.1.0+historical".to_string();
 
-        let strict = reconstruct_existing_cook_options(&recipe, None, false, false, false)
+        let strict = reconstruct_existing_cook_options(&recipe, None, None, false, false, false)
             .expect_err("ordinary continuation retains runtime pinning");
         assert!(strict.message.contains("pinned to Homeboy runtime"));
 
-        let recovered = reconstruct_existing_cook_options(&recipe, None, false, true, false)
+        let recovered = reconstruct_existing_cook_options(&recipe, None, None, false, true, false)
             .expect("pre-execution continuation uses the current runtime");
         assert_eq!(
             recovered.identity.initial_run_id,

@@ -4038,12 +4038,7 @@ pub fn defer_cook_runtime_admission_in_store(
         if !matches!(
             record.state,
             AgentTaskRunState::Queued | AgentTaskRunState::Running
-        ) || record.metadata["provider_executions_consumed"]
-            .as_u64()
-            .is_some_and(|consumed| consumed != 0)
-            || record.metadata["provider_executions"]
-                .as_array()
-                .is_some_and(|executions| !executions.is_empty())
+        ) || !crate::agent_task_service::has_unambiguous_zero_execution(record)
         {
             return false;
         }
@@ -7001,15 +6996,11 @@ where
     if let Some(reservation_metadata) = reservation_metadata {
         metadata.extend(reservation_metadata);
     }
-    let transport_runtime_recovery = source.state.is_terminal()
-        && source.provider_handles.is_empty()
-        && source.runner_job_id().is_none()
-        && source
-            .lab_handoff
-            .as_ref()
-            .is_none_or(|handoff| handoff.state != AgentTaskLabHandoffState::Accepted)
-        && source.metadata["provider_executions_consumed"].as_u64() == Some(0)
-        && crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(&source);
+    let transport_runtime_recovery = crate::agent_task_service::pre_execution_runtime_recovery(
+        &source,
+    ) == Some(
+        crate::agent_task_service::PreExecutionRuntimeRecovery::RetryablePreExecutionFailure,
+    );
     let previous_controller_runtime = transport_runtime_recovery
         .then(|| {
             source
@@ -7034,15 +7025,9 @@ where
                 .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
                 .cloned()
                 .unwrap_or(Value::Null);
-            child.metadata["controller_runtime_recovery"] = json!({
-                "schema": "homeboy/controller-runtime-pre-execution-recovery/v1",
-                "reason": "retryable_pre_execution_transport_failure",
-                "source_run_id": source.run_id,
-                "previous": previous,
-                "current": current,
-                "provider_executions_consumed": 0,
-                "recovered_at": now_timestamp(),
-            });
+            child.metadata["controller_runtime_recovery"] = crate::agent_task_service::PreExecutionRuntimeRecovery::RetryablePreExecutionTransportFailure
+                .provenance(previous, current);
+            child.metadata["controller_runtime_recovery"]["source_run_id"] = json!(source.run_id);
             true
         })?;
         record = recovered.ok_or_else(|| {
