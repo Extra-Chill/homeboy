@@ -15610,6 +15610,228 @@ fn promotion_reports_actionable_error_when_aggregate_and_executor_evidence_are_m
     });
 }
 
+fn event_states(run_id: &str) -> Vec<String> {
+    agent_task_lifecycle::logs(run_id)
+        .expect("logs")
+        .events
+        .into_iter()
+        .filter_map(|event| {
+            event
+                .data
+                .get("state")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn clear_mirrored_aggregate(store: &AgentTaskLifecycleStore, run_id: &str) {
+    let observations = store
+        .open_observation_initialized()
+        .expect("observation store");
+    let mut run = observations
+        .get_run(run_id)
+        .expect("read observation")
+        .expect("observation run");
+    run.metadata_json["agent_task_aggregate"] = Value::Null;
+    observations
+        .update_run_metadata(run_id, run.metadata_json)
+        .expect("clear mirrored aggregate");
+}
+
+fn write_executor_outcome(store: &AgentTaskLifecycleStore, run_id: &str, task_id: &str) {
+    let evidence_dir = store
+        .artifact_root()
+        .join("agent-task/executor-evidence")
+        .join(run_id)
+        .join(task_id);
+    std::fs::create_dir_all(&evidence_dir).expect("create evidence directory");
+    let outcome = crate::agent_task::AgentTaskOutcome {
+        task_id: task_id.to_string(),
+        status: crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable,
+        ..Default::default()
+    };
+    std::fs::write(
+        evidence_dir.join("executor-result.json"),
+        serde_json::to_string(&outcome).expect("encode executor outcome"),
+    )
+    .expect("persist executor outcome");
+}
+
+/// Timed-out Cook whose selected attempt is `gate_failed` and whose newer
+/// attempt only submitted. Cook ID and that exact attempt must share one
+/// promotion source and the attempt's event history.
+fn seed_timeout_gate_failed_cook(
+    cook_id: &str,
+    with_executor_evidence: bool,
+) -> (String, String, tempfile::TempDir) {
+    let temp = tempfile::tempdir().expect("candidate artifacts");
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    let attempt_id = format!("{cook_id}-attempt-1-timeout");
+    let latest_id = format!("{cook_id}-attempt-2-submitted");
+    options.identity.initial_run_id = attempt_id.clone();
+    options.retry_policy.max_attempts = 2;
+    let plan = options.identity.initial_plan.clone();
+    let lifecycle_store = test_lifecycle_store();
+    super::super::persist_initial_recipe(&options).expect("persist recipe");
+    for run_id in [attempt_id.as_str(), latest_id.as_str()] {
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(serde_json::json!({})))
+            .expect("persist attempt");
+    }
+    super::super::record_recipe_attempt(cook_id, 2, &latest_id, &plan)
+        .expect("persist later recipe attempt");
+    seed_substantive_candidate_aggregate(
+        &attempt_id,
+        &plan,
+        &temp.path().join("candidate.patch"),
+        "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+    );
+    let mut aggregate = lifecycle_store
+        .read_aggregate(&attempt_id)
+        .expect("seeded aggregate");
+    aggregate.status = crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable;
+    aggregate.totals.succeeded = 0;
+    aggregate.totals.candidate_recoverable = 1;
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
+    aggregate.events = vec![
+        crate::agent_task_scheduler::AgentTaskProgressEvent {
+            task_id: "provider".to_string(),
+            state: AgentTaskState::TimedOut,
+            attempt: 1,
+            message: Some("provider timed out".to_string()),
+        },
+        crate::agent_task_scheduler::AgentTaskProgressEvent {
+            task_id: "provider".to_string(),
+            state: AgentTaskState::CandidateRecoverable,
+            attempt: 1,
+            message: Some("candidate recoverable".to_string()),
+        },
+    ];
+    agent_task_lifecycle::record_run_aggregate(&attempt_id, &plan, &aggregate)
+        .expect("record timeout events");
+    let mut gate_failed = promotion(&attempt_id);
+    gate_failed.source.task_id = "provider".to_string();
+    gate_failed.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    gate_failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+    gate_failed.deterministic_gates[0].exit_code = 1;
+    agent_task_lifecycle::record_promotion(
+        &attempt_id,
+        serde_json::to_value(&gate_failed).expect("serialize gate failure"),
+    )
+    .expect("persist gate failure");
+    agent_task_lifecycle::rewrite_record_for_test(&attempt_id, |record| {
+        record.state = AgentTaskRunState::PartialRecoverable;
+        record.tasks[0].state = AgentTaskState::CandidateRecoverable;
+    })
+    .expect("retain partial recoverable terminal state");
+    for (attempt, run_id) in [(1, attempt_id.as_str()), (2, latest_id.as_str())] {
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &lifecycle_store,
+            cook_id,
+            attempt,
+            run_id,
+        )
+        .expect("index attempt");
+    }
+    std::fs::remove_file(lifecycle_store.aggregate_path(&attempt_id)).expect("drop aggregate file");
+    clear_mirrored_aggregate(&lifecycle_store, &attempt_id);
+    if with_executor_evidence {
+        write_executor_outcome(&lifecycle_store, &attempt_id, "provider");
+    }
+    (attempt_id, latest_id, temp)
+}
+
+#[test]
+fn cook_id_and_exact_attempt_share_timeout_gate_failed_promotion_and_logs() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-timeout-gate-failed";
+        let (attempt_id, latest_id, _patch_dir) = seed_timeout_gate_failed_cook(cook_id, true);
+        let latest_states = event_states(&latest_id);
+        assert_eq!(latest_states, vec!["queued".to_string()]);
+        assert!(latest_states.iter().all(|state| state != "timed_out"));
+
+        let cook_states = event_states(cook_id);
+        let attempt_states = event_states(&attempt_id);
+        assert_eq!(cook_states, attempt_states);
+        assert!(cook_states.iter().any(|state| state == "timed_out"));
+        assert!(cook_states
+            .iter()
+            .any(|state| state == "candidate_recoverable"));
+
+        let (cook_source, _) =
+            super::super::promotion_source(cook_id).expect("cook id reconstructs promotion");
+        let (attempt_source, _) = super::super::promotion_source(&attempt_id)
+            .expect("exact attempt reconstructs promotion");
+        let cook_aggregate: crate::agent_task_scheduler::AgentTaskAggregate =
+            serde_json::from_str(&cook_source).expect("cook aggregate");
+        let attempt_aggregate: crate::agent_task_scheduler::AgentTaskAggregate =
+            serde_json::from_str(&attempt_source).expect("attempt aggregate");
+        assert_eq!(cook_aggregate.plan_id, attempt_aggregate.plan_id);
+        assert_eq!(cook_aggregate.outcomes, attempt_aggregate.outcomes);
+
+        let guidance = super::super::promotion_replay_guidance(cook_id);
+        let attempt_guidance = super::super::promotion_replay_guidance(&attempt_id);
+        assert_eq!(guidance["available"], true);
+        assert_eq!(guidance["run_id"], attempt_id);
+        assert_eq!(attempt_guidance["available"], true);
+        assert_eq!(attempt_guidance["run_id"], guidance["run_id"]);
+        assert_eq!(attempt_guidance["command"], guidance["command"]);
+        assert_eq!(attempt_guidance["candidate"], guidance["candidate"]);
+        assert_eq!(attempt_guidance["gates"], guidance["gates"]);
+        let command = guidance["command"].as_str().expect("replayable command");
+        assert!(command.contains(&attempt_id));
+        assert!(command.contains("--gates-from-cook-recipe"));
+        assert!(command.contains("--dry-run"));
+        assert_eq!(guidance["gates"][0]["id"], "gate");
+        assert_eq!(guidance["candidate"]["status"], "gate_failed");
+    });
+}
+
+#[test]
+fn cook_id_promotion_reports_missing_aggregate_transport_and_preserves_gate_evidence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-timeout-gate-failed-unavailable";
+        let (attempt_id, _, _patch_dir) = seed_timeout_gate_failed_cook(cook_id, false);
+
+        let cook_error =
+            super::super::promotion_source(cook_id).expect_err("cook id must fail closed");
+        let attempt_error = super::super::promotion_source(&attempt_id)
+            .expect_err("exact attempt must fail the same way");
+
+        for error in [&cook_error, &attempt_error] {
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(
+                error.message.contains("agent_task_aggregate"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.contains("aggregate.json"),
+                "{}",
+                error.message
+            );
+            assert!(
+                error.message.contains("observation_mirror"),
+                "{}",
+                error.message
+            );
+            assert_eq!(error.details["run_id"], attempt_id);
+            assert_eq!(error.details["aggregate_key"], "agent_task_aggregate");
+            assert_eq!(error.details["candidate"]["status"], "gate_failed");
+            assert_eq!(error.details["gates"][0]["id"], "gate");
+            assert_eq!(error.details["gates"][0]["status"], "failed");
+            assert!(error.details["remediation"]
+                .as_str()
+                .is_some_and(|value| value.contains("agent_task_aggregate")));
+        }
+        assert_eq!(cook_error.message, attempt_error.message);
+    });
+}
+
 #[test]
 fn cook_alias_continuation_starts_from_failed_gate_feedback_attempt() {
     homeboy_core::test_support::with_isolated_home(|_| {

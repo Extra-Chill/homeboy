@@ -63,14 +63,25 @@ pub enum UpgradeCommand {
         /// Operation id from a previous `homeboy upgrade`. Defaults to the latest upgrade run.
         id: Option<String>,
     },
+    /// Resume an admitted upgrade from its detached worker process.
+    #[command(hide = true)]
+    Continue { id: String },
 }
 
 pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
-    if let Some(UpgradeCommand::Status { id }) = args.command {
+    if let Some(UpgradeCommand::Status { id }) = args.command.as_ref() {
         let result = upgrade::load_upgrade_operation_status(id.as_deref())?;
         let json = serde_json::to_value(result)
             .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
         return Ok((json, 0));
+    }
+
+    if let Some(UpgradeCommand::Continue { id }) = args.command.as_ref() {
+        upgrade::continue_detached_upgrade(&id)?;
+        return Ok((
+            serde_json::json!({ "operation_id": id, "status": "completed" }),
+            0,
+        ));
     }
 
     if args.check {
@@ -105,6 +116,29 @@ pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
             }
         })
         .transpose()?;
+
+    if !args.runner_only && args.skip_extensions && args.skip_runners && args.source_path.is_none()
+    {
+        let method = method_override.unwrap_or_else(|| {
+            if args.pin_version.is_some() {
+                upgrade::InstallMethod::Binary
+            } else {
+                upgrade::detect_install_method()
+            }
+        });
+        if matches!(
+            method,
+            upgrade::InstallMethod::Binary | upgrade::InstallMethod::Secondary
+        ) {
+            let admission = upgrade::start_detached_upgrade(
+                args.force,
+                method,
+                args.pin_version.as_deref(),
+                args.no_restart_services,
+            )?;
+            return Ok((admission, 0));
+        }
+    }
 
     let result = upgrade::run_upgrade_with_method(
         args.force,

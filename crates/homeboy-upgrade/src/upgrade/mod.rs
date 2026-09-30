@@ -1,5 +1,6 @@
 mod admission;
 mod constants;
+mod detached;
 mod execution;
 pub mod extension_update_check;
 mod helpers;
@@ -18,6 +19,7 @@ pub use admission::{
     ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
     VerifiedTargetUpgrade,
 };
+pub use detached::{continue_detached_upgrade, start_detached_upgrade};
 pub use execution::{controller_source_checkout, parse_build_identity_display};
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,

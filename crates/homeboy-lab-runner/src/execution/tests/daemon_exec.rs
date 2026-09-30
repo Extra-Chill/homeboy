@@ -661,12 +661,11 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         .expect("job id")
         .to_string();
     let job = wait_for_job(&store, &job_id);
-    let errors: Vec<_> = store
-        .events(job.id)
-        .expect("job events")
-        .into_iter()
+    let events = store.events(job.id).expect("events");
+    let errors: Vec<_> = events
+        .iter()
         .filter(|event| event.kind == JobEventKind::Error)
-        .filter_map(|event| event.message)
+        .filter_map(|event| event.message.as_ref())
         .map(|message| message.replace("runner-secret", "[REDACTED]"))
         .collect();
     assert_eq!(
@@ -675,9 +674,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         "daemon errors: {errors:?}"
     );
 
-    let result = store
-        .events(job.id)
-        .expect("events")
+    let result = events
         .into_iter()
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data)
@@ -738,12 +735,28 @@ fn exec_failed_command_marks_job_failed_after_result_event() {
     let job = wait_for_job(&store, &job_id);
     assert_eq!(job.status, JobStatus::Failed);
 
-    let events = store.events(job.id).expect("events");
+    // The terminal job status can become visible before the event stream does.
+    // Wait for both records, but still fail if the Result never arrives.
+    let mut events = store.events(job.id).expect("events");
+    for _ in 0..1500 {
+        let has_result = events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Result);
+        let has_failed_status = events.iter().any(|event| {
+            event.kind == JobEventKind::Status
+                && event.data.as_ref().and_then(|data| data["status"].as_str()) == Some("failed")
+        });
+        if has_result && has_failed_status {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        events = store.events(job.id).expect("events");
+    }
     let result = events
         .iter()
         .find(|event| event.kind == JobEventKind::Result)
         .and_then(|event| event.data.as_ref())
-        .expect("result event");
+        .expect("result event after bounded wait");
     assert_eq!(result["exit_code"], 7);
     assert_eq!(result["stdout"], "out");
     assert_eq!(result["stderr"], "err");
