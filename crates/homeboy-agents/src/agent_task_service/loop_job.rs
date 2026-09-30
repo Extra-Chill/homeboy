@@ -132,8 +132,10 @@ impl AgentTaskLoopJob {
     }
 
     fn refresh_controller_state(&mut self) -> bool {
-        let Ok(record) = agent_task_loop_controller::controller_status(&self.request.loop_id)
-        else {
+        // The work supervision reads the durable record without side effects.
+        // Waiting advancement is the explicit reconcile in `LoopWorkHandler::
+        // advance_waiting`, never a hidden refresh inside a status-shaped read.
+        let Ok(record) = agent_task_loop_controller::load_controller(&self.request.loop_id) else {
             return false;
         };
         let changed = self.controller_state != Some(record.state);
@@ -214,7 +216,7 @@ impl WorkJobHandler for LoopWorkHandler {
         let job = AgentTaskLoopJob::parse(checkpoint.clone())?;
         if job.phase != WorkJobPhase::Completed
             && !controller_state_is_terminal(
-                agent_task_loop_controller::controller_status(&job.request.loop_id)?.state,
+                agent_task_loop_controller::load_controller(&job.request.loop_id)?.state,
             )
         {
             agent_task_loop_controller::cancel_owned_provider_runs(
@@ -227,6 +229,48 @@ impl WorkJobHandler for LoopWorkHandler {
 }
 
 impl LoopWorkHandler {
+    /// Advance a `Waiting` loop from durable evidence, on the supervision
+    /// cadence. This is the one automatic driver `Waiting` has: it reuses the
+    /// controller service's single wait-reconcile primitive — durable
+    /// child/run terminal evidence satisfies a wait, a declared `timeout_at`
+    /// expires it, and a controller with nothing left to wait for becomes
+    /// runnable again — so child terminalization and deadline expiry advance
+    /// the loop without any CLI status, resume, or apply-event side effect.
+    fn advance_waiting(&self, job: &mut AgentTaskLoopJob) -> Result<()> {
+        if job.controller_state != Some(AgentTaskLoopControllerState::Waiting) {
+            return Ok(());
+        }
+        let mut record = agent_task_loop_controller::load_controller(&job.request.loop_id)?;
+        let before_state = record.state;
+        let outcome = crate::agent_task_controller_service::reconcile_open_waits(&mut record)?;
+        if !outcome.changed() {
+            return Ok(());
+        }
+        record.touch();
+        agent_task_loop_controller::write_controller(&record)?;
+        crate::agent_task_controller_service::emit_wait_reconcile_notifications(
+            &record,
+            before_state,
+            &outcome,
+        );
+        job.refresh_controller_state();
+        Ok(())
+    }
+
+    /// A `Waiting` controller with no open wait and no open action is parked:
+    /// nothing durable will ever wake it, so supervision completes instead of
+    /// polling forever.
+    fn waiting_is_idle(&self, job: &AgentTaskLoopJob) -> bool {
+        agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(|record| {
+            record.state == AgentTaskLoopControllerState::Waiting
+                && record.open_wait_count() == 0
+                && record
+                    .next_actions
+                    .iter()
+                    .all(|action| !action.status.is_open())
+        })
+    }
+
     fn observe(
         &self,
         job: &mut AgentTaskLoopJob,
@@ -234,17 +278,8 @@ impl LoopWorkHandler {
     ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
-        if job.controller_state == Some(AgentTaskLoopControllerState::Waiting)
-            && agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(
-                |record| {
-                    record.open_wait_count() == 0
-                        && record
-                            .next_actions
-                            .iter()
-                            .all(|action| !action.status.is_open())
-                },
-            )
-        {
+        self.advance_waiting(job)?;
+        if self.waiting_is_idle(job) {
             job.phase = WorkJobPhase::Completed;
             return Ok(WorkJobStep::Complete(job.result()));
         }
@@ -358,17 +393,7 @@ impl LoopWorkHandler {
             job.controller_state = Some(AgentTaskLoopControllerState::Failed);
             return Ok(WorkJobStep::Complete(job.result()));
         }
-        if job.controller_state == Some(AgentTaskLoopControllerState::Waiting)
-            && agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(
-                |record| {
-                    record.open_wait_count() == 0
-                        && record
-                            .next_actions
-                            .iter()
-                            .all(|action| !action.status.is_open())
-                },
-            )
-        {
+        if self.waiting_is_idle(job) {
             job.phase = WorkJobPhase::Completed;
             return Ok(WorkJobStep::Complete(job.result()));
         }

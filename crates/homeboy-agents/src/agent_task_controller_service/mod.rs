@@ -651,7 +651,7 @@ const ESCALATE_ON_TIMEOUT_POLICY: &str = "escalate";
 
 /// What one open-wait reconcile pass did to a controller.
 #[derive(Debug, Clone, Default)]
-pub struct WaitReconcileOutcome {
+pub(crate) struct WaitReconcileOutcome {
     /// Wait keys satisfied by durable evidence.
     pub resolved: Vec<String>,
     /// Wait keys whose declared `timeout_at` had passed.
@@ -670,6 +670,12 @@ impl WaitReconcileOutcome {
 
 /// Resolve open waits from durable run and controller state, and expire waits
 /// whose declared deadline has passed.
+///
+/// The loop `WorkJobDriver` supervision calls this on its own cadence; manual
+/// `resume` paths call it through [`reconcile_waiting_runner_actions`]. There
+/// is deliberately no daemon-wide sweep behind it: a `Waiting` controller is
+/// owned by its supervising work job, and a stopped loop must not advance on
+/// its own.
 ///
 /// # Evidence accepted
 ///
@@ -706,7 +712,7 @@ impl WaitReconcileOutcome {
 /// the same class of error as guessing evidence, and it would silently unblock
 /// long-running waits that are working correctly. An unparseable `timeout_at`
 /// never expires a wait — a malformed timestamp must not become a deadline.
-fn reconcile_open_waits(
+pub(crate) fn reconcile_open_waits(
     record: &mut AgentTaskLoopControllerRecord,
 ) -> Result<WaitReconcileOutcome> {
     let now = chrono::Utc::now();
@@ -882,134 +888,13 @@ fn wait_deadline_passed(
         .unwrap_or(false)
 }
 
-/// Schema for the controller wait-reconcile report.
-pub const WAIT_RECONCILE_RESULT_SCHEMA: &str = "homeboy/agent-task-controller-wait-reconcile/v1";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ControllerWaitReconcileEntry {
-    pub loop_id: String,
-    pub before_state: AgentTaskLoopControllerState,
-    pub after_state: AgentTaskLoopControllerState,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub resolved_waits: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub timed_out_waits: Vec<String>,
-    pub open_waits: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ControllerWaitReconcileReport {
-    pub schema: &'static str,
-    pub considered: usize,
-    pub changed: usize,
-    pub failed: usize,
-    pub controllers: Vec<ControllerWaitReconcileEntry>,
-}
-
-/// Sweep every durable controller with open waits and resolve what durable
-/// state already satisfies.
-///
-/// This is the automatic driver `Waiting` never had. `resume` stops at `idle`
-/// for a controller whose only remaining work is a wait, and nothing polled,
-/// subscribed, or timed out — so a controller that dispatched a cook sat there
-/// indefinitely even after that cook terminalized, until a human ran
-/// `apply-event`.
-///
-/// Every controller is reconciled independently: one unreadable or
-/// unwriteable record is recorded against its own entry and never aborts the
-/// sweep.
-pub fn reconcile_waiting_controllers() -> Result<ControllerWaitReconcileReport> {
-    let records = controller::list_controllers()?;
-    let mut entries = Vec::new();
-    let mut changed = 0usize;
-    let mut failed = 0usize;
-
-    for mut record in records {
-        if record.open_wait_count() == 0 {
-            continue;
-        }
-        let loop_id = record.loop_id.clone();
-        let before_state = record.state;
-        // Optimistic-concurrency token. Controller records have no locking, so
-        // a background writer on a timer could clobber an operator's `resume`
-        // that landed while this pass was reading. `reconcile_open_waits` does
-        // not touch `updated_at`, which makes the loaded value a usable
-        // version marker for a re-check immediately before the write.
-        let observed_at = record.updated_at.clone();
-        let outcome = match reconcile_open_waits(&mut record) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                failed += 1;
-                entries.push(ControllerWaitReconcileEntry {
-                    loop_id,
-                    before_state,
-                    after_state: before_state,
-                    resolved_waits: Vec::new(),
-                    timed_out_waits: Vec::new(),
-                    open_waits: 0,
-                    error: Some(error.message),
-                });
-                continue;
-            }
-        };
-        if !outcome.changed() {
-            continue;
-        }
-        // Somebody else advanced this controller while the pass ran. Their
-        // write is newer and is based on state this pass never saw; drop this
-        // one and let the next tick re-derive from the record they left.
-        // Reconciliation is idempotent, so losing a pass costs one interval.
-        if controller::load_controller(&loop_id)
-            .map(|current| current.updated_at != observed_at)
-            .unwrap_or(true)
-        {
-            continue;
-        }
-        record.touch();
-        if let Err(error) = controller::write_controller(&record) {
-            failed += 1;
-            entries.push(ControllerWaitReconcileEntry {
-                loop_id,
-                before_state,
-                after_state: before_state,
-                resolved_waits: outcome.resolved,
-                timed_out_waits: outcome.timed_out,
-                open_waits: outcome.open_waits,
-                error: Some(error.message),
-            });
-            continue;
-        }
-        changed += 1;
-        emit_wait_reconcile_notifications(&record, before_state, &outcome);
-        entries.push(ControllerWaitReconcileEntry {
-            loop_id,
-            before_state,
-            after_state: record.state,
-            resolved_waits: outcome.resolved,
-            timed_out_waits: outcome.timed_out,
-            open_waits: outcome.open_waits,
-            error: None,
-        });
-    }
-
-    Ok(ControllerWaitReconcileReport {
-        schema: WAIT_RECONCILE_RESULT_SCHEMA,
-        considered: entries.len(),
-        changed,
-        failed,
-        controllers: entries,
-    })
-}
-
-/// Announce what the sweep changed.
+/// Announce what one open-wait reconcile pass changed.
 ///
 /// Only emitted when the pass actually moved something. A controller that is
-/// still waiting on the same events it was waiting on last minute is not news,
-/// and a sweep that announced it every tick would be a heartbeat — exactly the
+/// still waiting on the same events it was waiting on last tick is not news,
+/// and announcing it every supervision poll would be a heartbeat — exactly the
 /// noise the cook emitters were kept sparse to avoid.
-fn emit_wait_reconcile_notifications(
+pub(crate) fn emit_wait_reconcile_notifications(
     record: &AgentTaskLoopControllerRecord,
     before_state: AgentTaskLoopControllerState,
     outcome: &WaitReconcileOutcome,
