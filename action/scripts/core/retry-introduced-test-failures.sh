@@ -149,7 +149,7 @@ run_single_test() {
   test_name="${BASH_REMATCH[4]}"
   case "${mode}" in
     nextest)
-      if (cd "${workspace}" && cargo nextest run -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
+      if (cd "${workspace}" && cargo nextest run -p "${package}" -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
         grep -Eq '1 tests? run: 1 passed' "${log}" && ok=0
       fi
       ;;
