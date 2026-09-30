@@ -867,6 +867,21 @@ impl LifecycleStoreLookup {
         Self { store }
     }
 
+    /// Construct an observation for this exact row, without resolving Cook aliases.
+    fn snapshot(&self, record: AgentTaskRunRecord) -> Result<RunSnapshot, ControlPlaneError> {
+        let record = crate::agent_task_service::project_cook_observation(&self.store, &record);
+        let plan = self.plan(&record.run_id)?;
+        Ok(RunSnapshot { record, plan })
+    }
+
+    fn exact(&self, run_id: &str) -> Result<RunSnapshot, ControlPlaneError> {
+        self.snapshot(
+            self.store
+                .read_record_bounded(run_id)
+                .map_err(map_lifecycle_error)?,
+        )
+    }
+
     fn plan(&self, run_id: &str) -> Result<Option<AgentTaskPlan>, ControlPlaneError> {
         match self.store.read_controller_plan(run_id) {
             Ok(plan) => Ok(Some(plan)),
@@ -885,14 +900,17 @@ impl LifecycleStoreLookup {
 
 impl RunLookup for LifecycleStoreLookup {
     fn get(&self, id: &RunId) -> Result<Option<RunSnapshot>, ControlPlaneError> {
-        let record =
-            match crate::agent_task_service::cook_observation_in_store(&self.store, id.as_str()) {
-                Ok(record) => record,
-                Err(error) if is_run_not_found(&error) => return Ok(None),
-                Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
-            };
-        let plan = self.plan(&record.run_id)?;
-        Ok(Some(RunSnapshot { record, plan }))
+        let record = match crate::agent_task_lifecycle::resolve_cook_reader_run_id_in_store(
+            &self.store,
+            id.as_str(),
+        )
+        .and_then(|subject| self.store.read_record_bounded(&subject))
+        {
+            Ok(record) => record,
+            Err(error) if is_run_not_found(&error) => return Ok(None),
+            Err(error) => return Err(ControlPlaneError::unavailable(error.message)),
+        };
+        self.snapshot(record).map(Some)
     }
 }
 
@@ -916,10 +934,7 @@ impl RunListLookup for LifecycleStoreLookup {
         .map_err(map_lifecycle_error)?;
         let snapshots = records
             .into_iter()
-            .map(|record| {
-                let plan = self.plan(&record.run_id)?;
-                Ok(RunSnapshot { record, plan })
-            })
+            .map(|record| self.snapshot(record))
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
         Ok(RunSnapshotPage {
             snapshots,
@@ -5058,12 +5073,10 @@ pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<
     let requested_id = parse_run_id(run_id)?;
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     let record = store.read_record_bounded(requested_id.as_str())?;
-    let record = crate::agent_task_service::project_cook_observation(&store, &record);
-    let lookup = LifecycleStoreLookup::new(store);
-    let plan = lookup
-        .plan(&record.run_id)
+    let snapshot = LifecycleStoreLookup::new(store)
+        .snapshot(record)
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
-    project_record(&record, plan.as_ref())
+    project_record(&snapshot.record, snapshot.plan.as_ref())
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))
 }
 
@@ -6803,11 +6816,7 @@ impl ControlPlaneProvider for RegisteredProvider {
             .iter()
             .map(|record| {
                 if record.kind == "agent-task" {
-                    let run = RunId::new(&record.id)
-                        .map_err(|error| ControlPlaneError::invalid_argument(error.to_string()))?;
-                    let snapshot = lookup.get(&run)?.ok_or_else(|| {
-                        ControlPlaneError::not_found(format!("run not found: {run}"))
-                    })?;
+                    let snapshot = lookup.exact(&record.id)?;
                     project_record(&snapshot.record, snapshot.plan.as_ref())
                 } else {
                     generic_observation_run(&observation, record)
