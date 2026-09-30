@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 
 use super::git;
 use crate::workspace::git::{
-    git_bundle_install_command, git_snapshot, materialize_git_command, ref_has_missing_objects,
+    git_bundle_install_command, git_snapshot, hydrate_controller_bundle_objects,
+    materialize_git_command, ref_has_missing_objects,
 };
 use crate::workspace::sync::{list_workspaces, sync_workspace};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
@@ -1002,4 +1003,111 @@ fn dirty_changed_since_git_sync_explains_snapshot_is_unavailable() {
         .join("\n");
     assert!(hint_text.contains("--placement local"));
     assert!(hint_text.contains("Omit --changed-since"));
+}
+
+fn pack_count(repo: &Path) -> usize {
+    fs::read_dir(repo.join(".git/objects/pack"))
+        .expect("pack dir")
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+        .count()
+}
+
+#[test]
+fn promisor_bundle_hydration_fetches_missing_blobs_in_one_batch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(
+            origin.path(),
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        const FILES: usize = 40;
+        for index in 0..FILES {
+            fs::write(
+                author.path().join(format!("file-{index}.txt")),
+                format!("content {index}\n"),
+            )
+            .expect("write file");
+        }
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "many blobs"]);
+        git(
+            author.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        git(author.path(), &["push", "origin", "main"]);
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--no-checkout",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        // Keep Git's own auto-maintenance out of the pack count.
+        git(source.path(), &["config", "gc.auto", "0"]);
+        git(source.path(), &["config", "maintenance.auto", "false"]);
+        assert!(
+            ref_has_missing_objects(source.path(), "HEAD").expect("probe"),
+            "the fixture must start with promised blobs missing"
+        );
+        let packs_before = pack_count(source.path());
+
+        hydrate_controller_bundle_objects(source.path(), &["HEAD".to_string()])
+            .expect("hydrate promisor closure");
+
+        assert!(
+            !ref_has_missing_objects(source.path(), "HEAD").expect("probe"),
+            "every promised object must be present after hydration"
+        );
+        let added = pack_count(source.path()) - packs_before;
+        assert!(
+            added <= 1,
+            "hydrating {FILES} missing blobs must fetch them in one batch, not one pack per blob (added {added} packs)"
+        );
+    });
+}
+
+#[test]
+fn promisor_bundle_hydration_is_a_no_op_when_the_closure_is_complete() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        git(origin.path(), &["init", "-b", "main"]);
+        git(origin.path(), &["config", "user.email", "test@example.com"]);
+        git(origin.path(), &["config", "user.name", "Test User"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        fs::write(origin.path().join("a.txt"), "a\n").expect("write");
+        git(origin.path(), &["add", "."]);
+        git(origin.path(), &["commit", "-m", "one"]);
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        let packs_before = pack_count(source.path());
+
+        hydrate_controller_bundle_objects(source.path(), &["HEAD".to_string()])
+            .expect("hydrate complete closure");
+
+        assert_eq!(pack_count(source.path()), packs_before);
+    });
 }
