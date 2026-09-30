@@ -71,7 +71,7 @@ matter when the workflow needs environment context.
   - **`enabled`** (boolean): Whether API client is enabled
   - **`proxy_url`** (string): Optional HTTP/SOCKS proxy URL for API requests, e.g. `socks5://127.0.0.1:8080`
   - **`auth`** (object): Optional API auth configuration with a header template and variables sourced from `keychain`, `env`, or `config`
-  - API POST/PUT/PATCH calls can send form data with `homeboy api post <project> <endpoint> --form key=value`.
+  - API POST/PUT/PATCH calls can send form data with `homeboy api request POST <project> <endpoint> --apply --form key=value`.
 - **`database`** (object): Database connection settings
   - **`host`** (string): Database host
   - **`port`** (number): Database port (default: 3306)

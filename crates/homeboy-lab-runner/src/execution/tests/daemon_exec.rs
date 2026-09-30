@@ -662,14 +662,16 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
         .to_string();
     let job = wait_for_job(&store, &job_id);
     let events = store.events(job.id).expect("events");
+    let errors: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == JobEventKind::Error)
+        .filter_map(|event| event.message.as_ref())
+        .map(|message| message.replace("runner-secret", "[REDACTED]"))
+        .collect();
     assert_eq!(
         job.status,
         JobStatus::Succeeded,
-        "terminal events: {:?}",
-        events
-            .iter()
-            .filter(|event| matches!(event.kind, JobEventKind::Result | JobEventKind::Error))
-            .collect::<Vec<_>>()
+        "daemon errors: {errors:?}"
     );
 
     let result = events

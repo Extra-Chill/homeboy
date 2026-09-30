@@ -14,43 +14,13 @@ Project API requests use the project’s API configuration (`projects/<project_i
 
 ## Subcommands
 
-### `get`
+### `request`
 
 ```sh
-homeboy api get <project_id> <endpoint>
+homeboy api request <method> <project_id> <endpoint> [--apply] [--body <json>] [--form <key=value>]...
 ```
 
-### `post`
-
-```sh
-homeboy api post <project_id> <endpoint> --apply [--body <json>] [--form <key=value>]...
-```
-
-Mutating requests require `--apply`.
-
-### `put`
-
-```sh
-homeboy api put <project_id> <endpoint> --apply [--body <json>] [--form <key=value>]...
-```
-
-Mutating requests require `--apply`.
-
-### `patch`
-
-```sh
-homeboy api patch <project_id> <endpoint> --apply [--body <json>] [--form <key=value>]...
-```
-
-Mutating requests require `--apply`.
-
-### `delete`
-
-```sh
-homeboy api delete <project_id> <endpoint> --apply
-```
-
-Mutating requests require `--apply`.
+`<method>` is one of `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. Mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) require `--apply`; `GET` does not.
 
 ## Notes
 
@@ -58,9 +28,9 @@ Mutating requests require `--apply`.
 - `http get|request` makes generic HTTP requests to full URLs. Mutating `request` methods require `--apply`; `GET`, `HEAD`, and `OPTIONS` do not.
 - `<endpoint>` is passed through as provided (example: `/wp/v2/posts`).
 - `--body` is parsed as JSON. If parsing fails, the request is sent with `body: null`.
-- `--form key=value` may be repeated for `post`, `put`, and `patch`; form fields take precedence over `--body`.
+- `--form key=value` may be repeated for `POST`, `PUT`, and `PATCH` requests; form fields take precedence over `--body`.
 - If `--body` and `--form` are omitted, `body` is `null`.
-- `get` is allowed without `--apply`; `post`, `put`, `patch`, and `delete` require `--apply` before Homeboy sends the request.
+- `GET` is allowed without `--apply`; `POST`, `PUT`, `PATCH`, and `DELETE` require `--apply` before Homeboy sends the request.
 
 ## Output
 
@@ -70,6 +40,14 @@ JSON output is wrapped in the global envelope. `data` is the `homeboy::api::ApiO
 
 - [project](project.md)
 - [JSON output contract](../architecture/output-system.md)
+
+## Project API Examples
+
+```sh
+homeboy api request GET myproject /wp/v2/posts
+homeboy api request POST myproject /wp/v2/posts --apply --body '{"title": "New Post"}'
+homeboy api request POST myproject /wp/v2/posts --apply --form title=Hello --form status=draft
+```
 
 ## Auth Examples
 

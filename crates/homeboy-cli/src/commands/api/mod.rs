@@ -19,19 +19,14 @@ pub(crate) enum ApiCommand {
     Auth(auth::AuthArgs),
     /// Make generic HTTP requests to full URLs
     Http(http::HttpArgs),
-    /// Make a GET request
-    Get {
+    /// Make a request to a project's configured API
+    Request {
+        /// HTTP method (GET, POST, PUT, PATCH, DELETE)
+        method: String,
         /// Project ID
         project_id: String,
         /// API endpoint (e.g., /wp/v2/posts)
         endpoint: String,
-    },
-    /// Make a POST request
-    Post {
-        /// Project ID
-        project_id: String,
-        /// API endpoint
-        endpoint: String,
         // Confirm the mutating request should be sent. Shared plan-default
         // mutation group (#11139) — `--apply` sends, bare plans.
         #[command(flatten)]
@@ -42,51 +37,6 @@ pub(crate) enum ApiCommand {
         /// Form field as key=value. May be repeated.
         #[arg(long)]
         form: Vec<String>,
-    },
-    /// Make a PUT request
-    Put {
-        /// Project ID
-        project_id: String,
-        /// API endpoint
-        endpoint: String,
-        // Confirm the mutating request should be sent. Shared plan-default
-        // mutation group (#11139) — `--apply` sends, bare plans.
-        #[command(flatten)]
-        mutation: MutationArgs,
-        /// JSON body
-        #[arg(long)]
-        body: Option<String>,
-        /// Form field as key=value. May be repeated.
-        #[arg(long)]
-        form: Vec<String>,
-    },
-    /// Make a PATCH request
-    Patch {
-        /// Project ID
-        project_id: String,
-        /// API endpoint
-        endpoint: String,
-        // Confirm the mutating request should be sent. Shared plan-default
-        // mutation group (#11139) — `--apply` sends, bare plans.
-        #[command(flatten)]
-        mutation: MutationArgs,
-        /// JSON body
-        #[arg(long)]
-        body: Option<String>,
-        /// Form field as key=value. May be repeated.
-        #[arg(long)]
-        form: Vec<String>,
-    },
-    /// Make a DELETE request
-    Delete {
-        /// Project ID
-        project_id: String,
-        /// API endpoint
-        endpoint: String,
-        // Confirm the mutating request should be sent. Shared plan-default
-        // mutation group (#11139) — `--apply` sends, bare plans.
-        #[command(flatten)]
-        mutation: MutationArgs,
     },
 }
 
@@ -104,7 +54,7 @@ pub fn run(args: ApiArgs) -> CmdResult<ApiCommandOutput> {
             ApiCommandOutput::Auth(Box::new(output))
         }),
         ApiCommand::Http(args) => map_nested(http::run(args), ApiCommandOutput::Http),
-        command => run_project(ApiArgs { command })
+        ApiCommand::Request { .. } => run_project(&args.command)
             .map(|(output, code)| (ApiCommandOutput::Project(output), code)),
     }
 }
@@ -116,125 +66,69 @@ fn map_nested<T>(
     result.map(|(output, code)| (wrap(output), code))
 }
 
-fn run_project(args: ApiArgs) -> CmdResult<api::ApiOutput> {
-    require_apply_for_mutation(&args)?;
-    let input = build_api_json(&args);
+fn run_project(command: &ApiCommand) -> CmdResult<api::ApiOutput> {
+    require_apply_for_mutation(command)?;
+    let input = build_api_json(command);
     api::run(&input)
 }
 
-pub(crate) fn require_apply_for_mutation(args: &ApiArgs) -> homeboy::core::Result<()> {
-    let Some((command, endpoint, mutation)) = mutating_command(&args.command) else {
+pub(crate) fn require_apply_for_mutation(command: &ApiCommand) -> homeboy::core::Result<()> {
+    let ApiCommand::Request {
+        method,
+        project_id,
+        endpoint,
+        mutation,
+        ..
+    } = command
+    else {
+        // `auth` and `http` own their guards and route before project API
+        // input construction is reachable.
         return Ok(());
     };
 
-    if mutation.is_apply() {
+    if mutation.is_apply() || !is_mutating_method(method) {
         return Ok(());
     }
 
     Err(homeboy::core::Error::validation_invalid_argument(
         "apply",
         format!(
-            "homeboy api {command} sends a mutating request and requires explicit --apply. Suggested command: homeboy api {command} {} {} --apply",
-            project_id(&args.command).unwrap_or_default(), endpoint
+            "homeboy api request {method} sends a mutating request and requires explicit --apply. Suggested command: homeboy api request {method} {project_id} {endpoint} --apply"
         ),
         None,
         Some(vec![format!(
-            "homeboy api {command} {} {} --apply",
-            project_id(&args.command).unwrap_or_default(), endpoint
+            "homeboy api request {method} {project_id} {endpoint} --apply"
         )]),
     ))
 }
 
-fn mutating_command(command: &ApiCommand) -> Option<(&'static str, &str, &MutationArgs)> {
-    match command {
-        ApiCommand::Auth(_) | ApiCommand::Http(_) | ApiCommand::Get { .. } => None,
-        ApiCommand::Post {
-            endpoint, mutation, ..
-        } => Some(("post", endpoint, mutation)),
-        ApiCommand::Put {
-            endpoint, mutation, ..
-        } => Some(("put", endpoint, mutation)),
-        ApiCommand::Patch {
-            endpoint, mutation, ..
-        } => Some(("patch", endpoint, mutation)),
-        ApiCommand::Delete {
-            endpoint, mutation, ..
-        } => Some(("delete", endpoint, mutation)),
-    }
+/// Every project API method except `GET` mutates, including unknown methods:
+/// the guard fails closed so an unrecognized spelling can never bypass the
+/// `--apply` gate. The core `api` input remains the authoritative validator
+/// for the accepted method set.
+fn is_mutating_method(method: &str) -> bool {
+    !method.eq_ignore_ascii_case("GET")
 }
 
-fn project_id(command: &ApiCommand) -> Option<&str> {
-    match command {
-        ApiCommand::Get { project_id, .. }
-        | ApiCommand::Post { project_id, .. }
-        | ApiCommand::Put { project_id, .. }
-        | ApiCommand::Patch { project_id, .. }
-        | ApiCommand::Delete { project_id, .. } => Some(project_id),
-        ApiCommand::Auth(_) | ApiCommand::Http(_) => None,
-    }
-}
-
-fn build_api_json(args: &ApiArgs) -> String {
-    let (project_id, method, endpoint, body, body_format) = match &args.command {
-        ApiCommand::Get {
-            project_id,
-            endpoint,
-        } => (project_id, "GET", endpoint.clone(), None, "json"),
-        ApiCommand::Post {
-            project_id,
-            endpoint,
-            mutation: _,
-            body,
-            form,
-        } => (
-            project_id,
-            "POST",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
-        ApiCommand::Put {
-            project_id,
-            endpoint,
-            mutation: _,
-            body,
-            form,
-        } => (
-            project_id,
-            "PUT",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
-        ApiCommand::Patch {
-            project_id,
-            endpoint,
-            mutation: _,
-            body,
-            form,
-        } => (
-            project_id,
-            "PATCH",
-            endpoint.clone(),
-            build_body(body, form),
-            body_format(form),
-        ),
-        ApiCommand::Delete {
-            project_id,
-            endpoint,
-            mutation: _,
-        } => (project_id, "DELETE", endpoint.clone(), None, "json"),
-        ApiCommand::Auth(_) | ApiCommand::Http(_) => {
-            unreachable!("nested API commands are routed before project API input construction")
-        }
+fn build_api_json(command: &ApiCommand) -> String {
+    let ApiCommand::Request {
+        method,
+        project_id,
+        endpoint,
+        mutation: _,
+        body,
+        form,
+    } = command
+    else {
+        unreachable!("nested API commands are routed before project API input construction")
     };
 
     serde_json::json!({
         "projectId": project_id,
         "method": method,
         "endpoint": endpoint,
-        "body": body,
-        "bodyFormat": body_format,
+        "body": build_body(body, form),
+        "bodyFormat": body_format(form),
     })
     .to_string()
 }

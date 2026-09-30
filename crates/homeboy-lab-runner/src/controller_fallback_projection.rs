@@ -556,7 +556,6 @@ mod tests {
     use homeboy_core::api_jobs::{Job, JobStatus, RunnerJobLogSnapshot};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
-    use std::time::Instant;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -678,21 +677,25 @@ mod tests {
         let receipt = store
             .submit_detached(&mut runner, &envelope)
             .expect("admit deferred receipt");
-        let started = Instant::now();
+        let (finished_query, query_completion) = mpsc::channel();
 
         let projected = store
             .reconcile_after_controller_restart_with_timeout(
                 8,
                 Duration::from_millis(20),
-                |_, _| {
+                move |_, _| {
                     thread::sleep(Duration::from_secs(1));
+                    let _ = finished_query.send(());
                     Ok(snapshot(JobStatus::Succeeded))
                 },
                 |_, _| Ok(true),
             )
             .expect("bounded reconciliation");
 
-        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(
+            matches!(query_completion.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "startup reconciliation waited for the blocked runner query"
+        );
         assert!(projected.is_empty());
         assert_eq!(
             store
