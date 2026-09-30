@@ -249,6 +249,46 @@ pub fn cancel_claimed_detached_cook_in_store(
 // remaining caller was a cancellation test, which now cancels inside the store
 // it resolves (#7505).
 
+/// Restore a nonterminal projection from its immutable cancellation receipt.
+/// The receipt belongs to this exact run, so a pruned runner job does not require
+/// another transport cancellation. Existing terminal results are left intact.
+pub fn reconcile_canonical_cancellation_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    let record = lifecycle_store.read_record(run_id)?;
+    if record.state.is_terminal() {
+        return Ok(false);
+    }
+    let Some(provenance) = canonical_cancellation_provenance_in_store(lifecycle_store, run_id)?
+    else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    lifecycle_store.mutate_record(run_id, |record| {
+        if record.state.is_terminal() {
+            return false;
+        }
+        let cancelled_at = provenance["timestamp"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(now_timestamp);
+        set_run_state(record, AgentTaskRunState::Cancelled);
+        for task in &mut record.tasks {
+            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                task.state = AgentTaskState::Cancelled;
+            }
+        }
+        let metadata = record.ensure_metadata_object();
+        terminalize_running_provider_executions(metadata, &cancelled_at);
+        metadata.insert("cancellation_provenance".to_string(), provenance.clone());
+        metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+        changed = true;
+        true
+    })?;
+    Ok(changed)
+}
+
 /// Cancel one literal run through an explicitly selected lifecycle store.
 ///
 /// Reserved handoff reconciliation needs exact-record semantics, but must not

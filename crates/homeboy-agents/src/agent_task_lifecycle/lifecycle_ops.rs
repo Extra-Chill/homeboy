@@ -5923,6 +5923,10 @@ pub fn reconcile_status_in_store(
     } else {
         resolve_run_id_in_store(lifecycle_store, run_id)?
     };
+    super::cancellation::reconcile_canonical_cancellation_in_store(
+        lifecycle_store,
+        &resolved_run_id,
+    )?;
     let _ = reconcile_deferred_candidate_in_store(lifecycle_store, &resolved_run_id)?;
     let mut record = lifecycle_store.read_record(&resolved_run_id)?;
     // The admission queue is durable lifecycle-adjacent state, so it is read
