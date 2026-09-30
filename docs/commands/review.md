@@ -29,6 +29,8 @@ homeboy review lint [component]
 homeboy review test [component]
 homeboy review build [component]
 homeboy review ci <list|plan|run|autofix|scope|differential-gate|triage> ...
+homeboy review ai [component] --changed-since=<ref>
+homeboy review [component] --changed-since=<ref> --ai
 ```
 
 ## Description
@@ -52,6 +54,73 @@ debugging aids, not proof. See
 [Release-gate proof: canonical non-local command path](../operations/release-gate-proof-path.md).
 
 ## Individual Quality Gates
+
+### Independent AI review
+
+`review ai` invokes an **operator-installed extension**, independently of audit,
+lint and tests. `review --ai` adds that same service after deterministic checks.
+Both require `--changed-since` and a clean committed checkout. The review is bound
+to the merge-base of that ref and `HEAD`, and the exact candidate SHA. Working-tree
+review is unsupported. Candidate changes during execution invalidate the result.
+
+AI findings and a model `block` verdict are **advisory**: a completed review exits
+zero. A skipped/incomplete review, timeout, invalid response or tool failure exits
+two and is explicitly labelled; an exit-zero provider skip never means reviewed.
+Existing deterministic checks retain their exit behavior. Results, normalized
+findings, raw bounded streams, usage and candidate provenance are retained in the
+review observation and artifact. `runs show <run-id>` inspects that evidence.
+
+Install a private local package using the existing extension lifecycle:
+
+```bash
+homeboy extension install /operator/private-reviewer --id=my-reviewer
+homeboy review ai my-component --extension=my-reviewer --changed-since=origin/main
+# One-off provider settings; component extension settings are used by --ai too.
+homeboy review ai my-component --extension=my-reviewer --changed-since=origin/main \
+  --setting model=chosen-model --ai-timeout-seconds=300
+# Markdown renderer: parent option precedes the action.
+homeboy review --report=pr-comment ai my-component \
+  --extension=my-reviewer --changed-since=origin/main
+```
+
+Link the reviewer alongside the component's lint/test extensions for umbrella
+`--ai` use. Exactly one linked contract producer must declare this result schema;
+ambiguous or malformed declarations fail before invocation. Local installation
+does not require a public registry, repository or provider implementation in core.
+
+The extension uses the existing `contract_producers` manifest contract:
+
+```json
+{
+  "name": "Private reviewer", "version": "1.0.0",
+  "contract_producers": [{
+    "id": "review", "phase": "result",
+    "invocation": {
+      "script": "review", "args": [], "env": ["PATH", "HOME", "REVIEW_TOKEN"],
+      "input_schema": "homeboy/ai-review-request/v1",
+      "output_schema": "homeboy/ai-review-response/v1"
+    },
+    "produces": [{"kind": "evidence", "schema": "homeboy/ai-review-response/v1"}]
+  }]
+}
+```
+
+The executable must resolve inside the installed package. It receives one JSON
+request on stdin: `schema`, `component`, absolute `checkout`, `base_sha`, `head_sha`
+and merged `settings` (manifest defaults → component → CLI). It emits JSON on
+stdout with the response schema, matching `base_sha`/`head_sha`, `execution`
+(`completed|skipped|failed`), `verdict` (`pass|findings|block|inconclusive`),
+`findings` (standard `HomeboyFinding` records), optional `reason`, `provenance`
+and `usage`. Progress belongs on stderr. Providers own authentication and model
+selection. Environment is restricted to the declared names; secret values belong
+in environment/auth stores rather than settings and are redacted before retention.
+Each stream is bounded to 4 MiB. The shared process owner enforces the timeout
+and drains descendants. Review-only execution currently uses the host where the
+private package is installed; invoke it on a managed runner after installing and
+authenticating the package there. Automatic private-package offload is not implied.
+
+The reusable service is `homeboy_review::review::ai::run`; Cook can consume the
+same candidate-bound result contract in a subsequent lifecycle integration.
 
 The standalone quality commands now live under `review`:
 

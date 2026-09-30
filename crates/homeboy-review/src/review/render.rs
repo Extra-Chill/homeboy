@@ -62,6 +62,10 @@ pub fn render_pr_comment_with_banners(
         out.push('\n');
         render_ci_stage(&mut out, stage);
     }
+    if let Some(result) = &output.ai {
+        out.push('\n');
+        out.push_str(&render_ai_review(result));
+    }
 
     out
 }
@@ -113,7 +117,8 @@ fn render_total_findings(out: &mut String, output: &ReviewCommandOutput) {
             .ci_profile
             .as_ref()
             .map(|stage| usize::from(stage.ran))
-            .unwrap_or(0);
+            .unwrap_or(0)
+        + usize::from(output.ai.is_some());
     let _ = writeln!(
         out,
         "**{}** finding(s) across {} stage(s)",
@@ -133,6 +138,25 @@ fn render_top_hints(out: &mut String, output: &ReviewCommandOutput) {
 }
 
 // ── Stage rendering ─────────────────────────────────────────────────────
+
+pub fn render_ai_review(result: &super::ai::AiReviewResult) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "**Independent AI review (advisory)** — {:?}; verdict: {:?}",
+        result.execution, result.verdict
+    );
+    let _ = writeln!(
+        out,
+        "\nCandidate: `{}` → `{}`",
+        result.request.base_sha, result.request.head_sha
+    );
+    if let Some(reason) = &result.reason {
+        let _ = writeln!(out, "\n> {}", reason);
+    }
+    render_test_findings(&mut out, &result.findings);
+    out
+}
 
 fn stage_header_icon(stage_ran: bool, stage_passed: bool) -> &'static str {
     if !stage_ran {
@@ -508,6 +532,7 @@ mod tests {
             lint: stage_lint_passing(),
             test: stage_test_passing(0),
             ci_profile: None,
+            ai: None,
             actionable: None,
         }
     }
@@ -990,6 +1015,7 @@ mod tests {
             lint: stage_skipped("lint", "no files changed"),
             test: stage_skipped("test", "no files changed"),
             ci_profile: None,
+            ai: None,
             actionable: None,
         };
         let md = render_pr_comment(&env);
