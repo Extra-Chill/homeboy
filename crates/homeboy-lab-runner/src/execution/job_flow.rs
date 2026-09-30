@@ -525,6 +525,17 @@ fn observed_agent_task_terminal_job_status(
     if run_id_owns_generic_exec {
         return None;
     }
+    // Dispatch observers own an exact attempt. Following the mission's latest
+    // retry here would keep a cancelled attempt's process and runtime pin alive.
+    if let Ok(store) =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    {
+        if let Ok(record) = store.read_record(run_id) {
+            if record.state.is_terminal() {
+                return exact_attempt_terminal_job_status(record.state);
+            }
+        }
+    }
     let run_id = homeboy_control_plane_contract::RunId::new(run_id).ok()?;
     if let Some(endpoint) = control_plane_endpoint {
         if let Ok(client) = homeboy_control_plane_client::ControlPlaneClient::new_local(
@@ -532,21 +543,29 @@ fn observed_agent_task_terminal_job_status(
             Duration::from_secs(2),
         ) {
             if let Ok(run) = client.run(&run_id) {
-                if let Some(status) = control_plane_terminal_job_status(run.state) {
-                    return Some(status);
+                if run.run == run_id {
+                    if let Some(status) = control_plane_terminal_job_status(run.state) {
+                        return Some(status);
+                    }
                 }
             }
         }
     }
-    let store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .ok()?;
-    let run = homeboy_agents::orchestration::OrchestrationService::new(
-        homeboy_agents::orchestration::LifecycleStoreLookup::new(store),
-    )
-    .run(&run_id)
-    .ok()?;
-    control_plane_terminal_job_status(run.state)
+    None
+}
+
+fn exact_attempt_terminal_job_status(
+    state: homeboy_agents::agent_task_lifecycle::AgentTaskRunState,
+) -> Option<JobStatus> {
+    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+    match state {
+        AgentTaskRunState::Cancelled => Some(JobStatus::Cancelled),
+        AgentTaskRunState::Succeeded
+        | AgentTaskRunState::CandidateRecoverable
+        | AgentTaskRunState::PartialRecoverable => Some(JobStatus::Succeeded),
+        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure => Some(JobStatus::Failed),
+        AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+    }
 }
 
 fn control_plane_terminal_job_status(
@@ -685,6 +704,70 @@ mod tests {
                 },
             )
             .expect("check admission fence");
+        });
+    }
+
+    #[test]
+    fn cancelled_exact_attempt_releases_observer_pin_with_queued_retry() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use homeboy_agents::agent_task_lifecycle::{
+                self, AgentTaskLifecycleStore, AgentTaskRunState,
+            };
+            use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
+            use homeboy_core::runtime_promotion;
+            let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let plan = AgentTaskPlan::new("cancelled-observer", Vec::new());
+            let original_id = "cancelled-observer-attempt-1";
+            let retry_id = "cancelled-observer-attempt-1-transport-retry";
+            for id in [original_id, retry_id] {
+                agent_task_lifecycle::submit_plan_in_store(&store, &plan, Some(id)).unwrap();
+                store
+                    .mutate_record(id, |record| {
+                        record.metadata["cook_id"] = serde_json::json!("cancelled-observer");
+                        true
+                    })
+                    .unwrap();
+            }
+            store
+                .record_cook_attempt("cancelled-observer", 1, original_id)
+                .unwrap();
+            store
+                .record_cook_attempt("cancelled-observer", 1, retry_id)
+                .unwrap();
+            let pin = runtime_promotion::pin_cook_generation(original_id).unwrap();
+            // Active exact work stays non-terminal even with a retry alias.
+            assert_eq!(
+                observed_agent_task_terminal_job_status(original_id, false, None),
+                None
+            );
+            agent_task_lifecycle::cancel_run_in_store(
+                &store,
+                original_id,
+                Some("fixture cancellation"),
+            )
+            .unwrap();
+            assert_eq!(
+                observed_agent_task_terminal_job_status(original_id, false, None),
+                Some(JobStatus::Cancelled)
+            );
+            // Generic exec children are still governed by their process owner.
+            assert_eq!(
+                observed_agent_task_terminal_job_status(original_id, true, None),
+                None
+            );
+            drop(pin); // same RAII boundary as the dispatch observer exiting
+            let lease = runtime_promotion::acquire_waiting_for_compatible(
+                "controller upgrade",
+                "test-candidate",
+                Duration::from_secs(2),
+                |_| {},
+            )
+            .expect("terminal observer releases promotion ownership");
+            drop(lease);
+            assert_eq!(
+                store.read_record(retry_id).unwrap().state,
+                AgentTaskRunState::Queued
+            );
         });
     }
 

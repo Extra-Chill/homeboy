@@ -6305,7 +6305,7 @@ fn rooted_status(
         lifecycle_store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
-        false,
+        true,
     )?
     .record)
 }
@@ -7716,6 +7716,28 @@ fn run_cook_spine(
             .get("lab_staging_controller_job_id")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|job_id| !job_id.is_empty());
+        // This invocation owns the exact attempt, not its mission's latest
+        // retry. Cancellation must end the observer and release its pin.
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Cancelled {
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_report(CookReportInput {
+                cook_id,
+                status: CookStatus::Cancelled.as_str(),
+                disposition: CookDisposition::Terminal,
+                attempts,
+                finalization: None,
+                stop_reason: Some("exact Cook attempt was cancelled".to_string()),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&run_id),
+            }));
+        }
         if matches!(
             record.state,
             agent_task_lifecycle::AgentTaskRunState::Queued
