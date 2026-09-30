@@ -536,6 +536,30 @@ fn reconcile_absent_lease_stop(
         error.details["lifecycle_mutation"] = serde_json::json!("stop");
         return Err(error);
     }
+    // A prior exact stop can remove the lease before registry retirement. Do
+    // not leave admission pinned to that absent generation forever. Retire only
+    // the matching directory and a definitively closed recorded endpoint; an
+    // active or unverifiable endpoint remains registered.
+    if let Some(endpoint) = generation_store::endpoint_for_lease(expected_lease_id)? {
+        let state_dir = std::path::Path::new(&state_path)
+            .parent()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        if endpoint.state_dir == state_dir {
+            if let Ok(address) = endpoint.address.parse::<std::net::SocketAddr>() {
+                if address.ip().is_loopback()
+                    && address.port() != 0
+                    && std::net::TcpStream::connect_timeout(
+                        &address,
+                        std::time::Duration::from_millis(200),
+                    )
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+                {
+                    generation_store::retire_exact_dead_generation(expected_lease_id, &state_dir)?;
+                }
+            }
+        }
+    }
     Ok(DaemonStopResult {
         stopped: false,
         already_absent: true,
@@ -790,6 +814,25 @@ mod tests {
                 .expect("a plan lease over a dead stored lease stays executable");
             assert!(result.already_absent);
             assert!(!result.stopped);
+        });
+    }
+
+    #[test]
+    fn replayed_absent_stop_retires_only_the_closed_registered_generation() {
+        with_isolated_home(|_| {
+            let path = state_path().unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut state = dead_state("absent-admission-owner", &path);
+            state.address = listener.local_addr().unwrap().to_string();
+            super::generation_store::seed(&state).unwrap();
+            // A reachable endpoint is still protected despite a missing lease.
+            assert!(stop_for_lease(&state.lease_id).unwrap().already_absent);
+            assert!(super::generation_store::admitting().unwrap().is_some());
+            drop(listener);
+            let result = stop_for_lease(&state.lease_id).unwrap();
+            assert!(result.already_absent);
+            assert!(super::generation_store::admitting().unwrap().is_none());
+            assert!(stop_for_lease(&state.lease_id).unwrap().already_absent);
         });
     }
 
