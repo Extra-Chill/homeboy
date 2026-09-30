@@ -9370,6 +9370,19 @@ fn cancelled_provider_child_retry_stays_attached_to_its_cook() {
         );
         assert_eq!(retry.record.metadata["cook_id"], cook_id);
         assert_eq!(retry.record.metadata["cook_attempt"], 2);
+        // The user-facing mission alias follows the retry, but an internal
+        // observer must finish the exact cancelled attempt it owns (#15269).
+        let observed = rooted_status(&test_lifecycle_store(), &options.identity.initial_run_id)
+            .expect("observe original exact attempt after replacement");
+        assert_eq!(observed.run_id, options.identity.initial_run_id);
+        assert_eq!(observed.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            test_lifecycle_store()
+                .read_record(&retry.record.run_id)
+                .expect("queued successor remains untouched")
+                .state,
+            AgentTaskRunState::Queued
+        );
         assert_eq!(
             agent_task_lifecycle::cook_index(cook_id)
                 .expect("Cook retry index")
