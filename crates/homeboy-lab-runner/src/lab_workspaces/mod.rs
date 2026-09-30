@@ -183,7 +183,13 @@ pub(super) fn sync_extra_lab_workspaces(
             runner_id,
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),
-                mode: extra_workspace_sync_mode(&local_path),
+                // A runtime root is shipped as exactly that directory, even
+                // when it lives inside a larger Git checkout.
+                mode: if extra.role == "agent_task_plan_runtime" {
+                    RunnerWorkspaceSyncMode::Snapshot
+                } else {
+                    extra_workspace_sync_mode(&local_path)
+                },
                 controller_routed_git: false,
                 changed_since_base: None,
                 git_fetch_refs: extra.git_fetch_refs.clone(),
@@ -818,6 +824,16 @@ pub(super) fn agent_task_plan_extra_workspaces(
             )?;
         }
     }
+    // The controller-selected runtime is a provider input too. A run-plan
+    // carries its identity in task metadata instead of a
+    // `--resolved-provider-policy` argument, so the runner-side generation
+    // step never sees it. Syncing each declared runtime source lets the plan
+    // remapper point `runtime_path` and its source locators at the runner's
+    // copy, instead of a controller path the runner doesn't have
+    // (MODULE_NOT_FOUND on readiness, #15259).
+    for candidate in agent_task_plan_runtime_source_paths(&value) {
+        add_runtime_root_extra_workspace(&candidate, &source_canon, &mut seen, &mut workspaces);
+    }
     for candidate in component_contract_candidate_paths(&value) {
         add_candidate_extra_workspace(
             &candidate,
@@ -848,6 +864,90 @@ pub(super) fn agent_task_plan_extra_workspaces(
     }
 
     Ok(workspaces)
+}
+
+/// Sync a runtime root as its own plain snapshot.
+///
+/// Unlike provider-config inputs, this never climbs to a containing Git
+/// checkout: an agent runtime is a self-contained directory (often inside a
+/// much larger extensions checkout, reached through a symlink), and the runner
+/// needs only that directory. Missing or non-directory paths are skipped;
+/// admission reports them through readiness as before.
+fn add_runtime_root_extra_workspace(
+    candidate: &str,
+    source_canon: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+    workspaces: &mut Vec<ExtraLabWorkspace>,
+) {
+    let expanded = shellexpand::tilde(candidate).to_string();
+    let Ok(canon) = Path::new(&expanded).canonicalize() else {
+        return;
+    };
+    if !canon.is_dir() || canon == source_canon || canon.starts_with(source_canon) {
+        return;
+    }
+    if seen.iter().any(|existing| canon.starts_with(existing)) || !seen.insert(canon.clone()) {
+        return;
+    }
+    workspaces.push(ExtraLabWorkspace {
+        role: "agent_task_plan_runtime".to_string(),
+        path: canon,
+        snapshot_includes: Vec::new(),
+        git_fetch_refs: Vec::new(),
+        allow_dirty_lab_workspace: true,
+        source_provenance: None,
+    });
+}
+
+/// Controller-local runtime roots named by a run-plan's resolved runtime
+/// identities. Only `runtime_path` and local-path source locators count:
+/// every runtime path in the identity sits under one of these roots, so
+/// syncing the roots is enough for the remapper to rewrite them all.
+fn agent_task_plan_runtime_source_paths(plan: &serde_json::Value) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for identity in plan
+        .get("tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| task.pointer("/metadata/resolved_runtime_identity"))
+    {
+        for pointer in [
+            "/provider/runtime_path",
+            "/materialization_plan/runtime_path",
+            "/materialization_plan/selected_identity/source_path",
+        ] {
+            if let Some(path) = identity
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+            {
+                paths.insert(path.to_string());
+            }
+        }
+        for source in identity
+            .pointer("/materialization_plan/runtime_sources")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if source
+                .pointer("/locator/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("local_path")
+            {
+                if let Some(path) = source
+                    .pointer("/locator/path")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .filter(|path| Path::new(path).is_absolute())
+        .collect()
 }
 
 /// Discover controller-local workspaces embedded in a batch-cook fanout input

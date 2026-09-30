@@ -1321,3 +1321,99 @@ fn source_cli_preflight_names_missing_workspace_package_and_importer() {
     assert!(err.message.contains("@example/provider-core"));
     assert!(err.message.contains("index.js"));
 }
+
+fn runtime_identity_plan(runtime_path: &str) -> String {
+    serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "plan_id": "runtime-identity",
+        "tasks": [{
+            "schema": "homeboy/agent-task-request/v1",
+            "task_id": "cook",
+            "executor": { "backend": "opencode" },
+            "instructions": "test",
+            "metadata": {
+                "resolved_runtime_identity": {
+                    "provider": { "runtime_path": runtime_path },
+                    "materialization_plan": {
+                        "schema": "homeboy/agent-runtime-materialization-plan/v2",
+                        "runtime_path": runtime_path,
+                        "selected_identity": { "source_path": runtime_path },
+                        "runtime_sources": [{
+                            "id": "controller-runtime",
+                            "destination_path": "runtime",
+                            "locator": { "kind": "local_path", "path": runtime_path }
+                        }]
+                    }
+                }
+            }
+        }]
+    })
+    .to_string()
+}
+
+#[test]
+fn run_plan_resolved_runtime_root_is_synced_as_its_own_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&source).expect("source");
+    // The runtime lives inside a larger Git checkout, reached through a
+    // symlinked parent: exactly the controller layout from #15259.
+    let extensions = temp.path().join("extensions");
+    let runtime = extensions.join("agent-runtimes/opencode");
+    std::fs::create_dir_all(runtime.join("scripts")).expect("runtime");
+    std::fs::write(
+        runtime.join("scripts/readiness.cjs"),
+        "module.exports = 1;\n",
+    )
+    .expect("runtime script");
+    std::fs::write(extensions.join("unrelated.txt"), "big checkout\n").expect("unrelated");
+    git(&extensions, &["init", "-b", "main"]);
+    git(&extensions, &["config", "user.email", "test@example.com"]);
+    git(&extensions, &["config", "user.name", "Homeboy Test"]);
+    git(&extensions, &["add", "."]);
+    git(&extensions, &["commit", "-m", "initial"]);
+    let config = temp.path().join("config");
+    std::os::unix::fs::symlink(extensions.join("agent-runtimes"), &config).expect("symlink");
+    let declared = config.join("opencode");
+
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        runtime_identity_plan(&declared.display().to_string()),
+    ];
+
+    let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+    let runtime_workspaces = workspaces
+        .iter()
+        .filter(|workspace| workspace.role == "agent_task_plan_runtime")
+        .collect::<Vec<_>>();
+    assert_eq!(runtime_workspaces.len(), 1, "{workspaces:?}");
+    assert_eq!(
+        runtime_workspaces[0].path,
+        runtime.canonicalize().unwrap(),
+        "the runtime directory itself, not its containing checkout"
+    );
+}
+
+#[test]
+fn run_plan_without_runtime_identity_adds_no_runtime_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(&source).expect("source");
+    let args = vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "run-plan".to_string(),
+        "--plan".to_string(),
+        runtime_identity_plan("/nonexistent/controller/runtime"),
+    ];
+
+    let workspaces = agent_task_plan_extra_workspaces(&args, &source).expect("workspaces");
+
+    assert!(workspaces
+        .iter()
+        .all(|workspace| workspace.role != "agent_task_plan_runtime"));
+}
