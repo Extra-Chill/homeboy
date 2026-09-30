@@ -1,13 +1,12 @@
-//! Open-wait reconciliation (W3-9).
+//! Open-wait reconciliation evidence rules.
 //!
-//! `Waiting` was a state with no automatic exit: a controller with an open
-//! `WaitForEvent`/`WaitForController` has no pending action, so `resume`
-//! returns `idle` and exits, and nothing polled, subscribed, or timed out.
-//!
-//! These tests pin both halves of the fix — what durable evidence resolves a
-//! wait, and (more importantly) what does not. A wait that resolves wrongly
-//! advances a controller past a gate the world has not passed, which is worse
-//! than one that stalls.
+//! `Waiting` advancement is owned by the loop `WorkJobDriver` supervision,
+//! which reuses this one primitive — [`reconcile_open_waits`] — on its own
+//! cadence. There is no daemon sweep behind it anymore, so these tests pin the
+//! primitive itself: what durable evidence resolves a wait, and (more
+//! importantly) what does not. A wait that resolves wrongly advances a
+//! controller past a gate the world has not passed, which is worse than one
+//! that stalls.
 
 use super::super::*;
 use super::*;
@@ -31,6 +30,18 @@ fn wait(wait_key: &str, event_type: &str, external_ref: Option<&str>) -> AgentTa
         status: AgentTaskLoopWaitStatus::Open,
         satisfied_by_event_id: None,
     }
+}
+
+/// One supervision-advance pass over a persisted controller: the same
+/// reconcile-plus-persist shape the loop work job runs on its cadence.
+fn advance_open_waits(loop_id: &str) -> WaitReconcileOutcome {
+    let mut record = controller::load_controller(loop_id).expect("controller");
+    let outcome = reconcile_open_waits(&mut record).expect("reconcile");
+    if outcome.changed() {
+        record.touch();
+        controller::write_controller(&record).expect("write advanced controller");
+    }
+    outcome
 }
 
 fn terminal_child(loop_id: &str, state: AgentTaskLoopControllerState) {
@@ -61,13 +72,8 @@ fn a_waiting_controller_resolves_when_its_child_controller_is_terminal() {
             ),
         );
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 1, "{report:?}");
-        let entry = &report.controllers[0];
-        assert_eq!(entry.resolved_waits.len(), 1);
-        assert_eq!(entry.after_state, AgentTaskLoopControllerState::Running);
-
-        // The transition is durable, so the next `resume` finds work.
+        let outcome = advance_open_waits("wait-parent-done");
+        assert_eq!(outcome.resolved.len(), 1, "{outcome:?}");
         let reloaded = controller::load_controller("wait-parent-done").expect("reload");
         assert_eq!(reloaded.state, AgentTaskLoopControllerState::Running);
         assert_eq!(reloaded.open_wait_count(), 0);
@@ -80,7 +86,7 @@ fn a_waiting_controller_resolves_when_its_child_controller_is_terminal() {
 
 #[test]
 fn a_waiting_controller_resolves_when_the_run_it_dispatched_is_terminal() {
-    // The exact shape W3-9 names: a controller that dispatched a cook sat in
+    // The exact shape W3-9 named: a controller that dispatched a cook sat in
     // Waiting indefinitely even after that cook terminalized.
     with_isolated_home(|_| {
         terminal_run("wait-reconcile-run-a");
@@ -93,8 +99,8 @@ fn a_waiting_controller_resolves_when_the_run_it_dispatched_is_terminal() {
             ),
         );
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 1, "{report:?}");
+        let outcome = advance_open_waits("wait-parent-run");
+        assert_eq!(outcome.resolved.len(), 1, "{outcome:?}");
         let reloaded = controller::load_controller("wait-parent-run").expect("reload");
         assert_eq!(reloaded.state, AgentTaskLoopControllerState::Running);
         assert_eq!(reloaded.waits[0].status, AgentTaskLoopWaitStatus::Satisfied);
@@ -119,8 +125,8 @@ fn a_still_running_child_controller_leaves_the_wait_open() {
             ),
         );
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 0, "{report:?}");
+        let outcome = advance_open_waits("wait-parent-busy");
+        assert!(!outcome.changed(), "{outcome:?}");
         let reloaded = controller::load_controller("wait-parent-busy").expect("reload");
         assert_eq!(reloaded.state, AgentTaskLoopControllerState::Waiting);
         assert_eq!(reloaded.open_wait_count(), 1);
@@ -148,11 +154,9 @@ fn an_external_event_type_is_never_resolved_from_local_state() {
         ] {
             let loop_id = format!("wait-parent-{}", key.replace([':'], "-"));
             parked_controller(&loop_id, wait(key, event_type, Some(reference)));
+            let outcome = advance_open_waits(&loop_id);
+            assert!(!outcome.changed(), "{loop_id}: {outcome:?}");
         }
-
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 0, "{report:?}");
-        assert_eq!(report.failed, 0, "{report:?}");
     });
 }
 
@@ -169,8 +173,8 @@ fn a_wait_without_an_external_ref_is_never_resolved() {
         record.waits[0].entity_id = Some("entity-1".to_string());
         controller::write_controller(&record).expect("written");
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 0, "{report:?}");
+        let outcome = advance_open_waits("wait-parent-anonymous");
+        assert!(!outcome.changed(), "{outcome:?}");
         assert_eq!(
             controller::load_controller("wait-parent-anonymous")
                 .unwrap()
@@ -198,9 +202,10 @@ fn an_unreadable_subject_is_not_evidence_of_terminality() {
             wait("run:nope", "agent_task.run_terminal", Some("no-such-run")),
         );
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 0, "{report:?}");
-        assert_eq!(report.failed, 0, "{report:?}");
+        for loop_id in ["wait-parent-missing-child", "wait-parent-missing-run"] {
+            let outcome = advance_open_waits(loop_id);
+            assert!(!outcome.changed(), "{loop_id}: {outcome:?}");
+        }
     });
 }
 
@@ -220,9 +225,9 @@ fn a_wait_is_only_expired_by_a_deadline_it_declared() {
         malformed.waits[0].timeout_at = Some("not a timestamp".to_string());
         controller::write_controller(&malformed).expect("written");
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 0, "{report:?}");
         for loop_id in ["wait-parent-no-deadline", "wait-parent-bad-deadline"] {
+            let outcome = advance_open_waits(loop_id);
+            assert!(!outcome.changed(), "{loop_id}: {outcome:?}");
             assert_eq!(
                 controller::load_controller(loop_id).unwrap().state,
                 AgentTaskLoopControllerState::Waiting,
@@ -243,8 +248,8 @@ fn an_expired_wait_unblocks_the_controller() {
             Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
         controller::write_controller(&record).expect("written");
 
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 1, "{report:?}");
+        let outcome = advance_open_waits("wait-parent-expired");
+        assert_eq!(outcome.timed_out.len(), 1, "{outcome:?}");
         let reloaded = controller::load_controller("wait-parent-expired").expect("reload");
         assert_eq!(reloaded.waits[0].status, AgentTaskLoopWaitStatus::TimedOut);
         // No escalation policy declared: unblocked, not terminalized.
@@ -268,7 +273,7 @@ fn an_expired_wait_escalates_only_when_its_policy_says_so() {
         record.waits[0].escalation_policy = Some("escalate".to_string());
         controller::write_controller(&record).expect("written");
 
-        reconcile_waiting_controllers().expect("sweep");
+        advance_open_waits("wait-parent-escalate");
         let reloaded = controller::load_controller("wait-parent-escalate").expect("reload");
         assert_eq!(reloaded.state, AgentTaskLoopControllerState::Escalated);
         assert!(reloaded
@@ -292,53 +297,13 @@ fn an_unrelated_escalation_policy_does_not_terminalize_the_controller() {
         record.waits[0].escalation_policy = Some("reinspect_pr".to_string());
         controller::write_controller(&record).expect("written");
 
-        reconcile_waiting_controllers().expect("sweep");
+        advance_open_waits("wait-parent-reinspect");
         assert_eq!(
             controller::load_controller("wait-parent-reinspect")
                 .unwrap()
                 .state,
             AgentTaskLoopControllerState::Running
         );
-    });
-}
-
-#[test]
-fn one_broken_controller_does_not_stop_the_sweep() {
-    with_isolated_home(|_| {
-        terminal_child("wait-child-ok", AgentTaskLoopControllerState::Completed);
-        parked_controller(
-            "wait-parent-ok",
-            wait(
-                "controller:wait-child-ok:terminal",
-                "controller.terminal",
-                Some("wait-child-ok"),
-            ),
-        );
-        // A wait naming a run whose status read fails is skipped, not fatal.
-        parked_controller(
-            "wait-parent-broken",
-            wait("run:broken", "agent_task.run_terminal", Some("   ")),
-        );
-
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert_eq!(report.changed, 1, "{report:?}");
-        assert_eq!(
-            controller::load_controller("wait-parent-ok").unwrap().state,
-            AgentTaskLoopControllerState::Running
-        );
-    });
-}
-
-#[test]
-fn a_controller_with_no_open_waits_is_not_touched() {
-    with_isolated_home(|_| {
-        let mut record = AgentTaskLoopControllerRecord::new("wait-parent-idle", "delegate", "v1");
-        record.state = AgentTaskLoopControllerState::Running;
-        controller::write_controller(&record).expect("written");
-
-        let report = reconcile_waiting_controllers().expect("sweep");
-        assert!(report.controllers.is_empty(), "{report:?}");
-        assert_eq!(report.changed, 0);
     });
 }
 

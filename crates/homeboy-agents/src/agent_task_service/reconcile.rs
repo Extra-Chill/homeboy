@@ -623,12 +623,6 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
     fn reconcile_queued_retries(&self) -> Result<serde_json::Value> {
         reconcile_queued_retries()
     }
-
-    fn reconcile_waiting_controllers(&self) -> Result<serde_json::Value> {
-        let report = crate::agent_task_controller_service::reconcile_waiting_controllers()?;
-        serde_json::to_value(report)
-            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))
-    }
 }
 
 /// Resume one retry reservation after the accepting process dies between the
@@ -1144,89 +1138,6 @@ mod tests {
                 serde_json::json!("2000-01-01T00:00:00+00:00");
         })
         .expect("make admission due");
-    }
-
-    fn daemon_waiting_controller(loop_id: &str, event_type: &str, timeout_at: Option<String>) {
-        let mut record = crate::agent_task_loop_controller::AgentTaskLoopControllerRecord::new(
-            loop_id, "delegate", "v1",
-        );
-        record.state = crate::agent_task_loop_controller::AgentTaskLoopControllerState::Waiting;
-        record
-            .waits
-            .push(crate::agent_task_loop_controller::AgentTaskLoopWait {
-                wait_key: format!("{loop_id}:wait"),
-                event_type: event_type.to_string(),
-                entity_id: None,
-                external_ref: Some("unmatched-external-ref".to_string()),
-                timeout_at,
-                escalation_policy: None,
-                status: crate::agent_task_loop_controller::AgentTaskLoopWaitStatus::Open,
-                satisfied_by_event_id: None,
-            });
-        crate::agent_task_loop_controller::write_controller(&record).expect("waiting controller");
-    }
-
-    #[test]
-    fn daemon_tick_reconciles_declared_wait_without_operator_input() {
-        with_isolated_home(|_| {
-            register_orchestration_driver();
-            daemon_waiting_controller(
-                "daemon-wait-expired",
-                "github.pr.merged",
-                Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
-            );
-
-            let report = homeboy_core::daemon::orchestration::reconcile_waiting_controllers()
-                .expect("wait tick");
-            assert_eq!(report["changed"], 1, "{report}");
-            assert_eq!(
-                crate::agent_task_loop_controller::load_controller("daemon-wait-expired")
-                    .expect("reloaded controller")
-                    .state,
-                crate::agent_task_loop_controller::AgentTaskLoopControllerState::Running
-            );
-        });
-    }
-
-    #[test]
-    fn daemon_wait_reconciliation_is_idempotent_across_ticks_and_driver_registration() {
-        with_isolated_home(|_| {
-            register_orchestration_driver();
-            daemon_waiting_controller(
-                "daemon-wait-restart",
-                "github.pr.merged",
-                Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
-            );
-            let first = homeboy_core::daemon::orchestration::reconcile_waiting_controllers()
-                .expect("first wait tick");
-            assert_eq!(first["changed"], 1, "{first}");
-
-            // Re-registering the driver reads the durable resolved wait and
-            // must neither rewrite nor re-emit it on the next tick.
-            register_orchestration_driver();
-            let second = homeboy_core::daemon::orchestration::reconcile_waiting_controllers()
-                .expect("restart wait tick");
-            assert_eq!(second["changed"], 0, "{second}");
-            assert_eq!(second["considered"], 0, "{second}");
-        });
-    }
-
-    #[test]
-    fn daemon_wait_reconciliation_refuses_unmatched_external_events() {
-        with_isolated_home(|_| {
-            register_orchestration_driver();
-            daemon_waiting_controller("daemon-wait-external", "github.pr.checks_changed", None);
-
-            let report = homeboy_core::daemon::orchestration::reconcile_waiting_controllers()
-                .expect("external wait tick");
-            assert_eq!(report["changed"], 0, "{report}");
-            assert_eq!(
-                crate::agent_task_loop_controller::load_controller("daemon-wait-external")
-                    .expect("reloaded controller")
-                    .state,
-                crate::agent_task_loop_controller::AgentTaskLoopControllerState::Waiting
-            );
-        });
     }
 
     #[test]

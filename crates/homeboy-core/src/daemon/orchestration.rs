@@ -73,11 +73,6 @@ pub trait OrchestrationDriver: Send + Sync {
 
     /// Resume one durable queued retry whose reservation survived its launcher.
     fn reconcile_queued_retries(&self) -> Result<Value>;
-
-    /// Reconcile durable controller waits from locally observable evidence.
-    /// External-event waits must remain open until their event or declared
-    /// deadline is present.
-    fn reconcile_waiting_controllers(&self) -> Result<Value>;
 }
 
 /// CLI-owned execution seam for an already-fenced Cook admission replay.
@@ -141,10 +136,6 @@ impl OrchestrationDriver for NoopOrchestrationDriver {
     }
 
     fn reconcile_queued_retries(&self) -> Result<Value> {
-        Ok(Value::Null)
-    }
-
-    fn reconcile_waiting_controllers(&self) -> Result<Value> {
         Ok(Value::Null)
     }
 }
@@ -253,11 +244,6 @@ pub fn drain_work_intents_with(
 
 pub fn schedule_terminal_cook_continuation(request: &Value) -> Result<Value> {
     cook_replay_registry::active().schedule_terminal_continuation(request)
-}
-
-/// Drive one durable controller-wait reconciliation pass.
-pub fn reconcile_waiting_controllers() -> Result<Value> {
-    active_driver().reconcile_waiting_controllers()
 }
 
 /// Invoke the registered replay worker after agents has durably claimed it.
