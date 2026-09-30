@@ -17299,9 +17299,14 @@ fn canonical_completion_requires_a_valid_review_form() {
 #[test]
 fn cook_observation_agrees_across_real_stores_without_mutation() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        use crate::orchestration::{LifecycleStoreLookup, OrchestrationService};
+        use homeboy_control_plane_contract::{ControlPlaneRunListRequest, MissionId};
+        crate::orchestration::register();
+
         crate::agent_task_lifecycle::activity_provider::register();
         let store = test_lifecycle_store();
         let recipes = CookRecipeStore::new(store.roots().clone());
+        let mut launcher_ids = std::collections::BTreeSet::new();
         for (name, gate_status, no_finalize, receipt, success, live_owner) in [
             ("pending", "deferred", false, false, false, false),
             ("failed", "failed", false, true, false, false),
@@ -17328,6 +17333,10 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
         ] {
             let mut options = compile_options(&format!("observe-{name}"));
             options.finalization.no_finalize = no_finalize;
+            let mission = MissionId::new(format!("observe-mission-{name}")).unwrap();
+            options.identity.initial_plan.metadata["fanout"] = serde_json::json!({
+                "id": mission.as_str(), "plane": "isolated_tasks",
+            });
             let run_id = &options.identity.initial_run_id;
             recipes.persist_initial_recipe(&options).unwrap();
             agent_task_lifecycle::record_completed_run(
@@ -17382,12 +17391,99 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
             store
                 .record_cook_attempt(&options.identity.cook_id, 2, &retry_id)
                 .unwrap();
+            // A launcher row shares the logical Cook alias, but discovery must
+            // retain that row rather than substituting the selected attempt.
+            submit_plan_in_test_store(
+                &store,
+                &options.identity.initial_plan,
+                Some(&options.identity.cook_id),
+            )
+            .unwrap();
+            launcher_ids.insert(options.identity.cook_id.clone());
+            let launcher_before = store
+                .read_record_bounded(&options.identity.cook_id)
+                .unwrap();
+            let launcher_events_before = serde_json::to_value(
+                agent_task_lifecycle::logs(&options.identity.cook_id).unwrap(),
+            )
+            .unwrap();
             let retry_before = store.read_record_bounded(&retry_id).unwrap();
             let before = store.read_record_bounded(run_id).unwrap();
             let recipe_before = recipes.load_recipe(&options.identity.cook_id).unwrap();
             let index_before = store.read_cook_index(&options.identity.cook_id).unwrap();
             let events_before =
                 serde_json::to_value(agent_task_lifecycle::logs(run_id).unwrap()).unwrap();
+            let retry_events_before =
+                serde_json::to_value(agent_task_lifecycle::logs(&retry_id).unwrap()).unwrap();
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            // Both discovery adapters must preserve the indexed attempt identities,
+            // including the queued retry that alias resolution deliberately skips.
+            for filtered in [false, true] {
+                let mut service_request = ControlPlaneRunListRequest {
+                    mission: filtered.then(|| mission.clone()),
+                    limit: 1,
+                    ..Default::default()
+                };
+                let mut provider_request = service_request.clone();
+                let mut seen = std::collections::BTreeSet::new();
+                loop {
+                    let page = service.runs(&service_request).unwrap();
+                    let provider_page =
+                        homeboy_core::control_plane::runs(&provider_request).unwrap();
+                    assert_eq!(page, provider_page, "{name}: discovery adapters");
+                    assert!(page.runs.len() <= 1);
+                    for listed in &page.runs {
+                        assert!(seen.insert(listed.run.to_string()), "duplicate attempt");
+                        let exact = crate::orchestration::run_exact_from_current_environment(
+                            listed.run.as_str(),
+                        )
+                        .unwrap();
+                        assert_eq!(listed, &exact, "{name}: exact row");
+                        if launcher_ids.contains(listed.run.as_str()) {
+                            continue;
+                        }
+                        let detail =
+                            crate::agent_task_service::control_plane_run(listed.run.as_str())
+                                .unwrap();
+                        assert_eq!(listed, &detail, "{name}: list/detail");
+                        let activity =
+                            homeboy_core::activity::show_activity(listed.run.as_str()).unwrap();
+                        assert_eq!(
+                            listed.state
+                                == homeboy_control_plane_contract::ControlPlaneRunState::Succeeded,
+                            activity.items[0].state
+                                == homeboy_core::activity::ActivityState::Succeeded,
+                            "{name}: list/activity success"
+                        );
+                        assert_eq!(
+                            listed.state.is_terminal(),
+                            !homeboy_core::activity::is_active(activity.items[0].state)
+                        );
+                    }
+                    assert_eq!(page.has_more, page.next_cursor.is_some());
+                    let Some(cursor) = page.next_cursor else {
+                        break;
+                    };
+                    assert_ne!(service_request.cursor.as_ref(), Some(&cursor));
+                    if filtered {
+                        let mismatched = ControlPlaneRunListRequest {
+                            mission: Some(MissionId::new("other-mission").unwrap()),
+                            cursor: Some(cursor.clone()),
+                            limit: 1,
+                        };
+                        assert!(service.runs(&mismatched).is_err());
+                        assert!(homeboy_core::control_plane::runs(&mismatched).is_err());
+                    }
+                    service_request.cursor = Some(cursor.clone());
+                    provider_request.cursor = Some(cursor);
+                }
+                assert!(seen.contains(run_id));
+                assert!(seen.contains(&retry_id));
+                assert!(seen.contains(&options.identity.cook_id));
+                if filtered {
+                    assert_eq!(seen.len(), 3, "mission must exclude other Cooks");
+                }
+            }
             for requested in [run_id.as_str(), options.identity.cook_id.as_str()] {
                 let observed = cook_observation_in_store(&store, requested).unwrap();
                 let canonical = crate::agent_task_service::control_plane_run(requested).unwrap();
@@ -17427,6 +17523,23 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
             }
             assert_eq!(store.read_record_bounded(run_id).unwrap(), before);
             assert_eq!(store.read_record_bounded(&retry_id).unwrap(), retry_before);
+            assert_eq!(
+                store
+                    .read_record_bounded(&options.identity.cook_id)
+                    .unwrap(),
+                launcher_before
+            );
+            assert_eq!(
+                serde_json::to_value(
+                    agent_task_lifecycle::logs(&options.identity.cook_id).unwrap()
+                )
+                .unwrap(),
+                launcher_events_before
+            );
+            assert_eq!(
+                serde_json::to_value(agent_task_lifecycle::logs(&retry_id).unwrap()).unwrap(),
+                retry_events_before
+            );
             assert_eq!(
                 cook_observation_in_store(&store, &retry_id).unwrap().run_id,
                 retry_id

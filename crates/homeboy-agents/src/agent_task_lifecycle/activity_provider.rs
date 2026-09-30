@@ -113,7 +113,9 @@ fn compact_health_samples(
 /// Cook aliases precede launcher rows; exact attempt IDs retain their identity.
 fn record_for_id(id: &str) -> Option<AgentTaskRunRecord> {
     let store = super::AgentTaskLifecycleStore::from_current_environment().ok()?;
-    crate::agent_task_service::cook_observation_in_store(&store, id).ok()
+    let subject = agent_task_lifecycle::resolve_cook_reader_run_id_in_store(&store, id).ok()?;
+    // Item construction projects both detail and listed rows exactly once.
+    store.read_record_bounded(&subject).ok()
 }
 
 fn metadata_string(value: &Value, keys: &[&str]) -> Option<String> {
