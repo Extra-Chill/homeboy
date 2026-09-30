@@ -40,6 +40,7 @@ mod control;
 pub mod controller_job_driver;
 mod daemon_lease;
 mod generation_store;
+mod lifetime;
 pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
@@ -1688,8 +1689,10 @@ where
     let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
-    let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
-    let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
+    let completion_notifier =
+        spawn_completion_notifier_for_lease(state.lease_id.clone(), completion_shutdown_rx);
+    let schedule_ticker =
+        spawn_schedule_ticker_for_lease(state.lease_id.clone(), schedule_shutdown_rx);
     let orchestration_reconciler = spawn_orchestration_reconciler(
         job_store.clone(),
         state.lease_id.clone(),
@@ -1798,9 +1801,8 @@ const UPLOAD_REAP_INTERVAL_SECS: u64 = 60;
 fn spawn_upload_reaper(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
         reap_expired_uploads();
-        if shutdown
-            .recv_timeout(std::time::Duration::from_secs(UPLOAD_REAP_INTERVAL_SECS))
-            .is_ok()
+        if shutdown.recv_timeout(std::time::Duration::from_secs(UPLOAD_REAP_INTERVAL_SECS))
+            != Err(mpsc::RecvTimeoutError::Timeout)
         {
             return;
         }
@@ -1833,7 +1835,10 @@ fn parse_schedule_tick_interval(configured: Option<&str>) -> Option<std::time::D
 
 /// Fire due schedules on a cadence so homeboy does not need an external timer
 /// to run its own periodic work (#10131).
-fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+fn spawn_schedule_ticker_for_lease(
+    lease_id: String,
+    shutdown: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let Some(interval) = schedule_tick_interval() else {
             // Disabled: still consume the shutdown signal so the join at
@@ -1841,7 +1846,7 @@ fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandl
             let _ = shutdown.recv();
             return;
         };
-        schedule_tick_loop(interval, shutdown)
+        schedule_tick_loop_for_lease(interval, Some(&lease_id), shutdown)
     })
 }
 
@@ -1851,7 +1856,16 @@ fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandl
 /// scheduled command delays neither this loop nor daemon shutdown. Stale
 /// `running` markers are reclaimed on every tick, so a live daemon cannot
 /// leave an enabled schedule un-run for many cadences.
+#[cfg(test)]
 fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+    schedule_tick_loop_for_lease(interval, None, shutdown)
+}
+
+fn schedule_tick_loop_for_lease(
+    interval: Duration,
+    lease_id: Option<&str>,
+    shutdown: mpsc::Receiver<()>,
+) {
     let runner: std::sync::Arc<dyn crate::schedule::ScheduleCommandRunner> =
         match crate::schedule::SubprocessRunner::new() {
             Ok(runner) => std::sync::Arc::new(runner),
@@ -1860,8 +1874,10 @@ fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()
     let ticker = crate::schedule::ScheduleTicker::new();
 
     loop {
-        let _ = ticker.dispatch_due(chrono::Utc::now(), std::sync::Arc::clone(&runner));
-        if shutdown.recv_timeout(interval).is_ok() {
+        if lease_id.is_none_or(lifetime::owns_global_work) {
+            let _ = ticker.dispatch_due(chrono::Utc::now(), std::sync::Arc::clone(&runner));
+        }
+        if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
         }
     }
@@ -1931,7 +1947,7 @@ fn spawn_orchestration_reconciler(
 /// reconcile that panics costs one pass, not the tick and not the daemon.
 /// Overlap is impossible by construction — the sleep happens after all
 /// passes return, exactly as the schedule ticker does it — and across
-/// processes the daemon owner lock already guarantees a single ticker.
+/// generations only the admission owner drives global work.
 fn orchestration_tick_loop(
     job_store: JobStore,
     serving_lease_id: String,
@@ -1939,18 +1955,20 @@ fn orchestration_tick_loop(
     shutdown: mpsc::Receiver<()>,
 ) {
     loop {
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_stale_active_runs();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_unmaterialized_cook_admissions();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::reconcile_queued_retries();
-        });
-        isolated_tick(|| {
-            let _ = orchestration::drain_work_intents();
-        });
+        if lifetime::owns_global_work(&serving_lease_id) {
+            isolated_tick(|| {
+                let _ = orchestration::reconcile_stale_active_runs();
+            });
+            isolated_tick(|| {
+                let _ = orchestration::reconcile_unmaterialized_cook_admissions();
+            });
+            isolated_tick(|| {
+                let _ = orchestration::reconcile_queued_retries();
+            });
+            isolated_tick(|| {
+                let _ = orchestration::drain_work_intents();
+            });
+        }
         // Terminalization of a linked durable run must deterministically
         // terminalize its own daemon jobs, even when the job's in-process
         // supervisor died without persisting anything.
@@ -1968,12 +1986,14 @@ fn orchestration_tick_loop(
             {
                 let _ = generation_store::mark_job_terminal(&job.id.to_string());
             }
-            let _ = generation_store::reconcile_drained_generations(
-                &serving_lease_id,
-                control::stop_drained_generation,
-            );
+            if lifetime::owns_global_work(&serving_lease_id) {
+                let _ = generation_store::reconcile_drained_generations(
+                    &serving_lease_id,
+                    control::stop_drained_generation,
+                );
+            }
         });
-        if shutdown.recv_timeout(interval).is_ok() {
+        if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
         }
     }
@@ -1990,11 +2010,9 @@ fn spawn_local_child_reservation_reconciler(
         let _ = job_store.reconcile_expired_admissions();
         reconcile_pending_workspace_owner_releases();
         reconcile_terminal_workspace_owner_leases(&job_store);
-        if shutdown
-            .recv_timeout(std::time::Duration::from_secs(
-                LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
-            ))
-            .is_ok()
+        if shutdown.recv_timeout(std::time::Duration::from_secs(
+            LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
+        )) != Err(mpsc::RecvTimeoutError::Timeout)
         {
             return;
         }
@@ -2007,14 +2025,21 @@ fn spawn_local_child_reservation_reconciler(
 ///
 /// Delivery is route-driven. Route-less completions are considered only when an
 /// explicit operations default transport is configured.
-fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+fn spawn_completion_notifier_for_lease(
+    lease_id: String,
+    shutdown: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
     let interval = std::env::var(COMPLETION_NOTIFY_INTERVAL_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS);
     std::thread::spawn(move || {
-        completion_notify_loop(std::time::Duration::from_secs(interval), shutdown)
+        completion_notify_loop_for_lease(
+            std::time::Duration::from_secs(interval),
+            Some(&lease_id),
+            shutdown,
+        )
     })
 }
 
@@ -2047,14 +2072,20 @@ fn isolated_tick(body: impl FnOnce()) {
 /// attempt failed is retried on the very next tick. The two mechanisms are
 /// individually isolated — an outbox drain that panics does not stop
 /// completion notification, and vice versa.
-fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+fn completion_notify_loop_for_lease(
+    interval: Duration,
+    lease_id: Option<&str>,
+    shutdown: mpsc::Receiver<()>,
+) {
     let mut tracker = completion_tracker::CompletionTracker::default();
     loop {
-        isolated_tick(|| completion_notify_pass(&mut tracker));
-        isolated_tick(|| {
-            let _ = crate::notify_outbox::drain(chrono::Utc::now());
-        });
-        if shutdown.recv_timeout(interval).is_ok() {
+        if lease_id.is_none_or(lifetime::owns_global_work) {
+            isolated_tick(|| completion_notify_pass(&mut tracker));
+            isolated_tick(|| {
+                let _ = crate::notify_outbox::drain(chrono::Utc::now());
+            });
+        }
+        if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
         }
     }
@@ -5438,6 +5469,37 @@ mod tests {
                 "shutdown must not wait out the poll interval, took {:?}",
                 start.elapsed()
             );
+        });
+    }
+
+    #[test]
+    fn daemon_tickers_exit_when_the_shutdown_owner_disappears() {
+        crate::test_support::with_isolated_home(|_| {
+            for completion in [false, true] {
+                let (shutdown, receiver) = std::sync::mpsc::channel();
+                drop(shutdown);
+                let (done, finished) = std::sync::mpsc::channel();
+                let handle = std::thread::spawn(move || {
+                    if completion {
+                        super::completion_notify_loop_for_lease(
+                            Duration::from_secs(300),
+                            Some("not-the-admission-owner"),
+                            receiver,
+                        );
+                    } else {
+                        super::schedule_tick_loop_for_lease(
+                            Duration::from_secs(300),
+                            Some("not-the-admission-owner"),
+                            receiver,
+                        );
+                    }
+                    done.send(()).unwrap();
+                });
+                finished
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("a disconnected channel stops the ticker rather than spinning");
+                handle.join().expect("ticker exits");
+            }
         });
     }
 

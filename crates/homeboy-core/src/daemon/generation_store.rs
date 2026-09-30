@@ -494,35 +494,42 @@ pub(super) fn reconcile_drained_generations(
                 .then_some((lease_id, generation.endpoint))
         })
         .collect::<Vec<_>>();
+    let mut first_error = None;
     for (lease_id, endpoint) in endpoints {
-        stop(&endpoint)?;
-        mutate_registry(|registry| {
-            let Some(registry) = registry.as_mut() else {
-                return Ok(());
-            };
-            let can_retire =
-                registry
-                    .generations
-                    .generations
-                    .get(&lease_id)
-                    .is_some_and(|generation| {
-                        generation.drain_state == RollingDrainState::Draining
-                            && generation.active_jobs == 0
-                    });
-            if can_retire {
-                registry.generations.generations.remove(&lease_id);
-                registry
-                    .generations
-                    .job_owners
-                    .retain(|_, owner| owner != &lease_id);
-                registry
-                    .completed_jobs
-                    .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
-            }
-            Ok(())
-        })?;
+        let result = stop(&endpoint).and_then(|()| {
+            mutate_registry(|registry| {
+                let Some(registry) = registry.as_mut() else {
+                    return Ok(());
+                };
+                let can_retire =
+                    registry
+                        .generations
+                        .generations
+                        .get(&lease_id)
+                        .is_some_and(|generation| {
+                            generation.drain_state == RollingDrainState::Draining
+                                && generation.active_jobs == 0
+                        });
+                if can_retire {
+                    registry.generations.generations.remove(&lease_id);
+                    registry
+                        .generations
+                        .job_owners
+                        .retain(|_, owner| owner != &lease_id);
+                    registry
+                        .completed_jobs
+                        .retain(|job_id| registry.generations.job_owners.contains_key(job_id));
+                }
+                Ok(())
+            })
+        });
+        // One blocked lease must not prevent independent idle generations from
+        // being retired. Failed entries remain durable for the next pass.
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
     }
-    Ok(())
+    first_error.map_or(Ok(()), Err)
 }
 
 pub(super) fn generation_state_dir() -> Result<PathBuf> {
@@ -679,6 +686,46 @@ mod tests {
             assert!(endpoint_for_lease("missing")
                 .expect("look up missing")
                 .is_none());
+        });
+    }
+
+    #[test]
+    fn a_blocked_retirement_does_not_strand_other_idle_generations() {
+        with_isolated_home(|_| {
+            seed(&state("A", "127.0.0.1:1001")).expect("seed A");
+            record_job("retained-a", "A").expect("admit A job");
+            mark_job_terminal("retained-a").expect("finish A job");
+            activate(&state("B", "127.0.0.1:1002")).expect("activate B");
+            activate(&state("C", "127.0.0.1:1003")).expect("activate C");
+            record_job("active-c", "C").expect("admit active C job");
+            activate(&state("D", "127.0.0.1:1004")).expect("activate D");
+
+            let stopped = std::sync::Mutex::new(Vec::new());
+            let result = reconcile_drained_generations("D", |endpoint| {
+                stopped.lock().unwrap().push(endpoint.lease_id.clone());
+                if endpoint.lease_id == "A" {
+                    Err(Error::internal_unexpected("exact A lease is blocked"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err(), "retain the original retirement diagnostic");
+            assert_eq!(*stopped.lock().unwrap(), ["A", "B"]);
+            assert!(endpoint_for_lease("B").unwrap().is_none());
+            assert!(endpoint_for_lease("A").unwrap().is_some());
+            assert_eq!(
+                endpoint_for_job("retained-a").unwrap().unwrap().lease_id,
+                "A"
+            );
+            assert_eq!(endpoint_for_job("active-c").unwrap().unwrap().lease_id, "C");
+            assert!(super::super::lifetime::owns_global_work("D"));
+            assert!(!super::super::lifetime::owns_global_work("A"));
+            assert!(!super::super::lifetime::owns_global_work("C"));
+
+            reconcile_drained_generations("D", |_| Ok(()))
+                .expect("retry only the retained idle generation");
+            assert!(endpoint_for_lease("A").unwrap().is_none());
+            assert!(endpoint_for_lease("C").unwrap().is_some());
         });
     }
 

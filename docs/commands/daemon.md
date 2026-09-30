@@ -17,6 +17,27 @@ homeboy daemon <COMMAND>
 - `recover` — resolve and run the right recovery from the current status report
 - `broker-config` — render a deployable reverse-runner broker service recipe
 
+## Daemon lifetime
+
+Automatically started daemons (`ensure-running`, including managed WorkJob
+launches) stop after **300 seconds with no active durable jobs**. Their
+supervisors use the existing lease-scoped stop gate: pending admissions and
+active work prevent shutdown, and every signal is tied to the exact lease and
+startup token. A subsequent command starts a new daemon using the retained
+durable store. Disposable clients do not need to leave a resident process behind.
+
+`homeboy daemon start` and foreground `serve` are explicitly resident launches,
+appropriate for continuous schedules and services. Set
+`HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
+window for a supervised launch, or `0` for a resident automatic launch. Foreground
+`serve` lifetime is owned by its calling service manager. Superseded resident generations
+also become bounded once their own durable work drains.
+
+Only the admission-owning generation runs global scheduling, notification, and
+orchestration passes. Older generations maintain their own jobs while draining.
+One blocked generation retirement does not prevent independent idle generations
+from being retired; failed entries retain their evidence and are retried.
+
 ## Recovery dispatch
 
 `homeboy daemon status` is a bounded operator projection by default. It reports

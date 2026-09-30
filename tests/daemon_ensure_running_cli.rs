@@ -1,9 +1,101 @@
 use std::fs;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use homeboy_core::api_jobs::{JobStatus, JobStore};
-use homeboy_core::test_support::{bounded_output, HermeticTestContext, TestBinary};
+use homeboy_core::test_support::{
+    bounded_output, HermeticDaemonGuard, HermeticTestContext, TestBinary,
+};
+
+#[test]
+fn on_demand_daemons_reap_their_supervisor_and_restart_without_accumulation() {
+    let context = HermeticTestContext::new();
+    let _daemon = HermeticDaemonGuard::new(&context, TestBinary::HomeboyFixture);
+    for _ in 0..3 {
+        let mut ensure = context.command(TestBinary::HomeboyFixture);
+        ensure
+            // Exercise production detachment. The bounded subprocess helper
+            // otherwise reaps the daemon along with the successful launcher.
+            .env_remove("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP")
+            .env("HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS", "2")
+            .args(["daemon", "ensure-running"]);
+        let output = bounded_output(ensure);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(context.daemon_dir().join("state.json")).expect("live lease"),
+        )
+        .unwrap();
+        let pid = state["pid"].as_u64().unwrap() as u32;
+        let parent = parent_pid(pid);
+        wait_for_process_exit(pid);
+        if let Some(parent) = parent {
+            wait_for_process_exit(parent);
+        }
+        let mut status = context.command(TestBinary::HomeboyFixture);
+        status.args(["daemon", "status"]);
+        let output = bounded_output(status);
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            status["data"]["running"], false,
+            "idle shutdown is observable"
+        );
+    }
+}
+
+#[test]
+fn idle_shutdown_preserves_active_durable_jobs_then_reaps_after_completion() {
+    let context = HermeticTestContext::new();
+    let _daemon = HermeticDaemonGuard::new(&context, TestBinary::HomeboyFixture);
+    let mut ensure = context.command(TestBinary::HomeboyFixture);
+    ensure
+        .env_remove("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP")
+        .env("HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS", "3")
+        .args(["daemon", "ensure-running"]);
+    assert!(bounded_output(ensure).status.success());
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(context.daemon_dir().join("state.json")).unwrap())
+            .unwrap();
+    let pid = state["pid"].as_u64().unwrap() as u32;
+    let jobs =
+        JobStore::open_without_reconciliation(context.daemon_dir().join("jobs.json")).unwrap();
+    let job = jobs.create("idle-lifetime-active-regression");
+    jobs.start(job.id).unwrap();
+    thread::sleep(Duration::from_secs(5));
+    let alive_with_active_work = homeboy_core::process::pid_is_running(pid);
+    let active_status = jobs.get(job.id).unwrap().status;
+    jobs.cancel(job.id, "regression fixture finished").unwrap();
+    assert!(
+        alive_with_active_work,
+        "active durable work keeps its owner alive"
+    );
+    assert_eq!(active_status, JobStatus::Running);
+    wait_for_process_exit(pid);
+    assert_eq!(jobs.get(job.id).unwrap().status, JobStatus::Cancelled);
+}
+
+fn parent_pid(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+fn wait_for_process_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while homeboy_core::process::pid_is_running(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !homeboy_core::process::pid_is_running(pid),
+        "daemon lifecycle must reap pid {pid}"
+    );
+}
 
 #[test]
 fn ensure_running_observes_the_isolated_daemon_startup_lease() {
