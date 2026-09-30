@@ -391,6 +391,48 @@ pub(crate) fn production_runtime_admission(
     }
 }
 
+/// Re-admit an upgrade-delayed Cook without submitting a new plan or attempt.
+/// The store commit rechecks eligibility after manifest admission; interruption
+/// before that commit leaves the original queue row available for the next tick.
+pub fn rebind_queued_cook_runtime_in_store(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    rebind_queued_cook_runtime_with_admission(
+        recipe,
+        lifecycle_store,
+        run_id,
+        production_runtime_admission(lifecycle_store),
+    )
+}
+
+pub(crate) fn rebind_queued_cook_runtime_with_admission(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    admit_runtime: impl FnOnce(&str) -> Result<Value>,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = lifecycle_store.read_record(run_id)?;
+    super::cook_recipe::validate_recipe_attempt_record_with_controller_plan(
+        recipe,
+        run_id,
+        &record,
+        &lifecycle_store.read_controller_plan(run_id)?,
+    )?;
+    if super::cook_recipe::pre_execution_runtime_recovery(&record)
+        != Some(super::cook_recipe::PreExecutionRuntimeRecovery::QueuedRuntimeAdmission)
+        || record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["build_identity"]
+            .as_str()
+            == Some(homeboy_core::build_identity::current().display.as_str())
+    {
+        return Ok(record);
+    }
+    let runtime = admit_runtime(run_id)?;
+    lifecycle_store.rebind_queued_cook_runtime(run_id, runtime)
+}
+
 /// Complete the second half of initial-attempt materialization after a crash.
 /// The recipe and run record are independent durable writes, so their exact
 /// identities must agree before repairing the alias/index projection.
