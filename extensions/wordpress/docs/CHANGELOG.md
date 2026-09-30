@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.7] - 2026-09-30
+
+### Fixed
+- skip workspace helper for empty schema defaults
+
 ## [3.50.6] - 2026-09-30
 
 ### Fixed
