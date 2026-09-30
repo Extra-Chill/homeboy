@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use homeboy::agents::agent_task_lifecycle::{
+    resolve_cook_reader_run_id_in_store, select_cook_candidate_in_store,
+};
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
@@ -276,10 +279,6 @@ pub(super) fn resolve_cook_reader_target(
     run_or_cook_id: &str,
     exact: bool,
 ) -> homeboy::core::Result<CookReaderTarget> {
-    // One store for the whole target resolution. Both branches ask the same
-    // question about the same Cook — does its index exist, and what does it
-    // say — and separately resolved homes can disagree about the answer
-    // (#7505).
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     if exact {
@@ -288,35 +287,15 @@ pub(super) fn resolve_cook_reader_target(
             selection: None,
         });
     }
-    if !agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, run_or_cook_id)? {
-        if let Some(materializing) =
-            agent_task_lifecycle::resolve_detached_cook_materializing_attempt_in_store(
-                &lifecycle_store,
-                run_or_cook_id,
-            )?
-        {
-            return Ok(CookReaderTarget {
-                run_id: materializing.run_id.clone(),
-                selection: None,
-            });
-        }
-        return Ok(CookReaderTarget {
-            run_id: run_or_cook_id.to_string(),
-            selection: None,
-        });
-    }
-    let selection = agent_task_service_direct::select_cook_candidate(run_or_cook_id)?;
-    if selection.incomplete || selection.run_id.is_empty() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "cook_id",
-            "candidate selection is incomplete after its bounded recovery window",
-            Some(run_or_cook_id.to_string()),
-            None,
-        ));
-    }
+    let run_id = resolve_cook_reader_run_id_in_store(&lifecycle_store, run_or_cook_id)?;
+    let selection =
+        agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, run_or_cook_id)?
+            .then(|| select_cook_candidate_in_store(&lifecycle_store, run_or_cook_id))
+            .transpose()?;
     Ok(CookReaderTarget {
-        run_id: selection.run_id.clone(),
-        selection: Some(serde_json::to_value(selection).unwrap_or(Value::Null)),
+        run_id,
+        selection: selection
+            .map(|selection| serde_json::to_value(selection).unwrap_or(Value::Null)),
     })
 }
 
@@ -332,7 +311,11 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         return Ok((recipe_only, 0));
     }
     let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
-    let run = agent_task_service::control_plane_run(&target.run_id)?;
+    let run = if args.exact {
+        homeboy::agents::orchestration::run_exact_from_current_environment(&target.run_id)?
+    } else {
+        agent_task_service::control_plane_run(&target.run_id)?
+    };
     let exit_code = if args.strict_subject_exit && control_plane_run_requires_action(&run) {
         1
     } else {
@@ -568,7 +551,7 @@ fn emit_status_change_event(snapshot: &Value, poll: u64, retained_limit_reached:
         event["change"] = json!({
             "run_id": run_id,
             "state": status_run_state(snapshot),
-            "change_basis": status_change_digest_projection(snapshot),
+            "change_basis": status_change_projection(snapshot),
             "full_status_ref": snapshot.get("full_command"),
         });
     }
@@ -585,25 +568,17 @@ fn emit_status_change_event(snapshot: &Value, poll: u64, retained_limit_reached:
 }
 
 fn status_watch_change(snapshot: &Value, poll: u64) -> Value {
-    let change = json!({
-        "poll": poll,
-        "run_id": status_run_id(snapshot),
-        "state": status_run_state(snapshot),
-        "phase": snapshot.get("phase"),
-        "blocker": snapshot.get("blocker"),
-        "heartbeat_at": snapshot.get("heartbeat_at"),
-        "candidate": snapshot.get("candidate"),
-        "gates": snapshot.get("gates"),
-        "publication": snapshot.get("publication"),
-        "action_eligibility": snapshot.get("action_eligibility"),
-        "change_basis": status_change_projection(snapshot),
-    });
+    let change_basis = status_change_projection(snapshot);
+    let mut change = change_basis.clone();
+    change["poll"] = json!(poll);
+    change["run_id"] = json!(status_run_id(snapshot));
+    change["change_basis"] = change_basis;
     if serialized_len(&change) > STATUS_WATCH_CHANGE_PAYLOAD_BYTE_LIMIT {
         return json!({
             "poll": poll,
             "run_id": status_run_id(snapshot),
             "state": status_run_state(snapshot),
-            "change_basis": status_change_digest_projection(snapshot),
+            "change_basis": status_change_projection(snapshot),
         });
     }
     change
@@ -622,35 +597,21 @@ fn status_change_projection(status: &Value) -> Value {
     })
 }
 
-fn status_change_digest_projection(status: &Value) -> Value {
-    status_change_projection(status)
-}
-
 fn status_is_terminal(status: &Value) -> bool {
-    !matches!(
-        status_run_state(status).and_then(Value::as_str),
-        Some("queued" | "running" | "in_flight")
-    )
+    canonical_status_state(status).is_none_or(|state| state.is_terminal())
 }
 
 fn status_is_failure(status: &Value) -> bool {
-    let Some(state) = status_run_state(status).and_then(Value::as_str) else {
-        // Recipe-only Cook status is a successful read whose recovery state is
-        // intentionally carried under `status`, not lifecycle `state`.
-        return false;
-    };
-    !matches!(
-        state,
-        "queued"
-            | "running"
-            | "in_flight"
-            | "succeeded"
-            | "review_ready"
-            | "draft_published"
-            | "green_no_finalize"
-            | "no_changes"
-            | "intentional_no_change"
-    )
+    canonical_status_state(status).is_some_and(|state| {
+        state.is_terminal()
+            && state != homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+    })
+}
+
+fn canonical_status_state(
+    status: &Value,
+) -> Option<homeboy_control_plane_contract::ControlPlaneRunState> {
+    serde_json::from_value(status_run_state(status)?.clone()).ok()
 }
 
 fn watch_status_output(

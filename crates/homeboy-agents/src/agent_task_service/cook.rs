@@ -1628,7 +1628,87 @@ impl serde::Serialize for AgentTaskCookReport {
     }
 }
 
+/// Pure Cook subject/outcome projection shared by operator observation surfaces.
+pub fn cook_observation_in_store(
+    store: &AgentTaskLifecycleStore,
+    id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let subject = agent_task_lifecycle::resolve_cook_reader_run_id_in_store(store, id)?;
+    let record = store.read_record_bounded(&subject)?;
+    Ok(project_cook_observation(store, &record))
+}
+
+pub(crate) fn project_cook_observation(
+    store: &AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> agent_task_lifecycle::AgentTaskRunRecord {
+    use agent_task_lifecycle::AgentTaskRunState;
+    let mut projected = record.clone();
+    if record.state != AgentTaskRunState::Succeeded {
+        return projected;
+    }
+    let Some(cook_id) = record.metadata["cook_id"].as_str() else {
+        return projected;
+    };
+    let terminal = &record.metadata["cook_progress"];
+    if terminal["phase"] == "terminal"
+        && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
+        && terminal["terminal_success"] == true
+        && terminal["exit_code"] == 0
+    {
+        return projected;
+    }
+    let recipes = CookRecipeStore::new(store.roots().clone());
+    let recipe = recipes.load_recipe(cook_id).ok();
+    let verified =
+        super::cook_promotion::persisted_promotion_from_record(&record.run_id, record.clone())
+            .ok()
+            .flatten()
+            .is_some_and(|promotion| {
+                matches!(
+                    promotion.status,
+                    AgentTaskPromotionStatus::Applied
+                        | AgentTaskPromotionStatus::GateFailed
+                        | AgentTaskPromotionStatus::VerifiedNoChanges
+                ) && promotion.finalization_eligible(
+                    recipe.as_ref().is_some_and(|recipe| {
+                        recipe.gate_policy["accept_inherited_failures"] == true
+                    }),
+                )
+            });
+    let no_finalize = recipe
+        .as_ref()
+        .is_some_and(|recipe| recipe.finalization["no_finalize"] == true);
+    let finalized = record
+        .metadata
+        .get("cook_finalization")
+        .is_some_and(cook_finalization_is_pr_receipt);
+    if !cook_success(true, verified, no_finalize, finalized) {
+        projected.state = AgentTaskRunState::CandidateRecoverable;
+    }
+    projected
+}
+
+fn cook_success(terminal: bool, verified: bool, no_finalize: bool, pr_finalized: bool) -> bool {
+    terminal && verified && (no_finalize || pr_finalized)
+}
+
 impl AgentTaskCookReport {
+    /// Successful Cook completion, rather than provider or launcher success.
+    pub fn completed_successfully(&self) -> bool {
+        let status = CookStatus::from_status(&self.status);
+        cook_success(
+            self.disposition.is_terminal(),
+            !status.is_in_flight() && (status.is_success_exit() || self.status == "succeeded"),
+            matches!(
+                self.status.as_str(),
+                "green_no_finalize" | "intentional_no_change"
+            ),
+            self.completion()
+                .is_some_and(|completion| completion.pr_finalized),
+        )
+    }
+
     /// The closed-vocabulary classification of this report.
     pub fn lifecycle(&self) -> RunLifecycleProjection {
         RunLifecycleProjection::from_status_and_disposition(&self.status, self.disposition)
@@ -3902,21 +3982,7 @@ pub(crate) fn apply_resource_guard_stop(
 }
 
 fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
-    let finalization_requested = !matches!(
-        report.status.as_str(),
-        "green_no_finalize" | "intentional_no_change"
-    );
-    if finalization_requested {
-        return report
-            .completion()
-            .is_some_and(|completion| completion.pr_finalized)
-            .then_some(0)
-            .unwrap_or(1);
-    }
-    CookStatus::from_status(&report.status)
-        .is_success_exit()
-        .then_some(0)
-        .unwrap_or(1)
+    i32::from(!report.completed_successfully())
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
