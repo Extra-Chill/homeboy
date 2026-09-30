@@ -1284,3 +1284,30 @@ fn verify_retry_reports_last_seen_version_on_exhaustion() {
         Some("0.220.0")
     );
 }
+#[cfg(unix)]
+#[test]
+fn installer_start_gate_supports_high_pipe_descriptors_and_waits_for_release() {
+    let mut gate = InstallerStartGate::new().unwrap();
+    let high_fd = unsafe { libc::fcntl(gate.read_fd, libc::F_DUPFD, 20) };
+    assert!(high_fd >= 20);
+    unsafe {
+        libc::close(gate.read_fd);
+    }
+    gate.read_fd = high_fd;
+    let output = tempfile::tempdir().unwrap();
+    let marker = output.path().join("installer-ran");
+    let mut child = gate
+        .command("touch \"$INSTALLER_TEST_MARKER\"")
+        .env("INSTALLER_TEST_MARKER", &marker)
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !marker.exists(),
+        "installer is fenced before admission release"
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    gate.release().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(marker.exists());
+}
