@@ -55,6 +55,31 @@ homeboy trace <component-id> --scenario <name>
 homeboy audit <component-id>
 ```
 
+## Deploy hooks
+
+After each WordPress component deploys, the extension's `post:deploy` hooks run
+a vendor-neutral object-cache flush (`wp cache flush`) and warn when the install
+directory is owned by `root:root`.
+
+The extension does not purge any particular page-cache plugin. A page cache is
+a property of the site, not of WordPress, and Homeboy deploys copy files
+directly, so WordPress upgrader hooks never fire. Declare the purge on the deploy
+target as a project-scoped `post:deploy:project` hook. It runs once per deploy
+invocation, after the last component, and only the project can declare it:
+
+```json
+{
+  "hooks": {
+    "post:deploy:project": [
+      "wp breeze purge --cache=all --path={{base_path}}"
+    ]
+  }
+}
+```
+
+Use whatever command your cache plugin provides (for example
+`wp w3-total-cache flush all`, or a site's own purge command).
+
 ## Bench Helpers
 
 `scripts/bench/bench-runner.sh` selects the WordPress bench runtime backend.
