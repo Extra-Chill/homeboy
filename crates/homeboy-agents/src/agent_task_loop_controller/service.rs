@@ -43,6 +43,13 @@ pub fn loop_work_status(
             "event_count": job.event_count,
             "updated_at_ms": job.updated_at_ms,
         }),
+        Err(_)
+            if metadata["work_job"]["recovery_receipt"]["schema"]
+                == "homeboy/loop-command-terminal-recovery/v1"
+                && metadata["work_job"]["recovery_receipt"]["job_id"] == job_id =>
+        {
+            metadata["work_job"]["recovery_receipt"].clone()
+        }
         Err(error) => serde_json::json!({
             "job_id": job_id,
             "status": "unavailable",

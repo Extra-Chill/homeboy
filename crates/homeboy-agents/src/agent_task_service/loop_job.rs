@@ -147,6 +147,12 @@ impl AgentTaskLoopJob {
 struct LoopWorkHandler;
 
 impl WorkJobHandler for LoopWorkHandler {
+    fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
+        request["request"]["loop_id"]
+            .as_str()
+            .or_else(|| request["loop_id"].as_str())
+            .map(|id| format!("loop-command:{id}"))
+    }
     fn work_type(&self) -> &'static str {
         AGENT_TASK_LOOP_JOB_TYPE
     }
