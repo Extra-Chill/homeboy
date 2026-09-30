@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.7] - 2026-09-30
+
+### Changed
+- retain immutable Cook binaries without draining execution
+- pass admitted runtime manifest to execution pin
+
+### Fixed
+- replay canonical cancellation before upgrade admission
+- contain command trees and reconcile orphaned execution
+
 ## [0.398.6] - 2026-09-30
 
 ### Fixed
