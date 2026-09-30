@@ -1195,3 +1195,66 @@ fn run_plan_credential_sources_include_the_selected_provider_default_file() {
         Some("~/.example-provider/auth.json")
     );
 }
+
+fn example_oauth_plan() -> AgentTaskPlan {
+    serde_json::from_value::<AgentTaskPlan>(serde_json::json!({
+        "schema": "homeboy/agent-task-plan/v1",
+        "plan_id": "controller-delivered-plan",
+        "tasks": [{
+            "schema": "homeboy/agent-task-request/v1",
+            "task_id": "example-oauth-route",
+            "executor": {
+                "backend": "sample-runtime",
+                "config": { "provider": "example-oauth" }
+            },
+            "instructions": "Use the auth-store route."
+        }]
+    }))
+    .expect("plan fixture")
+}
+
+#[test]
+fn controller_resolvable_json_file_source_is_not_a_runner_identity() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let store = home.path().join(".example-provider/auth.json");
+        std::fs::create_dir_all(store.parent().unwrap()).expect("store dir");
+        std::fs::write(
+            &store,
+            serde_json::json!({ "tokens": { "access_token": "not-a-real-token" } }).to_string(),
+        )
+        .expect("store");
+        let provider = fixture_provider_with_example_defaults();
+        let plan = example_oauth_plan();
+
+        let delivered =
+            controller_delivered_provider_secret_env(&plan, std::slice::from_ref(&provider));
+        assert!(delivered.contains("EXAMPLE_PROVIDER_ACCESS_TOKEN"));
+
+        let runner_names = agent_task_runner_provider_secret_env_names_with_providers(
+            &plan,
+            std::slice::from_ref(&provider),
+        );
+        assert!(
+            !runner_names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()),
+            "a store the controller syncs must not require a runner secret_env reference: {runner_names:?}"
+        );
+    });
+}
+
+#[test]
+fn unresolvable_declared_source_still_requires_a_runner_identity() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let provider = fixture_provider_with_example_defaults();
+        let plan = example_oauth_plan();
+
+        assert!(
+            controller_delivered_provider_secret_env(&plan, std::slice::from_ref(&provider))
+                .is_empty()
+        );
+        let runner_names = agent_task_runner_provider_secret_env_names_with_providers(
+            &plan,
+            std::slice::from_ref(&provider),
+        );
+        assert!(runner_names.contains(&"EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string()));
+    });
+}

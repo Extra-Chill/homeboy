@@ -576,6 +576,12 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
 ) -> Result<()> {
     let tasks = declared_agent_task_run_plan_secret_env_by_task(args);
     let required_names = secret_env_plan.secret_env_names();
+    let controller_delivered = agent_task_run_plan_from_args(args)
+        .map(|plan| {
+            let providers = ExtensionProviderAgentTaskExecutor::discover();
+            controller_delivered_provider_secret_env(&plan, providers.providers())
+        })
+        .unwrap_or_default();
     let mut ordered_required_names = Vec::new();
     for name in tasks.iter().flat_map(|task| task.secret_env.iter()) {
         if required_names.contains(name) && !ordered_required_names.contains(name) {
@@ -598,7 +604,11 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
             .iter()
             .filter(|task| task.secret_env.iter().any(|task_name| task_name == name))
             .any(|task| task.secret_sources.contains(name));
-        if env.contains_key(name) || runner.secret_env.contains_key(name) || task_sources {
+        if env.contains_key(name)
+            || runner.secret_env.contains_key(name)
+            || task_sources
+            || controller_delivered.contains(name)
+        {
             continue;
         }
         missing.push(name.clone());
@@ -672,17 +682,55 @@ pub fn preflight_agent_task_runner_provider_secret_env_plan(
 
 /// Resolve only the effective provider's required runner secret identities.
 /// Both Cook admission and staging consume this set without resolving values.
+///
+/// Names the controller delivers itself are excluded (see
+/// [`controller_delivered_provider_secret_env`]): the runner does not need its
+/// own `secret_env` reference for them (#15260).
 pub fn agent_task_runner_provider_secret_env_names(plan: &AgentTaskPlan) -> Vec<String> {
     let providers = ExtensionProviderAgentTaskExecutor::discover();
-    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers.providers());
+    agent_task_runner_provider_secret_env_names_with_providers(plan, providers.providers())
+}
+
+pub(crate) fn agent_task_runner_provider_secret_env_names_with_providers(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> Vec<String> {
+    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers);
     names.extend(
         plan.tasks
             .iter()
             .flat_map(|task| task.executor.secret_env.iter().cloned()),
     );
+    let delivered = controller_delivered_provider_secret_env(plan, providers);
+    names.retain(|name| !delivered.contains(name));
     names.sort();
     names.dedup();
     names
+}
+
+/// Provider-declared secret env names the controller delivers to the runner.
+///
+/// A provider route can declare where each of its secrets lives (for example a
+/// `json-file` auth store). When that source resolves on the controller, Lab
+/// staging hydrates the value into the forwarded env and syncs the declared
+/// store to the runner, so the name is controller-owned. Only names with a
+/// declared source that currently resolves on the controller qualify. A name
+/// the controller cannot resolve still has to come from the runner's own
+/// `secret_env` references, and admission keeps requiring it.
+pub(crate) fn controller_delivered_provider_secret_env(
+    plan: &AgentTaskPlan,
+    providers: &[AgentTaskExecutorProvider],
+) -> std::collections::BTreeSet<String> {
+    let sources = provider_secret_sources_for_plan_with_providers(plan, providers);
+    if sources.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+    let names = sources.keys().cloned().collect::<Vec<_>>();
+    agent_task_secrets::secret_env_status_with_fallbacks(&names, &sources)
+        .into_iter()
+        .filter(|status| status.configured)
+        .map(|status| status.name)
+        .collect()
 }
 
 pub(crate) fn preflight_lab_secret_env_handoff(
