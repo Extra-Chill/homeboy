@@ -3980,6 +3980,69 @@ fn operator_cancellation_recovers_provenance_missing_from_running_record() {
 }
 
 #[test]
+fn canonical_cancellation_replays_without_pruned_runner_job_and_preserves_receipt() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "run-15276-pruned-runner-cancellation";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submit exact run");
+    let mut record = store.read_record(run_id).unwrap();
+    record.state = AgentTaskRunState::Running;
+    record.tasks[0].state = AgentTaskState::Running;
+    store.write_record(&record).unwrap();
+    assert!(
+        !super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
+            .unwrap()
+    );
+    assert_eq!(
+        store.read_record(run_id).unwrap().state,
+        AgentTaskRunState::Running
+    );
+
+    let provenance = json!({
+        "actor": "runner", "cause": "runner_job_cancelled",
+        "reason": "runner job was cancelled", "timestamp": "2026-09-29T11:34:49+00:00",
+        "recovery_action": "inspect retained runner cancellation evidence"
+    });
+    record.metadata["cancellation_provenance"] = provenance.clone();
+    store.write_record(&record).unwrap();
+    let receipt = logs_in_store(&store, run_id)
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.kind == "run.cancelled")
+        .unwrap();
+    record
+        .metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("cancellation_provenance");
+    record.metadata["runner_id"] = json!("missing-runner");
+    record.metadata["runner_job_id"] = json!("pruned-job");
+    store.write_record(&record).unwrap();
+    assert!(
+        super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
+            .unwrap()
+    );
+    let cancelled = store.read_record(run_id).unwrap();
+    assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
+    assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
+    assert!(
+        !super::super::cancellation::reconcile_canonical_cancellation_in_store(&store, run_id)
+            .unwrap()
+    );
+    let receipts = logs_in_store(&store, run_id)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|event| event.kind == "run.cancelled")
+        .collect::<Vec<_>>();
+    assert_eq!(receipts, vec![receipt]);
+}
+
+#[test]
 fn cancel_run_reclaims_stale_running_record() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
