@@ -252,11 +252,37 @@ case "${output}" in
 esac
 
 # --- nextest: real package::kind::binary::test identity ----------------------
-# This is deliberately a real nextest run against the fixture crate, proving
-# that the complete Homeboy identity selects and executes its one target test.
+# This is deliberately a real nextest run against a two-package workspace,
+# proving that a member package is built and the complete Homeboy identity
+# selects and executes its one target test rather than the root package test.
 if command -v cargo-nextest >/dev/null 2>&1; then
+  mkdir -p "${workspace}/member/src"
+  cat > "${workspace}/Cargo.toml" <<'EOF'
+[package]
+name = "homeboy-retry-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+members = ["member"]
+EOF
+  cat > "${workspace}/member/Cargo.toml" <<'EOF'
+[package]
+name = "homeboy-retry-member"
+version = "0.0.0"
+edition = "2021"
+EOF
+  cat > "${workspace}/member/src/lib.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ok() {
+        assert_eq!(1 + 1, 2);
+    }
+}
+EOF
   reset_fixtures
-  full_ok='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::ok'
+  full_ok='homeboy-retry-member::lib::homeboy_retry_member::tests::ok'
   full_bad='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::bad'
   write_outcomes "${current_dir}" 'review test' nextest "${full_ok}" -- "${full_ok}" "${full_bad}"
   write_outcomes "${base_dir}" 'review test' nextest -- "${full_ok}" "${full_bad}"
@@ -269,7 +295,7 @@ if command -v cargo-nextest >/dev/null 2>&1; then
   esac
 
   reset_fixtures
-  full_missing='homeboy-retry-fixture::lib::homeboy_retry_fixture::tests::missing'
+  full_missing='homeboy-retry-member::lib::homeboy_retry_member::tests::missing'
   write_outcomes "${current_dir}" 'review test' nextest "${full_missing}" -- "${full_missing}"
   write_outcomes "${base_dir}" 'review test' nextest -- "${full_missing}"
   output="$(PATH="$(dirname "$(command -v cargo-nextest)"):${PATH}" run_retry "${bin_dir}" MAX_RETRIES=1 2>&1)"
