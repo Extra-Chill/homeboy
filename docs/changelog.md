@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.398.6] - 2026-09-30
+
+### Fixed
+- reuse corrected gate proof for candidate recovery
+
 ## [0.398.5] - 2026-09-30
 
 ### Changed
