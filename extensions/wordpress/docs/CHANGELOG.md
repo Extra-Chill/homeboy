@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.50.6] - 2026-09-30
+
+### Fixed
+- drop vendor cache-plugin purges from generic post:deploy
+
 ## [3.50.5] - 2026-09-29
 
 ### Fixed
