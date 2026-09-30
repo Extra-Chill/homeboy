@@ -2061,7 +2061,7 @@ fn refresh_execution_route_uses_diagnostic_ssh_for_incompatible_idle_unproven_ge
     );
 
     assert!(!admission.summary.daemon_compatible);
-    assert_eq!(admission.summary.active_job_count, 0);
+    assert_eq!(admission.summary.active_job_count, Some(0));
     assert!(admission.summary.safe_to_rotate);
     assert_eq!(
         refresh_execution_route(&runner, &admission).expect("recovered incompatible daemon"),

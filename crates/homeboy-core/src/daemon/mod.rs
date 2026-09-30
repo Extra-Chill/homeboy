@@ -2264,6 +2264,10 @@ where
     }
     reap_expired_uploads();
     match (method, path.split('?').next().unwrap_or(path)) {
+        ("GET", homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH) => match describe_runner(job_store) {
+            Ok(body) => daemon_endpoint_response("runner.describe", body),
+            Err(error) => error_response(503, error),
+        },
         ("GET", "/lifecycle/identity") => match daemon_endpoint_identity(path) {
             Ok(body) => HttpResponse {
                 status_code: 200,
@@ -3544,6 +3548,34 @@ fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport
         &validation,
         blocking_active_jobs,
     ))
+}
+
+/// One runner-owned observation. Capacity and freshness share the exact typed
+/// job snapshot, rather than straddling transitions through separate probes.
+fn describe_runner(job_store: &JobStore) -> Result<serde_json::Value> {
+    let validation = validate_lease_file(&state_path()?)?;
+    let lease = validation
+        .state
+        .as_ref()
+        .filter(|state| {
+            validation.running
+                && validation.fresh
+                && state.pid == std::process::id()
+                && state.build_identity == build_identity::current()
+        })
+        .ok_or_else(|| Error::internal_unexpected("runner observation has no owned fresh lease"))?;
+    let active = job_store.active_runner_jobs();
+    let freshness = freshness_report_from_validation(&validation, active.len());
+    Ok(json!({
+        "schema": homeboy_runner_contract::RUNNER_SERVICE_OBSERVATION_SCHEMA,
+        "lease_id": lease.lease_id,
+        "build_identity": build_identity::current(),
+        "lab_handoff_capabilities": homeboy_lab_runner_contract::required_lab_handoff_capabilities(),
+        "freshness": freshness,
+        "active_runner_job_count": active.len(),
+        "active_runner_jobs": active,
+        "stale_runner_jobs": job_store.stale_runner_jobs(),
+    }))
 }
 
 /// JSON pointer to an endpoint payload inside a fully written daemon response.

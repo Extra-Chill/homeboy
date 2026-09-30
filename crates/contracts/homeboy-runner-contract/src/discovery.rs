@@ -25,6 +25,9 @@ pub const RUNNER_API_CAPABILITIES_RESPONSE_SCHEMA: &str =
 pub const RUNNER_API_READINESS_REQUEST_SCHEMA: &str = "homeboy/runner-api-readiness-request/v1";
 pub const RUNNER_API_READINESS_RESPONSE_SCHEMA: &str = "homeboy/runner-api-readiness-response/v1";
 pub const RUNNER_API_V1: RunnerApiVersion = RunnerApiVersion { major: 1 };
+/// Lease-bound runner-service observation served by local and direct transports.
+pub const RUNNER_SERVICE_OBSERVATION_SCHEMA: &str = "homeboy/runner-service-observation/v1";
+pub const RUNNER_API_DESCRIBE_PATH: &str = "/runner/describe";
 
 /// A transport-neutral Runner API major version.
 ///
@@ -226,7 +229,8 @@ pub struct RunnerReadiness {
     pub runner_id: String,
     pub connected: bool,
     pub accepting_jobs: bool,
-    pub active_job_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_job_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -461,7 +465,7 @@ mod tests {
                 runner_id: "local".to_string(),
                 connected: true,
                 accepting_jobs: true,
-                active_job_count: 0,
+                active_job_count: Some(0),
                 capacity: Some(2),
                 reasons: Vec::new(),
             }),

@@ -2346,7 +2346,7 @@ fn fixture_request_reader_times_out_without_a_request() {
 }
 
 #[test]
-fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger() {
+fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
     test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener
@@ -2357,6 +2357,8 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
             .expect("serialize active job");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_server = std::sync::Arc::clone(&stop);
+        let version = homeboy_product_identity::product_version().to_string();
+        let build = homeboy_core::build_identity::current().display;
         let server = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while !stop_server.load(std::sync::atomic::Ordering::Acquire)
@@ -2380,18 +2382,23 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
                         },
                         "pid": 4242,
                     })
-                } else if request.starts_with("GET /jobs ") {
+                } else if request.starts_with("GET /runner/describe ") {
                     serde_json::json!({
                         "success": true,
                         "data": { "body": {
+                            "schema": "homeboy/runner-service-observation/v1",
+                            "lease_id": "lease-live",
+                            "freshness": { "fresh": true, "restartable": true,
+                                "lease_id": "lease-live", "pid": 4242, "active_jobs": 1 },
+                            "active_runner_job_count": 1,
                             "active_runner_jobs": [active_job],
                             "stale_runner_jobs": [],
                         }},
                     })
                 } else {
                     serde_json::json!({
-                        "version": "test",
-                        "build_identity": { "display": "homeboy test+abc123" },
+                        "version": version,
+                        "build_identity": { "display": build },
                     })
                 }
                 .to_string();
@@ -2418,6 +2425,8 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
         )
         .expect("create runner");
         let mut session = direct_ssh_session("lease-live");
+        session.homeboy_version = homeboy_product_identity::product_version().to_string();
+        session.homeboy_build_identity = Some(homeboy_core::build_identity::current().display);
         session.local_url = Some(format!("http://{address}"));
         session.local_port = Some(address.port());
         session.tunnel_pid = Some(std::process::id());
@@ -2427,8 +2436,8 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
             .generations
             .get_mut("lease-live")
             .expect("admission generation");
-        admission.active_jobs = 1;
-        admission.observed_active_jobs = Some(1);
+        admission.active_jobs = 7;
+        admission.observed_active_jobs = Some(7);
         crate::generation_store::write("homeboy-lab", &generations)
             .expect("write generation ledger");
 
@@ -2439,11 +2448,15 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
         .expect("status observation");
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
-        assert_eq!(report.active_job_count, 2);
+        assert_eq!(report.active_job_count, 1);
         assert_eq!(report.active_jobs.len(), 1);
-        assert!(report.active_job_error.is_some());
-        assert!(summary.retained_job_inconsistency.is_some());
-        assert!(!summary.accepting_jobs);
+        assert!(report.active_job_error.is_none());
+        assert!(
+            !summary.accepting_jobs,
+            "unverified configured job binary remains fenced"
+        );
+        assert_eq!(summary.active_job_count, Some(1));
+        assert!(!report.admission_availability(Some(32)).accepts_jobs);
 
         let mut mismatched = crate::generation_store::read("homeboy-lab", report.session.as_ref())
             .expect("read generation ledger")
@@ -2473,14 +2486,61 @@ fn status_admission_uses_direct_count_but_keeps_typed_owners_and_checks_ledger()
             &mismatched_owners,
             0,
         );
-        assert_eq!(mismatched_report.active_job_count, 2);
+        assert_eq!(mismatched_report.active_job_count, 1);
         assert_eq!(mismatched_report.active_jobs.len(), 1);
         assert!(mismatched_report.active_job_error.is_none());
-        assert!(mismatch.retained_job_inconsistency.is_none());
+        assert!(
+            !mismatch.accepting_jobs,
+            "ledger changes cannot clear binary compatibility"
+        );
 
         stop.store(true, std::sync::atomic::Ordering::Release);
         server.join().expect("daemon server");
     });
+}
+
+#[test]
+fn runner_observation_rejects_missing_jobs_wrong_lease_and_conflicting_counts() {
+    let session = direct_ssh_session("owned-lease");
+    let body = serde_json::json!({
+        "schema": homeboy_runner_contract::RUNNER_SERVICE_OBSERVATION_SCHEMA,
+        "lease_id": "owned-lease", "active_runner_job_count": 0,
+        "active_runner_jobs": [], "stale_runner_jobs": [],
+        "freshness": {"fresh":true,"restartable":true,"active_jobs":0,"lease_id":"owned-lease"},
+    });
+    assert!(parse_direct_runner_observation("homeboy-lab", &session, &body).is_ok());
+    let mut missing = body.clone();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("active_runner_jobs");
+    assert!(
+        parse_direct_runner_observation("homeboy-lab", &session, &missing).is_err(),
+        "missing is unknown, not idle"
+    );
+    let mut wrong_lease = body.clone();
+    wrong_lease["lease_id"] = serde_json::json!("another-service");
+    assert!(parse_direct_runner_observation("homeboy-lab", &session, &wrong_lease).is_err());
+    let mut wrong_freshness_lease = body.clone();
+    wrong_freshness_lease["freshness"]["lease_id"] = serde_json::json!("another-service");
+    assert!(
+        parse_direct_runner_observation("homeboy-lab", &session, &wrong_freshness_lease).is_err()
+    );
+    let mut conflicting = body;
+    conflicting["freshness"]["active_jobs"] = serde_json::json!(1);
+    assert!(parse_direct_runner_observation("homeboy-lab", &session, &conflicting).is_err());
+    let mut generic_job =
+        serde_json::to_value(sample_active_job(None, "generic controller work")).unwrap();
+    generic_job["runner_id"] = serde_json::json!("daemon-local");
+    conflicting["active_runner_jobs"] = serde_json::json!([generic_job]);
+    conflicting["active_runner_job_count"] = serde_json::json!(1);
+    let observed = parse_direct_runner_observation("homeboy-lab", &session, &conflicting)
+        .expect("service-owned generic job");
+    assert_eq!(
+        observed.active_jobs.len(),
+        1,
+        "controller alias must not hide an owned command"
+    );
 }
 
 #[test]

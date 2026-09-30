@@ -725,6 +725,7 @@ dependencies = [
  "homeboy-extension-contract",
  "homeboy-lab-contract",
  "homeboy-product-identity",
+ "homeboy-runner-contract",
  "homeboy-triage",
  "libc",
  "reqwest",

@@ -276,10 +276,13 @@ impl RunnerContinuationProvider for RunnerContinuation {
 }
 
 fn runner_live_job_authority_from_admission(
-    active_job_count: usize,
+    active_job_count: Option<usize>,
     safe_to_rotate: bool,
     unresolved_retained_projection_count: usize,
 ) -> RunnerLiveJobAuthority {
+    let Some(active_job_count) = active_job_count else {
+        return RunnerLiveJobAuthority::Unknown;
+    };
     if active_job_count > 0 {
         return RunnerLiveJobAuthority::Busy;
     }
@@ -561,19 +564,19 @@ mod tests {
     #[test]
     fn live_job_authority_maps_reconciled_idle_busy_and_unknown_admission() {
         assert_eq!(
-            runner_live_job_authority_from_admission(0, true, 0),
+            runner_live_job_authority_from_admission(Some(0), true, 0),
             RunnerLiveJobAuthority::Idle
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(2, false, 0),
+            runner_live_job_authority_from_admission(Some(2), false, 0),
             RunnerLiveJobAuthority::Busy
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(0, true, 1),
+            runner_live_job_authority_from_admission(Some(0), true, 1),
             RunnerLiveJobAuthority::Unknown
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(0, false, 0),
+            runner_live_job_authority_from_admission(Some(0), false, 0),
             RunnerLiveJobAuthority::Unknown
         );
     }

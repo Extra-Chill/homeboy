@@ -2280,8 +2280,18 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
         stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;
-    let local_daemon_freshness =
-        runner_daemon_freshness_until(&runner, session.as_ref(), connected, deadline)?;
+    let direct_observation = session
+        .as_ref()
+        .filter(|session| connected && session.local_url.is_some())
+        .map(|session| describe_direct_runner_until(runner_id, session, deadline));
+    let local_daemon_freshness = match &direct_observation {
+        Some(Ok(observation)) => Some(observation.freshness.clone()),
+        Some(Err(error)) => Some(unavailable_recovery_freshness(
+            runner_id,
+            error.message.clone(),
+        )),
+        None => runner_daemon_freshness_until(&runner, session.as_ref(), connected, deadline)?,
+    };
     let mut daemon_freshness = local_daemon_freshness
         .or_else(|| remote_daemon_recovery_freshness_until(runner_id, &runner, deadline));
     let active_job_source = session.as_ref().and_then(active_runner_job_source);
@@ -2293,7 +2303,27 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
                     .map(|freshness| freshness.active_jobs)
             })
             .flatten();
-    let (active_jobs, stale_jobs, active_job_state, active_job_error) = if connected {
+    let (active_jobs, stale_jobs, active_job_state, active_job_error) = if let Some(observation) =
+        direct_observation
+    {
+        match observation {
+            Ok(observation) => (
+                observation.active_jobs,
+                observation.stale_jobs,
+                RunnerActiveJobState::Available,
+                None,
+            ),
+            Err(error) => (
+                Vec::new(),
+                Vec::new(),
+                RunnerActiveJobState::Unavailable,
+                Some(RunnerActiveJobError {
+                    code: error.code.as_str().to_string(),
+                    message: error.message,
+                }),
+            ),
+        }
+    } else if connected {
         match session.as_ref() {
             Some(session) => match runner_jobs_until(runner_id, session, deadline) {
                 Ok((active_jobs, mut stale_jobs)) => {
@@ -2356,36 +2386,6 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
     let active_job_count = selected_active_job_count;
     let (generation_inventory, generation_owners) =
         super::generation_store::status_admission_projection(runner_id, session.as_ref())?;
-    let authoritative_live_count = generation_inventory
-        .iter()
-        .find(|generation| generation.admission_owner)
-        .filter(|generation| generation.active_job_count_authoritative)
-        .map(|generation| generation.live_job_count());
-    let delayed_live_projection = active_job_count > 0
-        && authoritative_live_count == Some(0)
-        && generation_owners.iter().any(|owner| {
-            generation_inventory.iter().any(|generation| {
-                generation.admission_owner
-                    && generation.generation == owner.generation
-                    && !owner.job_ids.is_empty()
-            })
-        });
-    let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
-        (Some(error), _) => Some(error),
-        (None, Some(_))
-            if authoritative_live_count.is_some_and(|count| count != active_job_count)
-                && !delayed_live_projection =>
-        {
-            Some(RunnerActiveJobError {
-                code: "retained_active_job_count_inconsistent".to_string(),
-                message: format!(
-                    "selected daemon reports {active_job_count} active job(s), but its authoritative generation ledger retains {}",
-                    authoritative_live_count.expect("guarded by is_some_and")
-                ),
-            })
-        }
-        (None, _) => None,
-    };
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
@@ -3106,6 +3106,89 @@ fn runner_jobs_until(
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build active job client: {err}")))?;
     runner_jobs_with_client(runner_id, session, &client, timeout)
+}
+
+struct DirectRunnerObservation {
+    freshness: DaemonFreshnessReport,
+    active_jobs: Vec<ActiveRunnerJobSummary>,
+    stale_jobs: Vec<ActiveRunnerJobSummary>,
+}
+
+fn describe_direct_runner_until(
+    runner_id: &str,
+    session: &RunnerSession,
+    deadline: Instant,
+) -> Result<DirectRunnerObservation> {
+    let timeout = remaining_observation_budget(deadline)
+        .ok_or_else(|| Error::internal_unexpected("runner observation deadline exhausted"))?;
+    let client = Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let data = daemon_get(
+        &client,
+        session.local_url.as_deref().expect("direct endpoint"),
+        homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH,
+    )?;
+    let body = data
+        .get("body")
+        .ok_or_else(|| Error::internal_unexpected("runner observation missing body"))?;
+    parse_direct_runner_observation(runner_id, session, body)
+}
+
+fn parse_direct_runner_observation(
+    runner_id: &str,
+    session: &RunnerSession,
+    body: &Value,
+) -> Result<DirectRunnerObservation> {
+    if body["schema"] != homeboy_runner_contract::RUNNER_SERVICE_OBSERVATION_SCHEMA
+        || session.remote_daemon_lease_id.as_deref() != body["lease_id"].as_str()
+        || body["lease_id"].as_str().is_none_or(str::is_empty)
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_observation",
+            "runner observation schema or service lease does not match the selected endpoint",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    // A service owns capacity for every job on its endpoint, including generic
+    // controller work with no configured runner alias. Filtering those jobs by
+    // the controller's alias recreates a count/identity disagreement.
+    let active_jobs: Vec<ActiveRunnerJobSummary> =
+        serde_json::from_value(body["active_runner_jobs"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("describe active runner jobs".to_string()),
+            )
+        })?;
+    let stale_jobs: Vec<ActiveRunnerJobSummary> =
+        serde_json::from_value(body["stale_runner_jobs"].clone()).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("describe stale runner jobs".to_string()),
+            )
+        })?;
+    let freshness: DaemonFreshnessReport = serde_json::from_value(body["freshness"].clone())
+        .map_err(|error| {
+            Error::internal_unexpected(format!("invalid runner freshness observation: {error}"))
+        })?;
+    if freshness.lease_id.as_deref() != body["lease_id"].as_str()
+        || body["active_runner_job_count"].as_u64() != Some(active_jobs.len() as u64)
+        || freshness.active_jobs != active_jobs.len()
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_observation",
+            "runner observation count and job identities disagree",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    Ok(DirectRunnerObservation {
+        freshness,
+        active_jobs,
+        stale_jobs,
+    })
 }
 
 /// Probe typed jobs through a direct daemon endpoint whose ownership was
