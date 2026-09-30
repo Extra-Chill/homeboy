@@ -1204,3 +1204,33 @@ fn stale_writer_cannot_turn_a_stopped_loop_back_on() {
         assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], true);
     });
 }
+
+#[test]
+fn late_command_completion_cannot_resurrect_cancelled_controller() {
+    with_isolated_home(|_| {
+        let mut record = create_controller("late-command", "repair", "v1").expect("created");
+        record.record_action(
+            AgentTaskLoopPolicyAction::RunCommand {
+                dedupe_key: "command".to_string(),
+                entity_id: None,
+                request: json!({}),
+            },
+            "fixture",
+        );
+        record.next_actions[0].status = AgentTaskLoopActionStatus::Running;
+        write_controller(&record).expect("persist active action");
+        let mut stale = record.clone();
+        stamp_loop_runtime_metadata(&mut record.metadata, false, None, false).expect("stop");
+        record.state = AgentTaskLoopControllerState::Abandoned;
+        write_controller(&record).expect("persist cancellation");
+        stale.next_actions[0].status = AgentTaskLoopActionStatus::Completed;
+        write_controller(&stale).expect("late successful completion");
+        let persisted = load_controller("late-command").expect("read back");
+        assert_eq!(persisted.state, AgentTaskLoopControllerState::Abandoned);
+        assert_eq!(
+            persisted.next_actions[0].status,
+            AgentTaskLoopActionStatus::Cancelled
+        );
+        assert_eq!(loop_runtime_metadata(&persisted.metadata)["on"], false);
+    });
+}
