@@ -103,7 +103,17 @@ pub(super) fn execute_run_command_action(
     process.env("HOMEBOY_LOOP_ACTION_DEDUPE_KEY", dedupe_key);
 
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let output = run_controller_command_with_timeout(process, &command, timeout_seconds)?;
+    let output =
+        run_controller_command_with_timeout(process, &command, timeout_seconds, &record.loop_id)?;
+    if output.cancelled {
+        return Ok((
+            serde_json::json!({
+                "mode": "run_command", "state": "cancelled", "cancelled": true,
+                "timed_out": false, "exit_code": output.exit_code, "signal": output.signal,
+            }),
+            1,
+        ));
+    }
     let exit_code = output.exit_code.unwrap_or(1);
     let result = if output_path.exists() {
         read_json_file(&output_path)?
@@ -149,6 +159,7 @@ struct ControllerCommandOutput {
     exit_code: Option<i32>,
     signal: Option<String>,
     timed_out: bool,
+    cancelled: bool,
     stdout: CappedCommandOutput,
     stderr: CappedCommandOutput,
 }
@@ -157,6 +168,7 @@ fn run_controller_command_with_timeout(
     mut process: Command,
     command: &str,
     timeout_seconds: u64,
+    loop_id: &str,
 ) -> Result<ControllerCommandOutput> {
     configure_controller_command_process_group(&mut process);
     let mut child = process.spawn().map_err(|error| {
@@ -169,7 +181,25 @@ fn run_controller_command_with_timeout(
     let stderr = child.stderr.take().map(read_capped_command_output);
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     let mut timed_out = false;
+    let mut cancelled = false;
     let exit_status = loop {
+        let current = match controller::load_controller(loop_id) {
+            Ok(current) => current,
+            Err(error) => {
+                kill_controller_command_process_group(&mut child);
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        if current.state == AgentTaskLoopControllerState::Abandoned
+            || current.metadata.pointer("/runtime/on") == Some(&Value::Bool(false))
+        {
+            cancelled = true;
+            kill_controller_command_process_group(&mut child);
+            break child
+                .wait()
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
         if let Some(status) = child.try_wait().map_err(|error| {
             Error::internal_io(
                 format!("failed to poll controller command '{command}': {error}"),
@@ -194,6 +224,7 @@ fn run_controller_command_with_timeout(
         exit_code: exit_status.code(),
         signal: exit_status_signal(&exit_status),
         timed_out,
+        cancelled,
         stdout: collect_capped_command_output(stdout, command, "stdout")?,
         stderr: collect_capped_command_output(stderr, command, "stderr")?,
     })

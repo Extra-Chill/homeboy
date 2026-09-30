@@ -382,7 +382,18 @@ fn cancel_work_job(
         None => homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
             .cancel(job_id, reason)?,
     };
-    Ok(serde_json::json!({ "job_id": job_id, "status": job.status }))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut work = serde_json::json!({ "job_id": job_id, "status": job.status });
+    while !work_job_is_terminal(&work) {
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::internal_unexpected(
+                "loop cancellation requested but owned work has not quiesced; loop remains off",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        work = loop_work_status(&record.metadata, context);
+    }
+    Ok(work)
 }
 
 /// Cancel provider runs already owned by a loop before the WorkJob reaches its
@@ -1724,11 +1735,24 @@ pub fn write_controller(record: &AgentTaskLoopControllerRecord) -> Result<()> {
         let persisted_runtime = loop_runtime_metadata(&persisted.metadata);
         if loop_runtime_stop_epoch(&persisted_runtime)
             > loop_runtime_stop_epoch(&loop_runtime_metadata(&merged.metadata))
+            || (persisted.state == AgentTaskLoopControllerState::Abandoned
+                && merged.state != AgentTaskLoopControllerState::Abandoned
+                && loop_runtime_metadata(&merged.metadata)["on"] == false)
         {
             if !merged.metadata.is_object() {
                 merged.metadata = serde_json::json!({});
             }
             merged.metadata["runtime"] = persisted_runtime;
+            // Completion loaded before stop may add evidence, but cannot
+            // resurrect the controller or publish a completed running action.
+            merged.state = persisted.state;
+            for action in &mut merged.next_actions {
+                if persisted.next_actions.iter().any(|previous| {
+                    previous.action_id == action.action_id && previous.status.is_open()
+                }) {
+                    action.status = AgentTaskLoopActionStatus::Cancelled;
+                }
+            }
         }
     }
     write_json(&path, &merged)?;
