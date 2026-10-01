@@ -709,6 +709,65 @@ fn materialized_workspace_promotion_adapter_applies_inline_patch_when_artifact_i
     );
 }
 
+fn resume_fixture(original: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create workspace");
+    git(&workspace, &["init"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Test User"]);
+    std::fs::write(workspace.join("src.txt"), original).expect("write source");
+    git(&workspace, &["add", "src.txt"]);
+    git(&workspace, &["commit", "-m", "initial"]);
+    (temp, workspace)
+}
+
+fn apply_request(patch: &str) -> String {
+    serde_json::json!({
+        "schema": AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+        "to_workspace": "homeboy@fix-15297",
+        "patch": patch,
+        "patch_path": "runner-artifact://homeboy-lab/run-1/changes.patch",
+        "changed_files": ["src.txt"]
+    })
+    .to_string()
+}
+
+/// #15297: a promotion that applied the patch and then failed must be
+/// resumable. Re-applying onto the identical working tree is a no-op.
+#[test]
+fn materialized_workspace_promotion_resume_accepts_exactly_applied_patch() {
+    let (_temp, workspace) = resume_fixture("old\n");
+    let patch =
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+    super::super::apply_materialized_workspace_patch(&workspace, &apply_request(patch))
+        .expect("first apply");
+    super::super::apply_materialized_workspace_patch(&workspace, &apply_request(patch))
+        .expect("resume onto an already-applied patch is a no-op");
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("src.txt")).unwrap(),
+        "new\n"
+    );
+}
+
+/// The resume shortcut must not hide extra edits: a destination holding the
+/// candidate plus anything else still fails instead of being promoted.
+#[test]
+fn materialized_workspace_promotion_resume_rejects_extra_destination_changes() {
+    let (_temp, workspace) = resume_fixture("old\n");
+    let patch =
+        "diff --git a/src.txt b/src.txt\n--- a/src.txt\n+++ b/src.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    super::super::apply_materialized_workspace_patch(&workspace, &apply_request(patch))
+        .expect("first apply");
+    std::fs::write(workspace.join("stray.txt"), "unrelated\n").expect("stray change");
+
+    let error = super::super::apply_materialized_workspace_patch(&workspace, &apply_request(patch))
+        .expect_err("a destination with extra changes is not the candidate");
+    assert!(error.message.contains("could not apply promotion patch"));
+}
+
 #[test]
 fn validate_patch_rejects_empty_patch() {
     let err =
