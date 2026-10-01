@@ -532,8 +532,6 @@ fn run_controller_upgrade_with_operation(
             let (mut runners_updated, mut runners_skipped) = if skip_runners {
                 (vec![], vec![])
             } else {
-                let promotion_lease =
-                    acquire_controller_upgrade_lease(operation, "controller upgrade completion")?;
                 completion = reconcile_controller_identity(
                     observed_installed_controller_identity()?,
                     previous_build_identity.as_deref(),
@@ -543,6 +541,10 @@ fn run_controller_upgrade_with_operation(
                     (vec![], vec![])
                 } else {
                     operation.set_phase_durable("refreshing configured runners")?;
+                    // Runner refresh already acquires its own generation-checked
+                    // publication lease after materialization. Delegating a
+                    // controller lease here would hold Cook admission during Git
+                    // acquisition and builds as well as publication.
                     refresh_configured_runners_with_progress(operation, || {
                         super::with_runner_upgrade(|p| {
                             p.upgrade_configured_runners_with_explicit_source_path(
@@ -553,7 +555,7 @@ fn run_controller_upgrade_with_operation(
                                 None,
                                 runner_targets,
                                 &extensions_updated,
-                                Some(&promotion_lease),
+                                None,
                             )
                         })
                     })?
@@ -926,9 +928,6 @@ fn run_controller_upgrade_with_operation(
     drop(selection_guard);
 
     let (mut runners_updated, mut runners_skipped) = if upgrade_completed && !skip_runners {
-        let promotion_lease =
-            acquire_controller_upgrade_lease(operation, "controller upgrade completion")?;
-        promotion_lease.assert_generation()?;
         let completion = reconcile_controller_identity(
             observed_installed_controller_identity()?,
             new_build_identity.as_deref(),
@@ -953,7 +952,7 @@ fn run_controller_upgrade_with_operation(
                         new_build_identity.as_deref(),
                         runner_targets,
                         &extensions_updated,
-                        Some(&promotion_lease),
+                        None,
                     )
                 })
             })?
@@ -2541,6 +2540,44 @@ fn acquire_controller_selection_guard_fast(
     operation.clear_promotion_wait_durable()?;
     operation.take_persistence_error()?;
     Ok(guard)
+}
+
+#[cfg(test)]
+mod runner_refresh_admission_tests {
+    use super::*;
+
+    #[test]
+    fn configured_runner_progress_does_not_reserve_controller_mutation_admission() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            assert!(
+                homeboy_core::paths::runtime_promotion_dir()
+                    .unwrap()
+                    .starts_with(home.path()),
+                "admission fixtures must never use the operator's promotion root"
+            );
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let admitted = std::cell::Cell::new(false);
+            refresh_configured_runners_with_progress(&operation, || {
+                assert!(
+                    homeboy_core::runtime_promotion::probe_cook_generation_admission()
+                        .expect("probe during preparation")
+                        .is_none()
+                );
+                let pin = homeboy_core::runtime_promotion::pin_cook_generation_waiting(
+                    "unrelated-local-cook",
+                    Duration::from_secs(2),
+                    || false,
+                    |_| {},
+                )
+                .expect("eligible local cook starts during delayed runner preparation");
+                admitted.set(true);
+                drop(pin);
+                Ok(())
+            })
+            .expect("configured runner progress completes without a controller lease");
+            assert!(admitted.get());
+        });
+    }
 }
 
 fn acquire_controller_upgrade_lease(

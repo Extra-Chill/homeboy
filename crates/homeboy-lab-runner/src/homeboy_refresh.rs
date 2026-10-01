@@ -2326,7 +2326,7 @@ fn github_integration_proves_forward(
                 let merge = quote_path(merge_commit);
                 let target = quote_path(destination);
                 format!(
-                    "set -e\nrepo=$(mktemp -d)\ntrap 'rm -rf \"$repo\"' EXIT HUP INT TERM\ngit -C \"$repo\" init --bare --quiet\ngit -C \"$repo\" fetch --quiet {source} '+refs/heads/*:refs/remotes/homeboy/*' '+refs/tags/*:refs/tags/*'\ngit -C \"$repo\" merge-base --is-ancestor {merge} {target}"
+                    "set -e\nrepo=$(mktemp -d)\ntrap 'rm -rf \"$repo\"' EXIT HUP INT TERM\ngit -C \"$repo\" init --bare --quiet\ngit -C \"$repo\" fetch --quiet {source} {merge} {target}\ngit -C \"$repo\" merge-base --is-ancestor {merge} {target}"
                 )
             };
             let options = if disconnected_ssh {
@@ -3066,6 +3066,230 @@ fn installed_homeboy_env(
     env
 }
 
+fn refresh_acquisition_preflight(authority_commits: &str) -> String {
+    r#"cache="$dir"
+mkdir -p "$cache"
+if [ ! -d "$cache/.git" ]; then
+  git init --quiet "$cache"
+fi
+echo "HOMEBOY_REFRESH_OBJECT_CACHE=$cache" >&2
+no_progress="${HOMEBOY_REFRESH_FETCH_NO_PROGRESS_SECONDS:-120}"
+overall="${HOMEBOY_REFRESH_FETCH_DEADLINE_SECONDS:-900}"
+case "$no_progress:$overall" in
+  *[!0-9:]*|:*|*:) echo "Invalid runner fetch deadlines" >&2; exit 1 ;;
+esac
+if [ "$no_progress" -le 0 ] || [ "$overall" -le 0 ]; then
+  echo "Runner fetch deadlines must be positive" >&2
+  exit 1
+fi
+emit_fetch_phase() {
+  printf '%s\n' "HOMEBOY_RUNNER_PROGRESS {\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"$1\",\"metadata\":{\"status\":\"$2\",\"duration_ms\":$3,\"output_bytes\":$4}}"
+  echo "HOMEBOY_REFRESH_FETCH_PHASE phase=$1 status=$2 duration_ms=$3 output_bytes=$4" >&2
+}
+object_present() {
+  git -C "$cache" cat-file -e "$1^{commit}" >/dev/null 2>&1
+}
+is_full_sha() {
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{40}$'
+}
+is_object_id() {
+  printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{7,40}$'
+}
+authority_matches_target() {
+  [ -z "$1" ] && return 0
+  [ "$1" = "$2" ] && return 0
+  return 1
+}
+stop_fetch() {
+  # Bash job control gives this acquisition its own process group, including
+  # Git's SSH/HTTP helpers. TERM is followed by KILL before reaping the leader.
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  sleep 0.2
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+bounded_git() {
+  phase=$1
+  shift
+  start=$(date +%s)
+  fetch_output=$(mktemp)
+  emit_fetch_phase "$phase" "started" 0 0
+  set -m
+  GIT_TERMINAL_PROMPT=0 "$@" >"$fetch_output" 2>&1 &
+  pid=$!
+  set +m
+  last_size=0
+  last_change=$start
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 0.2
+    now=$(date +%s)
+    size=$(wc -c < "$fetch_output" | tr -d '[:space:]')
+    [ -n "$size" ] || size=0
+    if [ "$size" != "$last_size" ]; then
+      last_size=$size
+      last_change=$now
+    fi
+    if [ $((now - last_change)) -ge "$no_progress" ]; then
+      stop_fetch
+      duration=$(( (now - start) * 1000 ))
+      emit_fetch_phase "$phase" "no_progress" "$duration" "$size"
+      echo "HOMEBOY_REFRESH_FETCH_NO_PROGRESS phase=$phase duration_ms=$duration deadline_s=$no_progress" >&2
+      cat "$fetch_output" >&2
+      rm -f "$fetch_output"
+      exit 1
+    fi
+    if [ $((now - start)) -ge "$overall" ]; then
+      stop_fetch
+      duration=$(( (now - start) * 1000 ))
+      emit_fetch_phase "$phase" "deadline" "$duration" "$size"
+      echo "HOMEBOY_REFRESH_FETCH_DEADLINE phase=$phase duration_ms=$duration deadline_s=$overall" >&2
+      cat "$fetch_output" >&2
+      rm -f "$fetch_output"
+      exit 1
+    fi
+  done
+  fetch_status=0
+  wait "$pid" || fetch_status=$?
+  now=$(date +%s)
+  duration=$(( (now - start) * 1000 ))
+  bytes=$(wc -c < "$fetch_output" | tr -d '[:space:]')
+  [ -n "$bytes" ] || bytes=0
+  if [ "$fetch_status" -ne 0 ]; then
+    emit_fetch_phase "$phase" "failed" "$duration" "$bytes"
+    cat "$fetch_output" >&2
+    rm -f "$fetch_output"
+    return "$fetch_status"
+  fi
+  emit_fetch_phase "$phase" "fetched" "$duration" "$bytes"
+  return 0
+}
+skip_network=false
+if is_full_sha "$ref"; then
+  all_same=true
+  for authority in HOMEBOY_AUTHORITIES; do
+    if ! authority_matches_target "$authority" "$ref"; then
+      all_same=false
+    fi
+  done
+  if [ "$all_same" = true ] && object_present "$ref"; then
+    target=$(git -C "$cache" rev-parse --verify --quiet "${ref}^{commit}")
+    skip_network=true
+    emit_fetch_phase "fetch_target" "cached_identical" 0 0
+  fi
+fi
+if [ "$skip_network" != true ]; then
+  if ! is_object_id "$ref" || ! object_present "$ref"; then
+    if is_full_sha "$ref"; then
+      tip=$ref
+    else
+    if ! bounded_git fetch_symbolic git ls-remote "$source" "$ref" "refs/heads/$ref" "refs/tags/$ref" "refs/tags/${ref}^{}"; then
+      echo "Homeboy ref not found: $ref" >&2
+      exit 1
+    fi
+    # Preserve branch precedence and peel annotated tags, without choosing an
+    # unrelated suffix match from ls-remote's pattern output.
+    tip=$(awk -v ref="$ref" '$2 == "refs/heads/" ref || ($2 == ref && ref ~ /^refs\/heads\//) {print $1; exit}' "$fetch_output")
+    if [ -z "$tip" ]; then
+      tip=$(awk -v ref="$ref" '$2 == "refs/tags/" ref "^{}" || $2 == ref "^{}" {print $1; exit}' "$fetch_output")
+    fi
+    if [ -z "$tip" ]; then
+      tip=$(awk -v ref="$ref" '$2 == "refs/tags/" ref || $2 == ref {print $1; exit}' "$fetch_output")
+    fi
+    rm -f "$fetch_output"
+    if [ -z "$tip" ]; then
+      echo "Homeboy ref not found: $ref" >&2
+      exit 1
+    fi
+    fi
+    symbolic_same=true
+    for authority in HOMEBOY_AUTHORITIES; do
+      if ! authority_matches_target "$authority" "$tip"; then
+        symbolic_same=false
+      fi
+    done
+    if [ "$symbolic_same" = true ] && object_present "$tip"; then
+      target=$tip
+      skip_network=true
+      emit_fetch_phase "fetch_target" "cached_identical" 0 0
+    elif object_present "$tip"; then
+      target=$tip
+      emit_fetch_phase "fetch_target" "cached" 0 0
+    else
+      if ! bounded_git fetch_target git -C "$cache" fetch --no-tags --progress "$source" "$tip"; then
+        echo "Homeboy ref not found: $ref" >&2
+        exit 1
+      fi
+      rm -f "$fetch_output"
+      target=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}")
+    fi
+  elif object_present "$ref"; then
+    target=$(git -C "$cache" rev-parse --verify --quiet "${ref}^{commit}")
+    emit_fetch_phase "fetch_target" "cached" 0 0
+  else
+    if ! bounded_git fetch_target git -C "$cache" fetch --no-tags --progress "$source" "$ref"; then
+      echo "Homeboy ref not found: $ref" >&2
+      exit 1
+    fi
+    rm -f "$fetch_output"
+    target=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}")
+  fi
+fi
+if [ -z "$target" ]; then
+  echo "Homeboy ref did not resolve to a commit: $ref" >&2
+  exit 1
+fi
+needs_history=false
+for comparison in HOMEBOY_AUTHORITIES "$(git -C "$cache" rev-parse --verify --quiet HEAD || true)"; do
+  resolved_comparison=$(git -C "$cache" rev-parse --verify --quiet "${comparison}^{commit}" || true)
+  comparison=${resolved_comparison:-$comparison}
+  if ! authority_matches_target "$comparison" "$target"; then
+    needs_history=true
+  fi
+done
+if [ "$needs_history" = true ] && [ "$(git -C "$cache" rev-parse --is-shallow-repository)" = true ]; then
+  bounded_git fetch_history git -C "$cache" fetch --no-tags --progress --unshallow "$source" "$target"
+  rm -f "$fetch_output"
+fi
+for authority in HOMEBOY_AUTHORITIES; do
+  if authority_matches_target "$authority" "$target"; then
+    continue
+  fi
+  resolved_authority=$(git -C "$cache" rev-parse --verify --quiet "${authority}^{commit}" || true)
+  if [ -n "$resolved_authority" ]; then
+    authority=$resolved_authority
+  fi
+  if authority_matches_target "$authority" "$target"; then
+    continue
+  fi
+  if ! object_present "$authority"; then
+    if ! bounded_git fetch_authority git -C "$cache" fetch --no-tags --progress "$source" "$authority"; then
+      rm -f "$fetch_output"
+      echo "HOMEBOY_REFRESH_AUTHORITY_UNRESOLVED=$authority" >&2
+      continue
+    fi
+    rm -f "$fetch_output"
+    resolved_authority=$(git -C "$cache" rev-parse --verify --quiet "FETCH_HEAD^{commit}" || true)
+    if [ -n "$resolved_authority" ]; then
+      authority=$resolved_authority
+    fi
+  fi
+  if authority_matches_target "$authority" "$target"; then
+    continue
+  fi
+  if git -C "$cache" merge-base --is-ancestor "$target" "$authority"; then
+    echo "HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority" >&2
+    echo "HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref" >&2
+    echo "HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target" >&2
+    if [ "$allow_downgrade" != true ]; then
+      echo "Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback" >&2
+      exit 1
+    fi
+  fi
+done
+"#
+    .replace("HOMEBOY_AUTHORITIES", authority_commits)
+}
+
 fn materialize_script(
     source: &str,
     git_ref: &str,
@@ -3075,7 +3299,7 @@ fn materialize_script(
     authority_commits: &[&str],
 ) -> String {
     let mut script = format!(
-        "set -e\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"fetch\"}}'\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git clone \"$source\" \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\ngit -C \"$dir\" fetch --prune origin\nrequested=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/$ref\" || git -C \"$dir\" rev-parse --verify --quiet \"$ref\")\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"build\"}}'\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"install\"}}'\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
+        "set -e\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"fetch\"}}'\nsource={}\nref={}\ndir={}\nbinary={}\nallow_downgrade={}\nhash_binary() {{ (sha256sum \"$1\" 2>/dev/null || shasum -a 256 \"$1\") | awk '{{print $1}}'; }}\nmkdir -p \"$(dirname \"$dir\")\"\ncheckout_existed=false\nif [ -d \"$dir/.git\" ]; then\n  checkout_existed=true\nelse\n  git init --quiet \"$dir\"\nfi\ncurrent_remote=$(git -C \"$dir\" config --get remote.origin.url 2>/dev/null || true)\nif [ \"$current_remote\" != \"$source\" ]; then\n  git -C \"$dir\" remote set-url origin \"$source\" 2>/dev/null || git -C \"$dir\" remote add origin \"$source\"\nfi\nif ! git -C \"$dir\" cat-file -e \"${{target}}^{{commit}}\" 2>/dev/null; then\n  git -C \"$dir\" fetch --quiet \"$cache\" \"$target\"\nfi\nrequested=$target\nif [ -z \"$requested\" ]; then\n  echo \"Homeboy ref not found: $ref\" >&2\n  exit 1\nfi\ntarget=$(git -C \"$dir\" rev-parse --verify --quiet \"${{requested}}^{{commit}}\")\ncurrent=\nif [ \"$checkout_existed\" = true ]; then\n  current=$(git -C \"$dir\" rev-parse --verify --quiet HEAD || true)\nfi\nif [ -n \"$current\" ] && [ \"$current\" != \"$target\" ] && git -C \"$dir\" merge-base --is-ancestor \"$target\" \"$current\"; then\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$current\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref\" >&2\n  echo \"HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target\" >&2\n  if [ \"$allow_downgrade\" != true ]; then\n    echo \"Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback\" >&2\n    exit 1\n  fi\nfi\ngit -C \"$dir\" checkout --quiet --force --detach \"$target\"\ngit -C \"$dir\" reset --hard \"$target\"\necho \"HOMEBOY_REFRESH_SOURCE_SHA=$target\"\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"build\"}}'\ncargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nbinary_sha=$(hash_binary \"$binary\")\nif [ -z \"$binary_sha\" ]; then\n  echo \"could not hash materialized Homeboy binary\" >&2\n  exit 1\nfi\nprintf '%s\\n' 'HOMEBOY_RUNNER_PROGRESS {{\"schema\":\"homeboy/runner-progress/v1\",\"phase\":\"install\"}}'\nslot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\"\nimmutable_binary=\"$slot_dir/homeboy\"\nmkdir -p \"$slot_dir\"\nif [ -e \"$immutable_binary\" ]; then\n  existing_sha=$(hash_binary \"$immutable_binary\")\n  if [ \"$existing_sha\" != \"$binary_sha\" ]; then\n    echo \"immutable Homeboy binary slot hash mismatch\" >&2\n    exit 1\n  fi\nelse\n  staged_binary=$(mktemp \"$slot_dir/.homeboy.XXXXXX\")\n  trap 'rm -f \"$staged_binary\"' EXIT HUP INT TERM\n  cp \"$binary\" \"$staged_binary\"\n  chmod 0755 \"$staged_binary\"\n  staged_sha=$(hash_binary \"$staged_binary\")\n  if [ \"$staged_sha\" != \"$binary_sha\" ]; then\n    echo \"staged Homeboy binary hash mismatch\" >&2\n    exit 1\n  fi\n  if ! ln \"$staged_binary\" \"$immutable_binary\"; then\n    if [ ! -e \"$immutable_binary\" ] || [ \"$(hash_binary \"$immutable_binary\")\" != \"$binary_sha\" ]; then\n      echo \"immutable Homeboy binary slot publication failed\" >&2\n      exit 1\n    fi\n  fi\n  rm -f \"$staged_binary\"\n  trap - EXIT HUP INT TERM\nfi\necho \"HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha\"\necho \"HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary\"\n",
         quote_path(source),
         quote_path(git_ref),
         quote_path(target_dir),
@@ -3087,49 +3311,7 @@ fn materialize_script(
         .map(|authority| quote_path(authority))
         .collect::<Vec<_>>()
         .join(" ");
-    let downgrade_guard = format!(
-        r#"preflight=$(mktemp -d)
-trap 'rm -rf "$preflight"' EXIT HUP INT TERM
-git -C "$preflight" init --bare --quiet
-if ! git -C "$preflight" fetch --quiet "$source" "$ref"; then
-  echo "Homeboy ref not found: $ref" >&2
-  exit 1
-fi
-target=$(git -C "$preflight" rev-parse --verify --quiet FETCH_HEAD^{{commit}})
-if [ -z "$target" ]; then
-  echo "Homeboy ref did not resolve to a commit: $ref" >&2
-  exit 1
-fi
-git -C "$preflight" fetch --quiet "$source" '+refs/heads/*:refs/remotes/homeboy-refresh/*'
-for authority in {authority_commits}; do
-  resolved_authority=$(git -C "$preflight" rev-parse --verify --quiet "${{authority}}^{{commit}}" || true)
-  if [ -n "$resolved_authority" ]; then
-    authority=$resolved_authority
-  fi
-  if [ -z "$authority" ] || [ "$authority" = "$target" ]; then
-    continue
-  fi
-  if ! git -C "$preflight" fetch --quiet "$source" "$authority"; then
-    # Defer unadvertised commits (for example, a PR head) to post-build
-    # validation. That check fails closed unless integration is proven.
-    echo "HOMEBOY_REFRESH_AUTHORITY_UNRESOLVED=$authority" >&2
-    continue
-  fi
-  if git -C "$preflight" merge-base --is-ancestor "$target" "$authority"; then
-    echo "HOMEBOY_REFRESH_DOWNGRADE_PREVIOUS=$authority" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_REQUESTED=$ref" >&2
-    echo "HOMEBOY_REFRESH_DOWNGRADE_RESOLVED=$target" >&2
-    if [ "$allow_downgrade" != true ]; then
-      echo "Refusing Homeboy runner downgrade; use --allow-downgrade only for an intentional rollback" >&2
-      exit 1
-    fi
-  fi
-done
-rm -rf "$preflight"
-trap - EXIT HUP INT TERM
-"#,
-        authority_commits = authority_commits
-    );
+    let downgrade_guard = refresh_acquisition_preflight(&authority_commits);
     script = script.replacen(
         "mkdir -p \"$(dirname \"$dir\")\"",
         &format!("{downgrade_guard}mkdir -p \"$(dirname \"$dir\")\""),
