@@ -37,6 +37,9 @@ const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
 const GATE_TOOLCHAIN_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 const RUST_CACHE_SCHEMA: &str = "homeboy/gate-rust-cache/v2";
 const RUST_CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(120);
+// Cold toolchain acquisition is network work, not lock contention. Give it a
+// separate bounded setup budget so lock wait cannot abort valid installations.
+const RUST_CACHE_HYDRATION_TIMEOUT: Duration = Duration::from_secs(900);
 
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
@@ -2535,7 +2538,7 @@ fn valid_marker_toolchain_cargo(
 }
 
 fn hydrate_rust_cache(cwd: &Path, cache: &Path) -> Result<PathBuf> {
-    hydrate_rust_cache_with_timeout(cwd, cache, RUST_CACHE_LOCK_TIMEOUT)
+    hydrate_rust_cache_with_timeout(cwd, cache, RUST_CACHE_HYDRATION_TIMEOUT)
 }
 
 fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) -> Result<PathBuf> {

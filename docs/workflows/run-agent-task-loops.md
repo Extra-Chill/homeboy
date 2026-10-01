@@ -74,6 +74,12 @@ homeboy agent-task loop stop site-loop
 
 Use `--off` to register or update loop state without executing handoffs. Use `--on --resume` when the operator wants to initialize and immediately run pending handoffs.
 
+`loop resume` reactivates a stopped loop after its prior owned work and command
+children are observably quiescent. It retains completed artifacts and effects,
+honors the revolution limit, and fences a concurrent newer stop. A failed action
+is recovered explicitly with `controller run <loop-id> --action-id <action-id>`;
+resuming the loop does not silently replay failed or completed effects.
+
 ## 4. Run A Controller From A Spec
 
 Use `controller run-from-spec` for bounded headless loop execution. This is the stable primitive for callers that have a complete controller spec and want Homeboy to execute a limited number of pending actions:
