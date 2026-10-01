@@ -1959,6 +1959,7 @@ pub(crate) mod tests_support {
         compatible: bool,
         source_artifact_compatible: bool,
         symlink_artifact_compatible: bool,
+        mint_offset: usize,
         calls: usize,
         provider_budget: usize,
         receipts: HashMap<String, RemoteRunnerStagingReceipt>,
@@ -1989,14 +1990,21 @@ pub(crate) mod tests_support {
             if let Some(receipt) = self.receipts.get(&envelope.handoff.idempotency_key) {
                 return Ok(receipt.clone());
             }
-            // This is the runner-side order: persist staging before provider work.
+            // Each admitted run mints its own runner job and artifact
+            // identities, so controller tests can hold per-attempt evidence
+            // apart. `mint_offset` simulates a runner that lost its durable
+            // store and re-mints conflicting identities for the same run.
+            let index = self.receipts.len() + self.mint_offset + 1;
             let receipt = RemoteRunnerStagingReceipt {
                 schema: REMOTE_RUNNER_STAGING_RECEIPT_SCHEMA.to_string(),
-                handoff: DirectLabHandoffReceipt::accepted(&envelope.handoff, "runner-job-1"),
+                handoff: DirectLabHandoffReceipt::accepted(
+                    &envelope.handoff,
+                    format!("runner-job-{index}"),
+                ),
                 artifacts: RunnerStagingArtifacts {
-                    lifecycle_id: "runner-lifecycle-1".to_string(),
-                    source_artifact_id: "runner-source-1".to_string(),
-                    workspace_artifact_id: "runner-workspace-1".to_string(),
+                    lifecycle_id: format!("runner-lifecycle-{index}"),
+                    source_artifact_id: format!("runner-source-{index}"),
+                    workspace_artifact_id: format!("runner-workspace-{index}"),
                     source_artifact: envelope
                         .materialization
                         .source_artifact
@@ -2012,20 +2020,26 @@ pub(crate) mod tests_support {
 
     impl Transport {
         pub(crate) fn compatible() -> Self {
-            transport()
+            transport(0)
+        }
+
+        /// A compatible runner whose durable store was lost: it re-mints a
+        /// different runner job for a run it already admitted elsewhere.
+        pub(crate) fn reminting() -> Self {
+            transport(1)
         }
 
         pub(crate) fn incompatible() -> Self {
             Self {
                 compatible: false,
-                ..transport()
+                ..transport(0)
             }
         }
 
         pub(crate) fn disconnected() -> Self {
             Self {
                 connected: false,
-                ..transport()
+                ..transport(0)
             }
         }
 
@@ -2039,6 +2053,12 @@ pub(crate) mod tests_support {
     }
 
     pub(crate) fn envelope() -> RemoteRunnerStagingEnvelope {
+        envelope_for_run("run-1")
+    }
+
+    /// A sealed envelope for an explicit handoff run id, so controller tests
+    /// can stage two attempts under one shared Cook mission.
+    pub(crate) fn envelope_for_run(run_id: &str) -> RemoteRunnerStagingEnvelope {
         let args = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -2069,14 +2089,14 @@ pub(crate) mod tests_support {
         };
         let handoff = DirectLabHandoffEnvelope::new(
             "controller-identity",
-            LabStagingRecipe::from_request("run-1", "runner-1", &request).expect("recipe"),
+            LabStagingRecipe::from_request(run_id, "runner-1", &request).expect("recipe"),
             homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("plan-1", Vec::new()),
         );
         RemoteRunnerStagingEnvelope::from_direct_handoff(
             &handoff,
             RunnerMaterializationAuthority {
                 authority_id: "authority-1".to_string(),
-                workspace_key: "run-1".to_string(),
+                workspace_key: run_id.to_string(),
                 source: SealedSourceAuthority::new("sha256:source-1", "sealed-source-payload"),
                 source_artifact: Some(SourceArtifactTransfer::from_bytes(
                     "source-package-1",
@@ -2088,12 +2108,13 @@ pub(crate) mod tests_support {
         .expect("sealed envelope")
     }
 
-    fn transport() -> Transport {
+    fn transport(mint_offset: usize) -> Transport {
         Transport {
             connected: true,
             compatible: true,
             source_artifact_compatible: true,
             symlink_artifact_compatible: true,
+            mint_offset,
             calls: 0,
             provider_budget: 0,
             receipts: HashMap::new(),
@@ -2107,7 +2128,7 @@ pub(crate) mod tests_support {
         assert!(!serde_json::to_string(&envelope)
             .expect("serialize")
             .contains("/controller/private/source"));
-        let mut transport = transport();
+        let mut transport = transport(0);
         let first = submit_remote_runner_staging(&mut transport, &envelope).expect("accept");
         let replay = submit_remote_runner_staging(&mut transport, &envelope).expect("replay");
         assert_eq!(first, replay);
@@ -2121,7 +2142,7 @@ pub(crate) mod tests_support {
         let envelope = envelope();
         let mut incompatible = Transport {
             compatible: false,
-            ..transport()
+            ..transport(0)
         };
         let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
@@ -2129,7 +2150,7 @@ pub(crate) mod tests_support {
         assert_eq!(incompatible.provider_budget, 0);
         let mut disconnected = Transport {
             connected: false,
-            ..transport()
+            ..transport(0)
         };
         assert!(submit_remote_runner_staging(&mut disconnected, &envelope).is_err());
         assert_eq!(disconnected.calls, 0);
@@ -2155,7 +2176,7 @@ pub(crate) mod tests_support {
             "run-1",
             durable_plan_digest,
         ));
-        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+        let receipt = submit_remote_runner_staging(&mut transport(0), &envelope)
             .expect("accept controller-materialized source");
         assert!(receipt.artifacts.source_artifact.is_none());
         assert_eq!(
@@ -2175,7 +2196,7 @@ pub(crate) mod tests_support {
         envelope.handoff.schema =
             crate::direct_lab_handoff::DIRECT_LAB_HANDOFF_SCHEMA_V1.to_string();
         envelope.schema = REMOTE_RUNNER_STAGING_SCHEMA_V1.to_string();
-        let receipt = submit_remote_runner_staging(&mut transport(), &envelope)
+        let receipt = submit_remote_runner_staging(&mut transport(0), &envelope)
             .expect("new runner accepts old bounded staging");
         assert!(receipt.artifacts.source_artifact.is_some());
     }
@@ -2185,7 +2206,7 @@ pub(crate) mod tests_support {
         let envelope = envelope();
         let mut incompatible = Transport {
             source_artifact_compatible: false,
-            ..transport()
+            ..transport(0)
         };
         let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);
@@ -2449,7 +2470,7 @@ pub(crate) mod tests_support {
         artifact.content_base64 = base64::engine::general_purpose::STANDARD.encode(v2);
         let mut incompatible = Transport {
             symlink_artifact_compatible: false,
-            ..transport()
+            ..transport(0)
         };
         let error = submit_remote_runner_staging(&mut incompatible, &envelope).expect_err("refuse");
         assert_eq!(error.code, homeboy_core::ErrorCode::RunnerCapabilityMissing);

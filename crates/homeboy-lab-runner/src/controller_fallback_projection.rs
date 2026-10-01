@@ -20,7 +20,15 @@ use crate::runner_staging_operation::{
     RemoteRunnerStagingTransport, RunnerStagingArtifacts,
 };
 
-const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v1";
+/// v2 keys receipts, projections, and observations by the exact handoff run
+/// id, so each attempt owns its own admission idempotence and finalization
+/// while the resolved mission stays grouping data on the record.
+const STORE_SCHEMA: &str = "homeboy/controller-fallback-projection/v2";
+/// v1 keyed the same records by the resolved parent mission, which rejected a
+/// later attempt under the same mission after its runner had admitted it.
+/// [`ControllerFallbackProjectionStore::load`] normalizes v1 ledgers in
+/// memory; the owning layer persists the v2 layout at its next write.
+const STORE_SCHEMA_V1: &str = "homeboy/controller-fallback-projection/v1";
 const STARTUP_RECONCILIATION_BATCH_SIZE: usize = 8;
 const REMOTE_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -102,7 +110,8 @@ pub struct RunnerTerminalEvidence {
     pub artifacts: RunnerStagingArtifacts,
 }
 
-/// The one controller-owned finalization projection for a deferred mission.
+/// The one controller-owned finalization projection for a deferred handoff
+/// run. The mission id stays the grouping identity of the owning receipt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControllerMissionProjection {
@@ -119,10 +128,69 @@ pub struct ControllerMissionProjection {
 #[serde(deny_unknown_fields)]
 struct State {
     schema: String,
+    /// Keyed by the exact handoff run id of the admitted runner receipt.
     receipts: BTreeMap<String, DeferredControllerReceipt>,
+    /// Keyed by the exact handoff run id of the receipt that owns the
+    /// projection; `mission_id` inside stays the grouping identity.
     projections: BTreeMap<String, ControllerMissionProjection>,
+    /// Reconciliation observations keyed by exact handoff run id.
     #[serde(default)]
     reconciliation: BTreeMap<String, ReconciliationObservation>,
+}
+
+/// Re-key v1 evidence without choosing between conflicting or orphaned records.
+fn normalize_v1(state: State) -> Result<State> {
+    let State {
+        schema: _,
+        receipts,
+        projections,
+        reconciliation,
+    } = state;
+    let mut normalized = State::default();
+    let mut mission_to_run: BTreeMap<String, String> = BTreeMap::new();
+    let invalid = |key: &str| {
+        Error::validation_invalid_argument(
+            "controller_fallback_store",
+            "v1 ledger evidence does not identify one exact owning run",
+            Some(key.to_string()),
+            None,
+        )
+    };
+    for (legacy_key, mut receipt) in receipts {
+        let run_key = receipt.runner_receipt.handoff.run_id.clone();
+        if legacy_key != receipt.mission_id.as_str()
+            || mission_from_handoff_run_id(&run_key)? != receipt.mission_id
+            || normalized.receipts.contains_key(&run_key)
+        {
+            return Err(invalid(&legacy_key));
+        }
+        mission_to_run.insert(legacy_key, run_key.clone());
+        receipt.schema = STORE_SCHEMA.to_string();
+        normalized.receipts.insert(run_key, receipt);
+    }
+    for (legacy_key, projection) in projections {
+        let run_key = mission_to_run
+            .get(&legacy_key)
+            .ok_or_else(|| invalid(&legacy_key))?;
+        let receipt = &normalized.receipts[run_key];
+        if projection.mission_id != legacy_key
+            || projection.runner_id != receipt.runner_receipt.handoff.runner_id
+            || projection.runner_job_id != receipt.runner_receipt.handoff.runner_job_id
+            || projection.artifacts != receipt.runner_receipt.artifacts
+        {
+            return Err(invalid(&legacy_key));
+        }
+        normalized.projections.insert(run_key.clone(), projection);
+    }
+    for (legacy_key, observation) in reconciliation {
+        let run_key = mission_to_run
+            .get(&legacy_key)
+            .ok_or_else(|| invalid(&legacy_key))?;
+        normalized
+            .reconciliation
+            .insert(run_key.clone(), observation);
+    }
+    Ok(normalized)
 }
 
 impl Default for State {
@@ -145,7 +213,9 @@ pub struct ReconciliationObservation {
 }
 
 /// File-backed controller receipt/projection ledger. Runner admission is
-/// atomic in its own store; this ledger only records accepted receipts.
+/// atomic in its own store; this ledger only records accepted receipts, keyed
+/// by each receipt's exact handoff run id. The resolved mission remains
+/// grouping data on the record and never gates a later attempt.
 pub struct ControllerFallbackProjectionStore {
     path: PathBuf,
 }
@@ -172,6 +242,8 @@ impl ControllerFallbackProjectionStore {
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let store = Self { path: path.into() };
+        // v1 mission-keyed ledgers normalize to exact-run ownership in memory
+        // (see [`normalize_v1`]); only unknown schemas fail closed.
         if store.load()?.schema != STORE_SCHEMA {
             return Err(Error::validation_invalid_argument(
                 "controller_fallback_store",
@@ -185,39 +257,44 @@ impl ControllerFallbackProjectionStore {
 
     /// Preflight happens inside `submit_remote_runner_staging` before the
     /// transport mutation boundary, so refusals spend no provider budget.
+    ///
+    /// Idempotence is owned by the exact handoff run id: replaying the same
+    /// run returns its admitted receipt, a different receipt for the same run
+    /// is an evidence conflict that fails closed, and a distinct attempt under
+    /// the same mission is admitted on its own.
     pub fn submit_detached<T: RemoteRunnerStagingTransport>(
         &self,
         transport: &mut T,
         envelope: &RemoteRunnerStagingEnvelope,
     ) -> Result<DeferredControllerReceipt> {
-        let receipt = DeferredControllerReceipt::new(
-            mission_from_handoff_run_id(&envelope.handoff.run_id)?,
-            submit_remote_runner_staging(transport, envelope)?,
-        );
+        let mission_id = mission_from_handoff_run_id(&envelope.handoff.run_id)?;
+        let runner_receipt = submit_remote_runner_staging(transport, envelope)?;
+        let receipt = DeferredControllerReceipt::new(mission_id, runner_receipt);
         receipt.validate_for(envelope)?;
+        let run_key = receipt.runner_receipt.handoff.run_id.clone();
         let _lock = self.lock()?;
         let mut state = self.load()?;
-        if let Some(existing) = state.receipts.get(receipt.mission_id.as_str()) {
+        if let Some(existing) = state.receipts.get(run_key.as_str()) {
             if existing != &receipt {
                 return Err(Error::validation_invalid_argument(
                     "idempotency_key",
-                    "controller fallback mission is already bound to a different runner receipt",
-                    Some(receipt.mission_id.to_string()),
+                    "controller fallback run is already bound to a different runner receipt",
+                    Some(run_key),
                     None,
                 ));
             }
             return Ok(existing.clone());
         }
-        state
-            .receipts
-            .insert(receipt.mission_id.to_string(), receipt.clone());
+        state.receipts.insert(run_key, receipt.clone());
         self.persist(&state)?;
         Ok(receipt)
     }
 
     /// Reconcile a bounded receipt batch against authoritative runner jobs.
     /// Nonterminal jobs remain deferred; only a terminal snapshot reaches the
-    /// agent-task lifecycle finalizer and this projection ledger.
+    /// agent-task lifecycle finalizer and this projection ledger. Each receipt
+    /// reconciles under its exact handoff run id, so one attempt's snapshot
+    /// can never finalize another attempt or the parent mission.
     pub fn reconcile_after_controller_restart_with<Snapshot, Finalize>(
         &self,
         limit: usize,
@@ -257,14 +334,14 @@ impl ControllerFallbackProjectionStore {
         let receipts = state
             .receipts
             .iter()
-            .filter(|(mission_id, _)| !state.projections.contains_key(*mission_id))
+            .filter(|(run_id, _)| !state.projections.contains_key(*run_id))
             .take(limit)
-            .map(|(mission_id, receipt)| (mission_id.clone(), receipt.clone()))
+            .map(|(run_id, receipt)| (run_id.clone(), receipt.clone()))
             .collect::<Vec<_>>();
         let snapshot = Arc::new(snapshot);
         let mut projections = Vec::new();
 
-        for (mission_id, receipt) in receipts {
+        for (run_id, receipt) in receipts {
             let result = remote_snapshot_with_timeout(
                 Arc::clone(&snapshot),
                 receipt.runner_receipt.handoff.runner_id.clone(),
@@ -275,14 +352,14 @@ impl ControllerFallbackProjectionStore {
                 Ok(snapshot) if snapshot.job.status.is_terminal() => snapshot,
                 Ok(snapshot) => {
                     self.record_observation(
-                        &mission_id,
+                        &run_id,
                         "pending",
                         format!("runner job remains {}", snapshot.job.status.as_str()),
                     )?;
                     continue;
                 }
                 Err(error) => {
-                    self.record_observation(&mission_id, "retryable", error.message)?;
+                    self.record_observation(&run_id, "retryable", error.message)?;
                     continue;
                 }
             };
@@ -291,12 +368,12 @@ impl ControllerFallbackProjectionStore {
             // A restart or concurrent controller can then replay the same evidence safely.
             let _lock = self.lock()?;
             let mut state = self.load()?;
-            if state.projections.contains_key(&mission_id) {
+            if state.projections.contains_key(&run_id) {
                 continue;
             }
-            if let Err(error) = finalize(&mission_id, &snapshot) {
+            if let Err(error) = finalize(&run_id, &snapshot) {
                 state.reconciliation.insert(
-                    mission_id.clone(),
+                    run_id.clone(),
                     ReconciliationObservation {
                         state: "retryable".to_string(),
                         detail: error.message,
@@ -307,24 +384,25 @@ impl ControllerFallbackProjectionStore {
             }
             let projection = self.project_terminal_evidence_in_state(
                 &mut state,
-                &mission_id,
+                &run_id,
                 RunnerTerminalEvidence {
                     outcome: snapshot.job.status.as_str().to_string(),
                     artifacts: receipt.runner_receipt.artifacts,
                 },
             )?;
-            state.reconciliation.remove(&mission_id);
+            state.reconciliation.remove(&run_id);
             self.persist(&state)?;
             projections.push(projection);
         }
         Ok(projections)
     }
 
-    /// Projects explicit runner terminal evidence and fails closed if later
-    /// evidence differs from the first finalized projection.
+    /// Projects explicit runner terminal evidence for the exact handoff run
+    /// id and fails closed if later evidence differs from the first finalized
+    /// projection.
     pub fn project_terminal_evidence(
         &self,
-        mission_id: &str,
+        run_id: &str,
         evidence: RunnerTerminalEvidence,
     ) -> Result<ControllerMissionProjection> {
         if evidence.outcome.trim().is_empty()
@@ -335,14 +413,13 @@ impl ControllerFallbackProjectionStore {
             return Err(Error::validation_invalid_argument(
                 "runner_terminal_evidence",
                 "runner terminal evidence requires an outcome and all staged artifacts",
-                Some(mission_id.to_string()),
+                Some(run_id.to_string()),
                 None,
             ));
         }
         let _lock = self.lock()?;
         let mut state = self.load()?;
-        let projection =
-            self.project_terminal_evidence_in_state(&mut state, mission_id, evidence)?;
+        let projection = self.project_terminal_evidence_in_state(&mut state, run_id, evidence)?;
         self.persist(&state)?;
         Ok(projection)
     }
@@ -350,31 +427,31 @@ impl ControllerFallbackProjectionStore {
     fn project_terminal_evidence_in_state(
         &self,
         state: &mut State,
-        mission_id: &str,
+        run_id: &str,
         evidence: RunnerTerminalEvidence,
     ) -> Result<ControllerMissionProjection> {
-        let receipt = state.receipts.get(mission_id).ok_or_else(|| {
+        let receipt = state.receipts.get(run_id).ok_or_else(|| {
             Error::validation_invalid_argument(
-                "mission_id",
-                "controller cannot project a mission without a deferred runner receipt",
-                Some(mission_id.to_string()),
+                "run_id",
+                "controller cannot project a run without a deferred runner receipt",
+                Some(run_id.to_string()),
                 None,
             )
         })?;
         let projection = ControllerMissionProjection {
-            mission_id: mission_id.to_string(),
+            mission_id: receipt.mission_id.to_string(),
             runner_id: receipt.runner_receipt.handoff.runner_id.clone(),
             runner_job_id: receipt.runner_receipt.handoff.runner_job_id.clone(),
             terminal_outcome: evidence.outcome,
             artifacts: evidence.artifacts,
             finalization_owner: "controller".to_string(),
         };
-        if let Some(existing) = state.projections.get(mission_id) {
+        if let Some(existing) = state.projections.get(run_id) {
             if existing != &projection {
                 return Err(Error::validation_invalid_argument(
                     "runner_terminal_evidence",
-                    "controller mission already has a different terminal projection",
-                    Some(mission_id.to_string()),
+                    "controller run already has a different terminal projection",
+                    Some(run_id.to_string()),
                     None,
                 ));
             }
@@ -382,16 +459,16 @@ impl ControllerFallbackProjectionStore {
         }
         state
             .projections
-            .insert(mission_id.to_string(), projection.clone());
+            .insert(run_id.to_string(), projection.clone());
         Ok(projection)
     }
 
-    fn record_observation(&self, mission_id: &str, state: &str, detail: String) -> Result<()> {
+    fn record_observation(&self, run_id: &str, state: &str, detail: String) -> Result<()> {
         let _lock = self.lock()?;
         let mut ledger = self.load()?;
-        if !ledger.projections.contains_key(mission_id) {
+        if !ledger.projections.contains_key(run_id) {
             ledger.reconciliation.insert(
-                mission_id.to_string(),
+                run_id.to_string(),
                 ReconciliationObservation {
                     state: state.to_string(),
                     detail,
@@ -403,15 +480,15 @@ impl ControllerFallbackProjectionStore {
     }
 
     #[cfg(test)]
-    fn observation(&self, mission_id: &str) -> Result<Option<ReconciliationObservation>> {
-        Ok(self.load()?.reconciliation.get(mission_id).cloned())
+    fn observation(&self, run_id: &str) -> Result<Option<ReconciliationObservation>> {
+        Ok(self.load()?.reconciliation.get(run_id).cloned())
     }
 
     fn load(&self) -> Result<State> {
         if !self.path.exists() {
             return Ok(State::default());
         }
-        serde_json::from_slice(&fs::read(&self.path).map_err(|error| {
+        let state: State = serde_json::from_slice(&fs::read(&self.path).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!("read {}", self.path.display())),
@@ -422,7 +499,19 @@ impl ControllerFallbackProjectionStore {
                 error.to_string(),
                 Some(format!("parse {}", self.path.display())),
             )
-        })
+        })?;
+        if state.schema == STORE_SCHEMA {
+            return Ok(state);
+        }
+        if state.schema == STORE_SCHEMA_V1 {
+            return normalize_v1(state);
+        }
+        Err(Error::validation_invalid_argument(
+            "controller_fallback_store",
+            "unsupported controller fallback projection store schema",
+            Some(self.path.display().to_string()),
+            None,
+        ))
     }
 
     fn persist(&self, state: &State) -> Result<()> {
@@ -552,12 +641,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner_staging_operation::tests_support::{envelope, Transport};
+    use crate::runner_staging_operation::tests_support::{envelope, envelope_for_run, Transport};
     use homeboy_core::api_jobs::{Job, JobStatus, RunnerJobLogSnapshot};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
+    use std::sync::{Barrier, Mutex};
     use tempfile::tempdir;
     use uuid::Uuid;
+
+    /// The blocked DLA Cook mission from the field report: its first attempt
+    /// held the v1 mission-keyed receipt, and later attempts were refused by
+    /// `submit_detached` after the runner had already admitted them.
+    const COOK_MISSION: &str = "agent-task-20bf814f-8536-44da-acb2-951d55ee50ca";
+    const FIRST_ATTEMPT_RUN: &str =
+        "agent-task-20bf814f-8536-44da-acb2-951d55ee50ca-attempt-1-5d0aad97";
+    const RETRY_ATTEMPT_RUN: &str =
+        "agent-task-20bf814f-8536-44da-acb2-951d55ee50ca-attempt-3-7ec741b8";
 
     fn store() -> ControllerFallbackProjectionStore {
         ControllerFallbackProjectionStore::open(
@@ -822,5 +920,306 @@ mod tests {
             .message
             .contains("encodes a run, not a grouping identity"));
         assert!(error.message.contains(RUN));
+    }
+
+    #[test]
+    fn distinct_retry_attempts_under_one_cook_mission_are_each_admitted_and_replayed_exactly() {
+        let store = store();
+        let mut runner = Transport::compatible();
+        let first = store
+            .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("first attempt admission");
+        let retry = store
+            .submit_detached(&mut runner, &envelope_for_run(RETRY_ATTEMPT_RUN))
+            .expect("retry attempt admission under the same Cook mission");
+        assert_eq!(first.mission_id.as_str(), COOK_MISSION);
+        assert_eq!(retry.mission_id, first.mission_id);
+        assert_ne!(
+            first.runner_receipt.handoff.runner_job_id,
+            retry.runner_receipt.handoff.runner_job_id
+        );
+        let first_replay = store
+            .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("exact first-attempt replay");
+        let retry_replay = store
+            .submit_detached(&mut runner, &envelope_for_run(RETRY_ATTEMPT_RUN))
+            .expect("exact retry-attempt replay");
+        assert_eq!(first_replay, first);
+        assert_eq!(retry_replay, retry);
+        assert_eq!(runner.provider_budget(), 0);
+    }
+
+    #[test]
+    fn conflicting_runner_receipt_within_the_same_exact_run_fails_closed() {
+        let store = store();
+        let mut runner = Transport::compatible();
+        let admitted = store
+            .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("admit the attempt");
+        // A runner that lost its durable store re-mints a different job for
+        // the exact run the ledger already bound. That is an evidence conflict.
+        let mut reminted = Transport::reminting();
+        let error = store
+            .submit_detached(&mut reminted, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect_err("same run must not rebind to a different runner receipt");
+        assert!(error
+            .message
+            .contains("already bound to a different runner receipt"));
+        assert_eq!(error.details["id"], FIRST_ATTEMPT_RUN);
+        let unchanged = store
+            .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("original receipt still replays after the refusal");
+        assert_eq!(unchanged, admitted);
+    }
+
+    #[test]
+    fn reconciliation_finalizes_each_attempt_by_its_exact_run_identity() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("controller.json");
+        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let mut runner = Transport::compatible();
+        let first = store
+            .submit_detached(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("admit first attempt");
+        let retry = store
+            .submit_detached(&mut runner, &envelope_for_run(RETRY_ATTEMPT_RUN))
+            .expect("admit retry attempt");
+        let finalizations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_job = first.runner_receipt.handoff.runner_job_id.clone();
+
+        // Bounded first pass: only the first attempt's runner job is terminal.
+        // The retry attempt must stay deferred under its own run identity.
+        let projected = store
+            .reconcile_after_controller_restart_with(
+                8,
+                {
+                    let first_job = first_job.clone();
+                    move |_, job_id| {
+                        if job_id == first_job.as_str() {
+                            Ok(snapshot(JobStatus::Succeeded))
+                        } else {
+                            Ok(snapshot(JobStatus::Running))
+                        }
+                    }
+                },
+                {
+                    let finalizations = Arc::clone(&finalizations);
+                    move |run_id, _| {
+                        finalizations
+                            .lock()
+                            .expect("finalizations")
+                            .push(run_id.to_string());
+                        Ok(true)
+                    }
+                },
+            )
+            .expect("first reconciliation pass");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].mission_id, COOK_MISSION);
+        assert_eq!(
+            projected[0].runner_job_id,
+            first.runner_receipt.handoff.runner_job_id
+        );
+        assert_eq!(projected[0].artifacts, first.runner_receipt.artifacts);
+        assert_eq!(
+            finalizations.lock().expect("finalizations").as_slice(),
+            [FIRST_ATTEMPT_RUN]
+        );
+        assert_eq!(
+            store
+                .observation(RETRY_ATTEMPT_RUN)
+                .expect("retry observation"),
+            Some(ReconciliationObservation {
+                state: "pending".to_string(),
+                detail: "runner job remains running".to_string(),
+            })
+        );
+
+        // Second bounded pass: the retry attempt reaches its own terminal
+        // evidence without re-finalizing the first attempt.
+        let retry_job = retry.runner_receipt.handoff.runner_job_id.clone();
+        let projected = store
+            .reconcile_after_controller_restart_with(
+                8,
+                move |_, job_id| {
+                    assert_eq!(job_id, retry_job.as_str());
+                    Ok(snapshot(JobStatus::Succeeded))
+                },
+                {
+                    let finalizations = Arc::clone(&finalizations);
+                    move |run_id, _| {
+                        finalizations
+                            .lock()
+                            .expect("finalizations")
+                            .push(run_id.to_string());
+                        Ok(true)
+                    }
+                },
+            )
+            .expect("second reconciliation pass");
+        assert_eq!(projected.len(), 1);
+        assert_eq!(
+            projected[0].runner_job_id,
+            retry.runner_receipt.handoff.runner_job_id
+        );
+        assert_eq!(projected[0].artifacts, retry.runner_receipt.artifacts);
+        assert_eq!(
+            finalizations.lock().expect("finalizations").as_slice(),
+            [FIRST_ATTEMPT_RUN, RETRY_ATTEMPT_RUN]
+        );
+
+        // A restart replays nothing: both attempts are already projected under
+        // their exact run identities.
+        let replay = ControllerFallbackProjectionStore::open(&path)
+            .expect("restarted store")
+            .reconcile_after_controller_restart_with(
+                8,
+                |_, _| panic!("finalized attempts must not be re-queried after restart"),
+                |_, _| panic!("terminal lifecycle CAS must not be re-entered after restart"),
+            )
+            .expect("restart replay");
+        assert!(replay.is_empty());
+    }
+
+    #[test]
+    fn v1_mission_keyed_ledger_is_normalized_to_exact_run_ownership_without_loss() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("controller.json");
+        let envelope = envelope_for_run(FIRST_ATTEMPT_RUN);
+        let mut runner = Transport::compatible();
+        let runner_receipt =
+            crate::runner_staging_operation::submit_remote_runner_staging(&mut runner, &envelope)
+                .expect("runner admission for the v1-era attempt");
+        let v1_receipt = DeferredControllerReceipt {
+            schema: STORE_SCHEMA_V1.to_string(),
+            mission_id: mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("grouping mission"),
+            runner_receipt: runner_receipt.clone(),
+            controller_projection: "deferred".to_string(),
+        };
+        let v1_projection = ControllerMissionProjection {
+            mission_id: COOK_MISSION.to_string(),
+            runner_id: v1_receipt.runner_receipt.handoff.runner_id.clone(),
+            runner_job_id: v1_receipt.runner_receipt.handoff.runner_job_id.clone(),
+            terminal_outcome: "succeeded".to_string(),
+            artifacts: v1_receipt.runner_receipt.artifacts.clone(),
+            finalization_owner: "controller".to_string(),
+        };
+        let mut v1_state = State {
+            schema: STORE_SCHEMA_V1.to_string(),
+            receipts: BTreeMap::new(),
+            projections: BTreeMap::new(),
+            reconciliation: BTreeMap::new(),
+        };
+        v1_state
+            .receipts
+            .insert(COOK_MISSION.to_string(), v1_receipt.clone());
+        v1_state
+            .projections
+            .insert(COOK_MISSION.to_string(), v1_projection.clone());
+        v1_state.reconciliation.insert(
+            COOK_MISSION.to_string(),
+            ReconciliationObservation {
+                state: "pending".to_string(),
+                detail: "runner job remains running".to_string(),
+            },
+        );
+        ControllerFallbackProjectionStore { path: path.clone() }
+            .persist(&v1_state)
+            .expect("seed v1 ledger");
+
+        let store = ControllerFallbackProjectionStore::open(&path).expect("v1 ledger opens");
+        let normalized = store.load().expect("normalized state");
+        assert_eq!(normalized.schema, STORE_SCHEMA);
+        let migrated_receipt = normalized
+            .receipts
+            .get(FIRST_ATTEMPT_RUN)
+            .expect("receipt re-keyed to its exact run");
+        assert_eq!(migrated_receipt.mission_id.as_str(), COOK_MISSION);
+        assert_eq!(
+            migrated_receipt.runner_receipt, v1_receipt.runner_receipt,
+            "runner-owned receipt payload must survive the transition unchanged"
+        );
+        let migrated_projection = normalized
+            .projections
+            .get(FIRST_ATTEMPT_RUN)
+            .expect("projection re-keyed to its exact run");
+        assert_eq!(*migrated_projection, v1_projection);
+        assert!(normalized.reconciliation.contains_key(FIRST_ATTEMPT_RUN));
+
+        // The earlier attempt still replays exactly after the transition.
+        let mut restarted = Transport::compatible();
+        let replay = store
+            .submit_detached(&mut restarted, &envelope_for_run(FIRST_ATTEMPT_RUN))
+            .expect("earlier attempt replays after the transition");
+        assert_eq!(replay.runner_receipt, v1_receipt.runner_receipt);
+        // And a later attempt under the same Cook mission is admitted.
+        let retry = store
+            .submit_detached(&mut restarted, &envelope_for_run(RETRY_ATTEMPT_RUN))
+            .expect("retry attempt admitted after the transition");
+        assert_eq!(retry.mission_id.as_str(), COOK_MISSION);
+
+        // The first write after the transition persists the v2 layout with
+        // both attempts retained.
+        let reloaded = store.load().expect("reload persisted ledger");
+        assert_eq!(reloaded.schema, STORE_SCHEMA);
+        assert_eq!(reloaded.receipts.len(), 2);
+        assert!(reloaded.receipts.contains_key(FIRST_ATTEMPT_RUN));
+        assert!(reloaded.receipts.contains_key(RETRY_ATTEMPT_RUN));
+        assert_eq!(
+            reloaded
+                .projections
+                .get(FIRST_ATTEMPT_RUN)
+                .map(|projection| projection.runner_job_id.as_str()),
+            Some(v1_receipt.runner_receipt.handoff.runner_job_id.as_str())
+        );
+    }
+
+    #[test]
+    fn malformed_v1_ownership_is_rejected_without_changing_recorded_evidence() {
+        for malformed in ["empty_run", "wrong_job", "orphan_observation"] {
+            let directory = tempdir().expect("temp directory");
+            let path = directory.path().join("controller.json");
+            let mut runner = Transport::compatible();
+            let runner_receipt =
+                submit_remote_runner_staging(&mut runner, &envelope_for_run(FIRST_ATTEMPT_RUN))
+                    .expect("admission");
+            let mut state = State {
+                schema: STORE_SCHEMA_V1.to_string(),
+                ..State::default()
+            };
+            let mut receipt = DeferredControllerReceipt::new(
+                mission_from_handoff_run_id(FIRST_ATTEMPT_RUN).expect("mission"),
+                runner_receipt,
+            );
+            receipt.schema = STORE_SCHEMA_V1.to_string();
+            if malformed == "empty_run" {
+                receipt.runner_receipt.handoff.run_id.clear();
+            } else if malformed == "wrong_job" {
+                state.projections.insert(
+                    COOK_MISSION.to_string(),
+                    ControllerMissionProjection {
+                        mission_id: COOK_MISSION.to_string(),
+                        runner_id: receipt.runner_receipt.handoff.runner_id.clone(),
+                        runner_job_id: Uuid::new_v4().to_string(),
+                        terminal_outcome: "succeeded".to_string(),
+                        artifacts: receipt.runner_receipt.artifacts.clone(),
+                        finalization_owner: "controller".to_string(),
+                    },
+                );
+            } else {
+                state.reconciliation.insert(
+                    "unowned-mission".to_string(),
+                    ReconciliationObservation {
+                        state: "pending".to_string(),
+                        detail: "retained evidence".to_string(),
+                    },
+                );
+            }
+            state.receipts.insert(COOK_MISSION.to_string(), receipt);
+            let bytes = serde_json::to_vec(&state).expect("serialize evidence");
+            fs::write(&path, &bytes).expect("seed ledger");
+            assert!(ControllerFallbackProjectionStore::open(&path).is_err());
+            assert_eq!(fs::read(&path).expect("retained ledger"), bytes);
+        }
     }
 }
