@@ -673,6 +673,96 @@ fn reverse_broker_exec_detached_surfaces_persisted_run_id() {
 }
 
 #[test]
+fn direct_daemon_preserves_declared_provider_source_through_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::register_runner_daemon_exec_driver();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store = workspace.path().join("provider-auth.json");
+        const NAME: &str = "HOMEBOY_STAGED_PROVIDER_ACCESS_TOKEN";
+        const VALUE: &str = "synthetic-provider-source-value";
+        std::fs::write(
+            &store,
+            serde_json::json!({"tokens": {"access": VALUE}}).to_string(),
+        )
+        .expect("synthetic auth store");
+        let mut plan =
+            homeboy_core::secret_env_plan::SecretEnvPlan::from_secret_env_names([NAME.to_string()]);
+        plan.provider_credentials.insert(
+            "fixture-provider".to_string(),
+            homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
+                secret_env: vec![NAME.to_string()],
+                sources: [(
+                    NAME.to_string(),
+                    homeboy_core::secret_env_plan::SecretEnvCredentialSource {
+                        source: "json-file".to_string(),
+                        env_var: None,
+                        path: Some(store.display().to_string()),
+                        scope: None,
+                        name: None,
+                        field: Some("tokens.access".to_string()),
+                        fallback_fields: Vec::new(),
+                        fallback_value: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("address"));
+        std::thread::spawn(move || {
+            let _ = homeboy_core::daemon::serve_listener(listener);
+        });
+        let execute = |plan| {
+            exec_via_daemon(
+                &ssh_runner(),
+                &daemon_url,
+                None,
+                workspace.path().display().to_string(),
+                None,
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("test -n \"${NAME}\" && printf provider-source-resolved"),
+                ],
+                Default::default(),
+                plan,
+                false,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+                None,
+            )
+        };
+
+        let (output, exit_code) = execute(plan.clone())
+            .expect("a declared source is sufficient without a runner secret reference");
+        assert_eq!(exit_code, 0, "{}", output.stderr);
+        assert!(output.stdout.contains("provider-source-resolved"));
+        let client = Client::builder().no_proxy().build().expect("client");
+        let job = fetch_daemon_job(&client, &daemon_url, output.job_id.as_deref().unwrap())
+            .expect("durable accepted job");
+        assert!(!serde_json::to_string(&job).unwrap().contains(VALUE));
+
+        std::fs::remove_file(&store).expect("remove synthetic source");
+        let error = execute(plan).expect_err("an unavailable declared source still fails closed");
+        assert!(
+            error.message.contains("runner secret source"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("missing runner secret env ref"));
+    });
+}
+
+#[test]
 fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
     homeboy_core::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
@@ -696,7 +786,7 @@ fn zero_wait_direct_daemon_preserves_accepted_running_handoff() {
             None,
             blocked_workload_command(&started, &release),
             Default::default(),
-            Vec::new(),
+            Default::default(),
             false,
             None,
             None,
@@ -747,7 +837,7 @@ fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
             None,
             blocked_workload_command(&started, &release),
             Default::default(),
-            Vec::new(),
+            Default::default(),
             false,
             None,
             None,
@@ -1137,7 +1227,7 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
                 release.display().to_string(),
             ],
             Default::default(),
-            Vec::new(),
+            Default::default(),
             false,
             None,
             None,
@@ -1334,7 +1424,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
             None,
             vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
             Default::default(),
-            Vec::new(),
+            Default::default(),
             false,
             None,
             None,
@@ -1906,7 +1996,7 @@ fn daemon_exec_failure_without_error_field_is_actionable() {
         None,
         vec!["homeboy".to_string(), "--version".to_string()],
         Default::default(),
-        Vec::new(),
+        Default::default(),
         false,
         None,
         None,
@@ -2313,7 +2403,7 @@ fn daemon_exec_empty_envelope_over_http_is_actionable_not_null() {
         None,
         vec!["homeboy".to_string(), "--version".to_string()],
         Default::default(),
-        Vec::new(),
+        Default::default(),
         false,
         None,
         None,

@@ -265,7 +265,7 @@ fn watch_follow_reproduces_the_daemon_event_log_and_reports_promotion_once() {
             None,
             command,
             Default::default(),
-            Vec::new(),
+            Default::default(),
             false,
             None,
             None,
