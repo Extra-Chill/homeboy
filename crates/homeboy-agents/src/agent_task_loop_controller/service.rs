@@ -342,6 +342,90 @@ pub fn resume_loop(
     Ok(acknowledgement)
 }
 
+#[cfg(test)]
+mod stopped_resume_tests {
+    use super::*;
+
+    #[test]
+    fn off_loop_preserves_unknown_work_and_live_command_fences() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            crate::orchestration::register();
+            for (id, ownership) in [
+                (
+                    "unknown-resume-work",
+                    serde_json::json!({"work_job":{"job_id":"missing-job"}}),
+                ),
+                (
+                    "live-resume-command",
+                    serde_json::json!({"command_recovery":{"state":"running"}}),
+                ),
+            ] {
+                let mut record = create_controller(id, "evaluate", "v1").unwrap();
+                record.metadata = ownership;
+                stamp_loop_runtime_metadata(&mut record.metadata, false, Some(3), false).unwrap();
+                write_controller(&record).unwrap();
+                assert!(resume_loop(id, None, serde_json::json!({})).is_err());
+                let after = load_controller(id).unwrap();
+                assert_eq!(after.metadata["runtime"]["on"], false);
+                assert_eq!(after.metadata["runtime"]["revolutions"], 0);
+            }
+        });
+    }
+
+    #[test]
+    fn reserved_resume_recovers_at_its_limit_using_its_original_generation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut record = create_controller("reserved-resume-limit", "evaluate", "v1").unwrap();
+            stamp_loop_runtime_metadata(&mut record.metadata, true, Some(1), true).unwrap();
+            record.metadata["resume_operation"] = serde_json::json!({"effect_id":"recover-resume","generation":"reserved-generation","state":"reserved","dispatch_defaults":{}});
+            record.updated_at = Utc::now().to_rfc3339();
+            write_controller(&record).unwrap();
+            let request: ControlPlaneActionRequest = serde_json::from_value(serde_json::json!({
+                "schema":homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+                "effect_id":"recover-resume","action":"resume","idempotency_key":"recover-resume","actor":"test","confirmed":true,
+                "parameters":{"schema":LOOP_RESUME_PARAMETERS_SCHEMA,"data":{}}
+            })).unwrap();
+            let run = RunRecord {
+                metadata_json: serde_json::json!({"loop_id":record.loop_id}),
+                ..Default::default()
+            };
+            let result = with_test_loop_work_admitter(
+                |_, generation, _| {
+                    assert_eq!(generation, "reserved-generation");
+                    Ok(serde_json::json!({"state":"submitted","job_id":"fixture-work"}))
+                },
+                || {
+                    LoopActionDelegate.resume(
+                        &run,
+                        &request,
+                        &homeboy_core::control_plane::ControlPlaneInvocationContext::default(),
+                    )
+                },
+            )
+            .unwrap();
+            assert_eq!(result.outcome, ControlPlaneActionOutcome::Succeeded);
+            assert_eq!(
+                load_controller(&record.loop_id).unwrap().metadata["runtime"]["revolutions"],
+                1
+            );
+            let mut stopped = load_controller(&record.loop_id).unwrap();
+            stamp_loop_runtime_metadata(&mut stopped.metadata, false, Some(1), false).unwrap();
+            write_controller(&stopped).unwrap();
+            assert!(LoopActionDelegate
+                .resume(
+                    &run,
+                    &request,
+                    &homeboy_core::control_plane::ControlPlaneInvocationContext::default()
+                )
+                .is_err());
+            assert_eq!(
+                load_controller(&record.loop_id).unwrap().metadata["runtime"]["on"],
+                false
+            );
+        });
+    }
+}
+
 /// Only route selection and opaque configuration references are durable loop
 /// intent. Provider configuration and credential material belong to the
 /// caller's admitted catalog/Runner handoff, never to a generic control-plane
@@ -734,13 +818,12 @@ impl LoopActionDelegate {
             homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
         })?;
         let runtime = loop_runtime_metadata(&record.metadata);
-        if !runtime["on"].as_bool().unwrap_or(true) {
-            return Err(
-                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
-                    "agent-task loop resume requires an on loop",
-                ),
-            );
-        }
+        let operation_id = request.effect_id.0.clone();
+        let reserved = record
+            .metadata
+            .get("resume_operation")
+            .filter(|operation| operation["effect_id"] == operation_id)
+            .cloned();
         let limit = request
             .parameters
             .data
@@ -753,7 +836,7 @@ impl LoopActionDelegate {
                     .map(|value| value as u32)
             });
         let current = runtime["revolutions"].as_u64().unwrap_or(0) as u32;
-        if limit.is_some_and(|limit| current >= limit) {
+        if reserved.is_none() && limit.is_some_and(|limit| current >= limit) {
             return Ok(ControlPlaneActionDelegateResult {
                 outcome: ControlPlaneActionOutcome::AlreadySatisfied,
                 result: ControlPlaneActionPayload {
@@ -768,13 +851,36 @@ impl LoopActionDelegate {
                 message: None,
             });
         }
-        let operation_id = request.effect_id.0.clone();
-        let reserved = record
-            .metadata
-            .get("resume_operation")
-            .filter(|operation| operation["effect_id"] == operation_id)
-            .cloned();
         if reserved.is_none() {
+            // Explicit resume owns the off -> on transition, but only after
+            // the stopped generation's owned work is observably quiescent.
+            // On-loop continuation retains its existing admission semantics.
+            if !runtime["on"].as_bool().unwrap_or(true) {
+                let work = loop_work_status(&record.metadata, context);
+                if !work.is_null() && !work_job_is_terminal(&work) {
+                    return Err(
+                        homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                            "loop resume requires observed quiescent prior owned work",
+                        ),
+                    );
+                }
+                if let Some(command) = record.metadata.get("command_recovery") {
+                    let recovered = command["state"] == "owner_lost_unknown_outcome"
+                        && record.metadata["work_job"]["recovery_receipt"]["schema"]
+                            == "homeboy/loop-command-terminal-recovery/v1"
+                        && record.metadata["work_job"]["recovery_receipt"]["job_id"]
+                            == record.metadata["work_job"]["job_id"]
+                        && !work.is_null()
+                        && work_job_is_terminal(&work);
+                    if command["state"] != "reaped" && !recovered {
+                        return Err(
+                            homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                                "loop resume requires quiescent command ownership evidence",
+                            ),
+                        );
+                    }
+                }
+            }
             let dispatch_defaults = request
                 .parameters
                 .data
@@ -804,7 +910,31 @@ impl LoopActionDelegate {
                 homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
             })?;
         }
-        let generation = record.updated_at.clone();
+        // A newer stop epoch wins while the reservation is being persisted.
+        // Recovery of an earlier reservation cannot clear that cancellation.
+        record = load_controller(loop_id).map_err(|error| {
+            homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
+        })?;
+        if !loop_runtime_metadata(&record.metadata)["on"]
+            .as_bool()
+            .unwrap_or(false)
+            || record.metadata["resume_operation"]["effect_id"] != operation_id
+        {
+            return Err(
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                    "loop resume reservation superseded by a concurrent lifecycle action",
+                ),
+            );
+        }
+        let generation = record.metadata["resume_operation"]["generation"]
+            .as_str()
+            .filter(|generation| !generation.is_empty())
+            .ok_or_else(|| {
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                    "loop resume reservation has no generation",
+                )
+            })?
+            .to_string();
         let dispatch_defaults = record.metadata["resume_operation"]["dispatch_defaults"].clone();
         let work = admit_loop_work_job(loop_id, &generation, dispatch_defaults, context).map_err(
             |error| homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message),
