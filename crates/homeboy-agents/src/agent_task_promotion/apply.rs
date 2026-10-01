@@ -94,12 +94,21 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
         .as_ref()
         .map(|file| file.path().to_string_lossy().into_owned())
         .unwrap_or_else(|| request.patch_path.clone());
-    if request
+    let already_applied = if request
         .trusted_unpushed_candidate_destination
         .as_ref()
         .is_some_and(|trusted| trusted_candidate_destination_matches(workspace, trusted))
-        && patch_is_already_applied(workspace, &patch_path)?
     {
+        patch_is_already_applied(workspace, &patch_path)?
+    } else {
+        // Resume after a failure that followed a successful apply (#15297):
+        // the destination already holds exactly this candidate as uncommitted
+        // changes. Skip the apply only when the working tree's diff against
+        // HEAD is precisely the candidate patch, so a partially applied or
+        // otherwise modified destination still fails loudly.
+        !request.dry_run && worktree_holds_exactly_patch(workspace, &patch_path)?
+    };
+    if already_applied {
         return serde_json::to_string(&AgentTaskPromotionApplyResponse {
             schema: AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA.to_string(),
             workspace_path: workspace.display().to_string(),
@@ -176,6 +185,73 @@ fn trusted_candidate_destination_matches(
             .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == trusted.head)
 }
 
+/// True when the working tree (index and files) differs from HEAD by exactly
+/// `patch_path`: the patch reverse-applies cleanly, and reversing it leaves no
+/// other change. Read-only: only `--check` and diff queries run.
+fn worktree_holds_exactly_patch(workspace: &Path, patch_path: &str) -> Result<bool> {
+    if !patch_is_already_applied(workspace, patch_path)? {
+        return Ok(false);
+    }
+    let changed =
+        output_allow_empty(workspace, &["diff", "HEAD", "--name-only"]).unwrap_or_default();
+    let untracked = output_allow_empty(workspace, &["ls-files", "--others", "--exclude-standard"])
+        .unwrap_or_default();
+    let mut actual = changed
+        .lines()
+        .chain(untracked.lines())
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    actual.sort();
+    actual.dedup();
+    let patched = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["apply", "--numstat", patch_path])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("list agent-task promotion patch paths".to_string()),
+            )
+        })?;
+    if !patched.status.success() {
+        return Ok(false);
+    }
+    let mut expected = String::from_utf8_lossy(&patched.stdout)
+        .lines()
+        .filter_map(|line| line.splitn(3, '\t').nth(2))
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect::<Vec<_>>();
+    expected.sort();
+    expected.dedup();
+    if actual != expected {
+        return Ok(false);
+    }
+    let current = output_allow_empty(workspace, &["diff", "HEAD", "--binary"]).unwrap_or_default();
+    let candidate = std::fs::read_to_string(patch_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read agent-task promotion patch".to_string()),
+        )
+    })?;
+    Ok(normalized_diff_body(&current) == normalized_diff_body(&candidate))
+}
+
+/// Compare diffs by their change lines only; index hashes and hunk context
+/// formatting can differ between producers without changing content.
+fn normalized_diff_body(diff: &str) -> Vec<&str> {
+    diff.lines()
+        .filter(|line| {
+            (line.starts_with('+') || line.starts_with('-'))
+                && !line.starts_with("+++")
+                && !line.starts_with("---")
+        })
+        .collect()
+}
+
 fn patch_is_already_applied(workspace: &Path, patch_path: &str) -> Result<bool> {
     Command::new("git")
         .arg("-C")
@@ -187,6 +263,8 @@ fn patch_is_already_applied(workspace: &Path, patch_path: &str) -> Result<bool> 
             "--whitespace=nowarn",
             patch_path,
         ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .map_err(|error| {
