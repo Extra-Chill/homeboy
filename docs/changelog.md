@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.0] - 2026-10-01
+
+### Added
+- add extension-owned independent AI review
+
+### Changed
+- share rooted run snapshots across discovery and detail
+- share canonical subject and completion outcomes
+
+### Fixed
+- bind admission to a coherent service observation
+
 ## [0.398.11] - 2026-09-30
 
 ### Fixed
