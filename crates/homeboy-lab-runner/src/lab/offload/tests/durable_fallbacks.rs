@@ -23,7 +23,7 @@ fn deferred_staging_emits_only_durable_run_commands() {
         "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e"
     );
     let receipt = crate::controller_fallback_projection::DeferredControllerReceipt {
-        schema: "homeboy/controller-fallback-projection/v1".to_string(),
+        schema: "homeboy/controller-fallback-projection/v2".to_string(),
         mission_id: mission,
         runner_receipt: crate::runner_staging_operation::RemoteRunnerStagingReceipt {
             schema: "homeboy/remote-runner-staging-receipt/v1".to_string(),
