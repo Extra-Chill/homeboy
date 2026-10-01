@@ -1412,7 +1412,10 @@ mod tests {
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(report.status, AgentTaskCookLoopStatus::GateDeclarationInvalid);
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::GateDeclarationInvalid
+        );
         assert!(report.follow_up_request.is_none());
     }
 
