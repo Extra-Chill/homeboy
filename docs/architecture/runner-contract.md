@@ -11,6 +11,43 @@ For the cross-command verification phase model (`syntax`, `lint`, `typecheck`,
 `audit`, `test`), see
 [`docs/internals/development/contracts/verification-phases.md`](../internals/development/contracts/verification-phases.md).
 
+## Runner-owned service observation
+
+`GET /runner/describe` serves `homeboy/runner-service-observation/v1` on the
+daemon transport. It binds the loaded build and typed job identities to the
+daemon's owned fresh lease. Freshness and active-job count derive from the same
+job snapshot, so separate health and job probes cannot create phantom owners.
+The controller checks the selected lease, response schema and agreement between
+count, freshness and job identities before using the observation.
+
+Direct runner status feeds this observation into the existing
+`RunnerAdmissionSnapshot` consumed by status, doctor and placement. The current
+service is the authority for its current jobs; retained generation counts remain
+historical ownership/evidence and cannot overwrite that service count. Proven
+activity on another generation still fences rotation and admission.
+
+Status serialization renders captured facts only and never re-reads the
+generation store. Historical generation detail is exposed separately through
+the snapshot's `generation_inventory` and bounded admission summary.
+
+Unavailable job observation is **unknown**, not authoritative zero.
+`RunnerAdmissionSummary` and Runner API readiness omit `active_job_count` when
+it was not observed; raw connection status does the same, and the summary also
+omits `live_daemon_job_count`. Consumers
+must keep unknown distinct from `Some(0)`. A local placement capability alone
+does not establish an idle job observation.
+
+The service-observation endpoint is required for this direct path. A runner that
+does not serve it is unobserved, rather than silently falling back to a second
+truth path. Existing forward/reverse transport and generation lifecycle remain
+separate delivery boundaries under #13881; this observation change does not
+claim runner-owned upgrades or automatic retirement of historical generations.
+
+The live `runner_service_observation` regression drops the submission connection
+before reading its admission response, retries with the same idempotency key,
+replaces the HTTP client mid-job, resumes watch from its event cursor and checks
+one terminal execution under the same service lease.
+
 ## Capability model
 
 Each extension can declare scripts per-capability in its manifest

@@ -578,40 +578,14 @@ pub struct RunnerUnresolvedJobOwner {
     pub observed_active_job_count: Option<usize>,
 }
 
-/// A direct daemon observation disagrees with the durable authoritative count
-/// retained by its admission generation. Neither source can be discarded by a
-/// read-only status request, so the lifecycle remains fenced until bounded
-/// reconciliation settles the ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RunnerRetainedJobInconsistency {
-    pub code: &'static str,
-    pub generation: String,
-    pub direct_daemon_active_job_count: usize,
-    pub authoritative_active_job_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub observed_active_job_count: Option<usize>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub job_ids: Vec<String>,
-}
-
 impl Serialize for RunnerStatusReport {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let generations =
-            crate::generation_store::status_projection(&self.runner_id, self.session.as_ref())
-                .unwrap_or_default();
-        // Bound the embedded generation view: emit a compact summary
-        // (authoritative selected daemon + a count-only breakdown of draining
-        // generations) rather than expanding every historical per-generation
-        // record (#9478/#9522). On a long-lived runner the full ledger runs to
-        // thousands of lines and its non-authoritative per-generation counts
-        // make old ownership look like current load. The full inventory remains
-        // available through `runner status --generations`, which surfaces the
-        // complete `generation_inventory` list. Nothing deserializes this
-        // report, so trimming the serialized shape is display-only.
-        let generation_summary = RunnerGenerationLedgerSummary::from_projection(&generations);
+        // Serialize the captured observation only. Generation evidence is
+        // exposed by RunnerAdmissionSnapshot; reading it again here creates a
+        // second point-in-time truth while rendering an already observed status.
         let mut state = serializer.serialize_struct("RunnerStatusReport", 18)?;
         state.serialize_field("runner_id", &self.runner_id)?;
         state.serialize_field("connected", &self.connected)?;
@@ -619,7 +593,6 @@ impl Serialize for RunnerStatusReport {
         if let Some(session) = &self.session {
             state.serialize_field("session", session)?;
         }
-        state.serialize_field("generations", &generation_summary)?;
         if let Some(stale_daemon) = &self.stale_daemon {
             state.serialize_field("stale_daemon", stale_daemon)?;
         }
@@ -638,7 +611,9 @@ impl Serialize for RunnerStatusReport {
         if !self.stale_runner_jobs.is_empty() {
             state.serialize_field("stale_runner_jobs", &self.stale_runner_jobs)?;
         }
-        state.serialize_field("active_job_count", &self.active_job_count)?;
+        if self.active_job_state == RunnerActiveJobState::Available {
+            state.serialize_field("active_job_count", &self.active_job_count)?;
+        }
         state.serialize_field("stale_runner_job_count", &self.stale_runner_job_count)?;
         state.serialize_field("active_job_state", &self.active_job_state)?;
         if let Some(active_job_source) = &self.active_job_source {
@@ -652,42 +627,6 @@ impl Serialize for RunnerStatusReport {
         }
         state.serialize_field("session_path", &self.session_path)?;
         state.end()
-    }
-}
-
-/// A bounded, count-only summary of the daemon generation ledger for status
-/// output. Replaces the full per-generation expansion that dominated `runner
-/// status` (#9478/#9522): it names the authoritative admission-owner generation
-/// and reports how many generations exist and how many are draining, without
-/// ever emitting the non-authoritative per-generation `active_job_count` values
-/// that made stale ownership look like current load.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct RunnerGenerationLedgerSummary {
-    /// Total number of tracked daemon generations.
-    pub total: usize,
-    /// The generation that currently owns admission, if any.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub admission_owner: Option<String>,
-    /// Number of generations that are draining (retiring, not accepting new
-    /// admission). Reported as a count, never expanded.
-    pub draining: usize,
-}
-
-impl RunnerGenerationLedgerSummary {
-    fn from_projection(generations: &[RunnerDaemonGenerationStatus]) -> Self {
-        let admission_owner = generations
-            .iter()
-            .find(|generation| generation.admission_owner)
-            .map(|generation| generation.generation.clone());
-        let draining = generations
-            .iter()
-            .filter(|generation| generation.drain_state == crate::RollingDrainState::Draining)
-            .count();
-        Self {
-            total: generations.len(),
-            admission_owner,
-            draining,
-        }
     }
 }
 
@@ -717,12 +656,12 @@ pub struct RunnerAdmissionSummary {
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
-    /// Governing active-job count for admission. This is the selected daemon's
-    /// live count unless it conflicts with an authoritative retained admission
-    /// generation count, in which case the retained count fences admission.
-    pub active_job_count: usize,
+    /// Runner-owned live count; absent when the job observation is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_job_count: Option<usize>,
     /// Jobs currently observed by the selected daemon.
-    pub live_daemon_job_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_daemon_job_count: Option<usize>,
     /// Total distinct durable job-owner identities retained by the generation
     /// ledger. This is intentionally independent of `live_daemon_job_count`:
     /// an owner may also be visible in the current daemon's live process view.
@@ -732,10 +671,6 @@ pub struct RunnerAdmissionSummary {
     /// healthy validated admission owner because they cannot be deduplicated
     /// safely with known jobs.
     pub unresolved_retained_projection_count: usize,
-    /// Typed disagreement between direct daemon state and authoritative durable
-    /// admission state. It is retained rather than silently choosing zero.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retained_job_inconsistency: Option<RunnerRetainedJobInconsistency>,
     /// Bounded durable identities from authoritative old generations that block
     /// admission until they drain or reconcile.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -845,16 +780,6 @@ impl RunnerStatusReport {
                 .push("daemon_freshness_unavailable".to_string());
             availability.accepts_jobs = false;
         }
-        if self
-            .active_job_error
-            .as_ref()
-            .is_some_and(|error| error.code == "retained_active_job_count_inconsistent")
-        {
-            availability
-                .reasons
-                .push("retained_active_job_count_inconsistent".to_string());
-            availability.accepts_jobs = false;
-        }
         // A runner whose freshness was never established is named, not fenced.
         // The reason travels with the availability record so an operator can
         // see *why* it was deprioritized without it dropping out of service.
@@ -899,38 +824,6 @@ impl RunnerStatusReport {
             .flat_map(|owner| owner.job_ids.iter())
             .collect::<BTreeSet<_>>()
             .len();
-        let retained_job_inconsistency = (self.active_job_source
-            == Some(RunnerActiveJobSource::DirectDaemon))
-        .then(|| {
-            generations.iter().find(|generation| {
-                generation.admission_owner
-                    && generation.active_job_count_authoritative
-                    && generation.live_job_count() != self.active_job_count
-                    // The daemon's positive live observation can precede the
-                    // controller's persisted generation projection. A durable
-                    // owner identity confirms this is delayed projection, not
-                    // an unexplained retained counter; the daemon remains the
-                    // authority for capacity in this case.
-                    && !(self.active_job_count > 0
-                        && generation.live_job_count() == 0
-                        && owners.iter().any(|owner| {
-                            owner.generation == generation.generation && !owner.job_ids.is_empty()
-                        }))
-            })
-        })
-        .flatten()
-        .map(|generation| RunnerRetainedJobInconsistency {
-            code: "direct_daemon_authoritative_ledger_disagreement",
-            generation: generation.generation.clone(),
-            direct_daemon_active_job_count: self.active_job_count,
-            authoritative_active_job_count: generation.active_job_count,
-            observed_active_job_count: generation.observed_active_job_count,
-            job_ids: owners
-                .iter()
-                .find(|owner| owner.generation == generation.generation)
-                .map(|owner| owner.job_ids.iter().take(20).cloned().collect())
-                .unwrap_or_default(),
-        });
         let unresolved_generations = generations
             .iter()
             .filter(|generation| {
@@ -981,16 +874,12 @@ impl RunnerStatusReport {
         // active-job count. Admission and rotation remain fail-closed until a
         // current job view is available.
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
-        let governing_active_job_count = retained_job_inconsistency
-            .as_ref()
-            .map(|inconsistency| inconsistency.authoritative_active_job_count)
-            .unwrap_or(self.active_job_count);
+        let governing_active_job_count = self.active_job_count;
         let accepting_jobs = connected
             && daemon_fresh
             && daemon_compatible
             && active_jobs_available
-            && blocking_generation.is_none()
-            && retained_job_inconsistency.is_none();
+            && blocking_generation.is_none();
         let safe_to_rotate = connected
             && self.rotation_evidence_is_unambiguous()
             && active_jobs_available
@@ -1010,25 +899,20 @@ impl RunnerStatusReport {
         // Terminal ownership uncertainty dominates every retained-generation
         // projection. Reconciliation mutates the ledger and cannot become an
         // implicit fallback when the daemon owner itself is not established.
-        let next_action = retained_job_inconsistency
+        let next_action = (!self
+            .daemon_freshness
             .as_ref()
-            .map(|_| reconcile_action(&self.runner_id))
-            .or_else(|| {
-                (!self
-                    .daemon_freshness
+            .is_some_and(DaemonFreshnessReport::has_terminal_recovery_ownership_blocker))
+        .then(|| {
+            self.admission_action().or_else(|| {
+                unresolved_generation
                     .as_ref()
-                    .is_some_and(DaemonFreshnessReport::has_terminal_recovery_ownership_blocker))
-                .then(|| {
-                    self.admission_action().or_else(|| {
-                        unresolved_generation
-                            .as_ref()
-                            .filter(|_| !safe_to_rotate)
-                            .map(|_| reconcile_action(&self.runner_id))
-                    })
-                })
-                .flatten()
+                    .filter(|_| !safe_to_rotate)
+                    .map(|_| reconcile_action(&self.runner_id))
             })
-            .map(|action| action.render_command());
+        })
+        .flatten()
+        .map(|action| action.render_command());
 
         RunnerAdmissionSummary {
             runner_id: self.runner_id.clone(),
@@ -1036,11 +920,10 @@ impl RunnerStatusReport {
             daemon_fresh,
             daemon_compatible,
             accepting_jobs,
-            active_job_count: governing_active_job_count,
-            live_daemon_job_count,
+            active_job_count: active_jobs_available.then_some(governing_active_job_count),
+            live_daemon_job_count: active_jobs_available.then_some(live_daemon_job_count),
             retained_durable_job_count,
             unresolved_retained_projection_count,
-            retained_job_inconsistency,
             admission_blocking_job_ids,
             unresolved_job_owners,
             unresolved_generation_ids,
@@ -1197,7 +1080,7 @@ mod status_serialization_tests {
     use super::*;
 
     #[test]
-    fn status_serialization_omits_empty_legacy_fields_and_includes_generations() {
+    fn status_serialization_uses_captured_fields_and_omits_unknown_counts() {
         let report = RunnerStatusReport {
             runner_id: "missing-runner".to_string(),
             connected: false,
@@ -1232,12 +1115,13 @@ mod status_serialization_tests {
         ] {
             assert!(value.get(field).is_none(), "{field} must be omitted");
         }
-        // Generations serialize as a bounded count-only summary, not the full
-        // per-generation expansion (#9478/#9522). With no generations it is a
-        // zero summary.
-        assert_eq!(
-            value["generations"],
-            serde_json::json!({ "total": 0, "draining": 0 })
+        assert!(
+            value.get("generations").is_none(),
+            "rendering must not re-query generation state"
+        );
+        assert!(
+            value.get("active_job_count").is_none(),
+            "unqueried is not idle"
         );
     }
 
@@ -1298,20 +1182,24 @@ mod status_serialization_tests {
             gen("build-old-2", false, crate::RollingDrainState::Draining, 82),
         ];
 
-        let summary = RunnerGenerationLedgerSummary::from_projection(&projection);
-        assert_eq!(summary.total, 3);
-        assert_eq!(summary.admission_owner.as_deref(), Some("build-current"));
-        assert_eq!(summary.draining, 2);
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        report.daemon_freshness = Some(fresh_daemon_freshness());
+        let summary = report.admission_summary_with_generations(&projection, &[], 2);
+        assert_eq!(summary.draining_generation_count, 2);
+        assert_eq!(summary.active_job_count, Some(0));
+        assert!(summary.accepting_jobs);
+        assert!(
+            !summary.safe_to_rotate,
+            "unproven old work still protects rotation"
+        );
 
         // The serialized summary is a compact object — no per-generation array,
         // no active_job_count fields leaking historical ownership as load.
         let value = serde_json::to_value(&summary).expect("serialize summary");
-        assert!(value.get("total").is_some());
-        assert!(
-            value
-                .as_object()
-                .is_some_and(|o| !o.contains_key("active_job_count")),
-            "summary must never carry a per-generation active_job_count: {value}"
+        assert_eq!(
+            value["active_job_count"], 0,
+            "retained old counts never become current load"
         );
     }
 
@@ -1427,7 +1315,7 @@ mod status_serialization_tests {
         assert!(summary.connected);
         assert!(summary.daemon_fresh);
         assert!(summary.accepting_jobs);
-        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
         assert!(summary.safe_to_rotate);
         assert_eq!(summary.next_action, None);
     }
@@ -1438,6 +1326,11 @@ mod status_serialization_tests {
 
         assert!(!summary.accepting_jobs);
         assert!(!summary.safe_to_rotate);
+        assert_eq!(summary.active_job_count, None);
+        assert_eq!(summary.live_daemon_job_count, None);
+        let wire = serde_json::to_value(&summary).expect("serialize unknown observation");
+        assert!(wire.get("active_job_count").is_none());
+        assert!(wire.get("live_daemon_job_count").is_none());
         assert_eq!(
             summary.next_action.as_deref(),
             Some("homeboy runner status homeboy-lab --full")
@@ -1455,7 +1348,7 @@ mod status_serialization_tests {
             summary.accepting_jobs,
             "a busy fresh runner still admits work"
         );
-        assert_eq!(summary.active_job_count, 3);
+        assert_eq!(summary.active_job_count, Some(3));
         assert!(
             !summary.safe_to_rotate,
             "an authoritative active job blocks rotation"
@@ -1740,7 +1633,7 @@ mod status_serialization_tests {
 
         assert!(!summary.accepting_jobs);
         assert!(summary.safe_to_rotate);
-        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
         assert_eq!(summary.draining_generation_count, 4);
         assert_eq!(summary.retained_durable_job_count, 24);
         assert_eq!(
@@ -1776,7 +1669,8 @@ mod status_serialization_tests {
         let summary = report.admission_summary(7);
         assert_eq!(summary.draining_generation_count, 7);
         assert_eq!(
-            summary.active_job_count, 0,
+            summary.active_job_count,
+            Some(0),
             "draining history is not current load"
         );
         assert!(summary.safe_to_rotate);
@@ -1823,7 +1717,7 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &[], 1);
 
-        assert_eq!(summary.active_job_count, 2);
+        assert_eq!(summary.active_job_count, Some(2));
         assert_eq!(summary.blocking_generation.as_deref(), Some("lease-active"));
         assert!(
             !summary.accepting_jobs,
@@ -1888,28 +1782,22 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &owners, 1);
 
-        assert_eq!(summary.active_job_count, 0);
-        assert_eq!(summary.live_daemon_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
+        assert_eq!(summary.live_daemon_job_count, Some(0));
         assert_eq!(summary.retained_durable_job_count, 3);
         assert!(summary.accepting_jobs);
         assert!(report.admission_availability(None).accepts_jobs);
-        assert!(summary.retained_job_inconsistency.is_none());
         assert!(summary.blocking_generation.is_none());
         assert!(generations[1].liveness().residue());
     }
 
     #[test]
-    fn live_observation_disagreeing_with_the_daemon_fails_closed() {
+    fn runner_owned_idle_observation_is_not_overwritten_by_retained_ledger() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.active_job_source = Some(RunnerActiveJobSource::DirectDaemon);
         report.daemon_freshness = Some(fresh_daemon_freshness());
         report.active_job_count = 0;
-        report.active_job_error = Some(RunnerActiveJobError {
-            code: "retained_active_job_count_inconsistent".to_string(),
-            message: "selected daemon reports 0 active job(s), but its authoritative generation ledger retains 1"
-                .to_string(),
-        });
         let generations = vec![RunnerDaemonGenerationStatus {
             generation: "lease-current".to_string(),
             admission_owner: true,
@@ -1932,21 +1820,14 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
-        assert_eq!(summary.live_daemon_job_count, 0);
-        assert!(!summary.accepting_jobs);
-        assert!(!summary.safe_to_rotate);
+        assert_eq!(summary.live_daemon_job_count, Some(0));
+        assert!(summary.accepting_jobs);
+        assert!(summary.safe_to_rotate);
         let availability = report.admission_availability(None);
-        assert!(!availability.accepts_jobs);
+        assert!(availability.accepts_jobs);
         assert_eq!(
-            summary.retained_job_inconsistency,
-            Some(RunnerRetainedJobInconsistency {
-                code: "direct_daemon_authoritative_ledger_disagreement",
-                generation: "lease-current".to_string(),
-                direct_daemon_active_job_count: 0,
-                authoritative_active_job_count: 1,
-                observed_active_job_count: Some(1),
-                job_ids: vec!["job-live".to_string()],
-            })
+            summary.retained_durable_job_count, 1,
+            "historical evidence remains visible"
         );
     }
 
@@ -1979,10 +1860,9 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &owners, 0);
 
-        assert_eq!(summary.active_job_count, 1);
-        assert_eq!(summary.live_daemon_job_count, 1);
+        assert_eq!(summary.active_job_count, Some(1));
+        assert_eq!(summary.live_daemon_job_count, Some(1));
         assert!(summary.accepting_jobs);
-        assert!(summary.retained_job_inconsistency.is_none());
         assert!(report.admission_availability(Some(32)).accepts_jobs);
 
         let mut missing_observation = generations.clone();
@@ -1990,9 +1870,8 @@ mod status_serialization_tests {
         missing_observation[0].active_job_count_authoritative = false;
         let missing_summary =
             report.admission_summary_with_generations(&missing_observation, &owners, 0);
-        assert_eq!(missing_summary.live_daemon_job_count, 1);
+        assert_eq!(missing_summary.live_daemon_job_count, Some(1));
         assert!(missing_summary.accepting_jobs);
-        assert!(missing_summary.retained_job_inconsistency.is_none());
     }
 
     #[test]
@@ -2018,8 +1897,8 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &[], 1);
 
-        assert_eq!(summary.active_job_count, 0);
-        assert_eq!(summary.live_daemon_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
+        assert_eq!(summary.live_daemon_job_count, Some(0));
         assert_eq!(summary.unresolved_retained_projection_count, 3);
         assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
         assert!(summary.accepting_jobs);
@@ -2079,7 +1958,7 @@ mod status_serialization_tests {
         let summary = report.admission_summary_with_generations(&generations, &[], 1);
 
         assert!(!summary.daemon_compatible);
-        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
         assert_eq!(summary.unresolved_retained_projection_count, 3);
         assert_eq!(summary.unresolved_generation_ids, ["lease-old"]);
         assert!(summary.blocking_generation.is_none());
@@ -2331,7 +2210,7 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary_with_generations(&generations, &[], 1);
 
-        assert_eq!(summary.active_job_count, 0);
+        assert_eq!(summary.active_job_count, Some(0));
         assert_eq!(summary.unresolved_retained_projection_count, 2);
         assert_eq!(
             summary.next_action.as_deref(),

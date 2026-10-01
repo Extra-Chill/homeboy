@@ -80,6 +80,7 @@ tempfile = "3.14"
 clap = { version = "4.5", features = ["derive", "env", "string"] }
 
 [dev-dependencies]
+homeboy-runner-contract = { version = "0.1.0", path = "crates/contracts/homeboy-runner-contract" }
 # Enable homeboy-core's shared hermetic test fixtures for this crate's test build
 # (integration tests reach them via `homeboy::test_support`).
 homeboy-core = { version = "0.1.0", path = "crates/homeboy-core", features = ["test-support"] }

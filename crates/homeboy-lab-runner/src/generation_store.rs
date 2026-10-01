@@ -4517,13 +4517,17 @@ mod tests {
                 active_job_recovery_evidence: None,
                 session_path: "test".to_string(),
             };
+            let serialized = serde_json::to_value(report).expect("serialize captured status");
+            assert!(
+                serialized.get("generations").is_none(),
+                "serialization must not fetch historical generation state"
+            );
             assert_eq!(
-                serde_json::to_value(report).expect("serialize status")["generations"],
-                json!({
-                    "admission_owner": "build-b",
-                    "draining": 1,
-                    "total": 2,
-                })
+                serde_json::to_value(
+                    status_projection("runner-a", Some(&b)).expect("explicit generation inventory")
+                )
+                .unwrap(),
+                serde_json::to_value(&projected).unwrap()
             );
 
             let report = RunnerStatusReport {
@@ -4566,9 +4570,9 @@ mod tests {
                 session_path: "test".to_string(),
             };
             let summary = report.admission_summary_with_generations(&projected, &owners, 1);
-            assert_eq!(summary.live_daemon_job_count, 1);
+            assert_eq!(summary.live_daemon_job_count, Some(1));
             assert_eq!(summary.retained_durable_job_count, 2);
-            assert_eq!(summary.active_job_count, 1);
+            assert_eq!(summary.active_job_count, Some(1));
             assert_eq!(summary.unresolved_retained_projection_count, 1);
             assert!(summary.admission_blocking_job_ids.is_empty());
             assert_eq!(summary.unresolved_generation_ids, ["lease-a"]);
