@@ -7788,8 +7788,11 @@ mod loop_control_plane_tests {
                 crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
                     .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
             let server = std::thread::spawn(move || {
-                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                homeboy_core::daemon::serve_listener_until_shutdown(listener, server_shutdown)
                     .expect("serve bounded daemon")
             });
             let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
@@ -7817,9 +7820,8 @@ mod loop_control_plane_tests {
             );
             assert_eq!(loop_runtime_metadata(&stopped.metadata)["on"], false);
             crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
-            for _ in 0..5 {
-                let _ = client.status(&job_id);
-            }
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+            std::net::TcpStream::connect(address).expect("wake completed fixture listener");
             server.join().expect("join daemon");
         });
     }
@@ -7838,8 +7840,11 @@ mod loop_control_plane_tests {
                 crate::agent_task_service::active_loop_stop_test_submission(&mut record, &started)
                     .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
             let server = std::thread::spawn(move || {
-                homeboy_core::daemon::serve_listener_for_requests(listener, 10)
+                homeboy_core::daemon::serve_listener_until_shutdown(listener, server_shutdown)
                     .expect("serve bounded daemon")
             });
             let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()
@@ -7892,9 +7897,8 @@ mod loop_control_plane_tests {
             assert_eq!(response.status, 200);
             assert_eq!(response.body["resource"]["outcome"], "succeeded");
             crate::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
-            for _ in 0..5 {
-                let _ = client.status(&job_id);
-            }
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+            std::net::TcpStream::connect(address).expect("wake completed fixture listener");
             server.join().expect("join daemon");
         });
     }

@@ -1606,7 +1606,7 @@ where
     let owner_lock = acquire_daemon_owner_lock()?;
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
-    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None)
+    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None, None)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1616,6 +1616,7 @@ pub fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
         listener,
         UnsupportedAnalysisJobRunner,
         owner_lock,
+        None,
         None,
     )
 }
@@ -1630,6 +1631,25 @@ pub fn serve_listener_for_requests(listener: TcpListener, requests: usize) -> Re
         UnsupportedAnalysisJobRunner,
         owner_lock,
         Some(requests),
+        None,
+    )
+}
+
+/// Serve an isolated TCP fixture until its owner requests shutdown. Wake the
+/// blocking listener with a connection after setting the flag; that connection
+/// is not dispatched, and all already-owned responses are drained before return.
+#[cfg(any(test, feature = "test-support"))]
+pub fn serve_listener_until_shutdown(
+    listener: TcpListener,
+    shutdown: Arc<AtomicBool>,
+) -> Result<DaemonState> {
+    let owner_lock = acquire_daemon_owner_lock()?;
+    serve_listener_with_analysis_runner_locked(
+        listener,
+        UnsupportedAnalysisJobRunner,
+        owner_lock,
+        None,
+        Some(shutdown),
     )
 }
 
@@ -1638,6 +1658,7 @@ fn serve_listener_with_analysis_runner_locked<R>(
     analysis_runner: R,
     _owner_lock: DaemonOwnerLock,
     request_limit: Option<usize>,
+    shutdown: Option<Arc<AtomicBool>>,
 ) -> Result<DaemonState>
 where
     R: AnalysisJobRunner,
@@ -1721,6 +1742,12 @@ where
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                if shutdown
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    break;
+                }
                 if connection_tx.send(stream).is_err() {
                     serve_result = Err(Error::internal_io(
                         "daemon connection workers stopped".to_string(),

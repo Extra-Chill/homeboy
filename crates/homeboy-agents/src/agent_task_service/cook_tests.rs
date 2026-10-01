@@ -12356,13 +12356,27 @@ fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
             .expect_err("ordinary continuation retains runtime pinning");
         assert!(strict.message.contains("pinned to Homeboy runtime"));
 
-        let recovered = reconstruct_existing_cook_options(&recipe, None, None, false, true, false)
-            .expect("pre-execution continuation uses the current runtime");
+        let missing_transport =
+            reconstruct_existing_cook_options(&recipe, None, None, false, true, false)
+                .expect_err("runtime recovery must still reconstruct the admitted transport");
+        assert_eq!(
+            missing_transport.details["field"],
+            "cook_recipe.promotion_transport.attempt_dispatch"
+        );
+        let recovered = reconstruct_existing_cook_options(
+            &recipe,
+            None,
+            options.provider_transport.attempt_dispatcher.clone(),
+            false,
+            true,
+            false,
+        )
+        .expect("pre-execution continuation uses the current runtime");
         assert_eq!(
             recovered.identity.initial_run_id,
             options.identity.initial_run_id
         );
-        assert!(recovered.provider_transport.attempt_dispatcher.is_none());
+        assert!(recovered.provider_transport.attempt_dispatcher.is_some());
     });
 }
 
