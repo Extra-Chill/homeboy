@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.2] - 2026-10-01
+
+### Fixed
+- resume a promotion whose patch is already applied, and name failing IO ops
+- retain daemon fixtures through cancellation completion
+
 ## [0.399.1] - 2026-10-01
 
 ### Fixed
