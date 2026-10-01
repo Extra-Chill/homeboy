@@ -42,7 +42,7 @@ pub(super) fn exec_via_daemon(
     project_id: Option<String>,
     command: Vec<String>,
     env: HashMap<String, String>,
-    secret_env_names: Vec<String>,
+    secret_env_plan: homeboy_core::secret_env_plan::SecretEnvPlan,
     capture_patch: bool,
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
@@ -114,6 +114,7 @@ pub(super) fn exec_via_daemon(
     let submission_key = run_id
         .clone()
         .unwrap_or_else(|| format!("direct-daemon:v1:{}:{}", runner.id, uuid::Uuid::new_v4()));
+    let secret_env_names = secret_env_plan.secret_env_names();
     let envelope = runner_api_execution_envelope(RunnerApiExecutionInput {
         runner_id: runner.id.clone(),
         project_id,
@@ -121,7 +122,7 @@ pub(super) fn exec_via_daemon(
         cwd: cwd.clone(),
         env: env.clone(),
         secret_env_names: secret_env_names.clone(),
-        secret_env_plan: None,
+        secret_env_plan: Some(secret_env_plan),
         capture_patch,
         source_snapshot: source_snapshot.clone(),
         path_materialization_plan: path_materialization_plan.clone(),
