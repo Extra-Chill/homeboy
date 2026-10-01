@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.8] - 2026-10-01
+
+### Fixed
+- acquire refresh history selectively without controller admission
+- separate Rust hydration budget from cache lock wait
+- reactivate stopped workflows with fenced resume ownership
+
 ## [0.399.7] - 2026-10-01
 
 ### Fixed
