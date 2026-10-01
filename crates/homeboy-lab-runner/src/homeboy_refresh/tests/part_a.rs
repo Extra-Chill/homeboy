@@ -570,7 +570,9 @@ fn materialize_plan_uses_clean_runner_cache() {
         followup_commands: refresh_followups("lab", false),
     };
 
-    assert!(plan.script.contains("git clone \"$source\" \"$dir\""));
+    assert!(plan.script.contains("git init --quiet \"$dir\""));
+    assert!(plan.script.contains("cache=\"$dir\""));
+    assert!(!plan.script.contains("refs/heads/*"));
     assert!(plan
         .script
         .contains("rev-parse --verify --quiet \"${requested}^{commit}\""));
@@ -612,7 +614,7 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
         script
             .find("for authority in 'newer-authority'; do")
             .unwrap()
-            < script.find("git clone \"$source\" \"$dir\"").unwrap()
+            < script.find("git init --quiet \"$dir\"").unwrap()
     );
     assert!(
         script
@@ -680,12 +682,17 @@ fn materialization_preflight_resolves_abbreviated_reachable_authorities_and_refu
         .expect("set remote default branch")
         .success());
 
+    let checkout = tempfile::tempdir().expect("managed checkout parent");
+    let target_dir = checkout.path().join("homeboy-clean");
     let preflight = |target: &str, authorities: &[&str]| {
         let script = materialize_script(
             remote_path.to_str().expect("remote path"),
             target,
-            "/runner/ws/homeboy-clean",
-            "/runner/ws/homeboy-clean/target/release/homeboy",
+            target_dir.to_str().expect("target path"),
+            target_dir
+                .join("target/release/homeboy")
+                .to_str()
+                .expect("binary path"),
             false,
             authorities,
         );
