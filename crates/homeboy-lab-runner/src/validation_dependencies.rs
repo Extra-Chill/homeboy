@@ -117,7 +117,7 @@ fn canonicalize_dependency_path(path: &Path, dependency_id: &str) -> Result<Path
 
 fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> Result<PathBuf> {
     let exact = parent.join(dependency_id);
-    if is_homeboy_component_id(&exact, dependency_id) {
+    if is_git_checkout(&exact) && is_homeboy_component_id(&exact, dependency_id) {
         return canonicalize_dependency_path(&exact, dependency_id);
     }
 
@@ -125,7 +125,7 @@ fn resolve_sibling_dependency_workspace(parent: &Path, dependency_id: &str) -> R
         .map_err(|err| Error::internal_io(err.to_string(), Some("read workspace parent".into())))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| is_homeboy_component_id(path, dependency_id))
+        .filter(|path| is_git_checkout(path) && is_homeboy_component_id(path, dependency_id))
         .collect::<Vec<_>>();
     matches.sort();
 
@@ -194,7 +194,8 @@ fn resolve_managed_dependency_workspace(
         return Ok((component, path));
     }
 
-    if let Ok(component) = component::resolve_effective(Some(dependency_id), None, None) {
+    let registered = component::resolve_effective(Some(dependency_id), None, None).ok();
+    if let Some(component) = registered {
         let path = PathBuf::from(shellexpand::tilde(&component.local_path).as_ref());
         if path.is_dir() {
             return Ok((
@@ -226,6 +227,10 @@ fn resolve_managed_dependency_workspace(
             "Register `{dependency_id}` as a Homeboy component or place its checkout next to the source checkout before runner dispatch."
         )]),
     ))
+}
+
+fn is_git_checkout(path: &Path) -> bool {
+    homeboy_core::git::repo_root(path).is_some()
 }
 
 fn clone_missing_dependency(
@@ -1073,6 +1078,39 @@ mod tests {
 
             assert_eq!(err.details["field"], "validation_dependencies");
             assert!(err.message.contains("shared-runtime"));
+        });
+    }
+
+    #[test]
+    fn registered_dependency_wins_over_plain_sibling_with_matching_manifest() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let parent = tempfile::tempdir().expect("workspace parent");
+            let sibling = parent.path().join("dependency");
+            let registered = parent.path().join("registered-dependency");
+            fs::create_dir_all(&sibling).expect("sibling directory");
+            fs::create_dir_all(&registered).expect("registered directory");
+            fs::write(
+                sibling.join("homeboy.json"),
+                serde_json::json!({"id":"dependency"}).to_string(),
+            )
+            .expect("sibling manifest");
+            fs::write(
+                registered.join("homeboy.json"),
+                serde_json::json!({"id":"dependency"}).to_string(),
+            )
+            .expect("registered manifest");
+            let components = home.path().join(".config/homeboy/components");
+            fs::create_dir_all(&components).expect("components directory");
+            fs::write(
+                components.join("dependency.json"),
+                serde_json::json!({"local_path":registered}).to_string(),
+            )
+            .expect("registration");
+
+            let (_, path) = resolve_managed_dependency_workspace(parent.path(), "dependency")
+                .expect("registered dependency resolves");
+
+            assert_eq!(path, registered.canonicalize().expect("canonical path"));
         });
     }
 }
