@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.5] - 2026-10-01
+
+### Fixed
+- separate candidate startup and service upgrade authority
+
 ## [0.399.4] - 2026-10-01
 
 ### Changed
