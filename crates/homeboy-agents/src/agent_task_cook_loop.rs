@@ -1376,6 +1376,49 @@ mod tests {
         );
     }
 
+    /// A gate the shell rejects fails identically on candidate and baseline.
+    /// The declaration is what is broken, so it must not read as an
+    /// inherited `baseline_red` (Extra-Chill/homeboy#15305).
+    #[test]
+    fn shell_rejected_gate_reports_declaration_not_baseline_red() {
+        let mut rejected = failed_gate();
+        if let Some(evidence) = rejected.failure_evidence.as_mut() {
+            evidence.classification = AgentTaskGateFailureClassification::GateDeclaration;
+        }
+        rejected.baseline_comparison =
+            Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+                base_ref: "base".to_string(),
+                exit_code: 2,
+                failure_fingerprint: "sh: 1: set: Illegal option -o pipefail".to_string(),
+                matches_candidate_failure: true,
+                result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+                diagnostic: None,
+            });
+        // The baseline replay's matching failure must not convert a broken
+        // declaration into an accepted inherited failure.
+        rejected.accept_inherited_failure();
+        assert_eq!(rejected.status, AgentTaskGateStatus::Failed);
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![rejected],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-shell-rejected".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::GateDeclarationInvalid
+        );
+        assert!(report.follow_up_request.is_none());
+    }
+
     #[test]
     fn baseline_comparison_keeps_required_gate_truthful() {
         let mut inherited = failed_gate();
