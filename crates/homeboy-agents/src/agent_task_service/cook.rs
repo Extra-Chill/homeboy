@@ -494,13 +494,18 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         })?
     };
     let operation_key = pre_artifact_interruption_operation_key(run_id);
-    let recipe_next_attempt = |require_plan_match: bool| {
+    let replacement_run_id = replace_semantic_attempt.then(|| format!("{run_id}-transport-retry"));
+    let recipe_next_attempt = |required_run_id: Option<&str>, require_plan_match: bool| {
         recipe_store.load_recipe(cook_id).map(|recipe| {
             recipe
                 .attempts
                 .iter()
                 .find(|recorded| {
                     recorded.attempt == next_attempt
+                        && replacement_run_id
+                            .as_ref()
+                            .is_none_or(|id| recorded.run_id == *id)
+                        && required_run_id.is_none_or(|id| recorded.run_id == id)
                         && (!require_plan_match || recorded.plan == *plan)
                 })
                 .map(|recorded| recorded.run_id.clone())
@@ -513,11 +518,9 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
     )? {
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let next_run_id = if replace_semantic_attempt {
-                format!("{run_id}-transport-retry")
-            } else {
+            let next_run_id = replacement_run_id.clone().unwrap_or_else(|| {
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
-            };
+            });
             if replace_semantic_attempt {
                 recipe_store.record_recipe_attempt_replacement_with_plan(
                     cook_id,
@@ -545,10 +548,12 @@ fn claim_pre_artifact_interruption_retry_with_stores(
             // the authority. Concurrent base capture can enrich the recorded
             // plan after this caller read its copy; comparing those copies
             // would reject a legitimate replay of the same durable receipt.
-            if let Some(next_run_id) = recipe_next_attempt(false)? {
-                if recorded_attempt == Some(u64::from(next_attempt))
-                    && recorded_run_id == Some(next_run_id.as_str())
-                {
+            if let Some(next_run_id) = recorded_run_id
+                .map(|id| recipe_next_attempt(Some(id), false))
+                .transpose()?
+                .flatten()
+            {
+                if recorded_attempt == Some(u64::from(next_attempt)) {
                     return Ok(Some((next_attempt, next_run_id)));
                 }
             }
@@ -561,7 +566,7 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
             // A crash after recipe append but before claim completion is safe to
             // finish: the immutable next attempt is already fully identified.
-            if let Some(next_run_id) = recipe_next_attempt(true)? {
+            if let Some(next_run_id) = recipe_next_attempt(replacement_run_id.as_deref(), true)? {
                 lifecycle_store.complete_cook_operation(
                     run_id,
                     &operation_key,

@@ -12381,6 +12381,103 @@ fn existing_recipe_pre_execution_recovery_does_not_reapply_runtime_pin() {
 }
 
 #[test]
+fn completed_transport_retry_receipt_selects_replacement_not_original_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "stale-transport-recipe",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let store = CookRecipeStore::from_current_data_root().unwrap();
+        let lifecycle = test_lifecycle_store();
+        store.persist_initial_recipe(&options).unwrap();
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle, &options).unwrap();
+        let (_, replacement) = claim_pre_artifact_interruption_retry_with_stores(
+            (&store, &lifecycle),
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(replacement, options.identity.initial_run_id);
+        let replayed = claim_pre_artifact_interruption_retry_with_stores(
+            (&store, &lifecycle),
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replayed, (1, replacement));
+    });
+}
+
+#[test]
+fn pending_transport_retry_claim_does_not_complete_from_original_attempt() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "pending-transport-recipe",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let store = CookRecipeStore::from_current_data_root().unwrap();
+        let lifecycle = test_lifecycle_store();
+        store.persist_initial_recipe(&options).unwrap();
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle, &options).unwrap();
+        let key = pre_artifact_interruption_operation_key(&options.identity.initial_run_id);
+        assert!(matches!(
+            lifecycle
+                .claim_cook_operation(
+                    &options.identity.initial_run_id,
+                    &key,
+                    PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
+                )
+                .unwrap(),
+            agent_task_lifecycle::ClaimOutcome::Acquired
+        ));
+        let pending = claim_pre_artifact_interruption_retry_with_stores(
+            (&store, &lifecycle),
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            true,
+        )
+        .unwrap();
+        assert!(
+            pending.is_none(),
+            "the original attempt is not a replacement receipt"
+        );
+        assert_eq!(
+            lifecycle
+                .operation_claim(&options.identity.initial_run_id, &key)
+                .unwrap()
+                .unwrap()
+                .state,
+            agent_task_lifecycle::ClaimState::Running
+        );
+        lifecycle.complete_cook_operation(
+            &options.identity.initial_run_id,
+            &key,
+            serde_json::json!({ "next_attempt": 1, "next_run_id": options.identity.initial_run_id }),
+        ).unwrap();
+        let invalid = claim_pre_artifact_interruption_retry_with_stores(
+            (&store, &lifecycle),
+            &options.identity.cook_id,
+            1,
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            true,
+        )
+        .expect_err("a receipt pointing back to the original attempt must not loop");
+        assert!(invalid.message.contains("claim conflicts"));
+    });
+}
+
+#[test]
 fn cook_persists_materialization_failure_without_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temp source root");
