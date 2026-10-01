@@ -683,29 +683,35 @@ fn prefer_cwd_for_component(
         return Ok(Some(component));
     }
 
-    // Check CWD directly
-    if let Some(mut discovered) = try_discover_from_portable(&cwd)? {
-        if discovered.id == component_id {
-            apply_standalone_fallbacks_at(config_root, &mut discovered);
-            return Ok(Some(discovered));
+    // A portable manifest in an arbitrary child directory is not proof that it
+    // is the registered checkout. Keep portable-only discovery for unregistered
+    // IDs, while registered IDs must match the checkout below (#15252).
+    let registered = load_at(config_root, component_id).ok();
+    if registered.is_none() {
+        if let Some(mut discovered) = try_discover_from_portable(&cwd)? {
+            if discovered.id == component_id {
+                apply_standalone_fallbacks_at(config_root, &mut discovered);
+                return Ok(Some(discovered));
+            }
         }
     }
 
-    // Check git root if different from CWD
-    if let Some(git_root) = detect_git_root(&cwd) {
-        if git_root != cwd {
-            if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
-                if discovered.id == component_id {
-                    apply_standalone_fallbacks_at(config_root, &mut discovered);
-                    return Ok(Some(discovered));
+    // For unregistered IDs, also allow discovery from a containing checkout.
+    if registered.is_none() {
+        if let Some(git_root) = detect_git_root(&cwd) {
+            if git_root != cwd {
+                if let Some(mut discovered) = try_discover_from_portable(&git_root)? {
+                    if discovered.id == component_id {
+                        apply_standalone_fallbacks_at(config_root, &mut discovered);
+                        return Ok(Some(discovered));
+                    }
                 }
             }
         }
     }
 
-    let registered = match load_at(config_root, component_id) {
-        Ok(registered) => registered,
-        Err(_) => return Ok(None),
+    let Some(registered) = registered else {
+        return Ok(None);
     };
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
     let Some(cwd_git_root) = detect_git_root(&cwd) else {
@@ -1464,7 +1470,7 @@ fn resolve_effective_inner(
             }
         } else {
             let id_path = Path::new(id);
-            if accept_bare_directory && id_path.is_dir() {
+            if accept_bare_directory && id_path.is_dir() && !component_is_registered(id) {
                 // The positional identifier resolves to a directory, so treat it as
                 // a bare-directory target. Normalize it to an absolute `local_path`:
                 // a relative value like `studio-native` (a sibling dir of the CWD)
@@ -1826,6 +1832,67 @@ mod tests {
                 resolution,
                 RegisteredPrimaryPathResolution::Primary("fixture".to_string())
             );
+        });
+    }
+
+    #[test]
+    fn registered_component_ignores_unrelated_cwd_clone_with_same_manifest_id() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let registered = root.path().join("registered");
+            let cwd = root.path().join("scratch");
+            let stray = cwd.join("fixture");
+            fs::create_dir_all(&registered).expect("registered checkout");
+            fs::create_dir_all(&stray).expect("stray checkout");
+            git(&registered, &["init"]);
+            git(&stray, &["init"]);
+            write_portable(&registered, "fixture");
+            write_portable(&stray, "fixture");
+            write_standalone_registration(home.path(), "fixture", &registered);
+
+            let resolved = with_cwd(&cwd, || resolve_effective(Some("fixture"), None, None))
+                .expect("registered component resolves");
+
+            assert_eq!(Path::new(&resolved.local_path), registered);
+        });
+    }
+
+    #[test]
+    fn registered_component_still_prefers_cwd_when_cwd_is_its_checkout() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture root");
+            let registered = root.path().join("registered");
+            let cwd = root.path().join("other-checkout");
+            fs::create_dir_all(&registered).expect("registered checkout");
+            fs::create_dir_all(&cwd).expect("cwd checkout");
+            git(&registered, &["init"]);
+            git(&cwd, &["init"]);
+            write_portable(&registered, "fixture");
+            write_portable(&cwd, "fixture");
+            write_standalone_registration(home.path(), "fixture", &registered);
+            git(
+                &registered,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/fixture.git",
+                ],
+            );
+            git(
+                &cwd,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://example.test/fixture.git",
+                ],
+            );
+
+            let resolved = with_cwd(&cwd, || resolve_effective(Some("fixture"), None, None))
+                .expect("cwd checkout resolves");
+
+            assert_eq!(Path::new(&resolved.local_path), cwd);
         });
     }
 
