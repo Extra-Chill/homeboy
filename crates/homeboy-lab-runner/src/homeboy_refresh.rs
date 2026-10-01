@@ -741,7 +741,10 @@ pub fn refresh_homeboy_binary_in_roots(
     // pre-materialization status snapshot.
     promotion_lease.assert_generation()?;
     let post_lease_status = (!fresh_ssh_bootstrap)
-        .then(|| super::connection::status_in_roots(roots, &plan.runner_id))
+        .then(|| {
+            reconciled_refresh_admission_in_roots(roots, &plan.runner_id)
+                .map(|admission| admission.status)
+        })
         .transpose()?;
     let promotion_authorities = match post_lease_status.as_ref() {
         Some(status) => refresh_promotion_authorities_in_roots(roots, &plan.runner_id, status)?,
@@ -937,10 +940,9 @@ pub fn refresh_homeboy_binary_in_roots(
     let interrupted_job_ids;
     if options.reconnect {
         promotion_lease.assert_generation()?;
-        let active_jobs = super::connection::active_jobs_before_daemon_replacement_in_roots(
-            roots,
-            &plan.runner_id,
-        )?;
+        let replacement = reconciled_refresh_admission_in_roots(roots, &plan.runner_id)?;
+        let active_jobs =
+            super::connection::active_jobs_from_replacement_observation(replacement.status)?;
         let preserve_generations = super::generation_store::requires_generation_preserving_refresh(
             &plan.runner_id,
             refresh_session.as_ref(),
@@ -2037,11 +2039,33 @@ fn reconciled_refresh_admission_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     runner_id: &str,
 ) -> Result<super::RunnerAdmissionSnapshot> {
-    reconciled_refresh_admission_with(
+    let admission = reconciled_refresh_admission_with(
         runner_id,
         |runner_id| super::connection::reconcile_status_in_roots(roots, runner_id),
         super::runner_admission_snapshot_for_status,
-    )
+    )?;
+    if admission
+        .status
+        .active_job_error
+        .as_ref()
+        .is_some_and(|error| error.code == super::connection::PRE_DESCRIBE_CAPABILITY_MISSING)
+    {
+        let runner = load_in_roots(roots, runner_id)?;
+        if runner.settings.service_managed {
+            let upgrade_status = super::connection::pre_describe_upgrade_status(&admission.status)?;
+            let upgrade = super::runner_admission_snapshot_for_status(upgrade_status)?;
+            if !upgrade.summary.safe_to_rotate {
+                return Err(Error::validation_invalid_argument(
+                    "upgrade_ownership",
+                    "verified idle service still has conflicting generation or rotation ownership",
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+            return Ok(upgrade);
+        }
+    }
+    Ok(admission)
 }
 
 fn reconciled_refresh_admission_with<Reconcile, Project>(

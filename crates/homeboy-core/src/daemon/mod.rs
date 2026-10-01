@@ -1420,6 +1420,12 @@ pub fn read_status() -> Result<DaemonStatus> {
         .flatten()
         .map(|endpoint| PathBuf::from(endpoint.state_dir).join("state.json"))
         .unwrap_or(state_path()?);
+    read_status_for_state_path(path)
+}
+
+/// Startup observes the exact candidate store before moving admission. Normal
+/// status continues to follow the current registry owner during that handoff.
+pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
     let jobs_path = path.with_file_name("jobs.json");
     let state_identity = daemon_state_identity(&path, &jobs_path)?;

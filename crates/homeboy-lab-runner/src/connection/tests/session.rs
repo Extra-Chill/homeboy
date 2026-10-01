@@ -2556,6 +2556,107 @@ fn synthetic_active_job_run_summaries_are_not_child_runs() {
 }
 
 #[test]
+fn pre_describe_upgrade_requires_stable_owned_idle_http_evidence() {
+    for scenario in [
+        "idle",
+        "busy",
+        "other_alias_job",
+        "missing_jobs",
+        "lease_drift",
+        "pid_drift",
+        "build_drift",
+        "unknown_tunnel",
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let build = "homeboy test+abc123";
+        let job =
+            serde_json::to_value(sample_active_job(None, "generic service-owned work")).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut health_reads = 0;
+            while !server_stop.load(std::sync::atomic::Ordering::Acquire)
+                && Instant::now() < deadline
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                let request = read_fixture_request_until(&mut stream, deadline).unwrap();
+                let body = if request.starts_with(b"GET /health ") {
+                    health_reads += 1;
+                    serde_json::json!({"success":true,"data":{
+                        "pid":if scenario == "pid_drift" && health_reads > 1 { 9999 } else { 4242 },
+                        "build_identity":{"display":if scenario == "build_drift" && health_reads > 1 { "another build" } else { build }},
+                        "freshness":{"fresh":true,"restartable":true,"active_jobs":if scenario == "busy" { 1 } else { 0 },
+                            "lease_id":if scenario == "lease_drift" && health_reads > 1 { "another-lease" } else { "lease-live" }}
+                    }})
+                } else {
+                    let mut body = serde_json::json!({"success":true,"data":{"body":{"active_runner_jobs":[],"stale_runner_jobs":[]}}});
+                    if scenario == "missing_jobs" { body["data"]["body"].as_object_mut().unwrap().remove("active_runner_jobs"); }
+                    if scenario == "other_alias_job" {
+                        let mut other = job.clone(); other["runner_id"] = serde_json::json!("another-alias");
+                        body["data"]["body"]["active_runner_jobs"] = serde_json::json!([other]);
+                    }
+                    body
+                }.to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = Some(format!("http://{address}"));
+        session.remote_daemon_pid = Some(4242);
+        session.homeboy_build_identity = Some(build.to_string());
+        session.tunnel_pid = if scenario == "unknown_tunnel" {
+            None
+        } else {
+            Some(std::process::id())
+        };
+        session.tunnel_process_start_identity =
+            capture_tunnel_process_start_identity(session.tunnel_pid).unwrap();
+        let status = RunnerStatusReport {
+            runner_id: "homeboy-lab".to_string(),
+            connected: true,
+            state: RunnerSessionState::Connected,
+            session: Some(session),
+            stale_daemon: None,
+            configured_job_binary_build_identity: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::Unavailable,
+            active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+            active_job_error: Some(RunnerActiveJobError {
+                code: PRE_DESCRIBE_CAPABILITY_MISSING.to_string(),
+                message: "describe not supported".to_string(),
+            }),
+            active_job_recovery_evidence: None,
+            session_path: "fixture".to_string(),
+        };
+        let result = pre_describe_upgrade_status(&status);
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        server.join().unwrap();
+        assert_eq!(result.is_ok(), scenario == "idle", "{scenario}: {result:?}");
+        assert_eq!(
+            status.active_job_state,
+            RunnerActiveJobState::Unavailable,
+            "upgrade evidence never changes normal observation"
+        );
+        assert_eq!(status.admission_summary(0).active_job_count, None);
+        if let Ok(upgrade) = result {
+            assert!(upgrade.admission_summary(0).safe_to_rotate);
+        }
+    }
+}
+
+#[test]
 fn active_runner_job_source_maps_direct_and_reverse_endpoints() {
     let mut direct = reverse_controller_session();
     direct.mode = RunnerTunnelMode::DirectSsh;

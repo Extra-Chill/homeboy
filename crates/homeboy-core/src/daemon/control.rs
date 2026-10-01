@@ -3304,7 +3304,7 @@ fn spawn_and_wait_for_lease_attempt(
             pid,
             startup_token,
             STARTUP_LEASE_OBSERVATIONS,
-            read_status,
+            || super::read_status_for_state_path(state_path.clone()),
             || thread::sleep(STARTUP_LEASE_POLL),
         )? {
             Ok(result) => {

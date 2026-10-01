@@ -43,6 +43,21 @@ truth path. Existing forward/reverse transport and generation lifecycle remain
 separate delivery boundaries under #13881; this observation change does not
 claim runner-owned upgrades or automatic retirement of historical generations.
 
+Explicit managed refresh of a pre-describe runner-owned service has a separate
+bounded migration authority. Owned, fresh, idle health reads bracket a complete
+typed job inventory; each read must match the selected lease, PID and build.
+The inventory covers every service job regardless of controller alias. Live or
+stale jobs, missing inventories, drifted identity, and conflicting generation
+ownership refuse migration. Refresh revalidates after acquiring its promotion
+lease and immediately before service replacement. This operation-local evidence
+does not change normal status or workload admission. Missing describe capability
+is reported separately from an unreachable transport.
+
+Local daemon startup observes its exact candidate state path before activating
+that candidate in the generation registry. General status still follows the
+admitting registry owner. A dead historical admission route therefore cannot
+hide a freshly published replacement lease and create an activation deadlock.
+
 The live `runner_service_observation` regression drops the submission connection
 before reading its admission response, retries with the same idempotency key,
 replaces the HTTP client mid-job, resumes watch from its event cursor and checks
