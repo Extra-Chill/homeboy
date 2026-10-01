@@ -2286,10 +2286,14 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
         .map(|session| describe_direct_runner_until(runner_id, session, deadline));
     let local_daemon_freshness = match &direct_observation {
         Some(Ok(observation)) => Some(observation.freshness.clone()),
-        Some(Err(error)) => Some(unavailable_recovery_freshness(
-            runner_id,
-            error.message.clone(),
-        )),
+        Some(Err(error)) => {
+            let mut freshness = unavailable_recovery_freshness(runner_id, error.message.clone());
+            if describe_capability_missing(error) {
+                freshness.stale_reason_code = None;
+                freshness.ownership_evidence = Some("runner service observation capability is unavailable; explicit upgrade requires separate ownership verification".to_string());
+            }
+            Some(freshness)
+        }
         None => runner_daemon_freshness_until(&runner, session.as_ref(), connected, deadline)?,
     };
     let mut daemon_freshness = local_daemon_freshness
@@ -2318,7 +2322,11 @@ pub(crate) fn status_with_admission_projection_until_in_roots(
                 Vec::new(),
                 RunnerActiveJobState::Unavailable,
                 Some(RunnerActiveJobError {
-                    code: error.code.as_str().to_string(),
+                    code: if describe_capability_missing(&error) {
+                        PRE_DESCRIBE_CAPABILITY_MISSING.to_string()
+                    } else {
+                        error.code.as_str().to_string()
+                    },
                     message: error.message,
                 }),
             ),
@@ -2933,12 +2941,11 @@ fn reconciled_active_job_count(
     daemon_active_count.unwrap_or(typed_job_count)
 }
 
-/// [`active_jobs_before_daemon_replacement`] against an injected root.
-pub(super) fn active_jobs_before_daemon_replacement_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    runner_id: &str,
+/// Apply the shared replacement guard to an operation's captured evidence.
+pub(crate) fn active_jobs_from_replacement_observation(
+    report: RunnerStatusReport,
 ) -> Result<Vec<ActiveRunnerJobSummary>> {
-    let report = status_in_roots(roots, runner_id)?;
+    let runner_id = &report.runner_id;
     if !report.connected {
         return Ok(Vec::new());
     }
@@ -3112,6 +3119,115 @@ struct DirectRunnerObservation {
     freshness: DaemonFreshnessReport,
     active_jobs: Vec<ActiveRunnerJobSummary>,
     stale_jobs: Vec<ActiveRunnerJobSummary>,
+}
+
+pub(crate) const PRE_DESCRIBE_CAPABILITY_MISSING: &str = "runner_observation_capability_missing";
+
+fn describe_capability_missing(error: &Error) -> bool {
+    error.code.as_str() == "validation.invalid_argument"
+        && error.details["field"] == "path"
+        && error.details["id"] == homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH
+}
+
+/// Explicit upgrade evidence for a service which cannot yet describe itself.
+/// This is never used by status or workload admission. Two owned health reads
+/// bracket a complete typed job inventory; drift or uncertain work fails closed.
+pub(crate) fn pre_describe_upgrade_status(
+    status: &RunnerStatusReport,
+) -> Result<RunnerStatusReport> {
+    let session = status
+        .session
+        .as_ref()
+        .filter(|session| session.mode == RunnerTunnelMode::DirectSsh)
+        .ok_or_else(|| Error::internal_unexpected("upgrade requires a selected direct service"))?;
+    let url = session
+        .local_url
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("upgrade service endpoint is unavailable"))?;
+    let pid = session
+        .tunnel_pid
+        .ok_or_else(|| Error::internal_unexpected("upgrade tunnel owner is unavailable"))?;
+    let identity = session
+        .tunnel_process_start_identity
+        .as_ref()
+        .ok_or_else(|| Error::internal_unexpected("upgrade tunnel ownership is unverified"))?;
+    if !tunnel_process_is_owned_with_observation(pid, identity).0 {
+        return Err(Error::internal_unexpected(
+            "upgrade tunnel ownership changed",
+        ));
+    }
+    let deadline = Instant::now() + crate::readonly_probe::readonly_probe_timeout();
+    let health = |deadline| {
+        let timeout = remaining_observation_budget(deadline)
+            .ok_or_else(|| Error::internal_unexpected("upgrade observation deadline exhausted"))?;
+        connection_daemon::daemon_health_report_with_timeout(url, timeout)
+            .map_err(Error::internal_unexpected)
+    };
+    validate_pre_describe_upgrade_health(session, &health(deadline)?)?;
+    let client = Client::builder()
+        .timeout(remaining_observation_budget(deadline).ok_or_else(|| {
+            Error::internal_unexpected("upgrade job observation deadline exhausted")
+        })?)
+        .build()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let jobs = daemon_get(&client, url, "/jobs")?;
+    let active: Vec<ActiveRunnerJobSummary> =
+        serde_json::from_value(jobs["body"]["active_runner_jobs"].clone()).map_err(|error| {
+            Error::internal_unexpected(format!("upgrade active job inventory unavailable: {error}"))
+        })?;
+    let stale: Vec<ActiveRunnerJobSummary> =
+        serde_json::from_value(jobs["body"]["stale_runner_jobs"].clone()).map_err(|error| {
+            Error::internal_unexpected(format!("upgrade stale job inventory unavailable: {error}"))
+        })?;
+    if !active.is_empty() || !stale.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "reconnect",
+            "service upgrade requires a proven idle job inventory",
+            Some(status.runner_id.clone()),
+            None,
+        ));
+    }
+    let after = health(deadline)?;
+    validate_pre_describe_upgrade_health(session, &after)?;
+    let mut upgrade = status.clone();
+    upgrade.daemon_freshness = Some(after.freshness);
+    upgrade.active_job_state = RunnerActiveJobState::Available;
+    upgrade.active_job_count = 0;
+    upgrade.active_jobs.clear();
+    upgrade.active_runner_jobs.clear();
+    upgrade.stale_runner_jobs.clear();
+    upgrade.stale_runner_job_count = 0;
+    upgrade.active_job_error = None;
+    Ok(upgrade)
+}
+
+fn validate_pre_describe_upgrade_health(
+    session: &RunnerSession,
+    health: &connection_daemon::DaemonHealthReport,
+) -> Result<()> {
+    if !health.freshness.fresh
+        || health.freshness.active_jobs != 0
+        || session
+            .remote_daemon_lease_id
+            .as_ref()
+            .is_none_or(String::is_empty)
+        || session.remote_daemon_pid.is_none()
+        || session
+            .homeboy_build_identity
+            .as_ref()
+            .is_none_or(String::is_empty)
+        || health.freshness.lease_id != session.remote_daemon_lease_id
+        || health.pid != session.remote_daemon_pid
+        || health.build_identity != session.homeboy_build_identity
+    {
+        return Err(Error::validation_invalid_argument(
+            "upgrade_ownership",
+            "upgrade requires the selected fresh idle service lease, PID and build",
+            Some(session.runner_id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn describe_direct_runner_until(
