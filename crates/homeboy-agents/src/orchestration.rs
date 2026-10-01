@@ -2007,6 +2007,29 @@ pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core:
     }
 }
 
+/// Keep the run service boundary's validation context while sharing its policy.
+fn run_boundary_error_to_homeboy(
+    error: ControlPlaneError,
+    field: &'static str,
+    subject: Option<&str>,
+) -> homeboy_core::Error {
+    match error.class {
+        ControlPlaneErrorClass::NotFound
+        | ControlPlaneErrorClass::InvalidArgument
+        | ControlPlaneErrorClass::CursorExpired => {
+            homeboy_core::Error::validation_invalid_argument(
+                field,
+                error.message,
+                subject.map(str::to_string),
+                None,
+            )
+        }
+        ControlPlaneErrorClass::Unavailable | ControlPlaneErrorClass::Unknown => {
+            homeboy_core::Error::internal_unexpected(error.message)
+        }
+    }
+}
+
 impl OrchestrationService<LifecycleStoreLookup> {
     pub fn register_reference(
         &self,
@@ -5091,24 +5114,7 @@ pub fn run_from_current_environment(run_id: &str) -> homeboy_core::Result<Contro
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .run(&requested_id)
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound
-            | ControlPlaneErrorClass::InvalidArgument
-            | ControlPlaneErrorClass::CursorExpired => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "run_id",
-                    error.message,
-                    Some(run_id.to_string()),
-                    None,
-                )
-            }
-            ControlPlaneErrorClass::Unavailable => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-            ControlPlaneErrorClass::Unknown => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-        })
+        .map_err(|error| run_boundary_error_to_homeboy(error, "run_id", Some(run_id)))
 }
 
 pub fn review_from_current_environment(
@@ -5119,24 +5125,7 @@ pub fn review_from_current_environment(
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .review(&requested_id, request)
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound
-            | ControlPlaneErrorClass::InvalidArgument
-            | ControlPlaneErrorClass::CursorExpired => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "run_id",
-                    error.message,
-                    Some(run_id.to_string()),
-                    None,
-                )
-            }
-            ControlPlaneErrorClass::Unavailable => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-            ControlPlaneErrorClass::Unknown => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-        })
+        .map_err(|error| run_boundary_error_to_homeboy(error, "run_id", Some(run_id)))
 }
 
 pub fn execute_action_from_current_environment(
@@ -5296,24 +5285,7 @@ where
     let store = AgentTaskLifecycleStore::from_current_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
-        .map_err(|error| match error.class {
-            ControlPlaneErrorClass::NotFound
-            | ControlPlaneErrorClass::InvalidArgument
-            | ControlPlaneErrorClass::CursorExpired => {
-                homeboy_core::Error::validation_invalid_argument(
-                    "action",
-                    error.message,
-                    None,
-                    None,
-                )
-            }
-            ControlPlaneErrorClass::Unavailable => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-            ControlPlaneErrorClass::Unknown => {
-                homeboy_core::Error::internal_unexpected(error.message)
-            }
-        })
+        .map_err(|error| run_boundary_error_to_homeboy(error, "action", None))
 }
 
 fn default_retry(
@@ -11025,6 +10997,72 @@ mod tests {
             .expect_err("missing");
         assert_eq!(error.class, ControlPlaneErrorClass::NotFound);
         assert!(!error.retryable);
+    }
+
+    #[test]
+    fn missing_run_boundaries_preserve_context_without_rows_or_effects() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            store
+                .write_record(&record(AGENT_TASK_RUN))
+                .expect("sentinel record");
+            let rows_before = store.read_record_page(None, 10).expect("rows before");
+            let observations = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            let missing = "missing-error-boundary-run";
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("missing-boundary-effect".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "missing-boundary-cancel".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({}),
+                },
+                confirmed: true,
+            };
+            assert!(observations
+                .control_plane_effect_status(&request.effect_id)
+                .unwrap()
+                .is_none());
+            let errors = [
+                (
+                    super::run_from_current_environment(missing).unwrap_err(),
+                    "run_id",
+                    Some(missing),
+                ),
+                (
+                    super::review_from_current_environment(
+                        missing,
+                        &ControlPlaneRunReviewRequest::default(),
+                    )
+                    .unwrap_err(),
+                    "run_id",
+                    Some(missing),
+                ),
+                (
+                    super::execute_action_from_current_environment(missing, &request).unwrap_err(),
+                    "action",
+                    None,
+                ),
+            ];
+            for (error, field, id) in errors {
+                assert_eq!(
+                    error.code,
+                    homeboy_core::ErrorCode::ValidationInvalidArgument
+                );
+                assert_eq!(error.details["field"], field);
+                assert_eq!(error.details["id"].as_str(), id);
+                assert!(error.message.contains(missing), "{}", error.message);
+            }
+            assert_eq!(store.read_record_page(None, 10).unwrap(), rows_before);
+            assert!(observations
+                .control_plane_effect_status(&request.effect_id)
+                .unwrap()
+                .is_none());
+        });
     }
 
     #[test]
