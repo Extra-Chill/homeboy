@@ -3526,11 +3526,11 @@ fn gate_failure_evidence(
                     "exact" | "module_prefix"
                 ))
     });
+    let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let classification = invalid_focused_selection
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
         .or_else(|| {
-            missing_script
-                .is_some()
+            (missing_script.is_some() || shell_rejection.is_some())
                 .then_some(AgentTaskGateFailureClassification::GateDeclaration)
         })
         .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
@@ -3543,9 +3543,16 @@ fn gate_failure_evidence(
             selection.filter_interpretation,
         )
     } else {
-        match missing_script {
-            Some(script) => format!("declared npm gate is missing script `{script}`: {command}"),
-            None => format!("deterministic gate failed with exit code {exit_code}: {command}"),
+        match (missing_script, shell_rejection.as_deref()) {
+            (Some(script), _) => {
+                format!("declared npm gate is missing script `{script}`: {command}")
+            }
+            (None, Some(line)) => {
+                format!("gate shell `sh -lc` rejected the gate program itself: {line}")
+            }
+            (None, None) => {
+                format!("deterministic gate failed with exit code {exit_code}: {command}")
+            }
         }
     };
     let agent_feedback = if invalid_focused_selection {
@@ -3565,11 +3572,14 @@ fn gate_failure_evidence(
                 "The Cargo test gate must use an exact or module-prefix filter and select at least one test before rerunning Cook.".to_string()
             })
     } else {
-        match missing_script {
-            Some(script) => format!(
+        match (missing_script, shell_rejection.as_deref()) {
+            (Some(script), _) => format!(
                 "The declared gate is invalid, not candidate-code feedback. Add `scripts.{script}` to the relevant package.json or change/remove `{command}` before rerunning Cook."
             ),
-            None => format!(
+            (None, Some(line)) => format!(
+                "The declared gate is invalid, not candidate-code feedback. Gates run under POSIX `sh -lc`, which rejected the gate program before it checked anything (`{line}`). Rewrite it for POSIX sh (for example drop `set -o pipefail` and other bash-only syntax) or invoke bash explicitly, e.g. `bash ./verify.sh`, before rerunning Cook."
+            ),
+            (None, None) => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
             ),
         }
@@ -3585,6 +3595,37 @@ fn gate_failure_evidence(
         agent_feedback,
         diagnostics: Vec::new(),
     }
+}
+
+/// Detects a gate program rejected by the `sh -lc` interpreter itself.
+///
+/// Gates run under POSIX `sh` (dash on Debian/Ubuntu). A program using
+/// bash-only syntax such as `set -o pipefail` dies before checking anything,
+/// identically on the candidate and the immutable baseline. Without this,
+/// the matching failures read as an inherited `baseline_red` environment
+/// fault instead of a broken gate declaration (Extra-Chill/homeboy#15305).
+///
+/// Only interpreter-level diagnostics on exit status 2 qualify, the status
+/// POSIX shells reserve for syntax and option errors. A plain `not found` is
+/// deliberately excluded: a missing tool can be legitimate candidate feedback.
+fn gate_shell_rejection(exit_code: i32, stderr: &str) -> Option<String> {
+    const MARKERS: [&str; 4] = [
+        "Illegal option",
+        "Syntax error",
+        "syntax error",
+        "Bad substitution",
+    ];
+    if exit_code != 2 {
+        return None;
+    }
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            (line.starts_with("sh: ") || line.starts_with("/bin/sh: "))
+                && MARKERS.iter().any(|marker| line.contains(marker))
+        })
+        .map(str::to_string)
 }
 
 fn effective_gate_exit_code(
@@ -4129,6 +4170,69 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+
+    /// A bash-only gate program under dash dies on line 1 with exit 2 on the
+    /// candidate and the baseline alike. That is a broken gate declaration,
+    /// not inherited infrastructure (Extra-Chill/homeboy#15305).
+    #[test]
+    fn dash_rejecting_a_bash_only_gate_is_a_gate_declaration_failure() {
+        let evidence = gate_failure_evidence(
+            "set -euo pipefail\necho VERIFY OK\n",
+            2,
+            "",
+            "sh: 1: set: Illegal option -o pipefail\n",
+            None,
+        );
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(
+            evidence.summary.contains("Illegal option -o pipefail"),
+            "summary must name the interpreter rejection: {}",
+            evidence.summary
+        );
+        assert!(
+            evidence.agent_feedback.contains("POSIX `sh -lc`"),
+            "feedback must explain the gate shell: {}",
+            evidence.agent_feedback
+        );
+    }
+
+    #[test]
+    fn shell_syntax_errors_are_gate_declaration_failures() {
+        for stderr in [
+            "sh: 3: Syntax error: \"(\" unexpected\n",
+            "sh: 1: Bad substitution\n",
+            "sh: line 4: syntax error near unexpected token `fi'\n",
+        ] {
+            let evidence = gate_failure_evidence("./verify", 2, "", stderr, None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::GateDeclaration,
+                "stderr {stderr:?}"
+            );
+        }
+    }
+
+    /// Ordinary failures stay candidate feedback: a missing tool, a shell
+    /// message on a non-syntax exit status, or a test's own "syntax error".
+    #[test]
+    fn ordinary_gate_failures_stay_candidate_code() {
+        for (exit_code, stderr) in [
+            (127, "sh: 1: nginx: not found\n"),
+            (1, "sh: 1: set: Illegal option -o pipefail\n"),
+            (2, "VERIFY FAIL: README lacks target\n"),
+            (2, "parser test: syntax error in fixture.conf\n"),
+        ] {
+            let evidence = gate_failure_evidence("./verify", exit_code, "", stderr, None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::CandidateCode,
+                "exit {exit_code} stderr {stderr:?}"
+            );
+        }
+    }
 
     /// A conclusive comparison carries no diagnostic, and the field is omitted
     /// from the wire form so persisted reports written before it existed still
