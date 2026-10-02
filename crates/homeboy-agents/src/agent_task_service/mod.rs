@@ -58,6 +58,7 @@ pub use cook_recipe::*;
 pub use cook_supervision::{resolve_supervision_policy, CookSupervisionTick, CookSupervisor};
 pub use discovery::*;
 pub use execution::*;
+pub(crate) use loop_job::guarded_command_execution_owner;
 pub use loop_job::*;
 pub use promotion_service::*;
 pub use reconcile::*;

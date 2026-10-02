@@ -1650,6 +1650,7 @@ mod tests {
             terminal_evidence: None,
             child_pid: None,
             child_started_at: None,
+            controller_owned: false,
             linked_durable_run_id: None,
             linked_durable_run_state: None,
             linked_durable_run_terminal_status: None,

@@ -329,6 +329,17 @@ fn invalid_cook_batch_job(message: &str) -> homeboy_core::Error {
 struct CookBatchWorkHandler;
 
 impl WorkJobHandler for CookBatchWorkHandler {
+    fn execution_owner(
+        &self,
+        state: &Value,
+    ) -> Result<homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner> {
+        use homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner as Owner;
+        let job = AgentTaskCookBatchJob::parse(state.clone())?;
+        Ok(Owner::supervised(
+            job.request.child_pid,
+            job.request.child_start_identity,
+        ))
+    }
     fn work_type(&self) -> &'static str {
         AGENT_TASK_COOK_BATCH_JOB_TYPE
     }
@@ -462,14 +473,14 @@ impl CookBatchWorkHandler {
     ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_observations();
-        if agent_task_batch::expire_stalled_fanout_admission(&job.request.batch_id)? {
-            let _ = homeboy_core::process::terminate_process_tree(job.request.child_pid);
-            return Ok(WorkJobStep::Complete(job.observe_terminal()?));
-        }
-        if !super::work_job::supervised_child_is_live(
+        if !super::work_job::supervised_child_may_be_live(
             job.request.child_pid,
             &job.request.child_start_identity,
         ) {
+            return Ok(WorkJobStep::Complete(job.observe_terminal()?));
+        }
+        if agent_task_batch::expire_stalled_fanout_admission(&job.request.batch_id)? {
+            let _ = homeboy_core::process::terminate_process_tree(job.request.child_pid);
             return Ok(WorkJobStep::Complete(job.observe_terminal()?));
         }
         Ok(WorkJobStep::Continue {
@@ -606,6 +617,145 @@ mod tests {
             .collect::<Vec<_>>();
         agent_task_batch::persist_fanout_run_batch(batch_id, batch_id, &children, json!({}))
             .expect("persist batch record");
+    }
+
+    #[test]
+    fn supervised_fanout_ownership_survives_store_restart_and_defers_dead_outcome_to_driver() {
+        use homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition as Disposition;
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            register_cook_batch_work_handler();
+            super::super::work_job::register_work_job_driver();
+            let mut child = SupervisedProcessFixture::spawn();
+            let submission =
+                cook_batch_job_submission("ownership-fanout", child.pid(), &child.identity)
+                    .unwrap();
+            let path = home.path().join("ownership-fanout-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "fanout-lease",
+            )
+            .unwrap();
+            harness
+                .handle()
+                .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
+                .unwrap();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let evidence = restarted
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| false);
+            assert_eq!(evidence[0].disposition, Disposition::ProtectedLive);
+            assert_eq!(evidence[0].child_pid, Some(child.pid()));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                restarted
+                    .store()
+                    .reconcile_dead_daemon_lease_jobs("fanout-lease")
+                    .unwrap()
+                    .protected_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            child.stop();
+            assert_eq!(
+                restarted
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| true)[0]
+                    .disposition,
+                Disposition::DeadChild
+            );
+            let diagnostics = restarted
+                .store()
+                .reconcile_dead_daemon_lease_jobs("fanout-lease")
+                .unwrap();
+            assert_eq!(
+                diagnostics.preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            assert_eq!(diagnostics.terminalized_count(), 0);
+            restarted.recover_after_restart();
+            restarted.wait_until_terminal().unwrap();
+            let events = restarted.events().unwrap();
+            let result = restarted
+                .events()
+                .unwrap()
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Result)
+                .unwrap_or_else(|| panic!("driver recovery produced no result: {events:#?}"))
+                .data
+                .unwrap();
+            assert_eq!(
+                result["terminal_state"], "failed",
+                "a dead coordinator with no retained batch cannot become an empty success"
+            );
+        });
+    }
+
+    #[test]
+    fn fanout_cancellation_keeps_generic_drain_protection_until_coordinator_stops() {
+        use homeboy_core::api_jobs::{
+            DaemonActiveJobRecoveryDisposition as Disposition, JobStatus,
+        };
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            register_cook_batch_work_handler();
+            super::super::work_job::register_work_job_driver();
+            let mut child = SupervisedProcessFixture::spawn();
+            let batch_id = "ownership-fanout-cancel";
+            persist_batch(batch_id, &["unclaimed-child"]);
+            let submission =
+                cook_batch_job_submission(batch_id, child.pid(), &child.identity).unwrap();
+            let path = home.path().join("ownership-fanout-cancel-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "fanout-cancel-lease",
+            )
+            .unwrap();
+            harness
+                .handle()
+                .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
+                .unwrap();
+            harness
+                .request_cancellation("coordinator drain fixture")
+                .unwrap();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            restarted.recover_after_restart();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !agent_task_batch::coordinator_is_cancelled(batch_id) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "driver did not publish cancellation"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                restarted.job().unwrap().status,
+                JobStatus::Running,
+                "a cancellation marker must not release generic ownership"
+            );
+            assert_eq!(
+                restarted
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| false)[0]
+                    .disposition,
+                Disposition::ProtectedLive
+            );
+            child.stop();
+            assert_eq!(
+                restarted.wait_until_terminal().unwrap().status,
+                JobStatus::Cancelled
+            );
+            assert!(restarted
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| true)
+                .is_empty());
+        });
     }
 
     /// The wire payload the launcher sends must be exactly what the driver
@@ -787,7 +937,9 @@ mod tests {
         with_isolated_home(|_| {
             let batch_id = "fanout-dead";
             persist_batch(batch_id, &["a"]);
-            let request = work_request_of(batch_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(batch_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
@@ -814,7 +966,9 @@ mod tests {
         with_isolated_home(|_| {
             let batch_id = "fanout-work-harness";
             persist_batch(batch_id, &["a"]);
-            let request = work_request_of(batch_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(batch_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct work job harness");
@@ -849,7 +1003,9 @@ mod tests {
     fn resume_replays_a_completed_shared_work_checkpoint() {
         with_isolated_home(|_| {
             let batch_id = "fanout-work-resume";
-            let request = work_request_of(batch_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(batch_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct work job harness");
@@ -877,7 +1033,9 @@ mod tests {
         with_isolated_home(|_| {
             let batch_id = "fanout-work-cancel";
             persist_batch(batch_id, &["a", "b"]);
-            let request = work_request_of(batch_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(batch_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct work job harness");

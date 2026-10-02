@@ -1763,6 +1763,15 @@ impl JobStore {
         reason: String,
     ) -> Result<Job> {
         self.durable_transaction(|inner| {
+            let ownership = inner
+                .jobs
+                .get(&job_id)
+                .map(|stored| stored_job_execution_liveness(stored, &local_child_liveness))
+                .ok_or_else(|| job_not_found(job_id))?;
+            let no_external_work = (ownership.driver_owned
+                && ownership.pid.is_none()
+                && matches!(ownership.state, Some(LocalChildLiveness::Dead)))
+                || (!ownership.driver_owned && ownership.state.is_none());
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -1792,12 +1801,13 @@ impl JobStore {
             controller.cancellation_reason = Some(reason.clone());
             let claimless = stored.job.status == JobStatus::Queued
                 && controller.execution_claim_id.is_none()
-                && controller.checkpoint.is_none();
+                && controller.checkpoint.is_none()
+                && no_external_work;
             let now = timestamp_ms();
             stored.job.updated_at_ms = now;
             if claimless {
-                // A response-handoff failure leaves no worker to observe this request.
-                // Terminalize while holding the claim lock so dispatch cannot start it.
+                // Only proven absence permits inline cancellation. An admitted
+                // external launcher is owned even before a worker/checkpoint exists.
                 stored.job.status = JobStatus::Cancelled;
                 stored.job.finished_at_ms = Some(now);
             }
@@ -2173,6 +2183,15 @@ impl JobStore {
         recovery: bool,
     ) -> Result<ControllerJobState> {
         self.durable_transaction(|inner| {
+            let repeat_recovery_is_safe = recovery
+                && inner.jobs.get(&job_id).is_some_and(|stored| {
+                    let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
+                    ownership.driver_owned
+                        && matches!(
+                            ownership.state,
+                            Some(LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch)
+                        )
+                });
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -2195,7 +2214,10 @@ impl JobStore {
                     None,
                 ));
             }
-            if recovery && (controller.checkpoint.is_none() || controller.recovery_attempted) {
+            if recovery
+                && (controller.checkpoint.is_none()
+                    || (controller.recovery_attempted && !repeat_recovery_is_safe))
+            {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
                     "controller job has no recoverable checkpoint",
@@ -2233,7 +2255,10 @@ impl JobStore {
                     None,
                 )
             })?;
-            if stored.job.status != JobStatus::Queued || controller.execution_claim_id.is_some() {
+            if stored.job.status != JobStatus::Queued
+                || controller.execution_claim_id.is_some()
+                || controller.cancellation_requested
+            {
                 return Ok(ControllerJobStartOutcome::Existing);
             }
             controller.execution_claim_id = Some(Uuid::new_v4().to_string());
@@ -2251,7 +2276,7 @@ impl JobStore {
             .expect("job store mutex poisoned")
             .jobs
             .values()
-            .filter(|stored| stored.job.status == JobStatus::Running)
+            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
             .filter_map(|stored| {
                 stored
                     .controller_job
@@ -3150,6 +3175,7 @@ enum DeadLeaseJobDisposition {
     RecoveredLinkedRun(RecoveredTerminalJob),
     ProtectedLive,
     PreservedRemote,
+    PreservedController,
     ProtectedUnsupported(String),
     TerminalizeDead,
 }
@@ -3157,7 +3183,82 @@ enum DeadLeaseJobDisposition {
 enum LocalChildLiveness {
     Live,
     Dead,
+    IdentityMismatch,
     Unsupported(String),
+}
+
+struct JobExecutionLiveness {
+    pid: Option<u32>,
+    state: Option<LocalChildLiveness>,
+    driver_owned: bool,
+}
+
+/// One ownership interpretation shared by read-only status and lease recovery.
+/// Opaque controller state is interpreted exclusively by its registered driver.
+fn stored_job_execution_liveness(
+    stored: &StoredJob,
+    inspect_local_child: &impl Fn(&LocalChildExecution) -> LocalChildLiveness,
+) -> JobExecutionLiveness {
+    use crate::daemon::controller_job_driver::{self, ControllerJobExecutionOwner};
+    use crate::process::ProcessIdentityState;
+    let local = || match &stored.local_child {
+        Some(child) => JobExecutionLiveness {
+            pid: child.process.as_ref().map(|process| process.pid),
+            state: Some(inspect_local_child(child)),
+            driver_owned: false,
+        },
+        None => JobExecutionLiveness {
+            pid: None,
+            state: None,
+            driver_owned: false,
+        },
+    };
+    if let Some(controller) = &stored.controller_job {
+        let projection = controller_job_driver::driver(&controller.job_type, controller.version)
+            .and_then(|driver| {
+                driver.execution_owner(&controller.request, controller.checkpoint.as_ref())
+            });
+        let owner = match projection {
+            Ok(Some(owner)) => owner,
+            Ok(None) => return local(),
+            Err(_) => ControllerJobExecutionOwner::Unavailable,
+        };
+        let (mut pid, observed) = owner.inspect_with_pid();
+        let mut state = match observed {
+            ProcessIdentityState::Live => LocalChildLiveness::Live,
+            ProcessIdentityState::Dead => LocalChildLiveness::Dead,
+            ProcessIdentityState::IdentityMismatch => LocalChildLiveness::IdentityMismatch,
+            ProcessIdentityState::Unverifiable => LocalChildLiveness::Unsupported(
+                "controller execution ownership is unavailable or unverifiable".to_string(),
+            ),
+        };
+        if let Some(child) = &stored.local_child {
+            let local_pid = child.process.as_ref().map(|process| process.pid);
+            // Existing daemon-spawn records retain their containment proof;
+            // observing them never attaches an external launcher as a child.
+            state = match (inspect_local_child(child), state) {
+                (LocalChildLiveness::Live, _) => {
+                    pid = local_pid;
+                    LocalChildLiveness::Live
+                }
+                (_, LocalChildLiveness::Live) => LocalChildLiveness::Live,
+                (LocalChildLiveness::Unsupported(evidence), _) => {
+                    LocalChildLiveness::Unsupported(evidence)
+                }
+                (_, unavailable @ LocalChildLiveness::Unsupported(_)) => unavailable,
+                (LocalChildLiveness::IdentityMismatch, _)
+                | (_, LocalChildLiveness::IdentityMismatch) => LocalChildLiveness::IdentityMismatch,
+                _ => LocalChildLiveness::Dead,
+            };
+            pid = pid.or(local_pid);
+        }
+        return JobExecutionLiveness {
+            pid,
+            state: Some(state),
+            driver_owned: true,
+        };
+    }
+    local()
 }
 
 fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
@@ -3166,7 +3267,8 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
             LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } => {
                 match crate::process::linux_process_starttime_ticks(process.pid) {
                     Ok(Some(actual)) if actual == *ticks => return LocalChildLiveness::Live,
-                    Ok(_) => LocalChildLiveness::Dead,
+                    Ok(Some(_)) => LocalChildLiveness::IdentityMismatch,
+                    Ok(None) => LocalChildLiveness::Dead,
                     Err(evidence) => return LocalChildLiveness::Unsupported(evidence),
                 }
             }
@@ -3181,11 +3283,14 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
                 }
             }
         };
-        if matches!(root_liveness, LocalChildLiveness::Dead) {
+        if matches!(
+            root_liveness,
+            LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch
+        ) {
             if let Some(pgid) = process.process_group_id {
                 return match crate::process::isolated_process_group_is_running(pgid) {
                     Ok(true) => LocalChildLiveness::Live,
-                    Ok(false) => LocalChildLiveness::Dead,
+                    Ok(false) => root_liveness,
                     Err(evidence) => LocalChildLiveness::Unsupported(evidence),
                 };
             }

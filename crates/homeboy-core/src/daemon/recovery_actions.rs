@@ -210,12 +210,12 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
-    // A recorded live child is never eligible for either automatic adoption or
-    // operator-attested PID-less recovery. The freshness report cannot see that
-    // per-job distinction, so apply the same evidence predicate here that the
+    // A live or unverifiable recorded owner is never eligible for automatic
+    // adoption or operator-attested PID-less recovery. The freshness report
+    // cannot see that per-job distinction, so apply the evidence predicate the
     // store enforces during apply.
     if freshness.stale_reason_code == Some(super::DaemonStaleReasonCode::PidDead)
-        && dead_lease_has_live_jobs(status)
+        && dead_lease_has_protected_jobs(status)
     {
         let blockers = status
             .active_job_recovery_evidence
@@ -225,6 +225,8 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
                     evidence.disposition,
                     crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
                         | crate::api_jobs::DaemonActiveJobRecoveryDisposition::DeadChild
+                        | crate::api_jobs::DaemonActiveJobRecoveryDisposition::ReusedChildPid
+                        | crate::api_jobs::DaemonActiveJobRecoveryDisposition::DriverRecovery
                 )
             })
             .map(|evidence| format!("{} ({:?})", evidence.job_id, evidence.disposition))
@@ -360,9 +362,13 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     }
 }
 
-fn dead_lease_has_live_jobs(status: &DaemonStatus) -> bool {
+fn dead_lease_has_protected_jobs(status: &DaemonStatus) -> bool {
     status.active_job_recovery_evidence.iter().any(|evidence| {
         evidence.disposition == crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
+            || (matches!(evidence.disposition,
+                crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable)
+                && (evidence.controller_owned || evidence.child_pid.is_some()))
     })
 }
 
@@ -716,6 +722,35 @@ mod tests {
     }
 
     #[test]
+    fn dead_lease_unavailable_driver_or_process_ownership_never_offers_pidless_attestation() {
+        for (controller_owned, child_pid, disposition) in [
+            (true, None, crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous),
+            (true, None, crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable),
+            (false, Some(42), crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous),
+        ] {
+            let mut status = status(
+                Some(super::super::DaemonStaleReasonCode::PidDead),
+                vec![DaemonRepairStep::executable(
+                    DAEMON_ADOPT_ORPHAN,
+                    adopt_orphan(LEASE_ID),
+                )],
+                1,
+            );
+            status.active_job_recovery_evidence =
+                vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+                    controller_owned,
+                    child_pid,
+                    disposition,
+                    ..recovery_evidence(Uuid::from_u128(44))
+                }];
+            let plan = plan_recovery(&status);
+            assert!(!plan.executable);
+            assert!(plan.required_confirmations.is_empty());
+            assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+        }
+    }
+
+    #[test]
     fn dead_lease_with_linked_terminal_child_keeps_adoption_eligible() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
@@ -752,7 +787,6 @@ mod tests {
                 linked_durable_run_state: Some(
                     crate::api_jobs::DaemonLinkedDurableRunState::Active,
                 ),
-                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous,
                 ..recovery_evidence(Uuid::from_u128(2))
             },
         ];
@@ -801,6 +835,7 @@ mod tests {
             terminal_evidence: None,
             child_pid: None,
             child_started_at: None,
+            controller_owned: false,
             linked_durable_run_id: None,
             linked_durable_run_state: None,
             linked_durable_run_terminal_status: None,

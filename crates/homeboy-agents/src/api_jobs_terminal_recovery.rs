@@ -21,31 +21,23 @@ struct AgentTaskTerminalRecoveryProviderImpl;
 /// Resolve an orphaned guarded command only after both exact process identities
 /// are conclusively gone. Output is deliberately unknown, never inferred as
 /// success: a crash may have occurred after external effects but before commit.
-fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminalJob> {
+pub(crate) fn recovered_loop_command_record(
+    loop_id: &str,
+) -> Option<crate::agent_task_loop_controller::AgentTaskLoopControllerRecord> {
     use crate::agent_task_loop_controller::{
         self as controller, AgentTaskLoopActionStatus, AgentTaskLoopControllerState,
     };
-    use homeboy_core::process::{ProcessIdentityState, ProcessStartIdentity};
+    use homeboy_core::process::ProcessIdentityState;
     let mut record = controller::load_controller(loop_id).ok()?;
     let receipt = record.metadata["command_recovery"].clone();
     if receipt["schema"] != "homeboy/loop-command-ownership/v1" {
         return None;
     }
-    let dead = |pid: &serde_json::Value, start: &serde_json::Value| -> Option<bool> {
-        let pid = u32::try_from(pid.as_u64()?).ok()?;
-        let identity: ProcessStartIdentity = serde_json::from_value(start.clone()).ok()?;
-        Some(matches!(
-            homeboy_core::process::process_identity_state_with_start_identity(
-                pid,
-                None,
-                Some(&identity)
-            ),
-            ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch
-        ))
-    };
-    if !dead(&receipt["owner_pid"], &receipt["owner_start"])?
-        || !dead(&receipt["root_pid"], &receipt["root_start"])?
-    {
+    let owner = crate::agent_task_service::guarded_command_execution_owner(&receipt)?;
+    if !matches!(
+        owner.inspect(),
+        ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch
+    ) {
         return None;
     }
     let action_id = receipt["action_id"].as_str()?;
@@ -68,7 +60,6 @@ fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminal
             "job_id": record.metadata["work_job"]["job_id"],
             "status": "failed", "outcome": "unknown", "ownership": receipt,
         });
-        controller::write_controller(&record).ok()?;
     }
     if !matches!(
         record.state,
@@ -76,11 +67,18 @@ fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminal
     ) {
         return None;
     }
+    Some(record)
+}
+
+fn recover_loop_command(loop_id: &str, run_id: &str) -> Option<RecoveredTerminalJob> {
+    // Status only projects terminal evidence. The WorkJob resume path commits
+    // this record after observing exact owner loss; reads never advance it.
+    let record = recovered_loop_command_record(loop_id)?;
     Some(recovered_terminal_job(
         JobStatus::Failed,
         serde_json::json!({
             "kind": "loop_command_owner_lost", "loop_id": loop_id,
-            "outcome": "unknown", "redispatched": false, "ownership": receipt,
+            "outcome": "unknown", "redispatched": false, "ownership": record.metadata["command_recovery"],
         }),
         run_id.to_string(),
         vec![],

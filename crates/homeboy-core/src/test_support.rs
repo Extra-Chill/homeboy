@@ -46,12 +46,169 @@ pub struct ControllerJobHarness {
     driver: Arc<dyn ControllerJobDriver>,
 }
 
+/// A real kernel-identified process, always reaped even when assertions fail.
+pub struct SupervisedProcessFixture {
+    child: std::process::Child,
+    pub identity: crate::process::ProcessStartIdentity,
+}
+
+impl SupervisedProcessFixture {
+    pub fn spawn() -> Self {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn supervised fixture");
+        let identity = match crate::process::process_start_identity(child.id()) {
+            Ok(Some(identity)) => identity,
+            other => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fixture has no kernel start identity: {other:?}");
+            }
+        };
+        Self { child, identity }
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn stop(&mut self) {
+        self.child.kill().expect("stop supervised fixture");
+        self.child.wait().expect("reap supervised fixture");
+    }
+
+    /// Observe a driver's actual stop and reap our child, rather than treating
+    /// a cancellation acknowledgement (or natural fixture timeout) as a stop.
+    pub fn wait_for_exit(&mut self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                other => {
+                    return Err(Error::internal_unexpected(format!(
+                        "supervised fixture was not stopped: {other:?}"
+                    )))
+                }
+            }
+        }
+    }
+
+    pub fn mismatched_identity(&self) -> crate::process::ProcessStartIdentity {
+        match self.identity {
+            crate::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                crate::process::ProcessStartIdentity::Linux {
+                    starttime_ticks: starttime_ticks + 1,
+                }
+            }
+            crate::process::ProcessStartIdentity::Macos {
+                start_seconds,
+                start_microseconds,
+            } => crate::process::ProcessStartIdentity::Macos {
+                start_seconds: start_seconds + 1,
+                start_microseconds,
+            },
+        }
+    }
+}
+
+impl Drop for SupervisedProcessFixture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl ControllerJobHarness {
     pub fn new(driver: Arc<dyn ControllerJobDriver>, request: serde_json::Value) -> Result<Self> {
+        Self::in_store(driver, request, JobStore::default())
+    }
+
+    pub fn durable(
+        driver: Arc<dyn ControllerJobDriver>,
+        request: serde_json::Value,
+        path: &Path,
+        lease_id: &str,
+    ) -> Result<Self> {
+        Self::in_store(
+            driver,
+            request,
+            JobStore::open_without_reconciliation(path)?.with_daemon_lease(lease_id.to_string()),
+        )
+    }
+
+    pub fn durable_queued(
+        driver: Arc<dyn ControllerJobDriver>,
+        request: serde_json::Value,
+        path: &Path,
+        lease_id: &str,
+    ) -> Result<Self> {
+        Self::admit_in_store(
+            driver,
+            request,
+            JobStore::open_without_reconciliation(path)?.with_daemon_lease(lease_id.to_string()),
+            false,
+        )
+    }
+
+    pub fn store(&self) -> &JobStore {
+        &self.store
+    }
+
+    pub fn reopen(&self, path: &Path, lease_id: &str) -> Result<Self> {
+        Ok(Self {
+            store: JobStore::open_without_reconciliation(path)?
+                .with_daemon_lease(lease_id.to_string()),
+            job_id: self.job_id,
+            driver: Arc::clone(&self.driver),
+        })
+    }
+
+    /// Use the production startup recovery and controller supervisor.
+    pub fn recover_after_restart(&self) {
+        crate::daemon::recover_controller_jobs(&self.store);
+    }
+
+    pub fn start_via_controller_boundary(&self) -> Result<Job> {
+        crate::daemon::start_controller_job(self.job_id, &self.store)
+    }
+
+    pub fn wait_until_terminal(&self) -> Result<Job> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let job = self.job()?;
+            if job.status.is_terminal() {
+                return Ok(job);
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::internal_unexpected(
+                    "controller fixture did not terminalize",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn in_store(
+        driver: Arc<dyn ControllerJobDriver>,
+        request: serde_json::Value,
+        store: JobStore,
+    ) -> Result<Self> {
+        Self::admit_in_store(driver, request, store, true)
+    }
+
+    fn admit_in_store(
+        driver: Arc<dyn ControllerJobDriver>,
+        request: serde_json::Value,
+        store: JobStore,
+        claim: bool,
+    ) -> Result<Self> {
         driver.validate_secret_references(&request)?;
         let public_request = driver.public_request(&request)?;
         let request_digest = crate::daemon::hex_digest(&request)?;
-        let store = JobStore::default();
         let outcome = store.admit_controller_job(
             format!("controller.{}", driver.job_type()),
             format!("test-controller-job:{}", Uuid::new_v4()),
@@ -80,7 +237,9 @@ impl ControllerJobHarness {
                 "unique controller test job was unexpectedly replayed",
             ));
         };
-        store.claim_controller_execution(job_id, false)?;
+        if claim {
+            store.claim_controller_execution(job_id, false)?;
+        }
         Ok(Self {
             store,
             job_id,
@@ -115,6 +274,10 @@ impl ControllerJobHarness {
     pub fn request_cancellation(&self, reason: impl Into<String>) -> Result<Job> {
         self.store
             .request_controller_cancellation(self.job_id, reason.into())
+    }
+
+    pub fn cancel_via_controller_boundary(&self, reason: &str) -> Result<Job> {
+        crate::daemon::cancel_controller_job(self.job_id, reason, &self.store)
     }
 }
 
