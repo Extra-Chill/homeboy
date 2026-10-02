@@ -9,9 +9,11 @@ use std::time::{Duration, Instant};
 
 mod dependency_graph;
 mod submodules;
+mod tool_preflight;
 pub use submodules::{
     hydrate_git_submodules, SUBMODULE_HYDRATION_PROVIDER_ID, SUBMODULE_HYDRATION_TIMEOUT,
 };
+pub use tool_preflight::{missing_dependency_tools, MissingDependencyTool};
 #[path = "deps_provider.rs"]
 pub(crate) mod provider;
 
@@ -1451,6 +1453,55 @@ mod tests {
                 .expect("unrelated linked extensions do not require dependency hydration");
 
             assert!(plan.is_empty());
+        });
+    }
+
+    /// #15364: a pnpm workspace on a host without pnpm is reported before any
+    /// provider attempt; a host that has the program reports nothing.
+    #[test]
+    fn missing_dependency_tools_reports_an_uninstalled_package_manager() {
+        crate::test_support::with_isolated_home(|home| {
+            write_builtin_dependency_adapters(home.path());
+            let project = tempfile::tempdir().expect("node project");
+            std::fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"fixture","dependencies":{"fixture-dependency":"1.0.0"}}"#,
+            )
+            .expect("package");
+            std::fs::write(project.path().join("pnpm-lock.yaml"), "").expect("lockfile");
+
+            // PATH holds only a shell, so the adapter's `sh -c` interpreter
+            // resolves and only the package manager itself is missing.
+            let bin = tempfile::tempdir().expect("bin dir");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink("/bin/sh", bin.path().join("sh")).expect("sh on PATH");
+            let previous_path = std::env::var_os("PATH");
+            std::env::set_var("PATH", bin.path());
+            let missing = missing_dependency_tools(project.path(), None);
+
+            let pnpm = bin.path().join("pnpm");
+            std::fs::write(&pnpm, "#!/bin/sh\n").expect("fake pnpm");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&pnpm, std::fs::Permissions::from_mode(0o755))
+                    .expect("executable");
+            }
+            let available = missing_dependency_tools(project.path(), None);
+            match previous_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+
+            assert_eq!(missing.len(), 1, "{missing:?}");
+            assert_eq!(missing[0].provider_id, "pnpm");
+            assert_eq!(missing[0].program, "pnpm");
+            assert_eq!(missing[0].package_root, ".");
+            assert!(missing[0]
+                .install_command
+                .iter()
+                .any(|part| part.contains("pnpm install")));
+            assert!(available.is_empty(), "{available:?}");
         });
     }
 

@@ -25090,3 +25090,28 @@ fn a_progress_event_without_a_sample_renders_no_activity() {
 
     assert_eq!(event.activity_summary(), None);
 }
+
+/// #15364: the dependency tool preflight is a no-op when there is nothing to
+/// hydrate, so admission never regresses for repositories without lockfiles.
+#[test]
+fn dependency_tool_preflight_is_a_noop_without_dependencies() {
+    homeboy_core::test_support::with_isolated_home(|_home| {
+        let mut options = compile_options("dependency-tool-preflight");
+        assert!(super::dependency_tool_preflight_error(&options)
+            .expect("no workspace")
+            .is_none());
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("README.md"), "no dependencies\n")
+            .expect("plain file");
+        options.workspace.source_worktree_path = Some(workspace.path().to_path_buf());
+        assert!(super::dependency_tool_preflight_error(&options)
+            .expect("plain workspace")
+            .is_none());
+
+        options.workspace.source_worktree_path = Some(workspace.path().join("missing"));
+        assert!(super::dependency_tool_preflight_error(&options)
+            .expect("absent workspace")
+            .is_none());
+    });
+}
