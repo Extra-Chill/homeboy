@@ -2284,7 +2284,12 @@ exec '{}' "$@"
             if !run_git(&monorepo, &["init", "--quiet"])
                 || !run_git(
                     &monorepo,
-                    &["remote", "add", "origin", "https://example.com/extensions.git"],
+                    &[
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.com/extensions.git",
+                    ],
                 )
             {
                 return;

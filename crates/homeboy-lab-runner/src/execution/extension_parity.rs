@@ -2532,7 +2532,9 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Controller-local extension metadata"));
-        assert!(err.to_string().contains("no sourceUrl or .source-url metadata"));
+        assert!(err
+            .to_string()
+            .contains("no sourceUrl or .source-url metadata"));
         assert_eq!(
             err.details["diagnostic"]["source_error"]["message"].as_str(),
             Some("Extension 'rust' has no sourceUrl or .source-url metadata")
