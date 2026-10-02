@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.12] - 2026-10-02
+
+### Changed
+- prune duplicate rotation case and close silent-skip prerequisites
+
+### Fixed
+- ship tracked files that match secret-shaped default excludes
+- cook homeboy
+- resolve provider-declared secret sources in dispatch preflight
+- bound and index workspace snapshot construction
+
 ## [0.399.11] - 2026-10-02
 
 ### Fixed
