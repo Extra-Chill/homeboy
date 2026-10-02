@@ -650,21 +650,94 @@ pub(crate) fn verify_lab_workspace(
     Ok(provenance)
 }
 
+/// Snapshot excludes plus every path the runner checkout itself reports as
+/// gitignored (#15303).
+///
+/// The controller derives `sync_excludes` from ignored paths that exist on the
+/// controller when the snapshot is taken (`git ls-files --others --ignored`),
+/// so a snapshot never carries ignored files. Runner-side dependency hydration
+/// (`composer install`, `npm ci`) then creates ignored paths such as
+/// `node_modules/` or an ignored `composer.lock` that a fresh controller
+/// worktree never had. Counting them made the harvest content hash diverge on
+/// every cook for affected repositories. Ignored paths are by construction not
+/// snapshot content, so excluding the runner's own ignored set restores the
+/// equality without loosening tracked or untracked non-ignored drift.
+///
+/// Only applies when the workspace is its own Git root: a `snapshot`
+/// materialization verified before its synthetic baseline exists has no
+/// checkout, and a parent repository's ignore rules must never leak in.
+fn runner_verification_excludes(workspace: &Path, sync_excludes: &[String]) -> Vec<String> {
+    let mut excludes = sync_excludes.to_vec();
+    if !workspace.join(".git").exists() {
+        return excludes;
+    }
+    let toplevel = git(workspace, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .and_then(|toplevel| Path::new(&toplevel).canonicalize().ok());
+    if toplevel.is_none() || toplevel != workspace.canonicalize().ok() {
+        return excludes;
+    }
+    let Ok(ignored) = git_bytes(
+        workspace,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+    ) else {
+        return excludes;
+    };
+    for entry in ignored
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let relative = String::from_utf8_lossy(entry);
+        let relative = relative.trim_start_matches("./").trim_end_matches('/');
+        if relative.is_empty() {
+            continue;
+        }
+        for pattern in [format!("./{relative}"), format!("./{relative}/**")] {
+            if !excludes.contains(&pattern) {
+                excludes.push(pattern);
+            }
+        }
+    }
+    excludes
+}
+
+fn git_bytes(cwd: &Path, args: &[&str]) -> std::result::Result<Vec<u8>, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| format!("could not run git {}: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
 fn verify_snapshot_workspace_content(
     workspace: &Path,
     provenance: &VerifiedLabWorkspaceProvenance,
 ) -> std::result::Result<(), String> {
+    let excludes = runner_verification_excludes(workspace, &provenance.sync_excludes);
     let actual_content_hash = match provenance.content_hash_algorithm.as_str() {
-        "homeboy-workspace-content-v1" => {
-            workspace_content_hash_v1(workspace, &provenance.sync_excludes)
-        }
+        "homeboy-workspace-content-v1" => workspace_content_hash_v1(workspace, &excludes),
         algorithm
             if algorithm.starts_with("homeboy-workspace-content-v2+")
                 || algorithm == "homeboy-workspace-content-v3+unix-owner-executable" =>
         {
             workspace_content_hash_for_policy(
                 workspace,
-                &provenance.sync_excludes,
+                &excludes,
                 provenance
                     .permission_policy
                     .as_deref()
@@ -699,7 +772,7 @@ fn verify_snapshot_workspace_content(
             .and_then(|expected| {
                 workspace_content_manifest_for_policy(
                     workspace,
-                    &provenance.sync_excludes,
+                    &excludes,
                     provenance.permission_policy.as_deref()?,
                 )
                 .ok()
@@ -1203,7 +1276,12 @@ mod tests {
 
     fn materialized_production_snapshot_git_workspace(
     ) -> (tempfile::TempDir, VerifiedLabWorkspaceProvenance) {
-        let source = git_workspace();
+        materialized_production_snapshot_git_workspace_from(git_workspace())
+    }
+
+    fn materialized_production_snapshot_git_workspace_from(
+        source: tempfile::TempDir,
+    ) -> (tempfile::TempDir, VerifiedLabWorkspaceProvenance) {
         let remote_root = tempfile::tempdir().expect("runner root");
         let remote = remote_root.path().join("workspace");
         let excludes = vec![".git".to_string(), ".git/**".to_string()];
@@ -2233,6 +2311,59 @@ mod tests {
         assert!(verify_lab_workspace_git_root(workspace.path(), &provenance)
             .expect_err("mismatched snapshot metadata must fail")
             .contains("does not match verified provenance"));
+    }
+
+    /// Regression for #15303: runner-side dependency hydration (composer
+    /// install, npm ci) creates gitignored paths such as `node_modules/` and an
+    /// ignored `composer.lock` after the snapshot lands. The controller derives
+    /// snapshot excludes from ignored paths that *exist* on the controller, so a
+    /// fresh worktree records none of them, and the harvest content hash then
+    /// counted the hydrated files and never matched. Ignored paths are not part
+    /// of any snapshot, so they must not count; tracked and untracked
+    /// non-ignored drift still must.
+    #[test]
+    fn snapshot_git_verification_ignores_runner_hydrated_gitignored_paths() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("file.txt"), "baseline\n").expect("source file");
+        std::fs::write(
+            source.path().join(".gitignore"),
+            "node_modules/\ncomposer.lock\n",
+        )
+        .expect("gitignore");
+        git(source.path(), &["init", "--quiet"]).expect("initialize repository");
+        git(source.path(), &["add", "--all"]).expect("stage source");
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        )
+        .expect("commit source");
+
+        let (root, provenance) = materialized_production_snapshot_git_workspace_from(source);
+        let workspace = root.path().join("workspace");
+        verify_lab_workspace_git_root(&workspace, &provenance).expect("fresh materialization");
+
+        std::fs::create_dir_all(workspace.join("node_modules/pkg")).expect("hydrated dir");
+        std::fs::write(
+            workspace.join("node_modules/pkg/index.js"),
+            "module.exports = 1;\n",
+        )
+        .expect("hydrated file");
+        std::fs::write(workspace.join("composer.lock"), "{}\n").expect("hydrated lockfile");
+        verify_lab_workspace_git_root(&workspace, &provenance)
+            .expect("runner-hydrated gitignored paths are not snapshot content");
+
+        std::fs::write(workspace.join("stray.txt"), "untracked\n").expect("untracked file");
+        verify_lab_workspace_git_root(&workspace, &provenance)
+            .expect_err("untracked non-ignored files still count");
     }
 
     #[test]
