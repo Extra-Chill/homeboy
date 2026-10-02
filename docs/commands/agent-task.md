@@ -505,6 +505,42 @@ homeboy agent-task cook --dir /path/to/existing-worktree \
 Cook snapshots the prompt once for the durable plan; provider rotations retry
 that same task against the same destination checkout.
 
+**Completion evidence.** An accepted durable handoff (including a Lab job) means
+an owner will carry the Cook forward, not that the change has been delivered.
+Neither a zero submission exit code nor provider success proves delivery. For a
+patch-producing Cook that requests a draft PR, follow the evidence chain:
+
+- **Provider candidate:** retain the patch/commit identity and its attempt/run
+  reference. Provider checks and `outputs.review_form` are supporting evidence,
+  not authoritative gate results or publication proof.
+- **Controller-owned passing gates:** inspect the durable promotion gate results
+  bound to that candidate, verified base, and target worktree. Every declared
+  deterministic gate must pass; deferred gates are not passing gates.
+- **Authoritative destination:** confirm the promotion receipt records application
+  to `--to-worktree`, or the canonical `--cwd` destination when no handle is given.
+  Changes present only in the isolated provider/runner checkout are not delivery.
+- **Final draft PR receipt:** normal Cook owns commit, push, and PR publication.
+  Require durable finalization evidence with `status: draft_published` and a PR
+  number or URL, then confirm the draft and its head in GitHub. The nearby
+  `publication_proof` and `finalization_outcome` contracts expose those effects;
+  `homeboy/agent-task-cook-completion/v1` reports `pr_finalized`, rather than merely
+  `candidate_produced` or `candidate_awaiting_finalization`.
+
+For the documentation delivery tracker [Extra-Chill/homeboy#15017](https://github.com/Extra-Chill/homeboy/issues/15017),
+reuse the existing-checkout form with normal draft finalization:
+
+```bash
+homeboy agent-task cook --cwd /path/to/task-worktree --placement lab \
+  --task-url https://github.com/Extra-Chill/homeboy/issues/15017 \
+  --prompt @task.md --verify 'git diff --check' --draft-pr
+```
+
+Use the existing `status`, `logs`, and emitted evidence commands to inspect the
+run. `--no-finalize` intentionally stops short of PR delivery. For an untouched
+delivery acceptance, the supervisor observes raw worker artifacts, read-only
+stores, and GitHub before recording its first verdict; it does not repair,
+promote, or publish on Cook's behalf.
+
 Use `agent-task fanout cook-batch` only when there are multiple independent
 issues that should each get separate worktree materialization, branch/PR
 metadata, and fanout status collation.
