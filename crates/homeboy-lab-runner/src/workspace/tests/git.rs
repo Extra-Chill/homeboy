@@ -1111,3 +1111,378 @@ fn promisor_bundle_hydration_is_a_no_op_when_the_closure_is_complete() {
         assert_eq!(pack_count(source.path()), packs_before);
     });
 }
+
+#[cfg(unix)]
+struct PromisorTransportFixture {
+    origin: tempfile::TempDir,
+    source: tempfile::TempDir,
+    transport: tempfile::TempDir,
+    base: String,
+    base_blob: String,
+    head: String,
+    unrelated_blob: String,
+}
+
+#[cfg(unix)]
+impl PromisorTransportFixture {
+    fn new() -> Self {
+        let origin = tempfile::tempdir().unwrap();
+        let author = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let transport = tempfile::tempdir().unwrap();
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(
+            origin.path(),
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        fs::write(author.path().join("removed.txt"), "historical base\n").unwrap();
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "base"]);
+        let base = git_output(author.path(), &["rev-parse", "HEAD"]).unwrap();
+        let base_blob = git_output(author.path(), &["rev-parse", "HEAD:removed.txt"]).unwrap();
+        fs::remove_file(author.path().join("removed.txt")).unwrap();
+        fs::write(author.path().join("file.txt"), "published head\n").unwrap();
+        git(author.path(), &["add", "-A"]);
+        git(author.path(), &["commit", "-m", "published head"]);
+        git(
+            author.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.path().display()),
+            ],
+        );
+        git(author.path(), &["push", "origin", "main"]);
+        git(author.path(), &["checkout", "-b", "unrelated"]);
+        fs::write(author.path().join("unrelated.txt"), "unrelated secret\n").unwrap();
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "unrelated"]);
+        let unrelated_blob =
+            git_output(author.path(), &["rev-parse", "HEAD:unrelated.txt"]).unwrap();
+        git(author.path(), &["push", "origin", "unrelated"]);
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test User"]);
+        fs::write(source.path().join("file.txt"), "local unpushed head\n").unwrap();
+        git(source.path(), &["commit", "-am", "local unpushed head"]);
+        let head = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert!(git_without_lazy_fetch(origin.path(), &["cat-file", "-e", &head]).is_err());
+        git(source.path(), &["remote", "rename", "origin", "controller"]);
+        git(
+            source.path(),
+            &[
+                "remote",
+                "set-url",
+                "controller",
+                "ssh://git@promisor.example.test/repo.git",
+            ],
+        );
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://127.0.0.1:1/unreachable.git",
+            ],
+        );
+        git(source.path(), &["config", "gc.auto", "0"]);
+        git(source.path(), &["config", "maintenance.auto", "false"]);
+        let fixture = Self {
+            origin,
+            source,
+            transport,
+            base,
+            base_blob,
+            head,
+            unrelated_blob,
+        };
+        fixture.assert_missing();
+        fixture
+    }
+
+    fn assert_missing(&self) {
+        for blob in [&self.base_blob, &self.unrelated_blob] {
+            assert!(
+                git_without_lazy_fetch(self.source.path(), &["cat-file", "-e", blob]).is_err(),
+                "filtered clone must really omit {blob}"
+            );
+        }
+    }
+
+    fn configure(&self, hang_on_call: usize) {
+        use homeboy_core::component::GithubHostConfig;
+        use homeboy_core::defaults::{save_config, HomeboyConfig};
+        use homeboy_core::engine::shell::quote_arg;
+        use std::collections::HashMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = self.transport.path().join("ssh");
+        let log = self.transport.path().join("calls");
+        let body = format!(
+            "if [ {hang_on_call} -gt 0 ] && [ \"$(wc -l < {})\" -ge {hang_on_call} ]; then\ntrap '' TERM\nsleep 30 &\necho $! > {}\nwait\nelse\nexec git-upload-pack {}\nfi\n",
+            quote_arg(&log.display().to_string()),
+            quote_arg(&self.transport.path().join("descendant.pid").display().to_string()),
+            quote_arg(&self.origin.path().display().to_string()),
+        );
+        fs::write(&script, format!(
+            "#!/bin/sh\n[ \"$HOMEBOY_PROMISOR_CONTROLLER\" = required ] || exit 91\n[ \"$HTTPS_PROXY\" = http://controller-proxy.example.test:8123 ] || exit 92\n[ \"$PWD\" = {} ] || exit 93\ncase \"$*\" in *promisor.example.test*) ;; *) exit 94 ;; esac\nprintf '%s\\n' \"$PWD $*\" >> {}\n{}",
+            quote_arg(&self.source.path().display().to_string()), quote_arg(&log.display().to_string()), body
+        )).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        save_config(&HomeboyConfig {
+            github_hosts: HashMap::from([
+                (
+                    "promisor.example.test".to_string(),
+                    GithubHostConfig {
+                        proxy: Some("http://controller-proxy.example.test:8123".to_string()),
+                        env: HashMap::from([
+                            (
+                                "GIT_SSH_COMMAND".to_string(),
+                                quote_arg(&script.display().to_string()),
+                            ),
+                            ("GIT_SSH_VARIANT".to_string(), "ssh".to_string()),
+                            (
+                                "HOMEBOY_PROMISOR_CONTROLLER".to_string(),
+                                "required".to_string(),
+                            ),
+                        ]),
+                    },
+                ),
+                (
+                    "127.0.0.1".to_string(),
+                    GithubHostConfig {
+                        proxy: Some("http://wrong-origin-proxy.example.test:8123".to_string()),
+                        env: HashMap::from([(
+                            "HOMEBOY_PROMISOR_CONTROLLER".to_string(),
+                            "wrong-host".to_string(),
+                        )]),
+                    },
+                ),
+            ]),
+            ..HomeboyConfig::default()
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = PromisorTransportFixture::new();
+        // Fail deterministically without persisted policy, rather than depending
+        // on DNS or ambient SSH configuration to reject the fixture hostname.
+        git(
+            fixture.source.path(),
+            &["config", "core.sshCommand", "false"],
+        );
+        let config_before = fs::read(fixture.source.path().join(".git/config")).unwrap();
+        let error = hydrate_controller_bundle_objects(
+            fixture.source.path(),
+            &[fixture.head.clone(), fixture.base.clone()],
+        )
+        .expect_err("missing host policy must fail");
+        assert_eq!(
+            error.details["reason"],
+            "controller_git_object_closure_unavailable"
+        );
+        fixture.assert_missing();
+        fixture.configure(0);
+        let runner_root = tempfile::tempdir().unwrap();
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-promisor-transport","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .unwrap();
+        let (output, status) = sync_workspace(
+            "lab-promisor-transport",
+            RunnerWorkspaceSyncOptions {
+                path: fixture.source.path().display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Git,
+                controller_routed_git: true,
+                changed_since_base: Some(fixture.base.clone()),
+                ..Default::default()
+            },
+        )
+        .expect("persisted selected-promisor policy must hydrate and seal the bundle");
+        assert_eq!(status, 0);
+        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+        assert!(output.materialization_plan.controller_git_bundle.is_some());
+        assert_eq!(output.snapshot_identity, fixture.head);
+        let remote = Path::new(&output.remote_path);
+        assert_eq!(
+            git_output(remote, &["rev-parse", "HEAD"]).unwrap(),
+            fixture.head
+        );
+        assert_eq!(
+            git_output(remote, &["merge-base", &fixture.base, "HEAD"]).unwrap(),
+            fixture.base
+        );
+        assert_eq!(
+            git_output(remote, &["show", &format!("{}:removed.txt", fixture.base)]).unwrap(),
+            "historical base"
+        );
+        assert_eq!(
+            fs::read_to_string(remote.join("file.txt")).unwrap(),
+            "local unpushed head\n"
+        );
+        assert!(git_without_lazy_fetch(remote, &["cat-file", "-e", &fixture.base_blob]).is_ok());
+        assert!(git_without_lazy_fetch(
+            fixture.source.path(),
+            &["cat-file", "-e", &fixture.unrelated_blob]
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(fixture.source.path().join(".git/config")).unwrap(),
+            config_before
+        );
+        let runner_config = fs::read_to_string(remote.join(".git/config")).unwrap();
+        for forbidden in [
+            "promisor",
+            "sshCommand",
+            "controller-proxy",
+            "wrong-origin-proxy",
+            "credential",
+            "HOMEBOY_PROMISOR_CONTROLLER",
+        ] {
+            assert!(
+                !runner_config.contains(forbidden),
+                "runner config leaked {forbidden}"
+            );
+        }
+        let calls = fs::read_to_string(fixture.transport.path().join("calls")).unwrap();
+        assert!(
+            calls.lines().count() >= 2,
+            "both ref repair and batched blob fetch must use configured transport"
+        );
+        assert!(calls
+            .lines()
+            .all(|line| line.starts_with(&fixture.source.path().display().to_string())));
+        assert_ne!(
+            std::env::var("HOMEBOY_PROMISOR_CONTROLLER").ok().as_deref(),
+            Some("required")
+        );
+    });
+}
+
+#[cfg(unix)]
+fn assert_hung_promisor_transport_stopped(cancel: bool, batched: bool) {
+    use crate::workspace::WorkspaceControl;
+    use homeboy_core::cooperative_control::CooperativeControl;
+    use homeboy_engine_primitives::command::process_is_running;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = PromisorTransportFixture::new();
+        fixture.configure(if batched { 2 } else { 1 });
+        let pid_file = fixture.transport.path().join("descendant.pid");
+        let observed_pid = pid_file.clone();
+        let control = WorkspaceControl::new(CooperativeControl::new(
+            Instant::now() + Duration::from_secs(if cancel { 10 } else { 2 }),
+            Arc::new(move || cancel && observed_pid.exists()),
+        ));
+        let runner_root = tempfile::tempdir().unwrap();
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-hung-promisor","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .unwrap();
+        let runner = crate::load("lab-hung-promisor").unwrap();
+        let destination = runner_root.path().join("workspace");
+        let destination_text = destination.display().to_string();
+        let started = Instant::now();
+        let result = crate::workspace::git::materialize_git_bundle_controlled(
+            &runner,
+            crate::workspace::git::ControllerGitBundleMaterializationRequest {
+                local_path: fixture.source.path(),
+                remote_path: &destination_text,
+                head: &fixture.head,
+                branch: Some("main"),
+                remote_url: "https://127.0.0.1:1/unreachable.git",
+                changed_since_base: Some(&fixture.base),
+                git_fetch_refs: &[],
+                allow_dirty_lab_workspace: false,
+            },
+            &control,
+        );
+        let error = result.err().expect("hung transport must be interrupted");
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert_eq!(error.details["workspace_sync"]["command_started"], true);
+        assert_eq!(
+            error.details["workspace_sync"]["action"],
+            if batched {
+                "fetch promisor objects"
+            } else {
+                "refetch controller git bundle commits"
+            }
+        );
+        if cancel {
+            assert_eq!(error.details["workspace_sync"]["cancelled"], true);
+        } else {
+            assert!(
+                error.message.contains("timed out") || error.message.contains("deadline"),
+                "{}",
+                error.message
+            );
+        }
+        let pid = fs::read_to_string(pid_file)
+            .expect("hung SSH must have started its descendant")
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            !process_is_running(pid),
+            "transport descendant {pid} survived invocation-owned cleanup"
+        );
+        assert!(
+            !destination.exists(),
+            "interrupted hydration must not install an unsealed workspace"
+        );
+        fixture.assert_missing();
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn promisor_configured_transport_deadline_reaps_hung_descendant() {
+    assert_hung_promisor_transport_stopped(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn promisor_configured_transport_cancellation_reaps_hung_descendant() {
+    assert_hung_promisor_transport_stopped(true, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn promisor_configured_transport_batch_deadline_reaps_hung_descendant() {
+    assert_hung_promisor_transport_stopped(false, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn promisor_configured_transport_batch_cancellation_reaps_hung_descendant() {
+    assert_hung_promisor_transport_stopped(true, true);
+}

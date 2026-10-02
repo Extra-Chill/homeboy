@@ -119,8 +119,8 @@ pub use push_transport::{
 };
 pub use remote_tracking_authority::with_remote_tracking_authority_until;
 pub use transport::{
-    git_transport_env, git_transport_env_for_command, git_transport_env_for_remote,
-    git_transport_env_for_repo,
+    apply_configured_transport, git_transport_env, git_transport_env_for_command,
+    git_transport_env_for_remote, git_transport_env_for_repo,
 };
 
 use serde::{Deserialize, Serialize};

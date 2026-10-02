@@ -180,6 +180,7 @@ pub(super) fn materialize_git_bundle_controlled(
             .arg("create")
             .arg(&bundle_path)
             .args(&refs)
+            .env("GIT_NO_LAZY_FETCH", "1")
             .current_dir(request.local_path),
         "create git bundle",
     )?;
@@ -508,8 +509,27 @@ fn fetch_promisor_objects(
         control.checkpoint()?;
         writeln!(input, "{object}").map_err(|error| Error::internal_io(error.to_string(), None))?;
     }
-    let output = control.output(Command::new("bash")
-        .args(["-o", "pipefail", "-c", &format!("git -C {} -c fetch.negotiationAlgorithm=noop fetch --no-tags --no-write-fetch-head --recurse-submodules=no --filter=blob:none --stdin {} < {}", shell::quote_arg(&local_path.display().to_string()), shell::quote_arg(remote), shell::quote_arg(&input.path().display().to_string()))]), "fetch promisor objects")?;
+    let args = [
+        "-c",
+        "fetch.negotiationAlgorithm=noop",
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--recurse-submodules=no",
+        "--filter=blob:none",
+        "--stdin",
+        remote,
+    ];
+    let mut process = Command::new("git");
+    process.args(args).current_dir(local_path);
+    homeboy_core::git::apply_configured_transport(&mut process, local_path, &args, &[]);
+    let output = control.output_with_stdin(
+        &mut process,
+        input
+            .reopen()
+            .map_err(|error| Error::internal_io(error.to_string(), None))?,
+        "fetch promisor objects",
+    )?;
     if output.status.success() {
         Ok(())
     } else {
@@ -569,14 +589,12 @@ fn refetch_controller_bundle_commits(
     // that the controller must hydrate only the promised base/head closure.
     // Naming the exact refs completes their closure through the promisor
     // transport without re-fetching unrelated history.
-    let output = control.output(
-        Command::new("git")
-            .args(["fetch", "--no-tags", "--filter=blob:none"])
-            .arg(remote)
-            .args(&incomplete_refs)
-            .current_dir(local_path),
-        "refetch controller git bundle commits",
-    )?;
+    let mut args = vec!["fetch", "--no-tags", "--filter=blob:none", remote];
+    args.extend(incomplete_refs.iter().map(String::as_str));
+    let mut process = Command::new("git");
+    process.args(&args).current_dir(local_path);
+    homeboy_core::git::apply_configured_transport(&mut process, local_path, &args, &[]);
+    let output = control.output(&mut process, "refetch controller git bundle commits")?;
     if output.status.success() {
         return Ok(());
     }

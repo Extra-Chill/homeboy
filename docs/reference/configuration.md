@@ -417,6 +417,13 @@ share one hostname; ambiguous multi-host operations receive no automatic host
 policy. Stored remote URLs, repository identity, and persistent Git configuration
 are not rewritten.
 
+Lab bundle hydration applies this policy on the controller, including batched
+missing-object fetches and selected-ref repair for partial clones. The controller
+seals the complete selected object closure with lazy fetching disabled; the Lab
+installs and verifies that bundle without source-remote access or receiving the
+controller's proxy or credential-helper policy. Workspace deadlines and
+cancellation continue to supervise the controller's Git processes.
+
 Host environment precedence is global host configuration, then component host
 configuration, then explicit child environment; inherited environment remains the
 fallback. `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_*`, and `GIT_CONFIG_VALUE_*` are one
