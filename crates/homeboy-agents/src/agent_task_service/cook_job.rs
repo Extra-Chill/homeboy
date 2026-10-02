@@ -261,6 +261,17 @@ fn invalid_cook_job(message: &str) -> homeboy_core::Error {
 struct CookWorkHandler;
 
 impl WorkJobHandler for CookWorkHandler {
+    fn execution_owner(
+        &self,
+        state: &Value,
+    ) -> Result<homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner> {
+        use homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner as Owner;
+        let job = AgentTaskCookJob::parse(state.clone())?;
+        Ok(Owner::supervised(
+            job.request.child_pid,
+            job.request.child_start_identity,
+        ))
+    }
     fn work_type(&self) -> &'static str {
         AGENT_TASK_COOK_JOB_TYPE
     }
@@ -408,7 +419,7 @@ impl CookWorkHandler {
             }
         }
 
-        if !super::work_job::supervised_child_is_live(
+        if !super::work_job::supervised_child_may_be_live(
             job.request.child_pid,
             &job.request.child_start_identity,
         ) {
@@ -1141,7 +1152,9 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = work_request_of(cook_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(cook_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
@@ -1172,7 +1185,9 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = work_request_of(cook_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(cook_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
@@ -1213,7 +1228,9 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = work_request_of(cook_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(cook_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
@@ -1248,7 +1265,9 @@ mod tests {
                 cook_id,
             )
             .expect("persist handoff parent");
-            let request = work_request_of(cook_id, u32::MAX);
+            let mut child = homeboy_core::test_support::SupervisedProcessFixture::spawn();
+            child.stop();
+            let request = work_request_of(cook_id, child.pid());
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
             let harness = ControllerJobHarness::new(Arc::clone(&driver), request.clone())
                 .expect("construct controller job harness");
@@ -1327,6 +1346,56 @@ mod tests {
             .expect("cancelling a completed cook job is a no-op");
     }
 
+    #[test]
+    fn supervised_cook_ownership_is_visible_to_generic_recovery() {
+        with_isolated_home(|home| {
+            register_cook_work_handler();
+            super::super::work_job::register_work_job_driver();
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn owned fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect child")
+                .expect("kernel identity");
+            let submission = cook_job_submission_for_launcher(
+                "ownership-fixture",
+                Some("ownership-launcher"),
+                child.id(),
+                &identity,
+            )
+            .expect("submission");
+            let path = home.path().join("ownership-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "ownership-lease",
+            )
+            .expect("real durable store");
+            harness
+                .handle()
+                .checkpoint(
+                    driver
+                        .prepare(submission["request"].clone())
+                        .expect("prepare"),
+                )
+                .expect("persist checkpoint");
+            let evidence = harness
+                .store()
+                .active_daemon_job_recovery_evidence(Some("ownership-lease"), |_| false);
+            // Clean up before assertions, including on the pre-fix reproduction.
+            child.kill().expect("stop owned fixture");
+            child.wait().expect("reap fixture");
+            assert_eq!(evidence[0].child_pid, Some(child.id()));
+            assert_eq!(
+                evidence[0].disposition,
+                homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
+            );
+        });
+    }
+
     /// Cancellation must actually stop the provider. Before an attempt exists
     /// the detached child is the containment owner, so terminating its tree is
     /// the stop — and this proves the driver reaches that established path
@@ -1381,6 +1450,492 @@ mod tests {
                 "a cancelled cook job must leave no live child"
             );
         });
+    }
+
+    #[test]
+    fn supervised_cook_store_reads_protect_handoff_reuse_and_unknown_evidence() {
+        use homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition as Disposition;
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            super::super::work_job::register_work_job_driver();
+            let child = SupervisedProcessFixture::spawn();
+            let submission = cook_job_submission_for_launcher(
+                "ownership-read",
+                Some("ownership-read-launcher"),
+                child.pid(),
+                &child.identity,
+            )
+            .unwrap();
+            let path = home.path().join("ownership-read-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable_queued(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "read-lease",
+            )
+            .unwrap();
+            let error = harness
+                .store()
+                .reconcile_exact_daemon_loss_jobs(
+                    "read-lease",
+                    &[harness.job().unwrap().id],
+                    u32::MAX,
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("controller-driver or persisted child-process ownership"),
+                "operator no-PID recovery must refuse typed controller ownership: {error}"
+            );
+            let other_submission = cook_job_submission_for_launcher(
+                "ownership-other",
+                Some("ownership-other-launcher"),
+                child.pid(),
+                &child.identity,
+            )
+            .unwrap();
+            let other = ControllerJobHarness::durable_queued(
+                Arc::clone(&driver),
+                other_submission["request"].clone(),
+                &path,
+                "other-lease",
+            )
+            .unwrap();
+            let harness = harness.reopen(&path, "read-lease").unwrap();
+            let read = || {
+                harness
+                    .store()
+                    .active_daemon_job_recovery_evidence(Some("read-lease"), |_| false)
+                    .into_iter()
+                    .find(|item| item.job_id == harness.job().unwrap().id)
+                    .unwrap()
+            };
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(
+                read().disposition,
+                Disposition::ProtectedLive,
+                "admitted request protects pre-checkpoint handoff"
+            );
+            assert_eq!(read().child_pid, Some(child.pid()));
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                before,
+                "status must not persist"
+            );
+            let diagnostics = harness
+                .store()
+                .reconcile_dead_daemon_lease_jobs("read-lease")
+                .unwrap();
+            assert_eq!(
+                diagnostics.protected_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            assert_eq!(
+                diagnostics.other_lease_job_ids,
+                vec![other.job().unwrap().id]
+            );
+            assert_eq!(
+                other.job().unwrap().status,
+                homeboy_core::api_jobs::JobStatus::Queued
+            );
+
+            let mut checkpoint = driver.prepare(submission["request"].clone()).unwrap();
+            checkpoint["checkpoint"]["request"]["child_start_identity"] =
+                json!(child.mismatched_identity());
+            harness.handle().checkpoint(checkpoint.clone()).unwrap();
+            assert_eq!(read().disposition, Disposition::ReusedChildPid);
+            assert_eq!(
+                homeboy_core::process::process_identity_state_with_start_identity(
+                    child.pid(),
+                    None,
+                    Some(&child.identity)
+                ),
+                homeboy_core::process::ProcessIdentityState::Live,
+                "reuse classification must not signal another process"
+            );
+            let diagnostics = harness
+                .store()
+                .reconcile_dead_daemon_lease_jobs("read-lease")
+                .unwrap();
+            assert_eq!(
+                diagnostics.preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            assert_eq!(diagnostics.terminalized_count(), 0);
+
+            checkpoint["work_version"] = json!(999);
+            harness.handle().checkpoint(checkpoint).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(
+                read().disposition,
+                Disposition::BlockingAmbiguous,
+                "missing handler is not death evidence"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                harness
+                    .store()
+                    .reconcile_dead_daemon_lease_jobs("read-lease")
+                    .unwrap()
+                    .protected_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            harness
+                .cancel_via_controller_boundary("unsupported handler fixture")
+                .unwrap();
+            assert_eq!(harness.job().unwrap().status, homeboy_core::api_jobs::JobStatus::Queued,
+                "unsupported checkpoint handlers must stay protected during cancellation recovery too");
+        });
+    }
+
+    #[test]
+    fn dead_cook_handoff_resumes_through_driver_after_store_restart() {
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            super::super::work_job::register_work_job_driver();
+            let mut child = SupervisedProcessFixture::spawn();
+            let cook_id = "ownership-dead-handoff";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .unwrap();
+            let submission = cook_job_submission_for_launcher(
+                cook_id,
+                Some("dead-handoff-launcher"),
+                child.pid(),
+                &child.identity,
+            )
+            .unwrap();
+            let path = home.path().join("ownership-dead-handoff-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable_queued(
+                driver,
+                submission["request"].clone(),
+                &path,
+                "dead-handoff-lease",
+            )
+            .unwrap();
+            child.stop();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            let evidence = restarted
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| true);
+            assert_eq!(
+                evidence[0].disposition,
+                homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::DeadChild
+            );
+            let diagnostics = restarted
+                .store()
+                .reconcile_dead_daemon_lease_jobs("dead-handoff-lease")
+                .unwrap();
+            assert_eq!(
+                diagnostics.preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            assert_eq!(
+                restarted.job().unwrap().status,
+                homeboy_core::api_jobs::JobStatus::Queued
+            );
+            restarted.recover_after_restart();
+            assert_eq!(
+                restarted.wait_until_terminal().unwrap().status,
+                homeboy_core::api_jobs::JobStatus::Succeeded
+            );
+            let result = restarted
+                .events()
+                .unwrap()
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Result)
+                .unwrap()
+                .data
+                .unwrap();
+            assert_eq!(
+                result["terminal_state"], "failed",
+                "the driver truthfully reports an exited, unmaterialized handoff"
+            );
+        });
+    }
+
+    #[test]
+    fn dead_cook_retained_completed_checkpoint_survives_generic_recovery() {
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            super::super::work_job::register_work_job_driver();
+            let mut child = SupervisedProcessFixture::spawn();
+            let submission = cook_job_submission_for_launcher(
+                "ownership-retained",
+                Some("retained-launcher"),
+                child.pid(),
+                &child.identity,
+            )
+            .unwrap();
+            let path = home.path().join("ownership-retained-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "retained-lease",
+            )
+            .unwrap();
+            let mut checkpoint = driver.prepare(submission["request"].clone()).unwrap();
+            checkpoint["checkpoint"]["phase"] = json!("completed");
+            checkpoint["checkpoint"]["terminal_state"] = json!("succeeded");
+            checkpoint["checkpoint"]["run_id"] = json!("retained-attempt");
+            harness.handle().checkpoint(checkpoint).unwrap();
+            assert_eq!(
+                harness
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| false)[0]
+                    .disposition,
+                homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive,
+                "publishing a retained outcome does not erase a still-live launcher"
+            );
+            child.stop();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            let diagnostics = restarted
+                .store()
+                .reconcile_dead_daemon_lease_jobs("retained-lease")
+                .unwrap();
+            assert_eq!(diagnostics.terminalized_count(), 0);
+            assert_eq!(
+                diagnostics.preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            restarted.recover_after_restart();
+            restarted.wait_until_terminal().unwrap();
+            let result = restarted
+                .events()
+                .unwrap()
+                .into_iter()
+                .find(|event| event.kind == JobEventKind::Result)
+                .unwrap()
+                .data
+                .unwrap();
+            assert_eq!(result["terminal_state"], "succeeded");
+            assert_eq!(result["run_id"], "retained-attempt");
+            let events = restarted.events().unwrap();
+            restarted.recover_after_restart();
+            assert_eq!(
+                serde_json::to_value(restarted.events().unwrap()).unwrap(),
+                serde_json::to_value(events).unwrap(),
+                "terminal recovery is idempotent"
+            );
+        });
+    }
+
+    #[test]
+    fn terminal_linked_attempt_cannot_release_a_live_cook_supervision_owner() {
+        use homeboy_core::api_jobs::{
+            DaemonActiveJobRecoveryDisposition as Disposition, JobStatus,
+        };
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            crate::api_jobs_terminal_recovery::register();
+            super::super::work_job::register_work_job_driver();
+            let child = SupervisedProcessFixture::spawn();
+            let cook_id = "ownership-terminal-linked";
+            let plan =
+                crate::agent_task_scheduler::AgentTaskPlan::new("terminal-linked", Vec::new());
+            let mut run = agent_task_lifecycle::submit_plan(&plan, Some(cook_id)).unwrap();
+            run.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+            run.lifecycle =
+                homeboy_core::run_lifecycle_record::RunLifecycleRecord::with_execution_state(
+                    homeboy_core::run_lifecycle_record::RunExecutionState::Succeeded,
+                );
+            test_lifecycle_store()
+                .write_aggregate(
+                    cook_id,
+                    &crate::agent_task_scheduler::AgentTaskAggregate {
+                        schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                        plan_id: plan.plan_id.clone(),
+                        status: crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
+                        totals: Default::default(),
+                        outcomes: Vec::new(),
+                        events: Vec::new(),
+                        artifact_lineage: Vec::new(),
+                        child_runs: Vec::new(),
+                        artifact_bindings: Vec::new(),
+                        queue: Default::default(),
+                    },
+                )
+                .unwrap();
+            test_lifecycle_store().write_record(&run).unwrap();
+            let submission = cook_job_submission_for_launcher(
+                cook_id,
+                Some("terminal-linked-launcher"),
+                child.pid(),
+                &child.identity,
+            )
+            .unwrap();
+            let path = home.path().join("ownership-terminal-linked-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "terminal-linked-lease",
+            )
+            .unwrap();
+            harness
+                .handle()
+                .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
+                .unwrap();
+            let evidence = harness
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| false);
+            assert_eq!(
+                evidence[0].linked_durable_run_terminal_status,
+                Some(JobStatus::Succeeded),
+                "the fixture must supply real linked terminal evidence"
+            );
+            assert_eq!(evidence[0].disposition, Disposition::ProtectedLive);
+            assert!(harness
+                .store()
+                .reconcile_terminal_linked_daemon_jobs()
+                .unwrap()
+                .is_empty());
+            assert_eq!(harness.job().unwrap().status, JobStatus::Running);
+            assert_eq!(
+                harness
+                    .store()
+                    .reconcile_dead_daemon_lease_jobs("terminal-linked-lease")
+                    .unwrap()
+                    .protected_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            // A lost driver generation cannot fall back to the linked attempt
+            // and erase an opaque checkpoint's still-live execution owner.
+            let mut durable: Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            durable["jobs"][0]["controller_job"]["version"] = json!(999);
+            std::fs::write(&path, serde_json::to_vec(&durable).unwrap()).unwrap();
+            let unavailable = harness.reopen(&path, "replacement-lease").unwrap();
+            let evidence = unavailable
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| false);
+            assert_eq!(
+                evidence[0].linked_durable_run_terminal_status,
+                Some(JobStatus::Succeeded)
+            );
+            assert_eq!(evidence[0].disposition, Disposition::BlockingAmbiguous);
+            assert!(unavailable
+                .store()
+                .reconcile_terminal_linked_daemon_jobs()
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                unavailable
+                    .store()
+                    .reconcile_dead_daemon_lease_jobs("terminal-linked-lease")
+                    .unwrap()
+                    .protected_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            assert_eq!(
+                homeboy_core::process::process_identity_state_with_start_identity(
+                    child.pid(),
+                    None,
+                    Some(&child.identity)
+                ),
+                homeboy_core::process::ProcessIdentityState::Live
+            );
+        });
+    }
+
+    #[test]
+    fn queued_cook_cancellation_and_restart_stop_exact_owner_before_terminalizing() {
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        for through_boundary in [false, true] {
+            with_isolated_home(|home| {
+                super::super::work_job::register_work_job_driver();
+                let mut child = SupervisedProcessFixture::spawn();
+                let cook_id = "ownership-cancel-restart";
+                let store = test_lifecycle_store();
+                agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                    .unwrap();
+                agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                    &store,
+                    cook_id,
+                    "ownership-cancel-launcher",
+                )
+                .unwrap();
+                agent_task_lifecycle::record_claimed_detached_cook_handoff_supervision_in_store(
+                    &store,
+                    cook_id,
+                    "ownership-cancel-launcher",
+                    child.pid(),
+                    child.identity.clone(),
+                    "ownership-cancel-supervisor",
+                )
+                .unwrap();
+                let submission = cook_job_submission_for_launcher(
+                    cook_id,
+                    Some("ownership-cancel-launcher"),
+                    child.pid(),
+                    &child.identity,
+                )
+                .unwrap();
+                let path = home.path().join("ownership-cancel-jobs.json");
+                let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+                let harness = ControllerJobHarness::durable_queued(
+                    Arc::clone(&driver),
+                    submission["request"].clone(),
+                    &path,
+                    "cancel-lease",
+                )
+                .unwrap();
+                let acknowledgement = if through_boundary {
+                    harness
+                        .cancel_via_controller_boundary("queued boundary cancellation")
+                        .unwrap()
+                } else {
+                    harness
+                        .request_cancellation("restart fixture cancellation")
+                        .unwrap()
+                };
+                assert_eq!(
+                    acknowledgement.status,
+                    homeboy_core::api_jobs::JobStatus::Queued,
+                    "claimless supervision is not process-less cancellation"
+                );
+                let restarted = if through_boundary {
+                    harness
+                } else {
+                    harness.reopen(&path, "replacement-lease").unwrap()
+                };
+                if !through_boundary {
+                    assert_eq!(
+                        restarted
+                            .store()
+                            .active_daemon_job_recovery_evidence(None, |_| false)[0]
+                            .disposition,
+                        homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
+                    );
+                    restarted.recover_after_restart();
+                }
+                child.wait_for_exit().unwrap();
+                assert_eq!(
+                    restarted.wait_until_terminal().unwrap().status,
+                    homeboy_core::api_jobs::JobStatus::Cancelled
+                );
+                assert_eq!(
+                    homeboy_core::process::process_identity_state_with_start_identity(
+                        child.pid(),
+                        None,
+                        Some(&child.identity)
+                    ),
+                    homeboy_core::process::ProcessIdentityState::Dead
+                );
+                assert!(restarted
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| true)
+                    .is_empty());
+            });
+        }
     }
 
     #[test]

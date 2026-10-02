@@ -80,6 +80,16 @@ impl ControllerJobDriver for RecoveryCancellationControllerDriver {
 }
 
 impl ControllerJobDriver for BlockingControllerDriver {
+    fn execution_owner(
+        &self,
+        _request: &Value,
+        _checkpoint: Option<&Value>,
+    ) -> Result<Option<controller_job_driver::ControllerJobExecutionOwner>> {
+        // This fixture owns only an in-process channel wait, never a launcher.
+        Ok(Some(
+            controller_job_driver::ControllerJobExecutionOwner::None,
+        ))
+    }
     fn job_type(&self) -> &'static str {
         self.job_type
     }

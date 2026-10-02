@@ -4713,6 +4713,17 @@ fn dispatch_claimed_controller_job(
         );
         return;
     };
+    if matches!(
+        driver.execution_owner(&state.request, state.checkpoint.as_ref()),
+        Err(_)
+            | Ok(Some(
+                controller_job_driver::ControllerJobExecutionOwner::Unavailable
+            ))
+    ) {
+        // Unsupported opaque state is not permission to dispatch a recovery
+        // that might report failure while externally owned work remains live.
+        return;
+    }
     // Cancellation is durable first. This channel only wakes the owner quickly;
     // every gate below re-reads the durable flag before doing work.
     let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -4725,21 +4736,28 @@ fn dispatch_claimed_controller_job(
         let _ = start_rx.recv();
         let job = job_store.handle(job_id);
         if job.is_cancelled() {
-            if recovery {
-                let checkpoint = state
-                    .checkpoint
-                    .as_ref()
-                    .expect("claimed recovery has checkpoint");
-                match driver.cancel(checkpoint) {
+            let checkpoint = if recovery {
+                state.checkpoint.clone()
+            } else {
+                driver.recovery_checkpoint(&state.request).ok().flatten()
+            };
+            if let Some(checkpoint) = checkpoint {
+                match driver.cancel(&checkpoint) {
                     Ok(()) => persist_controller_cancellation(&job),
                     Err(error) => {
                         let public = driver.public_error(&error);
                         persist_controller_cancellation_failure(&job, public.message, public.data);
                     }
                 }
-            } else {
-                // A fresh job cancelled before prepare has admitted no driver
-                // side effect, so durable cancellation is already sufficient.
+            } else if matches!(
+                driver.execution_owner(&state.request, None),
+                Ok(None)
+                    | Ok(Some(
+                        controller_job_driver::ControllerJobExecutionOwner::None
+                    ))
+            ) {
+                // A claimless in-process driver can prove it admitted no external
+                // work. Missing ownership evidence must remain active/ambiguous.
                 persist_controller_cancellation(&job);
             }
             controller_job_runtimes()
@@ -4978,24 +4996,60 @@ fn persist_controller_failure(
     }
 }
 
-fn recover_controller_jobs(job_store: &JobStore) {
+pub(crate) fn recover_controller_jobs(job_store: &JobStore) {
     for (job_id, state) in job_store.active_controller_jobs() {
-        if state.checkpoint.is_none() || state.recovery_attempted {
-            let _ = job_store.fail_controller_error(
-                job_id,
-                "controller job cannot be resumed after daemon restart".to_string(),
-                json!({ "phase": "recovery_unresolved" }),
-            );
-            continue;
-        }
-        let Ok(state) = job_store.claim_controller_execution(job_id, true) else {
-            continue;
-        };
-        dispatch_claimed_controller_job(job_store.clone(), job_id, state, true);
+        recover_controller_job(job_store, job_id, state);
     }
 }
 
-fn cancel_controller_job(
+fn recover_controller_job(
+    job_store: &JobStore,
+    job_id: Uuid,
+    state: crate::api_jobs::ControllerJobState,
+) {
+    if controller_job_runtimes()
+        .lock()
+        .expect("controller runtimes lock")
+        .contains_key(&controller_job_runtime_key(job_store, job_id))
+    {
+        return;
+    }
+    let Ok(driver) = controller_job_driver::driver(&state.job_type, state.version) else {
+        // A missing driver cannot prove that its work stopped.
+        return;
+    };
+    if matches!(
+        driver.execution_owner(&state.request, state.checkpoint.as_ref()),
+        Err(_)
+            | Ok(Some(
+                controller_job_driver::ControllerJobExecutionOwner::Unavailable
+            ))
+    ) {
+        return;
+    }
+    if state.checkpoint.is_none() {
+        let Ok(Some(checkpoint)) = driver.recovery_checkpoint(&state.request) else {
+            // Preserve the pre-checkpoint handoff when its domain cannot
+            // establish a safe resume. Status reports the owner ambiguity.
+            return;
+        };
+        if job_store
+            .record_controller_prepared(job_id, checkpoint)
+            .is_err()
+        {
+            return;
+        }
+    }
+    // Default drivers retain the one-resume fence. A typed absence proof lets
+    // a domain collect its retained outcome on a later restart. Live or
+    // unverifiable ownership is never failed just because resume was tried.
+    let Ok(state) = job_store.claim_controller_execution(job_id, true) else {
+        return;
+    };
+    dispatch_claimed_controller_job(job_store.clone(), job_id, state, true);
+}
+
+pub(crate) fn cancel_controller_job(
     job_id: Uuid,
     reason: &str,
     job_store: &JobStore,
@@ -5004,12 +5058,17 @@ fn cancel_controller_job(
     // Resolve the persisted type/version, not a caller-controlled envelope.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
     let job = job_store.request_controller_cancellation(job_id, reason.to_string())?;
-    if let Some(runtime) = controller_job_runtimes()
+    let runtime = controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")
         .get(&controller_job_runtime_key(job_store, job_id))
-    {
-        let _ = runtime.cancel.send(());
+        .map(|runtime| runtime.cancel.clone());
+    if let Some(cancel) = runtime {
+        let _ = cancel.send(());
+    } else if !job.status.is_terminal() {
+        // An external launcher can be admitted before /start or checkpoint
+        // publication. Cancel that one job through the same driver resume gate.
+        recover_controller_job(job_store, job_id, controller);
     }
     Ok(job)
 }

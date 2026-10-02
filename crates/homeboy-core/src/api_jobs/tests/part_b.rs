@@ -291,7 +291,67 @@ fn terminal_linked_reconciliation_preserves_live_jobs_and_is_idempotent() {
 
 /// Admit one `controller.lab.staging-dispatch` job, optionally linked to a
 /// durable agent-task run exactly as the Lab driver declares at admission.
+struct GenericLinkedHandoffFixtureDriver;
+
+impl crate::daemon::controller_job_driver::ControllerJobDriver
+    for GenericLinkedHandoffFixtureDriver
+{
+    fn job_type(&self) -> &'static str {
+        "lab.staging-dispatch"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    // This fixture delegates local-child/linked-run ownership to core. A missing
+    // driver is deliberately different: its opaque work must stay protected.
+    fn public_request(&self, value: &serde_json::Value) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_progress(
+        &self,
+        value: &serde_json::Value,
+    ) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_result(&self, value: &serde_json::Value) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_error(
+        &self,
+        _: &crate::error::Error,
+    ) -> crate::daemon::controller_job_driver::ControllerJobPublicError {
+        crate::daemon::controller_job_driver::ControllerJobPublicError {
+            message: "handoff fixture error".to_string(),
+            data: json!({}),
+        }
+    }
+    fn validate_secret_references(&self, _: &serde_json::Value) -> crate::error::Result<()> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _: serde_json::Value,
+        _: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> crate::error::Result<serde_json::Value> {
+        Err(crate::error::Error::internal_unexpected(
+            "read-only handoff fixture must not execute",
+        ))
+    }
+    fn cancel(&self, _: &serde_json::Value) -> crate::error::Result<()> {
+        Err(crate::error::Error::internal_unexpected(
+            "read-only handoff fixture must not cancel",
+        ))
+    }
+}
+
 fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&str>) -> Uuid {
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        crate::daemon::controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
+            GenericLinkedHandoffFixtureDriver,
+        ))
+        .unwrap()
+    });
     let outcome = store
         .admit_controller_job(
             "controller.lab.staging-dispatch".to_string(),

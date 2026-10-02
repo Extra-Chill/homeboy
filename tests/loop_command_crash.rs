@@ -73,7 +73,20 @@ fn daemon_crash_quiesces_command_without_attestation_or_redispatch() {
         );
         // Ordinary recovery: no operator workload-absence assertion.
         cli(&["daemon", "recover", "--yes"]);
-        let status = cli(&["agent-task", "loop", "status", "command-crash-proof"]);
+        // Recovery preserves the WorkJob for its driver's asynchronous resume;
+        // status reads no longer terminalize the domain as a side effect.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            let status = cli(&["agent-task", "loop", "status", "command-crash-proof"]);
+            if status["work"]["status"] == "failed" {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "driver did not settle guarded command owner loss: {status}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
         assert_eq!(status["status"]["controller"]["state"], "failed");
         assert_eq!(status["work"]["status"], "failed");
         std::thread::sleep(Duration::from_secs(1));

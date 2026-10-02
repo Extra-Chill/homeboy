@@ -304,6 +304,10 @@ pub struct DaemonLeaseJobDiagnostics {
     /// represent a local process that can block daemon replacement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preserved_remote_job_ids: Vec<Uuid>,
+    /// Dead supervised work is resumed by its controller driver, never failed
+    /// by generic child reconciliation before its retained outcome is observed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_controller_job_ids: Vec<Uuid>,
 }
 
 /// Read-only recovery evidence for one active daemon job.
@@ -319,6 +323,9 @@ pub struct DaemonActiveJobRecoveryEvidence {
     pub terminal_evidence: Option<JobStatus>,
     pub child_pid: Option<u32>,
     pub child_started_at: Option<String>,
+    /// Controller work must recover through its driver, including when its
+    /// process evidence cannot be projected. It is never operator PID-less work.
+    pub controller_owned: bool,
     pub linked_durable_run_id: Option<String>,
     pub linked_durable_run_state: Option<DaemonLinkedDurableRunState>,
     pub linked_durable_run_terminal_status: Option<JobStatus>,
@@ -338,6 +345,10 @@ pub enum DaemonLinkedDurableRunState {
 pub enum DaemonActiveJobRecoveryDisposition {
     TerminalEvidence,
     DeadChild,
+    ReusedChildPid,
+    /// No external execution remains; the controller driver must still resume
+    /// its durable state to publish the domain outcome.
+    DriverRecovery,
     MissingChildIdentityRecoverable,
     ProtectedLive,
     BlockingAmbiguous,
@@ -362,6 +373,9 @@ pub struct LeaselessOrphanJobDiagnostics {
     /// Broker-owned queued or unexpired jobs preserved for their runner claim.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preserved_remote_job_ids: Vec<Uuid>,
+    /// Work with no live external owner, retained for controller-driver resume.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_controller_job_ids: Vec<Uuid>,
 }
 
 impl LeaselessOrphanJobDiagnostics {
@@ -389,6 +403,7 @@ impl DaemonLeaseJobDiagnostics {
         self.matching_count()
             .saturating_sub(self.protected_count())
             .saturating_sub(self.preserved_remote_job_ids.len())
+            .saturating_sub(self.preserved_controller_job_ids.len())
     }
 }
 

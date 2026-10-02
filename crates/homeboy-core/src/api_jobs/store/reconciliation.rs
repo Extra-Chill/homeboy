@@ -59,11 +59,10 @@ impl JobStore {
     }
 
     /// Read active-job recovery evidence without reconciling or persisting jobs.
-    /// Typed local-child identity is authoritative; legacy progress payloads are
-    /// intentionally not used to infer ownership. A linked durable run that is
-    /// already terminal is durable terminal evidence: it proves no workload for
-    /// that job remains, so the job is classified reconcilable instead of
-    /// blocking-ambiguous.
+    /// Typed execution-owner identity is authoritative; legacy progress payloads are
+    /// intentionally not used to infer ownership. A terminal linked durable run
+    /// proves absence for a generic handoff, but driver-owned supervision must
+    /// collect its own outcome: its launcher may outlive a linked attempt.
     pub fn active_daemon_job_recovery_evidence(
         &self,
         current_lease_id: Option<&str>,
@@ -87,18 +86,28 @@ impl JobStore {
                 let linked_durable_run_state = linked_durable_run_id
                     .as_deref()
                     .and_then(super::super::agent_task_terminal_recovery::linked_durable_run_state);
-                let terminal_evidence = terminal_evidence
-                    .or_else(|| linked_terminal.as_ref().map(|recovered| recovered.status));
-                let child_pid = stored
-                    .local_child
-                    .as_ref()
-                    .and_then(|child| child.process.as_ref())
-                    .map(|process| process.pid);
+                let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
+                // A driver's supervised launcher can outlive one linked attempt.
+                // Only the driver can turn that attempt into the work's outcome.
+                let terminal_evidence = terminal_evidence.or_else(|| {
+                    (!ownership.driver_owned)
+                        .then(|| linked_terminal.as_ref().map(|recovered| recovered.status))
+                        .flatten()
+                });
+                let child_pid = ownership.pid;
                 let disposition = if terminal_evidence.is_some() {
                     DaemonActiveJobRecoveryDisposition::TerminalEvidence
-                } else if let Some(child) = stored.local_child.as_ref() {
-                    match local_child_liveness(child) {
+                } else if let Some(liveness) = ownership.state {
+                    match liveness {
+                        LocalChildLiveness::Dead
+                            if ownership.driver_owned && child_pid.is_none() =>
+                        {
+                            DaemonActiveJobRecoveryDisposition::DriverRecovery
+                        }
                         LocalChildLiveness::Dead => DaemonActiveJobRecoveryDisposition::DeadChild,
+                        LocalChildLiveness::IdentityMismatch => {
+                            DaemonActiveJobRecoveryDisposition::ReusedChildPid
+                        }
                         LocalChildLiveness::Live => {
                             DaemonActiveJobRecoveryDisposition::ProtectedLive
                         }
@@ -124,6 +133,7 @@ impl JobStore {
                     terminal_evidence,
                     child_pid,
                     child_started_at: None,
+                    controller_owned: stored.controller_job.is_some(),
                     linked_durable_run_id,
                     linked_durable_run_state,
                     linked_durable_run_terminal_status: linked_terminal
@@ -236,15 +246,11 @@ impl JobStore {
                     None,
                 ));
             }
-            if stored
-                .local_child
-                .as_ref()
-                .and_then(|child| child.process.as_ref())
-                .is_some()
+            if stored.controller_job.is_some() || stored_job_execution_liveness(stored, &local_child_liveness).pid.is_some()
             {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    format!("job `{job_id}` has persisted child-process evidence; refusing operator no-PID recovery"),
+                    format!("job `{job_id}` has controller-driver or persisted child-process ownership; refusing operator no-PID recovery"),
                     Some(job_id.to_string()),
                     None,
                 ));
@@ -453,6 +459,9 @@ impl JobStore {
                 .values()
                 .filter(|stored| {
                     matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .filter(|stored| {
+                    !stored_job_execution_liveness(stored, &local_child_liveness).driver_owned
                 })
                 .filter_map(|stored| resolve_terminal(stored).map(|result| (stored.job.id, result)))
                 .collect::<Vec<_>>()
@@ -749,14 +758,17 @@ impl JobStore {
                     } else {
                         DeadLeaseJobDisposition::TerminalizeDead
                     }
-                } else if let Some(local_child) = stored.local_child.as_ref() {
-                    match inspect_local_child(local_child) {
+                } else if let Some(liveness) = stored_job_execution_liveness(stored, &inspect_local_child).state {
+                    match liveness {
                         LocalChildLiveness::Live => {
                             diagnostics.protected_job_ids.push(*job_id);
                             DeadLeaseJobDisposition::ProtectedLive
                         }
-                        LocalChildLiveness::Dead => {
-                            if let Some(recovered) = terminal_child_result(stored) {
+                        LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch => {
+                            if stored.controller_job.is_some() {
+                                diagnostics.preserved_controller_job_ids.push(*job_id);
+                                DeadLeaseJobDisposition::PreservedController
+                            } else if let Some(recovered) = terminal_child_result(stored) {
                                 DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
                             } else {
                                 DeadLeaseJobDisposition::TerminalizeDead
@@ -855,9 +867,14 @@ impl JobStore {
                 continue;
             }
             if let DeadLeaseJobDisposition::ProtectedUnsupported(evidence) = disposition {
+                let reason = if stored.controller_job.is_some() {
+                    "controller_execution_owner_unavailable"
+                } else {
+                    "local_child_identity_unsupported"
+                };
                 let duplicate = stored.events.last().is_some_and(|event| {
                     event.data.as_ref().is_some_and(|data| {
-                        data["reason"] == "local_child_identity_unsupported"
+                        data["reason"] == reason
                             && data["evidence"] == evidence
                     })
                 });
@@ -868,11 +885,11 @@ impl JobStore {
                         job_id,
                         kind: JobEventKind::Progress,
                         timestamp_ms: now,
-                        message: Some("local child recovery deferred".to_string()),
+                        message: Some("execution-owner recovery deferred".to_string()),
                         data: Some(serde_json::json!({
-                            "reason": "local_child_identity_unsupported",
+                            "reason": reason,
                             "evidence": evidence,
-                            "recovery": "Homeboy cannot reattach or collect this child result; it blocks replacement until exact process evidence is available.",
+                            "recovery": "Execution-owner absence is not proven; work stays protected until authoritative process or driver evidence is available.",
                         })),
                     });
                     stored.job.event_count = stored.events.len();
@@ -883,6 +900,9 @@ impl JobStore {
                 continue;
             }
             if matches!(disposition, DeadLeaseJobDisposition::PreservedRemote) {
+                continue;
+            }
+            if matches!(disposition, DeadLeaseJobDisposition::PreservedController) {
                 continue;
             }
             let reason = "daemon lease owner process was not running".to_string();
@@ -926,6 +946,7 @@ impl JobStore {
         }
         diagnostics.protected_job_ids.sort();
         diagnostics.preserved_remote_job_ids.sort();
+        diagnostics.preserved_controller_job_ids.sort();
         Ok(diagnostics)
         })
     }
@@ -975,9 +996,13 @@ impl JobStore {
             diagnostics
                 .preserved_remote_job_ids
                 .extend(lease.preserved_remote_job_ids.iter().copied());
+            diagnostics
+                .preserved_controller_job_ids
+                .extend(lease.preserved_controller_job_ids.iter().copied());
             for job_id in lease.matching_job_ids {
                 if lease.protected_job_ids.contains(&job_id)
                     || lease.preserved_remote_job_ids.contains(&job_id)
+                    || lease.preserved_controller_job_ids.contains(&job_id)
                 {
                     continue;
                 }
@@ -996,6 +1021,8 @@ impl JobStore {
         diagnostics.protected_job_ids.dedup();
         diagnostics.preserved_remote_job_ids.sort();
         diagnostics.preserved_remote_job_ids.dedup();
+        diagnostics.preserved_controller_job_ids.sort();
+        diagnostics.preserved_controller_job_ids.dedup();
         Ok(diagnostics)
     }
 

@@ -147,6 +147,17 @@ impl AgentTaskLoopJob {
 struct LoopWorkHandler;
 
 impl WorkJobHandler for LoopWorkHandler {
+    fn execution_owner(
+        &self,
+        state: &Value,
+    ) -> Result<homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner> {
+        use homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner as Owner;
+        let job = AgentTaskLoopJob::parse(state.clone())?;
+        if job.phase == WorkJobPhase::Completed {
+            return Ok(Owner::None);
+        }
+        loop_execution_owner(&job.request.loop_id, &job.request.generation)
+    }
     fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
         request["request"]["loop_id"]
             .as_str()
@@ -267,14 +278,8 @@ impl LoopWorkHandler {
     /// nothing durable will ever wake it, so supervision completes instead of
     /// polling forever.
     fn waiting_is_idle(&self, job: &AgentTaskLoopJob) -> bool {
-        agent_task_loop_controller::load_controller(&job.request.loop_id).is_ok_and(|record| {
-            record.state == AgentTaskLoopControllerState::Waiting
-                && record.open_wait_count() == 0
-                && record
-                    .next_actions
-                    .iter()
-                    .all(|action| !action.status.is_open())
-        })
+        agent_task_loop_controller::load_controller(&job.request.loop_id)
+            .is_ok_and(|record| controller_is_waiting_idle(&record))
     }
 
     fn observe(
@@ -284,6 +289,40 @@ impl LoopWorkHandler {
     ) -> Result<WorkJobStep> {
         job.phase = WorkJobPhase::Supervising;
         job.refresh_controller_state();
+        if invocation == WorkJobInvocation::Resume {
+            let record = agent_task_loop_controller::load_controller(&job.request.loop_id)?;
+            if record.metadata["command_recovery"]["state"] != "reaped"
+                && guarded_command_execution_owner(&record.metadata["command_recovery"]).is_some()
+            {
+                let owner = loop_execution_owner(&job.request.loop_id, &job.request.generation)?;
+                if matches!(
+                    owner.inspect(),
+                    homeboy_core::process::ProcessIdentityState::Live
+                        | homeboy_core::process::ProcessIdentityState::Unverifiable
+                ) {
+                    return Ok(WorkJobStep::Continue {
+                        checkpoint: job.to_checkpoint()?,
+                        progress: job.result(),
+                        wait: SUPERVISION_POLL,
+                    });
+                }
+                if let Some(record) =
+                    crate::api_jobs_terminal_recovery::recovered_loop_command_record(
+                        &job.request.loop_id,
+                    )
+                {
+                    agent_task_loop_controller::write_controller(&record)?;
+                    job.controller_state = Some(record.state);
+                    job.resume_result = Some(json!({
+                        "recovery": "unknown", "reason": "command owner exited before durable completion; command is not redispatched"
+                    }));
+                    job.phase = WorkJobPhase::Completed;
+                    return Err(homeboy_core::Error::internal_unexpected(
+                        "guarded command owner exited before durable completion; outcome is unknown and command is not redispatched",
+                    ));
+                }
+            }
+        }
         self.advance_waiting(job)?;
         if self.waiting_is_idle(job) {
             job.phase = WorkJobPhase::Completed;
@@ -486,6 +525,167 @@ enum ResumeDispatchDecision {
     Unknown,
 }
 
+#[derive(Deserialize)]
+struct LoopCommandExecutionOwnership {
+    schema: String,
+    action_id: String,
+    owner_pid: u32,
+    owner_start: homeboy_core::process::ProcessStartIdentity,
+    root_pid: Option<u32>,
+    root_start: Option<homeboy_core::process::ProcessStartIdentity>,
+}
+
+/// Shared by supervision and the read-only terminal-evidence provider. Missing
+/// root publication is an unresolved spawn handoff, never proof of death.
+pub(crate) fn guarded_command_execution_owner(
+    value: &Value,
+) -> Option<homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner> {
+    use homeboy_core::daemon::controller_job_driver::{
+        ControllerJobExecutionOwner as Owner, ControllerJobExecutionProcess,
+    };
+    if value.is_null() {
+        return None;
+    }
+    let Ok(receipt) = serde_json::from_value::<LoopCommandExecutionOwnership>(value.clone()) else {
+        return Some(Owner::Unavailable);
+    };
+    if receipt.schema != "homeboy/loop-command-ownership/v1" || receipt.action_id.is_empty() {
+        return Some(Owner::Unavailable);
+    }
+    let Some((root_pid, root_start)) = receipt.root_pid.zip(receipt.root_start) else {
+        return Some(Owner::Unavailable);
+    };
+    Some(Owner::Processes(vec![
+        ControllerJobExecutionProcess {
+            pid: receipt.owner_pid,
+            start_identity: receipt.owner_start,
+        },
+        ControllerJobExecutionProcess {
+            pid: root_pid,
+            start_identity: root_start,
+        },
+    ]))
+}
+
+/// Project only generation-bound provider ownership. Reading status must never
+/// advance a waiting controller or replay a dispatch receipt.
+fn loop_execution_owner(
+    loop_id: &str,
+    generation: &str,
+) -> Result<homeboy_core::daemon::controller_job_driver::ControllerJobExecutionOwner> {
+    use homeboy_core::daemon::controller_job_driver::{
+        ControllerJobExecutionOwner as Owner, ControllerJobExecutionProcess,
+    };
+    use homeboy_core::process::ProcessStartIdentity;
+    let record = agent_task_loop_controller::load_controller(loop_id)?;
+    if record.metadata["command_recovery"]["state"] != "reaped" {
+        if let Some(owner) = guarded_command_execution_owner(&record.metadata["command_recovery"]) {
+            let dispatch = &record.metadata["loop_dispatch_receipt"];
+            if dispatch["schema"] != "homeboy/agent-task-loop-dispatch-receipt/v1"
+                || dispatch["generation"].as_str() != Some(generation)
+                || dispatch["action_id"] != record.metadata["command_recovery"]["action_id"]
+            {
+                return Ok(Owner::Unavailable);
+            }
+            return Ok(owner);
+        }
+    }
+    let Some(runs) = record.metadata["active_provider_runs"].as_array() else {
+        return Ok(
+            if controller_state_is_terminal(record.state) || controller_is_waiting_idle(&record) {
+                Owner::None
+            } else {
+                Owner::Unavailable
+            },
+        );
+    };
+    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let mut processes = Vec::new();
+    for run in runs {
+        let Some(run_id) = run.as_str() else {
+            return Ok(Owner::Unavailable);
+        };
+        let lineage = &record.metadata["active_provider_run_lineage"][run_id];
+        if lineage["loop_id"].as_str() != Some(loop_id)
+            || lineage["generation"].as_str() != Some(generation)
+            || !lineage["action_id"].as_str().is_some_and(|id| {
+                record
+                    .next_actions
+                    .iter()
+                    .any(|action| action.action_id == id && action.status.is_open())
+            })
+        {
+            return Ok(Owner::Unavailable);
+        }
+        let run = store.read_record_bounded(run_id)?;
+        if run.state.is_terminal() {
+            continue;
+        }
+        if run.state != crate::agent_task_lifecycle::AgentTaskRunState::Running {
+            return Ok(Owner::Unavailable);
+        }
+        let executions = run.metadata["provider_executions"].as_array();
+        let active = executions
+            .into_iter()
+            .flatten()
+            .filter(|execution| execution["state"] == "running")
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            let Some(pid) = run.metadata["runner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+            else {
+                return Ok(Owner::Unavailable);
+            };
+            let Ok(start_identity) =
+                serde_json::from_value(run.metadata["runner_process_start_identity"].clone())
+            else {
+                return Ok(Owner::Unavailable);
+            };
+            processes.push(ControllerJobExecutionProcess {
+                pid,
+                start_identity,
+            });
+        } else {
+            for execution in active {
+                let Some(pid) = execution["owner_pid"]
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())
+                else {
+                    return Ok(Owner::Unavailable);
+                };
+                let Some(starttime_ticks) = execution["owner_linux_starttime_ticks"].as_u64()
+                else {
+                    return Ok(Owner::Unavailable);
+                };
+                processes.push(ControllerJobExecutionProcess {
+                    pid,
+                    start_identity: ProcessStartIdentity::Linux { starttime_ticks },
+                });
+            }
+        }
+    }
+    if !processes.is_empty() {
+        return Ok(Owner::Processes(processes));
+    }
+    let receipt = &record.metadata["loop_dispatch_receipt"];
+    Ok(
+        if controller_state_is_terminal(record.state)
+            || controller_is_waiting_idle(&record)
+            || (receipt["schema"] == "homeboy/agent-task-loop-dispatch-receipt/v1"
+                && receipt["generation"].as_str() == Some(generation)
+                && matches!(
+                    receipt["state"].as_str(),
+                    Some("completed" | "pre_dispatch")
+                ))
+        {
+            Owner::None
+        } else {
+            Owner::Unavailable
+        },
+    )
+}
+
 fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDispatchDecision> {
     let record = agent_task_loop_controller::load_controller(loop_id)?;
     let has_pending_action = record
@@ -554,40 +754,8 @@ fn resume_dispatch_is_proven(loop_id: &str, generation: &str) -> Result<ResumeDi
         // is ambiguous and must not be replayed.
         return Ok(ResumeDispatchDecision::Unknown);
     }
-    let Ok(store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-    else {
-        return Ok(ResumeDispatchDecision::Unknown);
-    };
-    let lineage = record
-        .metadata
-        .get("active_provider_run_lineage")
-        .and_then(Value::as_object);
-    let owned_active_run = active_runs.iter().any(|run_id| {
-        let Some(lineage) = lineage
-            .and_then(|lineage| lineage.get(*run_id))
-            .and_then(Value::as_object)
-        else {
-            return false;
-        };
-        let exact_lineage = lineage.get("loop_id").and_then(Value::as_str) == Some(loop_id)
-            && lineage.get("generation").and_then(Value::as_str) == Some(generation)
-            && lineage
-                .get("action_id")
-                .and_then(Value::as_str)
-                .is_some_and(|action_id| {
-                    record
-                        .next_actions
-                        .iter()
-                        .any(|action| action.action_id == action_id && action.status.is_open())
-                });
-        exact_lineage
-            && store.read_record(run_id).is_ok_and(|run| {
-                run.state == crate::agent_task_lifecycle::AgentTaskRunState::Running
-                    && run.local_owner_liveness()
-                        == crate::agent_task_lifecycle::LocalOwnerLiveness::Live
-            })
-    });
+    let owned_active_run = loop_execution_owner(loop_id, generation)
+        .is_ok_and(|owner| owner.inspect() == homeboy_core::process::ProcessIdentityState::Live);
     Ok(if owned_active_run {
         ResumeDispatchDecision::SafeContinuation
     } else {
@@ -733,6 +901,17 @@ fn controller_state_is_terminal(state: AgentTaskLoopControllerState) -> bool {
             | AgentTaskLoopControllerState::Escalated
             | AgentTaskLoopControllerState::Failed
     )
+}
+
+fn controller_is_waiting_idle(
+    record: &crate::agent_task_loop_controller::AgentTaskLoopControllerRecord,
+) -> bool {
+    record.state == AgentTaskLoopControllerState::Waiting
+        && record.open_wait_count() == 0
+        && record
+            .next_actions
+            .iter()
+            .all(|action| !action.status.is_open())
 }
 
 pub fn register_loop_work_job_handler() {
@@ -939,6 +1118,127 @@ mod tests {
     }
 
     #[test]
+    fn loop_execution_owner_is_generation_bound_read_only_and_visible_to_generic_recovery() {
+        use homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition as Disposition;
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            super::super::work_job::register_work_job_driver();
+            let mut child = SupervisedProcessFixture::spawn();
+            let loop_id = "ownership-loop";
+            let generation = "generation-test";
+            let mut controller = recovery_record(loop_id, generation);
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "ownership-loop-provider",
+                Vec::new(),
+            );
+            let mut run =
+                crate::agent_task_lifecycle::submit_plan(&plan, Some("ownership-loop-run"))
+                    .unwrap();
+            run.state = crate::agent_task_lifecycle::AgentTaskRunState::Running;
+            run.lifecycle =
+                homeboy_core::run_lifecycle_record::RunLifecycleRecord::with_execution_state(
+                    homeboy_core::run_lifecycle_record::RunExecutionState::Running,
+                );
+            run.metadata["runner_pid"] = json!(child.pid());
+            run.metadata["runner_process_start_identity"] = json!(child.identity);
+            let lifecycle_store =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .unwrap();
+            lifecycle_store.write_record(&run).unwrap();
+            controller.metadata["active_provider_runs"] = json!([run.run_id]);
+            controller.metadata["active_provider_run_lineage"] = json!({run.run_id.clone(): {
+                "loop_id": loop_id, "generation": generation, "action_id": controller.next_actions[0].action_id
+            }});
+            controller.metadata["loop_dispatch_receipt"] = json!({
+                "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                "generation": generation, "state": "dispatching", "action_id": controller.next_actions[0].action_id
+            });
+            agent_task_loop_controller::write_controller(&controller).unwrap();
+            let submission = submission(loop_id);
+            let path = home.path().join("ownership-loop-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "loop-lease",
+            )
+            .unwrap();
+            harness
+                .handle()
+                .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
+                .unwrap();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            let before = std::fs::read(&path).unwrap();
+            let controller_before =
+                serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
+                    .unwrap();
+            let run_before =
+                serde_json::to_value(lifecycle_store.read_record_bounded(&run.run_id).unwrap())
+                    .unwrap();
+            let evidence = restarted
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| false);
+            assert_eq!(evidence[0].child_pid, Some(child.pid()));
+            assert_eq!(evidence[0].disposition, Disposition::ProtectedLive);
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(
+                serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
+                    .unwrap(),
+                controller_before
+            );
+            assert_eq!(
+                serde_json::to_value(lifecycle_store.read_record_bounded(&run.run_id).unwrap())
+                    .unwrap(),
+                run_before
+            );
+            assert_eq!(
+                resume_dispatch_is_proven(loop_id, generation).unwrap(),
+                ResumeDispatchDecision::SafeContinuation
+            );
+
+            controller.metadata["active_provider_run_lineage"][&run.run_id]["generation"] =
+                json!("foreign-generation");
+            agent_task_loop_controller::write_controller(&controller).unwrap();
+            assert_eq!(
+                restarted
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| false)[0]
+                    .disposition,
+                Disposition::BlockingAmbiguous
+            );
+            controller.metadata["active_provider_run_lineage"][&run.run_id]["generation"] =
+                json!(generation);
+            agent_task_loop_controller::write_controller(&controller).unwrap();
+            child.stop();
+            assert_eq!(
+                restarted
+                    .store()
+                    .active_daemon_job_recovery_evidence(None, |_| true)[0]
+                    .disposition,
+                Disposition::DeadChild
+            );
+            let diagnostics = restarted
+                .store()
+                .reconcile_dead_daemon_lease_jobs("loop-lease")
+                .unwrap();
+            assert_eq!(
+                diagnostics.preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            restarted.recover_after_restart();
+            restarted.wait_until_terminal().unwrap();
+            assert_eq!(
+                agent_task_loop_controller::load_controller(loop_id)
+                    .unwrap()
+                    .state,
+                AgentTaskLoopControllerState::Failed,
+                "an interrupted dispatch must not be replayed"
+            );
+        });
+    }
+
+    #[test]
     fn resume_recovery_accepts_only_current_dispatch_receipts() {
         with_isolated_home(|_| {
             let generation = "generation-current";
@@ -971,6 +1271,117 @@ mod tests {
                 resume_dispatch_is_proven("loop-recovery-completed", generation)
                     .expect("classify completed"),
                 ResumeDispatchDecision::SafeContinuation
+            );
+        });
+    }
+
+    #[test]
+    fn guarded_loop_command_status_is_read_only_and_dead_work_recovers_only_through_driver() {
+        use homeboy_core::api_jobs::{
+            DaemonActiveJobRecoveryDisposition as Disposition, JobStatus,
+        };
+        use homeboy_core::test_support::SupervisedProcessFixture;
+        with_isolated_home(|home| {
+            crate::api_jobs_terminal_recovery::register();
+            super::super::work_job::register_work_job_driver();
+            let mut owner = SupervisedProcessFixture::spawn();
+            let mut root = SupervisedProcessFixture::spawn();
+            let loop_id = "ownership-guarded-command";
+            let marker = home.path().join("command-must-not-replay");
+            let mut record =
+                agent_task_loop_controller::create_controller(loop_id, "repair", "v1").unwrap();
+            record.record_action(crate::agent_task_loop_controller::AgentTaskLoopPolicyAction::RunCommand {
+                dedupe_key: "guarded-command".to_string(), entity_id: None,
+                request: json!({"execution": {"command": "sh", "args": ["-c", "touch \"$1\"", "--", marker]}}),
+            }, "owned command fixture");
+            record.next_actions[0].status =
+                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Running;
+            record.metadata["loop_dispatch_receipt"] = json!({
+                "schema": "homeboy/agent-task-loop-dispatch-receipt/v1",
+                "generation": "generation-test", "action_id": record.next_actions[0].action_id, "state": "dispatching"
+            });
+            record.metadata["command_recovery"] = json!({
+                "schema": "homeboy/loop-command-ownership/v1", "action_id": record.next_actions[0].action_id,
+                "owner_pid": owner.pid(), "owner_start": owner.identity,
+                "root_pid": root.pid(), "root_start": root.identity, "state": "running"
+            });
+            agent_task_loop_controller::write_controller(&record).unwrap();
+            let submission = submission(loop_id);
+            let path = home.path().join("ownership-guarded-jobs.json");
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable(
+                Arc::clone(&driver),
+                submission["request"].clone(),
+                &path,
+                "guarded-lease",
+            )
+            .unwrap();
+            harness
+                .handle()
+                .checkpoint(driver.prepare(submission["request"].clone()).unwrap())
+                .unwrap();
+            owner.stop();
+            let before =
+                serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
+                    .unwrap();
+            let evidence = harness
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| false);
+            assert_eq!(
+                evidence[0].disposition,
+                Disposition::ProtectedLive,
+                "a surviving root is protected even after its daemon owner died"
+            );
+            assert_eq!(evidence[0].child_pid, Some(root.pid()));
+            root.stop();
+            let job_bytes = std::fs::read(&path).unwrap();
+            let evidence = harness
+                .store()
+                .active_daemon_job_recovery_evidence(None, |_| true);
+            assert_eq!(evidence[0].disposition, Disposition::DeadChild);
+            assert_eq!(
+                evidence[0].linked_durable_run_terminal_status,
+                Some(JobStatus::Failed)
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), job_bytes);
+            assert_eq!(
+                serde_json::to_value(agent_task_loop_controller::load_controller(loop_id).unwrap())
+                    .unwrap(),
+                before,
+                "terminal-evidence reads cannot reconcile the controller"
+            );
+            assert!(harness
+                .store()
+                .reconcile_terminal_linked_daemon_jobs()
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                harness
+                    .store()
+                    .reconcile_dead_daemon_lease_jobs("guarded-lease")
+                    .unwrap()
+                    .preserved_controller_job_ids,
+                vec![harness.job().unwrap().id]
+            );
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            restarted.recover_after_restart();
+            assert_eq!(
+                restarted.wait_until_terminal().unwrap().status,
+                JobStatus::Failed
+            );
+            let recovered = agent_task_loop_controller::load_controller(loop_id).unwrap();
+            assert_eq!(recovered.state, AgentTaskLoopControllerState::Failed);
+            assert_eq!(
+                recovered.next_actions[0].status,
+                crate::agent_task_loop_controller::AgentTaskLoopActionStatus::Failed
+            );
+            assert_eq!(
+                recovered.metadata["command_recovery"]["state"],
+                "owner_lost_unknown_outcome"
+            );
+            assert!(
+                !marker.exists(),
+                "driver recovery must never replay the command"
             );
         });
     }
@@ -1451,7 +1862,7 @@ mod tests {
             });
 
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            let _provider_run_id = loop {
+            let provider_run_id = loop {
                 let active = agent_task_loop_controller::load_controller(loop_id)
                     .expect("controller exists")
                     .metadata
@@ -1468,10 +1879,20 @@ mod tests {
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "provider admission missing"
+                    "provider admission missing: controller={:?}; marker={}; checkpoint={:?}; events={:?}",
+                    agent_task_loop_controller::load_controller(loop_id),
+                    marker_path.exists(),
+                    harness.checkpoint(),
+                    harness.events()
                 );
                 std::thread::sleep(Duration::from_millis(20));
             };
+            assert_eq!(
+                agent_task_loop_controller::load_controller(loop_id)?
+                    .metadata["active_provider_run_lineage"][&provider_run_id]["generation"],
+                "generation-1",
+                "provider lineage must retain the admitted WorkJob generation"
+            );
             let cancellation_started = std::time::Instant::now();
             harness
                 .request_cancellation("cancel active provider")
