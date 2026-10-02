@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.13] - 2026-10-02
+
+### Fixed
+- preserve terminal completion custody and stop stale retries
+
 ## [0.399.12] - 2026-10-02
 
 ### Changed
