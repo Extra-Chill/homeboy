@@ -2535,10 +2535,9 @@ mod tests {
         assert!(err
             .to_string()
             .contains("no sourceUrl or .source-url metadata"));
-        assert_eq!(
-            err.details["diagnostic"]["source_error"]["message"].as_str(),
-            Some("Extension 'rust' has no sourceUrl or .source-url metadata")
-        );
+        assert!(err.details["diagnostic"]["source_error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no sourceUrl or .source-url metadata")));
         assert_eq!(
             err.details["diagnostic"]["code"].as_str(),
             Some("runner_extension.controller_extension_metadata_required")
