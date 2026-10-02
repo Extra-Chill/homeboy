@@ -2219,6 +2219,16 @@ pub struct LabStagingStageIntent {
     pub operation_id: String,
 }
 
+/// Retain partial/uncertain workspace effects with the intent even when the
+/// controller job is cancelled and its public error is replaced by cancellation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LabWorkspaceConstructionFailure {
+    pub code: String,
+    pub message: String,
+    pub details: Value,
+}
+
 /// Private recovery state. Identities are references rather than output blobs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -2236,6 +2246,8 @@ pub struct LabStagingCheckpoint {
     pub stage_intent: Option<LabStagingStageIntent>,
     #[serde(default)]
     pub phase_timings: Vec<LabStagingPhaseTiming>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_construction_failure: Option<LabWorkspaceConstructionFailure>,
 }
 
 impl LabStagingCheckpoint {
@@ -2253,6 +2265,7 @@ impl LabStagingCheckpoint {
             final_runner_job_id: None,
             stage_intent: None,
             phase_timings: Vec::new(),
+            workspace_construction_failure: None,
         }
     }
 
@@ -2290,6 +2303,10 @@ impl LabStagingCheckpoint {
                 LabStagingPhase::Completed => "completed",
             },
             "final_runner_job_id": self.final_runner_job_id,
+            "workspace_construction_failure": self.workspace_construction_failure.as_ref().map(|failure| json!({
+                "code": failure.code,
+                "custody_retained": true,
+            })),
             "staging_latency": {
                 "phases": self.phase_timings,
                 "slowest": slowest,
@@ -2600,6 +2617,37 @@ const LAB_STAGING_POLL_FALLBACK_BUDGET: Duration = Duration::from_secs(6 * 60 * 
 /// poll away from finishing. This keeps that grace bounded.
 const LAB_STAGING_POLL_MIN_BUDGET: Duration = Duration::from_secs(30);
 
+/// Construction admits new effects, so it gets no observation-only expiry
+/// grace. Translate the absolute lifecycle budget once; every workspace shares
+/// that same monotonic deadline, including additional runtime roots.
+pub(crate) fn workspace_stage_control(
+    plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> crate::workspace::WorkspaceControl {
+    let now = now_unix_ms();
+    let remaining = plan
+        .and_then(|plan| {
+            plan.options
+                .execution_budget
+                .remaining_deadline_ms(now)
+                .or_else(|| {
+                    plan.tasks
+                        .iter()
+                        .filter_map(|task| task.limits.execution_deadline_unix_ms)
+                        .min()
+                        .map(|deadline| deadline.saturating_sub(now))
+                })
+        })
+        .map(Duration::from_millis)
+        .unwrap_or(LAB_STAGING_POLL_FALLBACK_BUDGET);
+    crate::workspace::WorkspaceControl::new(
+        homeboy_core::cooperative_control::CooperativeControl::new(
+            Instant::now() + remaining,
+            cancelled,
+        ),
+    )
+}
+
 /// First backoff step. Matches the flat 200ms these loops used before bounding,
 /// so a job that settles immediately is observed just as fast as it was.
 const LAB_STAGING_POLL_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
@@ -2766,6 +2814,7 @@ trait LabStagingStageOperations: Send + Sync {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
         handoff_identity: Option<LabHandoffHomeboyIdentity>,
+        cancellation: &LabStagingCancellationToken,
     ) -> Result<(String, String)>;
     fn materialize_runtime(
         &self,
@@ -3261,6 +3310,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
         homeboy_handoff_identity: Option<LabHandoffHomeboyIdentity>,
+        cancellation: &LabStagingCancellationToken,
     ) -> Result<(String, String)> {
         if checkpoint.phase != LabStagingPhase::AcceptedMaterializeWorkspace {
             return Err(Error::internal_unexpected(
@@ -3324,20 +3374,27 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             },
         };
         let workspace_root = offload_request.job_overrides.workspace_root.as_deref();
-        let stage = crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage(
-            &offload_request,
-            crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
-                &request.recipe.command,
-            ),
-            crate::lab_plan::base_lab_plan(None),
-            &request.recipe.runner_id,
-            source_path,
-            &["homeboy".to_string()],
-            workspace_root,
-            Some(request.recipe.run_id.clone()),
-            &request.recipe.normalized_args,
-            Some(&request.recipe.run_id),
-        )?;
+        let token = cancellation.clone();
+        let control = workspace_stage_control(
+            Some(&request.durable_agent_task_plan),
+            Arc::new(move || token.is_cancelled()),
+        );
+        let stage =
+            crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
+                &offload_request,
+                crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
+                    &request.recipe.command,
+                ),
+                crate::lab_plan::base_lab_plan(None),
+                &request.recipe.runner_id,
+                source_path,
+                &["homeboy".to_string()],
+                workspace_root,
+                Some(request.recipe.run_id.clone()),
+                &request.recipe.normalized_args,
+                Some(&request.recipe.run_id),
+                &control,
+            )?;
         let workspace_mapping =
             serde_json::to_value(&stage.workspace_mapping).map_err(|error| {
                 Error::internal_json(
@@ -4184,10 +4241,29 @@ impl StageExecutionAdapter {
         // returns. Keep the generic runtime-generation admission barrier until
         // the runner job is durably bound, so a concurrent refresh cannot swap
         // the selected binary between exact identity validation and dispatch.
+        let token = cancellation.clone();
+        let control = workspace_stage_control(
+            Some(&request.durable_agent_task_plan),
+            Arc::new(move || token.is_cancelled()),
+        );
+        if checkpoint.final_runner_job_id.is_none() {
+            control.checkpoint()?;
+        }
         let mut runtime_generation_pin = checkpoint
             .final_runner_job_id
             .is_none()
-            .then(|| homeboy_core::runtime_promotion::pin_cook_generation(&request.recipe.run_id))
+            .then(|| {
+                homeboy_core::runtime_promotion::pin_cook_generation_waiting(
+                    &request.recipe.run_id,
+                    control
+                        .deadline()
+                        .expect("staging has a finite deadline")
+                        .saturating_duration_since(Instant::now()),
+                    || control.checkpoint().is_err(),
+                    |_| {},
+                )
+                .map_err(|error| control.checkpoint().err().unwrap_or(error))
+            })
             .transpose()?;
         self.operations
             .validate_recorded_identities(request, &checkpoint)?;
@@ -4224,6 +4300,17 @@ impl StageExecutionAdapter {
                 .then(|| self.operations.recover_stage(request, &checkpoint, &intent))
                 .transpose()?
                 .flatten();
+            if recovered.is_none() {
+                if let Some(failure) = &checkpoint.workspace_construction_failure {
+                    let error = Error::new(
+                        homeboy_core::error::ErrorCode::from_str(&failure.code)
+                            .unwrap_or(homeboy_core::error::ErrorCode::InternalUnexpected),
+                        failure.message.clone(),
+                        failure.details.clone(),
+                    );
+                    return Err(error.with_retryable(false));
+                }
+            }
             let effect = (|| -> Result<LabStagingStageEffect> {
                 Ok(match recovered {
                     Some(effect) => effect,
@@ -4231,9 +4318,13 @@ impl StageExecutionAdapter {
                         LabStagingPhase::AcceptedMaterializeWorkspace => {
                             let handoff_identity =
                                 self.operations.validate_handoff_identity(request)?;
-                            let (source_snapshot_id, workspace_id) = self
-                                .operations
-                                .materialize_workspace(request, &checkpoint, handoff_identity)?;
+                            let (source_snapshot_id, workspace_id) =
+                                self.operations.materialize_workspace(
+                                    request,
+                                    &checkpoint,
+                                    handoff_identity,
+                                    cancellation,
+                                )?;
                             LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id)
                         }
                         LabStagingPhase::MaterializeRuntime => {
@@ -4279,7 +4370,19 @@ impl StageExecutionAdapter {
             let effect = match effect {
                 Ok(effect) => effect,
                 Err(error) => {
-                    checkpoint.finish_phase_timing("failed");
+                    if checkpoint.phase == LabStagingPhase::AcceptedMaterializeWorkspace {
+                        checkpoint.workspace_construction_failure =
+                            Some(LabWorkspaceConstructionFailure {
+                                code: error.code.as_str().to_string(),
+                                message: error.message.clone(),
+                                details: error.details.clone(),
+                            });
+                    }
+                    checkpoint.finish_phase_timing(if cancellation.is_cancelled() {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    });
                     persist(&checkpoint)?;
                     return Err(error);
                 }
@@ -4291,7 +4394,16 @@ impl StageExecutionAdapter {
             if matches!(effect, LabStagingStageEffect::Dispatch(_)) {
                 runtime_generation_pin.take();
             }
-            if cancellation.is_cancelled() {
+            // Workspace completion has a durable attachment, and dispatch has
+            // an accepted child binding: checkpoint those known effects before
+            // observing cancellation. Other stages retain their existing
+            // partial-effect reconciliation boundary.
+            if cancellation.is_cancelled()
+                && !matches!(
+                    effect,
+                    LabStagingStageEffect::Workspace(_, _) | LabStagingStageEffect::Dispatch(_)
+                )
+            {
                 checkpoint.finish_phase_timing("cancelled");
                 persist(&checkpoint)?;
                 return Err(Self::cancellation_error());
@@ -4302,6 +4414,7 @@ impl StageExecutionAdapter {
                         phase: LabStagingPhase::MaterializeRuntime,
                         source_snapshot_id: Some(source_snapshot_id),
                         workspace_id: Some(workspace_id),
+                        workspace_construction_failure: None,
                         stage_intent: None,
                         ..checkpoint
                     }
@@ -5749,6 +5862,8 @@ mod tests {
         reject_handoff_identity: Mutex<bool>,
         fail_hydration: Mutex<bool>,
         cancel_during_hydration: Mutex<bool>,
+        cancel_during_workspace: AtomicBool,
+        cancel_after_workspace: AtomicBool,
         recovered_runner_job_id: Mutex<Option<String>>,
         active_staging_jobs: AtomicUsize,
         fail_observation: Mutex<bool>,
@@ -5849,7 +5964,10 @@ mod tests {
             assert_eq!(intent.operation_id, checkpoint.operation_id_for_phase());
             let calls = self.calls();
             let recovered = match checkpoint.phase {
-                LabStagingPhase::AcceptedMaterializeWorkspace if calls.contains(&"workspace") => {
+                LabStagingPhase::AcceptedMaterializeWorkspace
+                    if calls.contains(&"workspace")
+                        && checkpoint.workspace_construction_failure.is_none() =>
+                {
                     Some(LabStagingStageEffect::Workspace(
                         "snapshot-1".to_string(),
                         "workspace-1".to_string(),
@@ -5898,8 +6016,20 @@ mod tests {
             _request: &LabStagingExecutionRequest,
             _checkpoint: &LabStagingCheckpoint,
             _handoff_identity: Option<LabHandoffHomeboyIdentity>,
+            cancellation: &LabStagingCancellationToken,
         ) -> Result<(String, String)> {
             self.record("workspace");
+            if self.cancel_during_workspace.swap(false, Ordering::SeqCst) {
+                cancellation.cancel();
+                let mut error = Error::internal_unexpected("workspace construction cancelled");
+                error.details["workspace_sync"] = json!({"cancelled": true});
+                error.details["completed_primary_workspace"] =
+                    json!({"remote_path": "workspace-1", "status": "materialized"});
+                return Err(error);
+            }
+            if self.cancel_after_workspace.swap(false, Ordering::SeqCst) {
+                cancellation.cancel();
+            }
             Ok(("snapshot-1".to_string(), "workspace-1".to_string()))
         }
 
@@ -6757,7 +6887,10 @@ mod tests {
         );
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
-        assert!(error.message.contains("before workspace materialization"));
+        assert!(
+            error.message.contains("before workspace materialization"),
+            "unexpected staging admission error: {error:?}"
+        );
         assert!(!error.message.contains("warning"));
         let recovery = error.details["tried"]
             .as_array()
@@ -7139,6 +7272,176 @@ mod tests {
             );
             assert_eq!(operations.calls(), ["validate", "hydration"]);
         }
+    }
+
+    #[test]
+    fn cancellation_inside_workspace_preserves_custody_and_releases_only_its_pin() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let unrelated =
+                homeboy_core::runtime_promotion::pin_cook_generation("unrelated-active-job")
+                    .unwrap();
+            let pins = homeboy_core::paths::runtime_promotion_dir()
+                .unwrap()
+                .join("pins");
+            let unrelated_records = std::fs::read_dir(&pins)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<Vec<_>>();
+            let operations = Arc::new(RecordedStageOperations::default());
+            operations
+                .cancel_during_workspace
+                .store(true, Ordering::SeqCst);
+            let adapter = StageExecutionAdapter::new(operations.clone());
+            let mut persisted = Vec::new();
+            let token = LabStagingCancellationToken::default();
+            let error = adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    LabStagingCheckpoint::initial(&envelope()),
+                    &token,
+                    |checkpoint| {
+                        persisted.push(checkpoint.clone());
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert!(token.is_cancelled());
+            assert_eq!(error.details["workspace_sync"]["cancelled"], true);
+            let last = persisted.last().unwrap();
+            assert_eq!(last.phase, LabStagingPhase::AcceptedMaterializeWorkspace);
+            assert!(last.stage_intent.is_some());
+            assert_eq!(last.phase_timings[0].status, "cancelled");
+            assert_eq!(
+                last.workspace_construction_failure
+                    .as_ref()
+                    .unwrap()
+                    .details["completed_primary_workspace"]["remote_path"],
+                "workspace-1"
+            );
+            assert_eq!(
+                operations.calls(),
+                ["validate", "handoff-identity", "workspace"]
+            );
+            assert_eq!(
+                std::fs::read_dir(&pins).unwrap().count(),
+                unrelated_records.len()
+            );
+            assert!(unrelated_records.iter().all(|path| path.exists()));
+            // A fresh driver cannot treat retained partial effects as absence.
+            assert!(adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    last.clone(),
+                    &LabStagingCancellationToken::default(),
+                    |_| Ok(())
+                )
+                .is_err());
+            assert_eq!(
+                operations.calls(),
+                ["validate", "handoff-identity", "workspace", "validate"]
+            );
+            drop(unrelated);
+            assert_eq!(std::fs::read_dir(&pins).unwrap().count(), 0);
+        });
+    }
+
+    #[test]
+    fn completed_workspace_is_checkpointed_before_cancellation_and_never_repeated() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operations = Arc::new(RecordedStageOperations::default());
+            operations
+                .cancel_after_workspace
+                .store(true, Ordering::SeqCst);
+            let adapter = StageExecutionAdapter::new(operations.clone());
+            let mut last = LabStagingCheckpoint::initial(&envelope());
+            assert!(adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    last.clone(),
+                    &LabStagingCancellationToken::default(),
+                    |checkpoint| {
+                        last = checkpoint.clone();
+                        Ok(())
+                    }
+                )
+                .is_err());
+            assert_eq!(last.phase, LabStagingPhase::MaterializeRuntime);
+            assert_eq!(last.workspace_id.as_deref(), Some("workspace-1"));
+            assert!(last.stage_intent.is_none());
+            assert_eq!(
+                operations.calls(),
+                ["validate", "handoff-identity", "workspace"]
+            );
+            let completed = adapter
+                .execute_with_checkpoint(
+                    &execution_request(),
+                    last,
+                    &LabStagingCancellationToken::default(),
+                    |_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(completed.phase, LabStagingPhase::Completed);
+            assert_eq!(
+                operations
+                    .calls()
+                    .iter()
+                    .filter(|call| **call == "workspace")
+                    .count(),
+                1
+            );
+        });
+    }
+
+    #[test]
+    fn expired_workspace_budget_has_no_observation_grace_or_provider_dispatch() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operations = Arc::new(RecordedStageOperations::default());
+            let adapter = StageExecutionAdapter::new(operations.clone());
+            let mut request = execution_request();
+            request
+                .durable_agent_task_plan
+                .options
+                .execution_budget
+                .deadline_unix_ms = Some(now_unix_ms().saturating_sub(1));
+            let error = adapter
+                .execute_with_checkpoint(
+                    &request,
+                    LabStagingCheckpoint::initial(&envelope()),
+                    &LabStagingCancellationToken::default(),
+                    |_| Ok(()),
+                )
+                .unwrap_err();
+            assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+            assert!(operations.calls().is_empty());
+        });
+    }
+
+    #[test]
+    fn workspace_failure_public_projection_keeps_private_custody_details_private() {
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        checkpoint.workspace_construction_failure = Some(LabWorkspaceConstructionFailure {
+            code: "internal.unexpected".to_string(),
+            message: "private-construction-diagnostic".to_string(),
+            details: json!({
+                "completed_primary_workspace": { "source": "private-source-locator" },
+                "diagnostic": "private-custody-value",
+            }),
+        });
+        let public = checkpoint.public_projection();
+        assert_eq!(
+            public["workspace_construction_failure"]["code"],
+            "internal.unexpected"
+        );
+        assert_eq!(
+            public["workspace_construction_failure"]["custody_retained"],
+            true
+        );
+        assert!(!public.to_string().contains("private-"));
+        let retained = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(
+            retained["workspace_construction_failure"]["details"]["diagnostic"],
+            "private-custody-value"
+        );
     }
 
     #[test]

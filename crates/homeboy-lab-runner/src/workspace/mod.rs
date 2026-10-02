@@ -6,6 +6,8 @@
 //! submodules; this module re-exports the surface consumed elsewhere in the
 //! runner subsystem so the historical `workspace::*` paths keep resolving.
 
+mod control;
+pub(crate) use control::WorkspaceControl;
 mod git;
 mod materialized;
 mod materializer;
@@ -20,6 +22,7 @@ pub(crate) use util::ssh_client_for_runner;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
 pub(crate) use sync::save_prepared_source_cache;
+pub(crate) use sync::sync_workspace_controlled;
 pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
@@ -52,6 +55,7 @@ pub(crate) use provenance::{
     materialize_verified_lab_snapshot_git_baseline, verify_lab_workspace,
     verify_lab_workspace_from_env, verify_lab_workspace_git_root,
 };
+pub(crate) use snapshot::materialize_snapshot_with_scratch_controlled;
 pub(crate) use snapshot::{
     copy_snapshot_to_directory, effective_snapshot_excludes, immutable_replay_snapshot,
     local_snapshot_stats, materialize_snapshot, materialize_snapshot_git, replay_artifact_identity,

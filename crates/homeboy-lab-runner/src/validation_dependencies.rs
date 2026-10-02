@@ -7,7 +7,10 @@ use homeboy_core::component::{self, Component};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::{git::clone_repo, paths};
 
-use super::workspace::{materialize_snapshot, parent_remote_path, sanitize_path_segment};
+use super::workspace::{
+    materialize_snapshot_with_scratch_controlled, parent_remote_path, sanitize_path_segment,
+    WorkspaceControl,
+};
 use super::Runner;
 
 const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
@@ -31,21 +34,26 @@ pub(super) fn sync_validation_dependency_workspaces(
     remote_path: &str,
     excludes: &[String],
     selected_dependency_ids: Option<&[String]>,
+    control: &WorkspaceControl,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
+    control.checkpoint()?;
     let mut synced = Vec::new();
     for dependency in
         validation_dependency_workspaces(local_path, excludes, selected_dependency_ids)?
     {
+        control.checkpoint()?;
         let remote_dependency_path = format!(
             "{}/{}",
             parent_remote_path(remote_path),
             sanitize_path_segment(&dependency.remote_name)
         );
-        materialize_snapshot(
+        materialize_snapshot_with_scratch_controlled(
             runner,
             &dependency.prepared_path,
             &remote_dependency_path,
             excludes,
+            None,
+            control,
         )?;
         synced.push(RunnerValidationDependencySyncOutput {
             id: dependency.remote_name,

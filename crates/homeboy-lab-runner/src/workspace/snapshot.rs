@@ -1,7 +1,7 @@
 use homeboy_engine_primitives::content_hash;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -12,12 +12,13 @@ use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
+use super::control::WorkspaceControl;
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
 use super::types::{ByteFileCounts, SnapshotStats, SnapshotTransferStats};
 use super::util::{
     git_output, hex_prefix, owner_capture_shell, owner_restore_shell, parent_remote_path,
     run_shell_capture, run_shell_command, run_shell_command_before, shell_command_for_runner,
-    ssh_args, ssh_client_for_runner, workspace_preparation_timeout,
+    ssh_args, ssh_client_for_runner,
 };
 
 const RUNNER_WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
@@ -133,6 +134,16 @@ pub(crate) fn snapshot_identity(
     excludes: &[String],
     includes: &[String],
 ) -> Result<String> {
+    snapshot_identity_controlled(local_path, excludes, includes, &WorkspaceControl::default())
+}
+
+pub(super) fn snapshot_identity_controlled(
+    local_path: &Path,
+    excludes: &[String],
+    includes: &[String],
+    control: &WorkspaceControl,
+) -> Result<String> {
+    control.checkpoint()?;
     let repository_integrity_evidence =
         homeboy_core::repository_integrity::collect_operator_policy_evidence(local_path)?;
     homeboy_core::repository_integrity::verify_tracked_symlink_portability(
@@ -140,16 +151,28 @@ pub(crate) fn snapshot_identity(
         "HEAD",
         repository_integrity_evidence.as_ref(),
     )?;
-    let head =
-        git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
-    let status = snapshot_git_output(local_path, &["status", "--porcelain=v1"], excludes)
+    let head = control
+        .git(local_path, &["rev-parse", "HEAD"])
         .unwrap_or_else(|_| "nogit".to_string());
-    let diff = snapshot_git_output(local_path, &["diff", "--binary", "HEAD"], excludes)
-        .unwrap_or_default();
-    let staged = snapshot_git_output(
+    let status = snapshot_git_output_controlled(
+        local_path,
+        &["status", "--porcelain=v1"],
+        excludes,
+        control,
+    )
+    .unwrap_or_else(|_| "nogit".to_string());
+    let diff = snapshot_git_output_controlled(
+        local_path,
+        &["diff", "--binary", "HEAD"],
+        excludes,
+        control,
+    )
+    .unwrap_or_default();
+    let staged = snapshot_git_output_controlled(
         local_path,
         &["diff", "--cached", "--binary", "HEAD"],
         excludes,
+        control,
     )
     .unwrap_or_default();
     let mut hasher = Sha256::new();
@@ -158,7 +181,14 @@ pub(crate) fn snapshot_identity(
     hasher.update(status.as_bytes());
     hasher.update(diff.as_bytes());
     hasher.update(staged.as_bytes());
-    hash_snapshot_tree(local_path, local_path, excludes, includes, &mut hasher)?;
+    hash_snapshot_tree(
+        local_path,
+        local_path,
+        excludes,
+        includes,
+        &mut hasher,
+        control,
+    )?;
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
 }
 
@@ -169,10 +199,11 @@ pub(crate) fn snapshot_git_exclude_pathspecs(excludes: &[String]) -> Vec<String>
     homeboy_core::source_snapshot::git_exclude_pathspecs(excludes)
 }
 
-pub(crate) fn snapshot_git_output(
+fn snapshot_git_output_controlled(
     path: &Path,
     command: &[&str],
     excludes: &[String],
+    control: &WorkspaceControl,
 ) -> Result<String> {
     let mut args = command
         .iter()
@@ -182,7 +213,7 @@ pub(crate) fn snapshot_git_output(
     args.push(".".to_string());
     args.extend(snapshot_git_exclude_pathspecs(excludes));
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git_output(path, &args)
+    control.git(path, &args)
 }
 
 /// Stable v2 digest of the files a snapshot materializes. Unlike
@@ -209,6 +240,21 @@ pub(crate) fn workspace_content_manifest_and_hash_for_policy(
     excludes: &[String],
     policy: &str,
 ) -> Result<(WorkspaceContentManifest, String)> {
+    workspace_content_manifest_and_hash_controlled(
+        path,
+        excludes,
+        policy,
+        &WorkspaceControl::default(),
+    )
+}
+
+pub(super) fn workspace_content_manifest_and_hash_controlled(
+    path: &Path,
+    excludes: &[String],
+    policy: &str,
+    control: &WorkspaceControl,
+) -> Result<(WorkspaceContentManifest, String)> {
+    control.checkpoint()?;
     let (algorithm, executable_capability) =
         workspace_content_hash_contract(policy).ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -232,6 +278,7 @@ pub(crate) fn workspace_content_manifest_and_hash_for_policy(
         hasher: &mut hasher,
         executable_capability,
         manifest: Some(&mut manifest),
+        control,
     }
     .collect(&root, Path::new(""), &mut vec![root.clone()])?;
     Ok((manifest, format!("sha256:{:x}", hasher.finalize())))
@@ -286,6 +333,7 @@ struct ContentHashTraversal<'a> {
     hasher: &'a mut Sha256,
     executable_capability: ExecutableCapability,
     manifest: Option<&'a mut WorkspaceContentManifest>,
+    control: &'a WorkspaceControl,
 }
 
 impl ContentHashTraversal<'_> {
@@ -295,6 +343,7 @@ impl ContentHashTraversal<'_> {
         logical: &Path,
         ancestors: &mut Vec<std::path::PathBuf>,
     ) -> Result<()> {
+        self.control.checkpoint()?;
         let mut children = match fs::read_dir(path) {
             Ok(children) => children,
             Err(err)
@@ -310,15 +359,19 @@ impl ContentHashTraversal<'_> {
                 ));
             }
         }
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read sync directory entry".to_string()),
-            )
-        })?;
+        .map(|entry| {
+            self.control.checkpoint()?;
+            entry.map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("read sync directory entry".to_string()),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
         children.sort_by_key(|entry| entry.path());
         for entry in children {
+            self.control.checkpoint()?;
             let entry_path = entry.path();
             let relative_path = logical.join(entry.file_name());
             let relative = relative_path.to_string_lossy().replace('\\', "/");
@@ -441,22 +494,32 @@ impl ContentHashTraversal<'_> {
                 self.collect(&resolved, &relative_path, ancestors)?;
                 ancestors.pop();
             } else if metadata.is_file() {
-                let contents = fs::read(&resolved).map_err(|err| {
-                    Error::internal_io(err.to_string(), Some("read sync file".to_string()))
-                })?;
                 self.hasher.update(relative.as_bytes());
                 self.hasher.update(b"\0file\0");
                 if let Some(executable) = self.executable_capability.value(&metadata) {
                     self.hasher.update([executable as u8]);
                 }
-                self.hasher.update((contents.len() as u64).to_le_bytes());
-                self.hasher.update(&contents);
+                self.hasher.update(metadata.len().to_le_bytes());
+                let mut file_hash = Sha256::new();
+                let bytes = read_file_chunks(&resolved, self.control, |chunk| {
+                    self.hasher.update(chunk);
+                    file_hash.update(chunk);
+                    Ok(())
+                })?;
+                if bytes != metadata.len() {
+                    return Err(snapshot_construction_failure(
+                        "content",
+                        &resolved,
+                        None,
+                        "source file size changed during hashing",
+                    ));
+                }
                 record_workspace_content_manifest_entry(
                     &mut self.manifest,
                     relative,
                     "file",
-                    Some(format!("sha256:{}", content_hash::sha256_hex(&contents))),
-                    Some(contents.len() as u64),
+                    Some(format!("sha256:{:x}", file_hash.finalize())),
+                    Some(bytes),
                     self.executable_capability.owner_value(&metadata),
                 );
             }
@@ -693,8 +756,17 @@ pub(crate) fn local_snapshot_stats(
     excludes: &[String],
     includes: &[String],
 ) -> Result<SnapshotStats> {
+    local_snapshot_stats_controlled(path, excludes, includes, &WorkspaceControl::default())
+}
+
+pub(super) fn local_snapshot_stats_controlled(
+    path: &Path,
+    excludes: &[String],
+    includes: &[String],
+    control: &WorkspaceControl,
+) -> Result<SnapshotStats> {
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
-    collect_stats(path, path, excludes, includes, &mut stats)?;
+    collect_stats(path, path, excludes, includes, &mut stats, control)?;
     Ok(stats)
 }
 
@@ -704,7 +776,9 @@ fn hash_snapshot_tree(
     excludes: &[String],
     includes: &[String],
     hasher: &mut Sha256,
+    control: &WorkspaceControl,
 ) -> Result<()> {
+    control.checkpoint()?;
     let mut entries = fs::read_dir(path)
         .map_err(|err| {
             Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
@@ -719,6 +793,7 @@ fn hash_snapshot_tree(
     entries.sort_by_key(|entry| entry.path());
 
     for entry in entries {
+        control.checkpoint()?;
         let entry_path = entry.path();
         if is_excluded(root, &entry_path, excludes, includes) {
             continue;
@@ -733,14 +808,14 @@ fn hash_snapshot_tree(
         hasher.update(rel.as_bytes());
         if metadata.is_dir() {
             hasher.update(b"/dir");
-            hash_snapshot_tree(root, &entry_path, excludes, includes, hasher)?;
+            hash_snapshot_tree(root, &entry_path, excludes, includes, hasher, control)?;
         } else if metadata.is_file() {
             hasher.update(b"/file");
             hasher.update(metadata.len().to_le_bytes());
-            let contents = fs::read(&entry_path).map_err(|err| {
-                Error::internal_io(err.to_string(), Some("read sync file".to_string()))
+            read_file_chunks(&entry_path, control, |chunk| {
+                hasher.update(chunk);
+                Ok(())
             })?;
-            hasher.update(contents);
         }
     }
     Ok(())
@@ -752,10 +827,13 @@ fn collect_stats(
     excludes: &[String],
     includes: &[String],
     stats: &mut SnapshotStats,
+    control: &WorkspaceControl,
 ) -> Result<()> {
+    control.checkpoint()?;
     for entry in fs::read_dir(path).map_err(|err| {
         Error::internal_io(err.to_string(), Some("read sync directory".to_string()))
     })? {
+        control.checkpoint()?;
         let entry = entry.map_err(|err| {
             Error::internal_io(
                 err.to_string(),
@@ -770,7 +848,7 @@ fn collect_stats(
             Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
         })?;
         if metadata.is_dir() {
-            collect_stats(root, &entry_path, excludes, includes, stats)?;
+            collect_stats(root, &entry_path, excludes, includes, stats, control)?;
         } else if metadata.is_file() {
             stats.files += 1;
             stats.bytes = stats.bytes.saturating_add(metadata.len());
@@ -829,18 +907,30 @@ pub(super) fn is_excluded(
 ///
 /// Links resolving outside the root are left alone; staging materializes those
 /// on purpose, and they are not dangling.
+#[cfg(test)]
 pub(super) fn excludes_with_links_to_excluded_targets(
     root: &Path,
     excludes: &[String],
 ) -> Vec<String> {
+    excludes_with_links_controlled(root, excludes, &WorkspaceControl::default())
+        .expect("unbounded link discovery has no control failure")
+}
+
+fn excludes_with_links_controlled(
+    root: &Path,
+    excludes: &[String],
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
     let mut expanded = excludes.to_vec();
     let mut pending = vec![root.to_path_buf()];
 
     while let Some(directory) = pending.pop() {
+        control.checkpoint()?;
         let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
+            control.checkpoint()?;
             let path = entry.path();
             if is_excluded(root, &path, &expanded, &[]) {
                 continue;
@@ -871,7 +961,7 @@ pub(super) fn excludes_with_links_to_excluded_targets(
         }
     }
 
-    expanded
+    Ok(expanded)
 }
 
 #[cfg(test)]
@@ -959,8 +1049,26 @@ pub(crate) fn materialize_snapshot_with_scratch_before(
     scratch: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<()> {
+    materialize_snapshot_with_scratch_controlled(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        scratch,
+        &WorkspaceControl::before(deadline),
+    )
+}
+
+pub(crate) fn materialize_snapshot_with_scratch_controlled(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    scratch: Option<&Path>,
+    control: &WorkspaceControl,
+) -> Result<()> {
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_piped_before(
+        RunnerKind::Local => materialize_snapshot_piped_controlled(
             local_path,
             &format!(
                 "sh -c {}",
@@ -969,12 +1077,12 @@ pub(crate) fn materialize_snapshot_with_scratch_before(
             excludes,
             "materialize local workspace snapshot",
             scratch,
-            deadline,
+            control,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_piped_before(
+                materialize_snapshot_piped_controlled(
                     local_path,
                     &format!(
                         "sh -c {}",
@@ -983,7 +1091,7 @@ pub(crate) fn materialize_snapshot_with_scratch_before(
                     excludes,
                     "materialize local workspace snapshot",
                     scratch,
-                    deadline,
+                    control,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
@@ -994,13 +1102,13 @@ pub(crate) fn materialize_snapshot_with_scratch_before(
                     remote = shell::quote_arg(&remote),
                     remote_command = shell::quote_arg(&remote_command),
                 );
-                materialize_snapshot_piped_before(
+                materialize_snapshot_piped_controlled(
                     local_path,
                     &target,
                     excludes,
                     "materialize SSH workspace snapshot",
                     scratch,
-                    deadline,
+                    control,
                 )
             }
         }
@@ -1134,24 +1242,26 @@ fn validate_workspace_content_manifest(manifest: &WorkspaceContentManifest) -> R
 /// Materialize an immutable snapshot by linking unchanged content from a
 /// compatible runner-local seed, deleting paths absent from the controller
 /// manifest, and transporting only the manifest's explicit changed paths.
-pub(crate) fn materialize_snapshot_incremental_before(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn materialize_snapshot_incremental_controlled(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     seed_path: &str,
     excludes: &[String],
     delta: &SnapshotManifestDelta,
-    deadline: Option<Instant>,
+    control: &WorkspaceControl,
 ) -> Result<SnapshotTransferStats> {
+    control.checkpoint()?;
     let temporary = format!("{}.tmp-{}", remote_path, uuid::Uuid::new_v4());
     if !incremental_prepare_command_fits(remote_path, &temporary, seed_path, delta) {
-        materialize_snapshot_with_scratch_before(
+        materialize_snapshot_with_scratch_controlled(
             runner,
             local_path,
             remote_path,
             excludes,
             None,
-            deadline,
+            control,
         )?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
@@ -1161,13 +1271,13 @@ pub(crate) fn materialize_snapshot_incremental_before(
     }
     let prepare = incremental_prepare_command(remote_path, &temporary, seed_path, delta);
     if prepare.len() > INCREMENTAL_PREPARE_COMMAND_MAX_BYTES {
-        materialize_snapshot_with_scratch_before(
+        materialize_snapshot_with_scratch_controlled(
             runner,
             local_path,
             remote_path,
             excludes,
             None,
-            deadline,
+            control,
         )?;
         return Ok(SnapshotTransferStats {
             reused: ByteFileCounts::default(),
@@ -1177,51 +1287,37 @@ pub(crate) fn materialize_snapshot_incremental_before(
     }
     let finalize = incremental_finalize_command(remote_path, &temporary);
     let result = match runner.kind {
-        RunnerKind::Local => run_shell_command_before(
-            &prepare,
-            "prepare incremental local workspace snapshot",
-            deadline,
-        )
-        .and_then(|_| {
-            materialize_changed_paths_before(
-                local_path,
-                &local_extract_command(&temporary),
-                &delta.changed_paths,
-                "materialize incremental local workspace delta",
-                deadline,
-            )
-        })
-        .and_then(|_| {
-            run_shell_command_before(
-                &finalize,
-                "finalize incremental local workspace snapshot",
-                deadline,
-            )
-        }),
+        RunnerKind::Local => control
+            .shell(&prepare, "prepare incremental local workspace snapshot")
+            .and_then(|_| {
+                materialize_changed_paths_controlled(
+                    local_path,
+                    &local_extract_command(&temporary),
+                    &delta.changed_paths,
+                    "materialize incremental local workspace delta",
+                    control,
+                )
+            })
+            .and_then(|_| {
+                control.shell(&finalize, "finalize incremental local workspace snapshot")
+            }),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                run_shell_command_before(
-                    &prepare,
-                    "prepare incremental local workspace snapshot",
-                    deadline,
-                )
-                .and_then(|_| {
-                    materialize_changed_paths_before(
-                        local_path,
-                        &local_extract_command(&temporary),
-                        &delta.changed_paths,
-                        "materialize incremental local workspace delta",
-                        deadline,
-                    )
-                })
-                .and_then(|_| {
-                    run_shell_command_before(
-                        &finalize,
-                        "finalize incremental local workspace snapshot",
-                        deadline,
-                    )
-                })
+                control
+                    .shell(&prepare, "prepare incremental local workspace snapshot")
+                    .and_then(|_| {
+                        materialize_changed_paths_controlled(
+                            local_path,
+                            &local_extract_command(&temporary),
+                            &delta.changed_paths,
+                            "materialize incremental local workspace delta",
+                            control,
+                        )
+                    })
+                    .and_then(|_| {
+                        control.shell(&finalize, "finalize incremental local workspace snapshot")
+                    })
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let remote_shell = |script: &str| {
@@ -1232,32 +1328,34 @@ pub(crate) fn materialize_snapshot_incremental_before(
                         shell::quote_arg(script),
                     )
                 };
-                run_shell_command_before(
-                    &remote_shell(&prepare),
-                    "prepare incremental SSH workspace snapshot",
-                    deadline,
-                )
-                .and_then(|_| {
-                    materialize_changed_paths_before(
-                        local_path,
-                        &remote_extract_command(&client, &remote, &temporary),
-                        &delta.changed_paths,
-                        "materialize incremental SSH workspace delta",
-                        deadline,
+                control
+                    .shell(
+                        &remote_shell(&prepare),
+                        "prepare incremental SSH workspace snapshot",
                     )
-                })
-                .and_then(|_| {
-                    run_shell_command_before(
-                        &remote_shell(&finalize),
-                        "finalize incremental SSH workspace snapshot",
-                        deadline,
-                    )
-                })
+                    .and_then(|_| {
+                        materialize_changed_paths_controlled(
+                            local_path,
+                            &remote_extract_command(&client, &remote, &temporary),
+                            &delta.changed_paths,
+                            "materialize incremental SSH workspace delta",
+                            control,
+                        )
+                    })
+                    .and_then(|_| {
+                        control.shell(
+                            &remote_shell(&finalize),
+                            "finalize incremental SSH workspace snapshot",
+                        )
+                    })
             }
         }
     };
-    if result.is_err() {
-        cleanup_incremental_temporary(runner, &temporary, deadline.is_some());
+    if result
+        .as_ref()
+        .is_err_and(|error| error.details["workspace_sync"]["remote_effect_uncertain"] != true)
+    {
+        cleanup_incremental_temporary(runner, &temporary, control.deadline().is_some());
     }
     result.map(|_| delta.transfer.clone())
 }
@@ -1652,12 +1750,30 @@ fn materialize_changed_paths_before(
     action: &str,
     deadline: Option<Instant>,
 ) -> Result<()> {
+    materialize_changed_paths_controlled(
+        local_path,
+        target_command,
+        changed_paths,
+        action,
+        &WorkspaceControl::before(deadline),
+    )
+}
+
+fn materialize_changed_paths_controlled(
+    local_path: &Path,
+    target_command: &str,
+    changed_paths: &[String],
+    action: &str,
+    control: &WorkspaceControl,
+) -> Result<()> {
+    control.checkpoint()?;
     if changed_paths.is_empty() {
         return Ok(());
     }
     let mut list = tempfile::NamedTempFile::new()
         .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
     for path in changed_paths {
+        control.checkpoint()?;
         list.write_all(path.as_bytes())
             .and_then(|_| list.write_all(&[0]))
             .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
@@ -1668,7 +1784,7 @@ fn materialize_changed_paths_before(
         shell::quote_arg(&list.path().display().to_string()),
         target_command,
     );
-    run_shell_command_before(&command, action, deadline)
+    control.shell(&command, action)
 }
 
 fn local_extract_command(destination: &str) -> String {
@@ -1695,49 +1811,84 @@ pub(crate) fn materialize_snapshot_git(
     excludes: &[String],
     snapshot: &str,
 ) -> Result<SyntheticCheckoutIdentity> {
-    materialize_snapshot(runner, local_path, remote_path, excludes)?;
+    materialize_snapshot_git_controlled(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        snapshot,
+        &WorkspaceControl::default(),
+    )
+}
+
+pub(super) fn materialize_snapshot_git_controlled(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    snapshot: &str,
+    control: &WorkspaceControl,
+) -> Result<SyntheticCheckoutIdentity> {
+    materialize_snapshot_with_scratch_controlled(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        None,
+        control,
+    )?;
     let source_dirty = git_output(local_path, &["status", "--porcelain=v1"])
         .map(|status| !status.trim().is_empty())
         .unwrap_or(false);
-    initialize_synthetic_git_checkout(runner, local_path, remote_path, snapshot, source_dirty)
+    initialize_synthetic_git_checkout(
+        runner,
+        local_path,
+        remote_path,
+        snapshot,
+        source_dirty,
+        control,
+    )
 }
 
 /// Apply a filtered controller snapshot over an existing runner checkout while
 /// preserving its runner-created Git directory. The overlay is staged before
 /// replacing worktree content so an interrupted transfer cannot leave a
 /// partially extracted archive behind.
-pub(crate) fn materialize_snapshot_overlay(
+pub(super) fn materialize_snapshot_overlay_controlled(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
+    control: &WorkspaceControl,
 ) -> Result<()> {
     let target = format!(
         "sh -c {}",
         shell::quote_arg(&snapshot_overlay_install_command(remote_path))
     );
     match runner.kind {
-        RunnerKind::Local => materialize_snapshot_piped(
+        RunnerKind::Local => materialize_snapshot_piped_controlled(
             local_path,
             &target,
             excludes,
             "apply local Git workspace snapshot overlay",
             None,
+            control,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_snapshot_piped(
+                materialize_snapshot_piped_controlled(
                     local_path,
                     &target,
                     excludes,
                     "apply local Git workspace snapshot overlay",
                     None,
+                    control,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let command = snapshot_overlay_install_command(remote_path);
-                materialize_snapshot_piped(
+                materialize_snapshot_piped_controlled(
                     local_path,
                     &format!(
                         "ssh {} {} {}",
@@ -1748,6 +1899,7 @@ pub(crate) fn materialize_snapshot_overlay(
                     excludes,
                     "apply SSH Git workspace snapshot overlay",
                     None,
+                    control,
                 )
             }
         }
@@ -1772,6 +1924,7 @@ fn initialize_synthetic_git_checkout(
     remote_path: &str,
     snapshot: &str,
     source_dirty: bool,
+    control: &WorkspaceControl,
 ) -> Result<SyntheticCheckoutIdentity> {
     let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"]).ok();
     let source_head = git_output(local_path, &["rev-parse", "HEAD"]).ok();
@@ -1785,12 +1938,12 @@ fn initialize_synthetic_git_checkout(
 
     match runner.kind {
         RunnerKind::Local => {
-            run_shell_command(&command, "initialize synthetic snapshot git checkout")?;
+            control.shell(&command, "initialize synthetic snapshot git checkout")?;
         }
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                run_shell_command(&command, "initialize synthetic snapshot git checkout")?;
+                control.shell(&command, "initialize synthetic snapshot git checkout")?;
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let ssh_command = format!(
@@ -1799,7 +1952,7 @@ fn initialize_synthetic_git_checkout(
                     remote = shell::quote_arg(&remote),
                     command = shell::quote_arg(&command),
                 );
-                run_shell_command(
+                control.shell(
                     &ssh_command,
                     "initialize SSH synthetic snapshot git checkout",
                 )?;
@@ -1958,7 +2111,7 @@ pub(crate) fn immutable_replay_snapshot(
 
 fn materialize_replay_archive(source: &Path, staged: &Path, excludes: &[String]) -> Result<()> {
     let manifest = snapshot_input_manifest(source, excludes)?;
-    materialize_selected_snapshot(source, staged, &manifest, None)
+    materialize_selected_snapshot(source, staged, &manifest, &WorkspaceControl::default())
 }
 
 fn replay_symlink_error(path: &Path) -> Error {
@@ -2075,33 +2228,56 @@ pub(super) fn materialize_snapshot_piped_before(
     scratch: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<()> {
+    materialize_snapshot_piped_controlled(
+        local_path,
+        target_command,
+        excludes,
+        action,
+        scratch,
+        &WorkspaceControl::before(deadline),
+    )
+}
+
+pub(super) fn materialize_snapshot_piped_controlled(
+    local_path: &Path,
+    target_command: &str,
+    excludes: &[String],
+    action: &str,
+    scratch: Option<&Path>,
+    control: &WorkspaceControl,
+) -> Result<()> {
     // Complete the controller-side archive staging before starting the target
     // command. In particular, an SSH target must never observe a partial or
     // second read of a controller workspace whose overlay artifacts changed.
     // Resolve this once, before anything reads the tree: every manifest and the
     // staging archive must apply the identical exclude set or they disagree.
-    let excludes = &excludes_with_links_to_excluded_targets(local_path, excludes);
-    let manifest = snapshot_input_manifest(local_path, excludes).map_err(|error| {
-        snapshot_construction_failure(
-            "workspace_snapshot",
-            local_path,
-            None,
-            &format!(
-                "{action}: {}; diagnostics: {}",
-                error.message, error.details
-            ),
-        )
-    })?;
+    let excludes = &excludes_with_links_controlled(local_path, excludes, control)?;
+    let manifest =
+        snapshot_input_manifest_controlled(local_path, excludes, control).map_err(|error| {
+            if error.details["workspace_sync"].is_object() {
+                return error;
+            }
+            snapshot_construction_failure(
+                "workspace_snapshot",
+                local_path,
+                None,
+                &format!(
+                    "{action}: {}; diagnostics: {}",
+                    error.message, error.details
+                ),
+            )
+        })?;
     let source_manifest = manifest.stable_manifest.clone();
-    let stage = materialize_snapshot_stage_before(local_path, &manifest, scratch, deadline)
+    let stage = materialize_snapshot_stage_controlled(local_path, &manifest, scratch, control)
         .map_err(|mut error| {
             error.message = format!("{action}: {}", error.message);
             error
         })?;
     // The stage contains only the selected entries, so reapplying excludes here
     // would be a second interpretation of policy rather than a verification.
-    let staged_manifest = snapshot_stable_manifest(&stage.path().join("source"), &[])?;
-    let current_manifest = snapshot_stable_manifest(local_path, excludes)?;
+    let staged_manifest =
+        snapshot_stable_manifest_controlled(&stage.path().join("source"), &[], control)?;
+    let current_manifest = snapshot_stable_manifest_controlled(local_path, excludes, control)?;
     validate_snapshot_stability(
         &source_manifest,
         &staged_manifest,
@@ -2114,7 +2290,7 @@ pub(super) fn materialize_snapshot_piped_before(
         target_command,
         scratch,
     );
-    run_shell_command_before(&command, action, deadline)
+    control.shell(&command, action)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2127,10 +2303,19 @@ pub(super) fn snapshot_stable_manifest(
     path: &Path,
     excludes: &[String],
 ) -> Result<SnapshotStableManifest> {
-    let (inventory, content_identity) = workspace_content_manifest_and_hash_for_policy(
+    snapshot_stable_manifest_controlled(path, excludes, &WorkspaceControl::default())
+}
+
+fn snapshot_stable_manifest_controlled(
+    path: &Path,
+    excludes: &[String],
+    control: &WorkspaceControl,
+) -> Result<SnapshotStableManifest> {
+    let (inventory, content_identity) = workspace_content_manifest_and_hash_controlled(
         path,
         excludes,
         WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+        control,
     )?;
     Ok(SnapshotStableManifest {
         inventory,
@@ -2259,6 +2444,43 @@ struct SnapshotSelectionEntry {
     kind: String,
 }
 
+/// Component-aware internal-link ancestry. `Path::ancestors` cannot confuse
+/// `link` with `link-sibling`, and the probe bound depends only on path depth.
+struct InternalLinkIndex(HashSet<PathBuf>);
+
+impl InternalLinkIndex {
+    fn discover(
+        root: &Path,
+        selection: &[SnapshotSelectionEntry],
+        control: &WorkspaceControl,
+    ) -> Result<Self> {
+        let mut links = HashSet::new();
+        for entry in selection {
+            control.checkpoint()?;
+            if fs::symlink_metadata(&entry.source)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && entry
+                    .source
+                    .canonicalize()
+                    .is_ok_and(|target| target.starts_with(root))
+            {
+                links.insert(entry.relative.clone());
+            }
+        }
+        Ok(Self(links))
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.0.contains(path)
+    }
+
+    fn below(&self, path: &Path) -> bool {
+        path.ancestors()
+            .skip(1)
+            .any(|ancestor| self.contains(ancestor))
+    }
+}
+
 /// The typed input contract for one snapshot staging operation.
 #[derive(Debug, Clone)]
 pub(super) struct SnapshotInputManifest {
@@ -2271,17 +2493,30 @@ pub(super) fn snapshot_input_manifest(
     local_path: &Path,
     excludes: &[String],
 ) -> Result<SnapshotInputManifest> {
+    snapshot_input_manifest_controlled(local_path, excludes, &WorkspaceControl::default())
+}
+
+fn snapshot_input_manifest_controlled(
+    local_path: &Path,
+    excludes: &[String],
+    control: &WorkspaceControl,
+) -> Result<SnapshotInputManifest> {
+    control.checkpoint()?;
     let entries = fs::read_dir(local_path)
         .map_err(|err| Error::internal_io(err.to_string(), Some("read snapshot root".to_string())))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read snapshot root entry".to_string()),
-            )
-        })?;
+        .map(|entry| {
+            control.checkpoint()?;
+            entry.map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("read snapshot root entry".to_string()),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut manifest_entries = Vec::new();
     for entry in entries {
+        control.checkpoint()?;
         let source = entry.path();
         if is_excluded(local_path, &source, excludes, &[]) {
             continue;
@@ -2303,25 +2538,39 @@ pub(super) fn snapshot_input_manifest(
             source,
         });
     }
-    let stable_manifest = snapshot_stable_manifest(local_path, excludes)?;
+    let stable_manifest = snapshot_stable_manifest_controlled(local_path, excludes, control)?;
     let mut selection = stable_manifest
         .inventory
         .entries
         .iter()
-        .map(|entry| SnapshotSelectionEntry {
-            source: local_path.join(&entry.path),
-            relative: PathBuf::from(&entry.path),
-            kind: entry.kind.clone(),
+        .map(|entry| {
+            control.checkpoint()?;
+            Ok(SnapshotSelectionEntry {
+                source: local_path.join(&entry.path),
+                relative: PathBuf::from(&entry.path),
+                kind: entry.kind.clone(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     // Git and runner metadata are intentionally outside content identity, but
     // snapshot-git and generic snapshot copies still transport them explicitly.
+    let mut selected = selection
+        .iter()
+        .map(|entry| entry.relative.clone())
+        .collect::<HashSet<_>>();
     for entry in &manifest_entries {
         if matches!(
             entry.source.file_name().and_then(|name| name.to_str()),
             Some(".git" | ".homeboy")
         ) {
-            collect_transport_only_selection(&entry.source, local_path, excludes, &mut selection)?;
+            collect_transport_only_selection(
+                &entry.source,
+                local_path,
+                excludes,
+                &mut selection,
+                &mut selected,
+                control,
+            )?;
         }
     }
     Ok(SnapshotInputManifest {
@@ -2336,14 +2585,17 @@ fn collect_transport_only_selection(
     root: &Path,
     excludes: &[String],
     selection: &mut Vec<SnapshotSelectionEntry>,
+    selected: &mut HashSet<PathBuf>,
+    control: &WorkspaceControl,
 ) -> Result<()> {
+    control.checkpoint()?;
     let relative = path.strip_prefix(root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("select snapshot transport path".to_string()),
         )
     })?;
-    if selection.iter().any(|entry| entry.relative == relative) {
+    if !selected.insert(relative.to_path_buf()) {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -2379,7 +2631,9 @@ fn collect_transport_only_selection(
             })?;
             let child = child.path();
             if !is_excluded(root, &child, excludes, &[]) {
-                collect_transport_only_selection(&child, root, excludes, selection)?;
+                collect_transport_only_selection(
+                    &child, root, excludes, selection, selected, control,
+                )?;
             }
         }
     }
@@ -2417,6 +2671,21 @@ fn materialize_snapshot_stage_before(
     scratch: Option<&Path>,
     deadline: Option<Instant>,
 ) -> Result<SnapshotStage> {
+    materialize_snapshot_stage_controlled(
+        local_path,
+        manifest,
+        scratch,
+        &WorkspaceControl::before(deadline),
+    )
+}
+
+fn materialize_snapshot_stage_controlled(
+    local_path: &Path,
+    manifest: &SnapshotInputManifest,
+    scratch: Option<&Path>,
+    control: &WorkspaceControl,
+) -> Result<SnapshotStage> {
+    control.checkpoint()?;
     let stage = match scratch {
         Some(path) => {
             let scratch_stage = tempfile::Builder::new()
@@ -2455,7 +2724,7 @@ fn materialize_snapshot_stage_before(
             &error.to_string(),
         )
     })?;
-    materialize_selected_snapshot(local_path, &stage_source, manifest, deadline)?;
+    materialize_selected_snapshot(local_path, &stage_source, manifest, control)?;
     Ok(stage)
 }
 
@@ -2468,7 +2737,7 @@ fn materialize_selected_snapshot(
     source_root: &Path,
     destination: &Path,
     manifest: &SnapshotInputManifest,
-    deadline: Option<Instant>,
+    control: &WorkspaceControl,
 ) -> Result<()> {
     #[cfg(test)]
     for entry in &manifest.entries {
@@ -2476,26 +2745,23 @@ fn materialize_selected_snapshot(
     }
 
     let root = content_hash_root(source_root)?;
-    let internal_links = manifest
-        .selection
-        .iter()
-        .filter(|entry| {
-            fs::symlink_metadata(&entry.source)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                && entry
-                    .source
-                    .canonicalize()
-                    .is_ok_and(|target| target.starts_with(&root))
-        })
-        .map(|entry| entry.relative.clone())
-        .collect::<Vec<_>>();
-    let is_internal_link =
-        |entry: &SnapshotSelectionEntry| internal_links.contains(&entry.relative);
-    let is_below_internal_link = |entry: &SnapshotSelectionEntry| {
-        internal_links
-            .iter()
-            .any(|link| entry.relative != *link && entry.relative.starts_with(link))
-    };
+    let internal_links = InternalLinkIndex::discover(&root, &manifest.selection, control)?;
+    materialize_selection_with_lookup(
+        destination,
+        manifest,
+        control,
+        |entry| internal_links.contains(&entry.relative),
+        |entry| internal_links.below(&entry.relative),
+    )
+}
+
+fn materialize_selection_with_lookup(
+    destination: &Path,
+    manifest: &SnapshotInputManifest,
+    control: &WorkspaceControl,
+    is_internal_link: impl Fn(&SnapshotSelectionEntry) -> bool,
+    is_below_internal_link: impl Fn(&SnapshotSelectionEntry) -> bool,
+) -> Result<()> {
     let output = |entry: &SnapshotSelectionEntry| destination.join(&entry.relative);
     let failure = |entry: &SnapshotSelectionEntry, error: &dyn std::fmt::Display| {
         let declaration_id = manifest
@@ -2520,20 +2786,20 @@ fn materialize_selected_snapshot(
     // Create real directories first, so selected paths through an internal
     // symlink always have their target before the link is recreated.
     for entry in &manifest.selection {
-        snapshot_selection_deadline(deadline)?;
+        control.checkpoint()?;
         if entry.kind != "directory" || is_internal_link(entry) || is_below_internal_link(entry) {
             continue;
         }
         fs::create_dir_all(output(entry)).map_err(|error| failure(entry, &error))?;
     }
     for entry in &manifest.selection {
-        snapshot_selection_deadline(deadline)?;
-        if entry.kind == "directory" && is_internal_link(entry) {
+        control.checkpoint()?;
+        if entry.kind == "directory" && is_internal_link(entry) && !is_below_internal_link(entry) {
             copy_snapshot_symlink(entry, &output(entry), &failure)?;
         }
     }
     for entry in &manifest.selection {
-        snapshot_selection_deadline(deadline)?;
+        control.checkpoint()?;
         if entry.kind != "file" || is_below_internal_link(entry) {
             continue;
         }
@@ -2545,10 +2811,19 @@ fn materialize_selected_snapshot(
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| failure(entry, &error))?;
         }
-        fs::copy(&entry.source, &target).map_err(|error| failure(entry, &error))?;
+        copy_snapshot_file(&entry.source, &target, control).map_err(|error| {
+            if error.details["workspace_sync"].is_object() {
+                error
+            } else {
+                failure(
+                    entry,
+                    &format!("{}; diagnostics: {}", error.message, error.details),
+                )
+            }
+        })?;
     }
     for entry in &manifest.selection {
-        snapshot_selection_deadline(deadline)?;
+        control.checkpoint()?;
         if entry.kind == "symlink" && !is_below_internal_link(entry) {
             copy_snapshot_symlink(entry, &output(entry), &failure)?;
         }
@@ -2556,18 +2831,63 @@ fn materialize_selected_snapshot(
     Ok(())
 }
 
-fn snapshot_selection_deadline(deadline: Option<Instant>) -> Result<()> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        // The same "workspace sync deadline expired before runner command
-        // dispatch" classification `run_shell_command_before` uses below in
-        // this same call chain: an expired deadline here is a pre-handoff
-        // transport failure, not the generic bounded-command timeout a
-        // dispatched remote command times out with.
-        return Err(workspace_preparation_timeout(
-            "workspace snapshot staging",
-            Duration::ZERO,
+const SNAPSHOT_COPY_CHUNK_BYTES: usize = 64 * 1024;
+
+pub(super) fn snapshot_file_sha256(path: &Path, control: &WorkspaceControl) -> Result<String> {
+    let mut hash = Sha256::new();
+    read_file_chunks(path, control, |chunk| {
+        hash.update(chunk);
+        Ok(())
+    })?;
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn read_file_chunks(
+    path: &Path,
+    control: &WorkspaceControl,
+    mut consume: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<u64> {
+    control.checkpoint()?;
+    let mut file = fs::File::open(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("read snapshot file".to_string()))
+    })?;
+    let mut buffer = [0; SNAPSHOT_COPY_CHUNK_BYTES];
+    let mut bytes = 0;
+    loop {
+        control.checkpoint()?;
+        let count = file.read(&mut buffer).map_err(|error| {
+            Error::internal_io(error.to_string(), Some("read snapshot file".to_string()))
+        })?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        consume(&buffer[..count])?;
+        bytes += count as u64;
+    }
+}
+
+fn copy_snapshot_file(source: &Path, target: &Path, control: &WorkspaceControl) -> Result<()> {
+    control.checkpoint()?;
+    let metadata =
+        fs::metadata(source).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let mut output =
+        fs::File::create(target).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let bytes = read_file_chunks(source, control, |chunk| {
+        output.write_all(chunk).map_err(|error| {
+            Error::internal_io(error.to_string(), Some("copy snapshot file".to_string()))
+        })
+    })?;
+    if bytes != metadata.len() {
+        return Err(snapshot_construction_failure(
+            "selection",
+            source,
+            Some(target),
+            "source file size changed during copying",
         ));
     }
+    output
+        .set_permissions(metadata.permissions())
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
     Ok(())
 }
 
@@ -2704,3 +3024,6 @@ pub(super) fn snapshot_overlay_install_command(remote_path: &str) -> String {
         "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/"
     )
 }
+
+#[cfg(test)]
+mod construction_tests;
