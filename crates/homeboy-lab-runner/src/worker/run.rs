@@ -1081,10 +1081,12 @@ pub(crate) fn materialize_staged_source_artifact(
             ));
         }
         let mut directory = verify_controller_workspace(runner_id, &workspace, None)?;
+        verify_staged_workspace_path(&directory, &workspace.remote_cwd)?;
         directory._private_plans = Some(bind_materialized_cook_workspace_identity(
             envelope,
             &workspace.remote_cwd,
         )?);
+        verify_staged_workspace_path(&directory, &workspace.remote_cwd)?;
         return Ok(Some(directory));
     }
     let Some(source) = envelope
