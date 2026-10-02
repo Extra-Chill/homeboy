@@ -793,7 +793,8 @@ fn controller_extension_metadata_required_error(
     Error::new(
         ErrorCode::ValidationInvalidArgument,
         format!(
-            "Invalid argument 'runner_extension': Controller-local extension metadata is required to materialize runner job extension parity for '{extension_id}' on runner '{runner_id}'"
+            "Invalid argument 'runner_extension': Controller-local extension metadata is required to materialize runner job extension parity for '{extension_id}' on runner '{runner_id}': {}",
+            source_error.message
         ),
         serde_json::json!({
             "field": "runner_extension",
@@ -2531,6 +2532,11 @@ mod tests {
         assert!(err
             .to_string()
             .contains("Controller-local extension metadata"));
+        assert!(err.to_string().contains("no sourceUrl or .source-url metadata"));
+        assert_eq!(
+            err.details["diagnostic"]["source_error"]["message"].as_str(),
+            Some("Extension 'rust' has no sourceUrl or .source-url metadata")
+        );
         assert_eq!(
             err.details["diagnostic"]["code"].as_str(),
             Some("runner_extension.controller_extension_metadata_required")

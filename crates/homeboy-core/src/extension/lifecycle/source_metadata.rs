@@ -68,6 +68,17 @@ pub fn resolve_source_url(extension_id: &str) -> Result<SourceMetadataResolution
         });
     }
 
+    if is_extension_linked(extension_id) {
+        if let Some(source_url) =
+            git::remote_origin_url(&extension_dir).and_then(normalize_source_url)
+        {
+            return Ok(SourceMetadataResolution {
+                url: source_url,
+                repair: None,
+            });
+        }
+    }
+
     Err(missing_source_url_error(
         extension_id,
         extension.extension_path.as_deref(),
