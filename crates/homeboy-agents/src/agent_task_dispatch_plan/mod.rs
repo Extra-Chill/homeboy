@@ -14,13 +14,16 @@ use crate::agent_task::{
     AgentToolPolicy, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_provider::provider_requires_cwd_git_checkout;
+use crate::agent_task_provider::provider_secret_sources_for_plan;
 use crate::agent_task_runtime_dependency_graph;
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
 };
-use crate::agent_task_secrets::validate_secret_env;
+use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
+use homeboy_core::defaults::AgentTaskSecretSource;
 use homeboy_core::{defaults, worktree, Error, Result};
 use homeboy_runner_contract::WorkspaceIdentity;
+use std::collections::HashMap;
 
 use super::agent_task_dispatch_service::{
     initial_provider_route_from_policy, AgentTaskDispatchRequest, AgentTaskModelSelection,
@@ -529,7 +532,21 @@ fn is_git_checkout(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Reject a dispatch whose provider credentials cannot be resolved.
+///
+/// Resolves exactly like execution does (`validate_secret_env_with_fallbacks`
+/// with the selected providers' declared `secret_env_sources`), so a route
+/// whose credentials come from a declared `json-file` source — e.g. the
+/// OpenCode `openai-oauth` auth-store handoff — is admitted here instead of
+/// being refused for env names it never needs in the process env (#15331).
 pub fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
+    preflight_dispatch_provider_secrets_with_sources(plan, &provider_secret_sources_for_plan(plan))
+}
+
+fn preflight_dispatch_provider_secrets_with_sources(
+    plan: &AgentTaskPlan,
+    provider_sources: &HashMap<String, AgentTaskSecretSource>,
+) -> Result<()> {
     let mut names = Vec::new();
     for task in &plan.tasks {
         for name in &task.executor.secret_env {
@@ -539,7 +556,7 @@ pub fn preflight_dispatch_provider_secrets(plan: &AgentTaskPlan) -> Result<()> {
         }
     }
 
-    validate_secret_env(&names).map_err(|error| {
+    validate_secret_env_with_fallbacks(&names, provider_sources).map_err(|error| {
         Error::validation_invalid_argument(
             "secret_env",
             error.message,
@@ -1949,6 +1966,53 @@ mod tests {
 
             assert!(err.to_string().contains(&missing));
             assert!(lifecycle::status("dispatch-missing-secret").is_err());
+        });
+    }
+
+    /// A provider route whose credentials come from a declared `json-file`
+    /// source (OpenCode `openai-oauth` auth-store handoff) must pass the
+    /// dispatch preflight even though the env names are absent from the
+    /// process env and Homeboy's secret config (#15331).
+    #[test]
+    fn dispatch_preflight_accepts_provider_declared_json_file_sources() {
+        with_isolated_home(|_| {
+            let name = format!(
+                "HOMEBOY_TEST_DISPATCH_JSON_FILE_SECRET_{}",
+                std::process::id()
+            );
+            std::env::remove_var(&name);
+
+            let auth_dir = tempfile::tempdir().expect("auth dir");
+            let auth_path = auth_dir.path().join("auth.json");
+            std::fs::write(&auth_path, r#"{"openai":{"access":"declared-token"}}"#)
+                .expect("write auth store");
+
+            let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
+                prompt: Some("Cook with auth-store credentials.".to_string()),
+                secret_env: vec![name.clone()],
+                ..DispatchRequestOverrides::default()
+            }))
+            .expect("plan");
+
+            let missing = preflight_dispatch_provider_secrets_with_sources(&plan, &HashMap::new())
+                .expect_err("without the declared source the env is missing");
+            assert!(missing.to_string().contains(&name));
+
+            let sources = HashMap::from([(
+                name.clone(),
+                AgentTaskSecretSource {
+                    source: "json-file".to_string(),
+                    env_var: None,
+                    path: Some(auth_path.to_string_lossy().to_string()),
+                    scope: None,
+                    name: None,
+                    field: Some("openai.access".to_string()),
+                    fallback_fields: Vec::new(),
+                    value: None,
+                },
+            )]);
+            preflight_dispatch_provider_secrets_with_sources(&plan, &sources)
+                .expect("declared json-file source satisfies the preflight");
         });
     }
 
