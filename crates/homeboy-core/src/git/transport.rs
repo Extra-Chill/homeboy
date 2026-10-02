@@ -73,7 +73,13 @@ pub fn remote_host(remote: &str) -> Option<String> {
         .map(|host| host.trim_matches(['[', ']']).to_string())
 }
 
-pub(crate) fn apply_configured_transport(
+/// Prepare a Git command for execution by a caller-owned supervisor.
+///
+/// `args` must describe the Git invocation, including its selected remote.
+/// Explicit environment values override persisted host policy; structured Git
+/// configuration replaces the whole inherited slot set. This only prepares
+/// process-local policy: the caller retains deadlines, cancellation and I/O.
+pub fn apply_configured_transport(
     command: &mut Command,
     git_root: &Path,
     args: &[&str],
@@ -213,6 +219,8 @@ fn command_remote_host(root: &Path, args: &[&str]) -> Option<String> {
                 | "-p"
                 | "--tags"
                 | "--no-tags"
+                | "--no-write-fetch-head"
+                | "--stdin"
                 | "--force"
                 | "-f"
                 | "--dry-run"
@@ -390,6 +398,17 @@ mod tests {
             .unwrap();
             for args in [
                 vec!["fetch", "other"],
+                vec![
+                    "-c",
+                    "fetch.negotiationAlgorithm=noop",
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--recurse-submodules=no",
+                    "--filter=blob:none",
+                    "--stdin",
+                    "other",
+                ],
                 vec!["push", "origin", "HEAD"],
                 vec![
                     "ls-remote",

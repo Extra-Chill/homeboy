@@ -63,6 +63,19 @@ impl WorkspaceControl {
         self.wait_output(process, action)
     }
 
+    pub(crate) fn output_with_stdin(
+        &self,
+        process: &mut Command,
+        input: std::fs::File,
+        action: &str,
+    ) -> Result<std::process::Output> {
+        process
+            .stdin(input)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        self.wait_output(process, action)
+    }
+
     /// Git identities and object closures need complete stdout. Spool that
     /// evidence to owned scratch while keeping child supervision output bounded.
     pub(crate) fn output_exact(
