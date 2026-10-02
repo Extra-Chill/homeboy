@@ -339,8 +339,8 @@ pub struct AgentTaskGatePackageArtifactRequirement {
 pub struct AgentTaskGateExtensionInput {
     pub id: String,
     pub source: String,
-    /// Optional identity pinned by a prior candidate gate when replaying a
-    /// baseline. A changed source must fail rather than compare different input.
+    /// Optional identity of the extension and declared shared closure pinned by
+    /// a prior candidate gate. Baselines must not compare different inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
 }
@@ -821,6 +821,17 @@ pub struct AgentTaskGateExtensionInputProvenance {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// Content identity including the declared shared assets, when present.
+    pub identity: String,
+    pub destination: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_assets: Vec<AgentTaskGateSharedAssetProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateSharedAssetProvenance {
+    pub path: String,
+    pub source: String,
     pub identity: String,
     pub destination: String,
 }
@@ -3060,8 +3071,31 @@ fn materialize_extension_inputs(
     home: &Path,
     inputs: &[AgentTaskGateExtensionInput],
 ) -> Result<()> {
+    // Reused invocation roots must not retain files or links written by an earlier gate.
+    let config = home.join(".config/homeboy");
+    if !inputs.is_empty() {
+        if fs::symlink_metadata(home.join(".config"))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(Error::invalid_argument(
+                "gate_environment.extension_inputs",
+                "isolated gate config parent cannot be a symlink",
+            ));
+        }
+        if let Ok(metadata) = fs::symlink_metadata(&config) {
+            let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(&config)
+            } else {
+                fs::remove_file(&config)
+            };
+            result.map_err(|error| {
+                Error::internal_io(error.to_string(), Some(config.display().to_string()))
+            })?;
+        }
+    }
     let extensions = home.join(".config/homeboy/extensions");
     let mut ids = std::collections::BTreeSet::new();
+    let mut shared_targets: BTreeMap<PathBuf, String> = BTreeMap::new();
     for input in inputs {
         if input.id.trim().is_empty()
             || input.id.contains(['/', '\\'])
@@ -3092,7 +3126,70 @@ fn materialize_extension_inputs(
                 None,
             ));
         }
-        let identity = extension_tree_identity(source)?;
+        let resolved_source = source
+            .canonicalize()
+            .map_err(|error| Error::internal_io(error.to_string(), Some(input.source.clone())))?;
+        let extension_identity = extension_tree_identity(&resolved_source)?;
+        let mut shared_assets = Vec::new();
+        for (path, asset_source) in
+            homeboy_core::extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
+        {
+            let target = homeboy_core::extension::lifecycle::isolated_shared_asset_target(
+                &home.join(".config/homeboy"),
+                &path,
+            )?;
+            if inputs.iter().any(|selected| {
+                let extension = extensions.join(&selected.id);
+                target.starts_with(&extension) || extension.starts_with(&target)
+            }) {
+                return Err(Error::invalid_argument(
+                    "gate_environment.extension_inputs",
+                    "shared asset destinations cannot overlap selected extensions",
+                ));
+            }
+            let asset_source = asset_source.canonicalize().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("resolve declared shared asset {path}")),
+                )
+            })?;
+            let identity = extension_tree_identity(&asset_source)?;
+            if shared_targets.iter().any(|(existing, expected)| {
+                (target.starts_with(existing) || existing.starts_with(&target))
+                    && (existing != &target || expected != &identity)
+            }) {
+                return Err(Error::invalid_argument(
+                    "gate_environment.extension_inputs",
+                    "declared shared asset destinations have conflicting identities or overlap",
+                ));
+            }
+            shared_targets.insert(target.clone(), identity.clone());
+            shared_assets.push(AgentTaskGateSharedAssetProvenance {
+                path,
+                source: asset_source.display().to_string(),
+                identity,
+                destination: target
+                    .strip_prefix(home)
+                    .expect("isolated shared asset")
+                    .display()
+                    .to_string(),
+            });
+        }
+        shared_assets.sort_by(|left, right| left.path.cmp(&right.path));
+        let identity = if shared_assets.is_empty() {
+            extension_identity.clone()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(b"homeboy/gate-extension-closure/v1\0");
+            hasher.update(extension_identity.as_bytes());
+            for asset in &shared_assets {
+                hasher.update([0]);
+                hasher.update(asset.path.as_bytes());
+                hasher.update([0]);
+                hasher.update(asset.identity.as_bytes());
+            }
+            format!("sha256:{:x}", hasher.finalize())
+        };
         let source_revision = homeboy_core::extension::lifecycle::read_source_revision_at(source);
         if input
             .identity
@@ -3107,7 +3204,23 @@ fn materialize_extension_inputs(
             ));
         }
         let destination = extensions.join(&input.id);
-        copy_extension_input(source, &destination)?;
+        copy_extension_input(&resolved_source, &destination)?;
+        if extension_tree_identity(&destination)? != extension_identity {
+            return Err(Error::invalid_argument(
+                "gate_environment.extension_inputs",
+                "extension input changed during materialization",
+            ));
+        }
+        for asset in &shared_assets {
+            let target = home.join(&asset.destination);
+            copy_extension_input(Path::new(&asset.source), &target)?;
+            if extension_tree_identity(&target)? != asset.identity {
+                return Err(Error::invalid_argument(
+                    "gate_environment.extension_inputs",
+                    "shared asset changed during materialization",
+                ));
+            }
+        }
         report
             .extension_inputs
             .push(AgentTaskGateExtensionInputProvenance {
@@ -3115,6 +3228,7 @@ fn materialize_extension_inputs(
                 source: input.source.clone(),
                 source_revision,
                 identity,
+                shared_assets,
                 destination: destination
                     .strip_prefix(home)
                     .unwrap_or(&destination)
@@ -6342,6 +6456,181 @@ mod tests {
             "Invalid argument 'gate_environment.extension_inputs': extension input no longer matches the candidate gate identity"
         );
         assert_eq!(error.details["field"], "gate_environment.extension_inputs");
+    }
+
+    #[test]
+    fn isolated_gate_shared_closure_runs_rust_inventory_and_tests_and_rejects_drift() {
+        let _guard = env_mutex();
+        let project = tempfile::tempdir().expect("project");
+        let root = tempfile::tempdir().expect("extension source root");
+        let rust = root.path().join("rust");
+        let helpers = root.path().join("scripts/lib");
+        fs::create_dir_all(rust.join("scripts")).unwrap();
+        fs::create_dir_all(&helpers).unwrap();
+        fs::create_dir_all(root.path().join("agent-runtimes")).unwrap();
+        fs::write(
+            root.path().join("homeboy-extension-root.json"),
+            r#"{"shared_assets":["scripts/lib","agent-runtimes"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            rust.join("rust.json"),
+            r#"{"id":"rust","name":"Rust","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(rust.join("scripts/test-runner.sh"),
+            "#!/bin/sh\nset -eu\n. \"$(dirname \"$0\")/../../scripts/lib/runner-harness.sh\"\nrun_tests \"$@\"\n").unwrap();
+        let helper = helpers.join("runner-harness.sh");
+        fs::write(&helper, "run_tests() { \"$@\"; }\n").unwrap();
+        fs::write(
+            project.path().join("fixture.rs"),
+            "#[test] fn copied_runner_reaches_test() { assert_eq!(2 + 2, 4); }\n",
+        )
+        .unwrap();
+        let binary = project.path().join("fixture-test");
+        let compiled = Command::new("rustc")
+            .arg("--test")
+            .arg(project.path().join("fixture.rs"))
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("compile real Rust test harness");
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let input = AgentTaskGateExtensionInput {
+            id: "rust".to_string(),
+            source: rust.display().to_string(),
+            identity: None,
+        };
+        let runtime = tempfile::tempdir().unwrap();
+        let home = runtime.path().join("home");
+        let mut candidate = AgentTaskGateEnvironment::default();
+        materialize_extension_inputs(&mut candidate, &home, &[input.clone()]).unwrap();
+        let copied_runner = home.join(".config/homeboy/extensions/rust/scripts/test-runner.sh");
+        for args in [vec!["--list"], vec![]] {
+            let output = Command::new("sh")
+                .arg(&copied_runner)
+                .arg(&binary)
+                .args(&args)
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("copied_runner_reaches_test"), "{stdout}");
+            if args.is_empty() {
+                assert!(stdout.contains("1 passed"), "{stdout}");
+            }
+        }
+        let provenance = &candidate.extension_inputs[0];
+        assert_eq!(provenance.shared_assets.len(), 2);
+        assert!(home.join(".config/homeboy/agent-runtimes").is_dir());
+        let original_identity = extension_tree_identity(&rust).unwrap();
+        assert_ne!(provenance.identity, original_identity);
+        let replay = candidate.replay_policy();
+        let baseline_home = runtime.path().join("baseline-home");
+        let mut baseline = AgentTaskGateEnvironment::default();
+        materialize_extension_inputs(&mut baseline, &baseline_home, &replay.extension_inputs)
+            .unwrap();
+        assert_eq!(candidate.extension_inputs, baseline.extension_inputs);
+        let baseline_output = Command::new("sh")
+            .arg(baseline_home.join(".config/homeboy/extensions/rust/scripts/test-runner.sh"))
+            .arg(&binary)
+            .env("HOME", &baseline_home)
+            .output()
+            .unwrap();
+        assert!(baseline_output.status.success());
+        fs::write(
+            home.join(".config/homeboy/extensions/scripts/lib/runner-harness.sh"),
+            "gate-owned changes\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&helper).unwrap(),
+            "run_tests() { \"$@\"; }\n"
+        );
+        assert_eq!(extension_tree_identity(&rust).unwrap(), original_identity);
+        fs::write(&helper, "run_tests() { return 1; }\n").unwrap();
+        let error =
+            materialize_extension_inputs(&mut baseline, &baseline_home, &replay.extension_inputs)
+                .expect_err("shared content drift must fail before execution");
+        assert!(error
+            .message
+            .contains("no longer matches the candidate gate identity"));
+        assert_eq!(extension_tree_identity(&rust).unwrap(), original_identity);
+        fs::remove_dir_all(&helpers).unwrap();
+        assert!(
+            materialize_extension_inputs(&mut baseline, &baseline_home, &[input]).is_err(),
+            "a missing declared source must not be silently skipped"
+        );
+    }
+
+    #[test]
+    fn isolated_gate_shared_closure_resolves_installed_metadata_and_rejects_unsafe_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("extensions/fixture");
+        let shared = root.path().join("extensions/scripts/lib");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(source.join("fixture.json"), "{}").unwrap();
+        fs::write(shared.join("settings.sh"), "helper\n").unwrap();
+        #[cfg(unix)]
+        {
+            let linked_source = root.path().join("linked-shared-source");
+            fs::rename(&shared, &linked_source).unwrap();
+            std::os::unix::fs::symlink(&linked_source, &shared).unwrap();
+        }
+        let manifest = source.join(".homeboy-extension-root.json");
+        fs::write(&manifest, r#"{"shared_assets":["scripts/lib"]}"#).unwrap();
+        let home = root.path().join("gate-home");
+        let input = AgentTaskGateExtensionInput {
+            id: "fixture".to_string(),
+            source: source.display().to_string(),
+            identity: None,
+        };
+        let mut report = AgentTaskGateEnvironment::default();
+        materialize_extension_inputs(&mut report, &home, &[input.clone()]).unwrap();
+        assert!(home
+            .join(".config/homeboy/extensions/scripts/lib/settings.sh")
+            .is_file());
+        assert!(
+            !fs::symlink_metadata(home.join(".config/homeboy/extensions/scripts/lib"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::write(
+            home.join(".config/homeboy/extensions/scripts/lib/settings.sh"),
+            "gate-owned\n",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(shared.join("settings.sh")).unwrap(),
+            "helper\n"
+        );
+        for path in [
+            "../credentials",
+            "/host/config",
+            "fixture",
+            "scripts/lib/../../fixture",
+        ] {
+            fs::write(
+                &manifest,
+                serde_json::to_vec(&json!({"shared_assets":[path]})).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                materialize_extension_inputs(&mut report, &home, &[input.clone()]).is_err(),
+                "{path}"
+            );
+        }
     }
 
     #[test]

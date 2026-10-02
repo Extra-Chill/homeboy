@@ -373,11 +373,40 @@ fn installed_shared_asset_target(extension_dir: &Path, shared_dir: &str) -> Resu
         // refresh snapshots it into an immutable generation; it must not write
         // through the active generation read boundary.
         "agent-runtimes" => paths::agent_runtimes()?,
-        "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
         // Shared extension libraries install under the extensions root so
         // installed wrappers can source `../../../scripts/lib/...`.
-        _ => extensions_dir.join(shared_dir),
+        _ => shared_asset_target(extensions_dir, &paths::homeboy()?, shared_dir),
     })
+}
+
+pub(crate) fn isolated_shared_asset_target(
+    config_root: &Path,
+    asset_path: &str,
+) -> Result<PathBuf> {
+    if asset_path.is_empty()
+        || Path::new(asset_path)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || asset_path.contains('\\')
+    {
+        return Err(Error::invalid_argument(
+            "shared_assets.path",
+            "shared asset paths must be non-empty relative paths without traversal",
+        ));
+    }
+    Ok(shared_asset_target(
+        &config_root.join("extensions"),
+        config_root,
+        asset_path,
+    ))
+}
+
+fn shared_asset_target(extensions_root: &Path, config_root: &Path, asset_path: &str) -> PathBuf {
+    let root = match asset_path {
+        "agent-runtimes" | "runtime-agent-ci" | "agent-task-contracts" => config_root.to_path_buf(),
+        _ => extensions_root.to_path_buf(),
+    };
+    root.join(asset_path)
 }
 
 /// Remove a shared-asset install target if present, handling both real
