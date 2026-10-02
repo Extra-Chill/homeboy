@@ -2276,6 +2276,39 @@ exec '{}' "$@"
     }
 
     #[test]
+    #[cfg(unix)]
+    fn linked_monorepo_subdir_extension_resolves_source_from_git_origin() {
+        with_isolated_home(|home| {
+            let monorepo = home.path().join("checkouts/extensions-monorepo");
+            write_extension_fixture(&monorepo, "custom");
+            if !run_git(&monorepo, &["init", "--quiet"])
+                || !run_git(
+                    &monorepo,
+                    &[
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.com/extensions.git",
+                    ],
+                )
+            {
+                return;
+            }
+
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            fs::create_dir_all(&extensions_dir).expect("extensions dir");
+            std::os::unix::fs::symlink(monorepo.join("custom"), extensions_dir.join("custom"))
+                .expect("link extension");
+
+            let source = source_metadata::resolve_source_url("custom")
+                .expect("linked extension resolves its git origin");
+
+            assert_eq!(source.url, "https://example.com/extensions.git");
+            assert!(source.repair.is_none());
+        });
+    }
+
+    #[test]
     fn copied_unknown_extension_missing_source_metadata_is_actionable_error() {
         with_isolated_home(|home| {
             let extensions_dir = home.path().join(".config/homeboy/extensions");
