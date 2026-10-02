@@ -3240,6 +3240,9 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 completed.phase = LabStagingPhase::Completed;
                 completed.stage_intent = None;
                 terminal.payload.validate(request, &completed)?;
+                homeboy_agents::agent_task_lifecycle::reconcile_terminal_cook_provider_result(
+                    &request.recipe.run_id,
+                )?;
                 Ok(Some(LabStagingStageEffect::Observe))
             }
             LabStagingPhase::Completed => Ok(Some(LabStagingStageEffect::Observe)),
@@ -3951,35 +3954,42 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 None,
             ));
         }
-        // A completed receipt makes recovery idempotent and prevents a resumed
-        // controller from polling or submitting a replacement child.
+        // A completed receipt prevents runner redispatch. Both fresh observation
+        // and receipt replay must still ensure controller-owned Cook completion.
         if let Ok(receipt) = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
             DurableLabTerminalReceipt,
         >(
             &request.recipe.run_id,
             DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
         ) {
-            return receipt.payload.validate(request, checkpoint);
+            receipt.payload.validate(request, checkpoint)?;
+        } else {
+            Self::check_cancelled(cancellation)?;
+            let observed = Self::observe_runner_job_until_terminal(
+                request,
+                runner_job_id,
+                Some(cancellation),
+            )?;
+            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+                &request.recipe.run_id,
+                &observed,
+            )?;
+            let receipt = DurableLabTerminalReceipt {
+                schema: "homeboy/durable-lab-terminal-receipt/v1".to_string(),
+                run_id: request.recipe.run_id.clone(),
+                runner_id: request.recipe.runner_id.clone(),
+                runner_job_id: runner_job_id.to_string(),
+                status: observed.job.status.as_str().to_string(),
+            };
+            receipt.validate(request, checkpoint)?;
+            homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                &request.recipe.run_id,
+                DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
+                &receipt,
+            )?;
         }
-        Self::check_cancelled(cancellation)?;
-        let observed =
-            Self::observe_runner_job_until_terminal(request, runner_job_id, Some(cancellation))?;
-        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+        homeboy_agents::agent_task_lifecycle::reconcile_terminal_cook_provider_result(
             &request.recipe.run_id,
-            &observed,
-        )?;
-        let receipt = DurableLabTerminalReceipt {
-            schema: "homeboy/durable-lab-terminal-receipt/v1".to_string(),
-            run_id: request.recipe.run_id.clone(),
-            runner_id: request.recipe.runner_id.clone(),
-            runner_job_id: runner_job_id.to_string(),
-            status: observed.job.status.as_str().to_string(),
-        };
-        receipt.validate(request, checkpoint)?;
-        homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
-            &request.recipe.run_id,
-            DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
-            &receipt,
         )?;
         Ok(())
     }
@@ -6017,6 +6027,169 @@ mod tests {
                 "recipe-plan",
                 Vec::new(),
             ),
+        }
+    }
+
+    #[test]
+    fn terminal_receipt_replay_restores_one_durable_cook_completion_intent() {
+        use homeboy_agents::agent_task_scheduler::{
+            AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskPlan,
+        };
+        use homeboy_agents::agent_task_service::{
+            AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore,
+        };
+
+        let _serial = global_state_lock().lock().expect("lock");
+        // Both production recovery paths must publish completion custody; neither
+        // may depend on a later status read or re-observe the remote provider.
+        for replay_observer in [false, true] {
+            homeboy_core::test_support::with_isolated_home(|_| {
+                let mut request = execution_request();
+                let plan: AgentTaskPlan = serde_json::from_value(json!({
+                    "schema": "homeboy/agent-task-plan/v1", "plan_id": "terminal-cook",
+                    "tasks": [{"schema": "homeboy/agent-task-request/v1",
+                        "task_id": "cook-fixture", "executor": {"backend": "example"},
+                        "instructions": "Produce a useful patch."}]
+                }))
+                .expect("compiled fixture plan");
+                request.durable_agent_task_plan = plan.clone();
+                let run_id = &request.recipe.run_id;
+                let cook_id = "receipt-completion-cook";
+                let aggregate = AgentTaskAggregate {
+                    schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                    plan_id: plan.plan_id.clone(),
+                    status: AgentTaskAggregateStatus::Succeeded,
+                    totals: Default::default(),
+                    outcomes: Vec::new(),
+                    events: Vec::new(),
+                    artifact_lineage: Vec::new(),
+                    child_runs: Vec::new(),
+                    artifact_bindings: Vec::new(),
+                    queue: Default::default(),
+                };
+                assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+                homeboy_agents::agent_task_lifecycle::record_completed_run(
+                    &plan,
+                    &aggregate,
+                    Some(run_id),
+                )
+                .expect("persist real terminal lifecycle");
+                let recipes = CookRecipeStore::from_current_data_root().expect("recipe store");
+                recipes
+                    .persist_recipe(&AgentTaskCookRecipe {
+                        schema: "homeboy/agent-task-cook-recipe/v1".to_string(),
+                        cook_id: cook_id.to_string(),
+                        attempts: vec![AgentTaskCookRecipeAttempt {
+                            attempt: 1,
+                            run_id: run_id.clone(),
+                            plan,
+                        }],
+                        promotion_transport: Value::Null,
+                        gate_policy: Value::Null,
+                        retry_budget: Value::Null,
+                        finalization: Value::Null,
+                        source_refs: Vec::new(),
+                        runtime_generation: "fixture-generation".to_string(),
+                        sensitive_mappings: Vec::new(),
+                        harvest_context: Default::default(),
+                    })
+                    .expect("persist durable Cook recipe");
+                let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .expect("lifecycle store");
+                homeboy_agents::agent_task_lifecycle::record_cook_attempt_in_store(
+                    &lifecycle, cook_id, 1, run_id,
+                )
+                .expect("bind exact terminal attempt to Cook");
+                let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+                checkpoint.phase = LabStagingPhase::ObserveRunner;
+                checkpoint.final_runner_job_id = Some("terminal-job".to_string());
+                let receipt = DurableLabTerminalReceipt {
+                    schema: "homeboy/durable-lab-terminal-receipt/v1".to_string(),
+                    run_id: run_id.clone(),
+                    runner_id: request.recipe.runner_id.clone(),
+                    runner_job_id: "terminal-job".to_string(),
+                    status: "succeeded".to_string(),
+                };
+                homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                    run_id,
+                    DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
+                    &receipt,
+                )
+                .expect("persist terminal receipt before interrupted completion");
+                let dispatch = DurableLabDispatchReceipt {
+                    schema: "homeboy/durable-lab-dispatch-receipt/v1".to_string(),
+                    run_id: run_id.clone(),
+                    runner_id: request.recipe.runner_id.clone(),
+                    recipe_digest: canonical_digest(&request.recipe).unwrap(),
+                    workspace_attachment_digest: "workspace".to_string(),
+                    runtime_attachment_digest: "runtime".to_string(),
+                    hydration_attachment_digest: "hydration".to_string(),
+                    daemon_lease_id: Some("fixture-lease".to_string()),
+                    reservation_job_id: Some("fixture-reservation".to_string()),
+                    reverse_submission_key: None,
+                    runner_job_id: "terminal-job".to_string(),
+                    remote_workspace: "/runner/fixture".to_string(),
+                    remote_command: vec!["homeboy".to_string()],
+                    workload_identity: "fixture-workload".to_string(),
+                    homeboy_handoff_execution_evidence: None,
+                };
+                homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
+                    run_id,
+                    DURABLE_LAB_DISPATCH_RECEIPT_ATTACHMENT_KIND,
+                    &dispatch,
+                )
+                .expect("persist dispatch identity");
+                let replay = || {
+                    if replay_observer {
+                        ProductionLabStagingOperations
+                            .observe_runner(
+                                &request,
+                                &checkpoint,
+                                "terminal-job",
+                                &LabStagingCancellationToken::default(),
+                            )
+                            .expect("replay terminal observer without remote access");
+                    } else {
+                        assert!(matches!(
+                            ProductionLabStagingOperations
+                                .recover_stage(
+                                    &request,
+                                    &checkpoint,
+                                    &checkpoint.intent_for_current_action(),
+                                )
+                                .expect("recover interrupted terminal effect"),
+                            Some(LabStagingStageEffect::Observe)
+                        ));
+                    }
+                };
+                replay();
+                let record = homeboy_agents::agent_task_lifecycle::exact_record(run_id).unwrap();
+                assert_eq!(record.metadata["cook_continuation"]["state"], "pending");
+                assert_eq!(record.metadata["cook_continuation"]["cook_id"], cook_id);
+                replay();
+                let scheduled = std::cell::Cell::new(0);
+                homeboy_core::daemon::orchestration::drain_work_intents_with(|intent| {
+                    assert_eq!(intent.run_id, *run_id);
+                    assert_eq!(intent.payload["cook_id"], cook_id);
+                    scheduled.set(scheduled.get() + 1);
+                    Ok(json!({"scheduled": true, "job_id": "completion-owner"}))
+                })
+                .expect("consume real durable completion intent");
+                assert_eq!(scheduled.get(), 1);
+                assert_eq!(
+                    homeboy_core::daemon::orchestration::drain_work_intents_with(|_| {
+                        panic!("receipt replay must not duplicate completed scheduling")
+                    })
+                    .unwrap()["scheduled"],
+                    false
+                );
+                assert_eq!(
+                    homeboy_agents::agent_task_lifecycle::exact_record(run_id)
+                        .unwrap()
+                        .state,
+                    homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Succeeded
+                );
+            });
         }
     }
 
