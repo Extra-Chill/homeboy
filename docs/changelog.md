@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.9] - 2026-10-02
+
+### Changed
+- match source error message by substring
+- rustfmt regression test
+- rustfmt
+
+### Fixed
+- restore Cook continuation from durable terminal receipts
+- exclude runner-hydrated gitignored paths from snapshot content verification
+- resolve linked extension source from git origin for runner parity
+
 ## [0.399.8] - 2026-10-01
 
 ### Fixed
