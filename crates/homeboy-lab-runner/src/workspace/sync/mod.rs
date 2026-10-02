@@ -46,7 +46,7 @@ use super::types::{
     RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceUpdateOutput,
 };
 use super::util::{
     deterministic_remote_path, git_output, hex_prefix, parent_remote_path,
@@ -146,10 +146,7 @@ fn sync_workspace_in_roots_with_deadline(
     validate_absolute_path("workspace_root", workspace_root)?;
     require_runner_workspace_disk_headroom(&runner, workspace_root)?;
 
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
@@ -971,10 +968,7 @@ pub fn update_workspace(
             None,
         ));
     }
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
@@ -1365,10 +1359,7 @@ pub fn reuse_compatible_snapshot_workspace(
             ]),
         )
     })?;
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());

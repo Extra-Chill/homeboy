@@ -254,10 +254,7 @@ pub fn controller_workspace_materialization_identity(
 pub fn generic_lab_replay_artifact_identity(
     path: &std::path::Path,
 ) -> homeboy_core::error::Result<String> {
-    let mut excludes = workspace::DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = workspace::default_excludes_for(path);
     for exclude in homeboy_core::source_snapshot::policy_for_path(path).sync_excludes {
         if !excludes.contains(&exclude) {
             excludes.push(exclude);
@@ -278,10 +275,7 @@ pub fn generic_lab_replay_transfer_excludes(
     runner: &Runner,
     path: &std::path::Path,
 ) -> Vec<String> {
-    let mut excludes = workspace::DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = workspace::default_excludes_for(path);
     for exclude in runner.policy.snapshot_excludes.iter().chain(
         homeboy_core::source_snapshot::policy_for_path(path)
             .sync_excludes
