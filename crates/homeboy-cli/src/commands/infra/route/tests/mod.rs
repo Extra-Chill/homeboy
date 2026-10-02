@@ -2,6 +2,7 @@
 
 mod dispatch;
 mod handoff;
+mod terminal_review_wait;
 
 #[test]
 fn terminal_cook_uses_shared_work_job_with_the_existing_active_fence() {

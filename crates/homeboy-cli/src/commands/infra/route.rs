@@ -251,31 +251,17 @@ pub(crate) fn route_after_parse_with_provenance(
         == homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer
         && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_none()
     {
-        let deferred = homeboy::deferred_workload::defer(deferred_workload_input(
+        // A live deferred worker only proves durable asynchronous ownership.
+        // It can wait indefinitely for a runner and has no terminal execution
+        // result for this caller. Reject a terminal observer before persisting
+        // work, rather than acknowledge unexecuted tests as a successful gate.
+        let result = deferred_review_result(
             cli,
-            &portable_deferred_args(&normalized_args),
+            &normalized_args,
             &preflight,
-            review_test_deferred_requirements(cli)
-                .expect("preflight only defers portable review tests"),
-        )?)?;
-        crate::commands::deferred_workload::ensure_worker(&homeboy::core::paths::homeboy()?)?;
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "schema": "homeboy/deferred-workload-result/v1",
-                "status": "deferred",
-                "deferred_workload_id": deferred.id,
-                "command": deferred.command_label,
-                "diagnostics": {
-                    "worker_command": "homeboy deferred-workload worker",
-                    "status_command": "homeboy deferred-workload status",
-                    "ci_alternative": deferred.ci_alternative,
-                    "resolved_portability": deferred.portability,
-                    "reason": deferred.reason,
-                },
-            }))
-            .unwrap_or_else(|_| "{}".to_string())
-        );
+            crate::commands::deferred_workload::ensure_worker,
+        )?;
+        println!("{result}");
         return Ok(Some(0));
     }
 
@@ -2677,6 +2663,68 @@ fn required_lab_runner_unavailable_error(
         Some("lab".to_string()),
         Some(hints),
     )
+}
+
+fn reject_deferred_terminal_wait(
+    cli: &Cli,
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+) -> homeboy::core::Result<()> {
+    if cli.detach_after_handoff
+        || preflight.deferred_workload
+            != homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::Defer
+    {
+        return Ok(());
+    }
+    let readiness = preflight.lab_readiness.as_ref();
+    let state = readiness
+        .map(|readiness| readiness.state.as_str())
+        .unwrap_or("unknown");
+    let mut hints = readiness
+        .into_iter()
+        .flat_map(|readiness| readiness.remediation_commands.iter().cloned())
+        .collect::<Vec<_>>();
+    hints.push("Run the same --wait command with an eligible ready runner or in CI, or retry when controller resource admission permits execution.".to_string());
+    hints.push("Omit --wait only to request durable asynchronous deferral; that acknowledgment is not terminal test verification.".to_string());
+    let mut error = Error::validation_invalid_argument(
+        "wait",
+        format!("review test --wait cannot obtain terminal execution evidence: controller resource admission refused execution and no eligible ready runner was admitted (readiness: {state}); no tests executed and no deferred workload was enqueued"),
+        Some("true".to_string()),
+        Some(hints),
+    );
+    error.details["resource_admission"] =
+        serde_json::to_value(&preflight.resource_admission).expect("resource admission serializes");
+    error.details["lab_readiness"] = serde_json::json!(state);
+    Err(error)
+}
+
+fn deferred_review_result(
+    cli: &Cli,
+    normalized_args: &[String],
+    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
+    ensure_worker: impl FnOnce(&Path) -> homeboy::core::Result<()>,
+) -> homeboy::core::Result<serde_json::Value> {
+    reject_deferred_terminal_wait(cli, preflight)?;
+    let deferred = homeboy::deferred_workload::defer(deferred_workload_input(
+        cli,
+        &portable_deferred_args(normalized_args),
+        preflight,
+        review_test_deferred_requirements(cli)
+            .expect("preflight only defers portable review tests"),
+    )?)?;
+    ensure_worker(&homeboy::core::paths::homeboy()?)?;
+    Ok(serde_json::json!({
+        "schema": "homeboy/deferred-workload-result/v1",
+        "status": "deferred",
+        "deferred_workload_id": deferred.id,
+        "command": deferred.command_label,
+        "diagnostics": {
+            "worker_command": "homeboy deferred-workload worker",
+            "status_command": "homeboy deferred-workload status",
+            "ci_alternative": deferred.ci_alternative,
+            "resolved_portability": deferred.portability,
+            "reason": deferred.reason,
+        },
+    }))
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,
