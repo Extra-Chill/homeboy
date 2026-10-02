@@ -4662,7 +4662,10 @@ fn record_controller_job_generation(job: &crate::api_jobs::Job) -> Result<()> {
     generation_store::record_job_for_admission(&job.id.to_string(), lease_id, &serving)
 }
 
-fn start_controller_job(job_id: Uuid, job_store: &JobStore) -> Result<crate::api_jobs::Job> {
+pub(crate) fn start_controller_job(
+    job_id: Uuid,
+    job_store: &JobStore,
+) -> Result<crate::api_jobs::Job> {
     let controller = job_store.controller_job_state(job_id)?;
     if job_store.get(job_id)?.status != JobStatus::Queued {
         return job_store.get(job_id);
@@ -4713,15 +4716,17 @@ fn dispatch_claimed_controller_job(
         );
         return;
     };
-    if matches!(
-        driver.execution_owner(&state.request, state.checkpoint.as_ref()),
-        Err(_)
-            | Ok(Some(
-                controller_job_driver::ControllerJobExecutionOwner::Unavailable
-            ))
-    ) {
-        // Unsupported opaque state is not permission to dispatch a recovery
-        // that might report failure while externally owned work remains live.
+    if (recovery || state.cancellation_requested)
+        && matches!(
+            driver.execution_owner(&state.request, state.checkpoint.as_ref()),
+            Err(_)
+                | Ok(Some(
+                    controller_job_driver::ControllerJobExecutionOwner::Unavailable
+                ))
+        )
+    {
+        // Recovery/cancellation must preserve unknown external ownership.
+        // A fresh admitted start establishes its checkpoint through prepare.
         return;
     }
     // Cancellation is durable first. This channel only wakes the owner quickly;

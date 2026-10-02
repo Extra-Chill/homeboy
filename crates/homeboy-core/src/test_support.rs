@@ -172,6 +172,10 @@ impl ControllerJobHarness {
         crate::daemon::recover_controller_jobs(&self.store);
     }
 
+    pub fn start_via_controller_boundary(&self) -> Result<Job> {
+        crate::daemon::start_controller_job(self.job_id, &self.store)
+    }
+
     pub fn wait_until_terminal(&self) -> Result<Job> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {

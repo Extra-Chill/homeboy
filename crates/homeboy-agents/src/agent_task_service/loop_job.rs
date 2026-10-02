@@ -1770,6 +1770,47 @@ mod tests {
     }
 
     #[test]
+    fn fresh_loop_starts_through_the_real_controller_dispatch_boundary() {
+        with_isolated_home(|home| {
+            register_loop_work_job_handler();
+            super::super::work_job::register_work_job_driver();
+            let loop_id = "loop-fresh-controller-boundary";
+            let mut record =
+                agent_task_loop_controller::create_controller(loop_id, "repair", "v1")?;
+            record.state = AgentTaskLoopControllerState::Running;
+            agent_task_loop_controller::write_controller(&record)?;
+            let submission = loop_work_job_execution_submission(
+                loop_id,
+                "fresh-generation",
+                json!({}),
+                AgentTaskProviderCatalog::default(),
+            )?;
+            let driver: Arc<dyn ControllerJobDriver> = Arc::new(WorkJobDriver);
+            let harness = ControllerJobHarness::durable_queued(
+                driver,
+                submission["request"].clone(),
+                &home.path().join("fresh-jobs.json"),
+                "fresh-lease",
+            )?;
+            harness.start_via_controller_boundary()?;
+            assert_eq!(
+                harness.wait_until_terminal()?.status,
+                homeboy_core::api_jobs::JobStatus::Succeeded
+            );
+            assert_eq!(
+                agent_task_loop_controller::load_controller(loop_id)?.state,
+                AgentTaskLoopControllerState::Waiting
+            );
+            assert!(harness
+                .events()?
+                .iter()
+                .any(|event| event.kind == homeboy_core::api_jobs::JobEventKind::Result));
+            Ok::<(), homeboy_core::Error>(())
+        })
+        .expect("fresh admission reaches its driver and records a terminal result");
+    }
+
+    #[test]
     fn actionless_loop_waits_and_supervising_work_job_completes() {
         with_isolated_home(|_| {
             let loop_id = "loop-actionless-waiting";
