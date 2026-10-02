@@ -779,7 +779,7 @@ fn collect_stats(
     Ok(())
 }
 
-pub(super) fn is_excluded(
+pub(crate) fn is_excluded(
     root: &Path,
     path: &Path,
     excludes: &[String],

@@ -29,6 +29,79 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     "*.pfx",
 ];
 
+/// Secret-shaped patterns in [`DEFAULT_EXCLUDES`]. They exist to keep stray
+/// local credentials off runners, not to drop committed repository content.
+pub(crate) const SECRET_EXCLUDES: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "id_rsa",
+    "id_ed25519",
+    ".ssh",
+    ".ssh/**",
+    "*.p12",
+    "*.pfx",
+];
+
+/// [`DEFAULT_EXCLUDES`] scoped to a source checkout (#15303).
+///
+/// A secret pattern that also matches a *tracked* file (e.g. data-machine's
+/// `tests/fixtures/service-account/test-key.pem`) silently dropped committed
+/// content from every Lab materialization. When the checkout tracks a match,
+/// the glob is replaced by explicit root-anchored excludes for only the
+/// untracked matches, so committed files ship and stray local keys still do
+/// not. Outside a Git checkout, or when nothing tracked matches, the defaults
+/// are returned unchanged.
+pub(crate) fn default_excludes_for(path: &std::path::Path) -> Vec<String> {
+    let defaults = DEFAULT_EXCLUDES
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+    let Some(tracked) = git_paths(path, &["ls-files", "-z"]) else {
+        return defaults;
+    };
+    let untracked = git_paths(path, &["ls-files", "--others", "-z"]).unwrap_or_default();
+    let matches = |pattern: &str, relative: &str| {
+        super::snapshot::is_excluded(path, &path.join(relative), &[pattern.to_string()], &[])
+    };
+    let mut excludes = Vec::with_capacity(defaults.len());
+    for pattern in defaults {
+        let scoped = SECRET_EXCLUDES.contains(&pattern.as_str())
+            && tracked.iter().any(|file| matches(&pattern, file));
+        if !scoped {
+            excludes.push(pattern);
+            continue;
+        }
+        for file in untracked.iter().filter(|file| matches(&pattern, file)) {
+            let anchored = format!("./{file}");
+            if !excludes.contains(&anchored) {
+                excludes.push(anchored);
+            }
+        }
+    }
+    excludes
+}
+
+fn git_paths(path: &std::path::Path, args: &[&str]) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf8_lossy(entry).into_owned())
+            .collect(),
+    )
+}
+
 pub use homeboy_lab_runner_contract::RunnerWorkspaceSyncOptions;
 pub use homeboy_runner_contract::RunnerWorkspaceSyncMode;
 
@@ -687,4 +760,55 @@ pub(crate) fn canonical_workspace_path(path: &str) -> homeboy_core::error::Resul
     path.canonicalize().map_err(|err| {
         Error::internal_io(err.to_string(), Some("canonicalize sync path".to_string()))
     })
+}
+
+#[cfg(test)]
+mod default_excludes_tests {
+    use super::default_excludes_for;
+    use std::process::Command;
+
+    fn git(path: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// Regression for #15303 cause 1: data-machine tracks
+    /// `tests/fixtures/service-account/test-key.pem`, and the `*.pem` secret
+    /// exclude dropped it from every Lab materialization.
+    #[test]
+    fn tracked_secret_shaped_files_ship_but_untracked_ones_stay_excluded() {
+        let repo = tempfile::tempdir().expect("repo");
+        let fixture = repo.path().join("tests/fixtures");
+        std::fs::create_dir_all(&fixture).expect("fixture dir");
+        std::fs::write(fixture.join("test-key.pem"), "fixture\n").expect("tracked pem");
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["add", "--all"]);
+        std::fs::write(repo.path().join("stray.pem"), "secret\n").expect("untracked pem");
+        std::fs::write(repo.path().join(".env"), "SECRET=1\n").expect("untracked env");
+
+        let excludes = default_excludes_for(repo.path());
+
+        assert!(!excludes.contains(&"*.pem".to_string()), "{excludes:?}");
+        assert!(excludes.contains(&"./stray.pem".to_string()), "{excludes:?}");
+        assert!(
+            !excludes.iter().any(|value| value.contains("test-key.pem")),
+            "{excludes:?}"
+        );
+        assert!(excludes.contains(&".env".to_string()), "{excludes:?}");
+        assert!(excludes.contains(&"*.key".to_string()), "{excludes:?}");
+    }
+
+    #[test]
+    fn non_git_paths_keep_the_default_excludes() {
+        let dir = tempfile::tempdir().expect("dir");
+        let expected = super::DEFAULT_EXCLUDES
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(default_excludes_for(dir.path()), expected);
+    }
 }

@@ -61,7 +61,7 @@ pub(crate) use snapshot::{
 };
 pub use snapshot::{WorkspaceContentManifest, WorkspaceContentManifestEntry};
 pub use snapshot_provider::register as register_workspace_snapshot_provider;
-pub(crate) use types::{canonical_workspace_path, DEFAULT_EXCLUDES};
+pub(crate) use types::{canonical_workspace_path, default_excludes_for, DEFAULT_EXCLUDES};
 pub(crate) use util::{
     git_output, parent_remote_path, run_shell_capture, run_shell_command, sanitize_path_segment,
     shell_command_for_runner,
