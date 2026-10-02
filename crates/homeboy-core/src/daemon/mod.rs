@@ -5736,6 +5736,53 @@ mod tests {
     /// admission, and leave it claimed `running` with no child identity — the
     /// #13619 incident shape.
     fn admitted_running_staging_dispatch(run_id: Option<&str>) -> uuid::Uuid {
+        struct LinkedRunDriver;
+        impl controller_job_driver::ControllerJobDriver for LinkedRunDriver {
+            fn job_type(&self) -> &'static str {
+                "test.linked-run"
+            }
+            fn version(&self) -> u32 {
+                1
+            }
+            fn public_request(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
+                Ok(value.clone())
+            }
+            fn public_progress(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
+                Ok(value.clone())
+            }
+            fn public_result(&self, value: &serde_json::Value) -> Result<serde_json::Value> {
+                Ok(value.clone())
+            }
+            fn public_error(
+                &self,
+                _error: &Error,
+            ) -> controller_job_driver::ControllerJobPublicError {
+                controller_job_driver::ControllerJobPublicError {
+                    message: "fixture".to_string(),
+                    data: json!({}),
+                }
+            }
+            fn validate_secret_references(&self, _request: &serde_json::Value) -> Result<()> {
+                Ok(())
+            }
+            fn execute(
+                &self,
+                _prepared: serde_json::Value,
+                _job: controller_job_driver::ControllerJobHandle,
+            ) -> Result<serde_json::Value> {
+                panic!("linked-run fixture must not execute")
+            }
+            fn cancel(&self, _prepared: &serde_json::Value) -> Result<()> {
+                panic!("linked-run fixture must not cancel")
+            }
+        }
+        static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        REGISTERED.get_or_init(|| {
+            controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
+                LinkedRunDriver,
+            ))
+            .expect("register available generic linked-run driver");
+        });
         let store =
             JobStore::open_without_reconciliation(paths::daemon_jobs_file().expect("jobs path"))
                 .expect("durable store");
@@ -5744,7 +5791,7 @@ mod tests {
                 "controller.lab.staging-dispatch".to_string(),
                 format!("lab-staging-{}", uuid::Uuid::new_v4()),
                 ControllerJobState {
-                    job_type: "lab.staging-dispatch".to_string(),
+                    job_type: "test.linked-run".to_string(),
                     version: 1,
                     request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),
                     public_request: json!({ "schema": "homeboy/lab-staging-dispatch/v1" }),

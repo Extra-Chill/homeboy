@@ -250,7 +250,7 @@ impl JobStore {
             {
                 return Err(Error::validation_invalid_argument(
                     "job_id",
-                    format!("job `{job_id}` has controller-driver or persisted child-process ownership; refusing operator no-PID recovery"),
+                    format!("job `{job_id}` has controller-driver or persisted child-process evidence; refusing operator no-PID recovery"),
                     Some(job_id.to_string()),
                     None,
                 ));

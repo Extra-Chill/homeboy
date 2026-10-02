@@ -1486,7 +1486,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("controller-driver or persisted child-process ownership"),
+                    .contains("controller-driver or persisted child-process evidence"),
                 "operator no-PID recovery must refuse typed controller ownership: {error}"
             );
             let other_submission = cook_job_submission_for_launcher(
