@@ -2406,6 +2406,22 @@ fn run_promotion_gates(
                 );
             }),
         };
+        // Detached gate workspaces have no submodules until initialized
+        // (#15355). Recorded with the setup evidence; a failure here does not
+        // fail setup on its own, since gates that need a missing submodule
+        // fail with their own diagnostics.
+        let submodule_setup = options
+            .gates
+            .hydrate_dependencies
+            .then(|| {
+                homeboy_core::deps::hydrate_git_submodules(
+                    &gate_workspace,
+                    None,
+                    "destination_gate_workspace",
+                    homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
+                )
+            })
+            .flatten();
         let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
             &gate_workspace,
             options.gates.hydrate_dependencies,
@@ -2430,7 +2446,7 @@ fn run_promotion_gates(
         {
             return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
         }
-        setup
+        submodule_setup.into_iter().chain(setup).collect()
     } else {
         // An opaque provider destination cannot be hydrated locally. Its gate
         // provider remains the authority, and the report makes no local
