@@ -793,7 +793,10 @@ mod default_excludes_tests {
         let excludes = default_excludes_for(repo.path());
 
         assert!(!excludes.contains(&"*.pem".to_string()), "{excludes:?}");
-        assert!(excludes.contains(&"./stray.pem".to_string()), "{excludes:?}");
+        assert!(
+            excludes.contains(&"./stray.pem".to_string()),
+            "{excludes:?}"
+        );
         assert!(
             !excludes.iter().any(|value| value.contains("test-key.pem")),
             "{excludes:?}"
