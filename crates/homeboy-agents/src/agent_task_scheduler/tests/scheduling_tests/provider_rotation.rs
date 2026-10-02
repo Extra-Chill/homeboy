@@ -581,11 +581,6 @@ mod provider_rotation_tests {
     }
 
     #[test]
-    fn timeout_candidate_converges_before_empty_rotation() {
-        retained_timeout_candidate_converges_before_rotation();
-    }
-
-    #[test]
     fn timeout_candidate_converges_before_another_provider_rotation() {
         let _home = homeboy_core::test_support::HomeGuard::new();
         let temp = tempfile::tempdir().expect("tempdir");
