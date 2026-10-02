@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.18] - 2026-10-02
+
+### Fixed
+- retry cook attempts that produce no change instead of parking them
+
 ## [0.399.17] - 2026-10-02
 
 ### Fixed
