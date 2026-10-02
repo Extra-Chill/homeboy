@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.19] - 2026-10-02
+
+### Fixed
+- reject cooks whose gates need a missing dependency tool before any provider runs
+
+## [0.399.18] - 2026-10-02
+
+### Fixed
+- retry cook attempts that produce no change instead of parking them
+
+## [0.399.17] - 2026-10-02
+
+### Fixed
+- explain dependency gate setup failures
+
+## [0.399.16] - 2026-10-02
+
+### Fixed
+- reject deferred acknowledgments for terminal wait callers
+- initialize submodules and dependencies in cook checkouts before the provider starts
+
+## [0.399.15] - 2026-10-02
+
+### Fixed
+- keep host Playwright browser cache visible to isolated gates
+- apply controller transport to offline bundle hydration
+- bind worker roots and retain bounded startup evidence
+
 ## [0.399.14] - 2026-10-02
 
 ### Fixed

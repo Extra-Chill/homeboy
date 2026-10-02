@@ -310,6 +310,21 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     let review_form_gap = (options.require_review_form && gates_green_with_changes)
         .then(|| review_form_requirement_gap(&options.review_form));
 
+    // An attempt that changed nothing is a gap to feed back, exactly like a red
+    // gate, while budget remains (#15364). It is not a terminal outcome for a
+    // task that is expected to produce a change, unless the provider declared
+    // a verified intentional no-change verdict.
+    let no_change_gap = intentional_no_change.is_none()
+        && options.promotion_report.changed_files.is_empty()
+        && matches!(
+            options.promotion_report.status,
+            AgentTaskPromotionStatus::VerifiedNoChanges
+                | AgentTaskPromotionStatus::NoChangesGateFailed
+                | AgentTaskPromotionStatus::NoChanges
+        )
+        && !request_is_review_form_only(&options.source_request)
+        && request_requires_substantive_candidate(&options.source_request);
+
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
             &options,
@@ -323,6 +338,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         // attempt with actionable feedback, exactly like a red gate — unless the
         // retry budget is exhausted.
         (retry_budget_remaining > 0).then(|| build_review_form_follow_up_request(&options, gap))
+    } else if no_change_gap && !invalid_gate_declaration && retry_budget_remaining > 0 {
+        Some(build_no_change_follow_up_request(&options, &failed_gates))
     } else {
         None
     };
@@ -528,6 +545,139 @@ fn build_follow_up_request(
         }
     });
     request
+}
+
+/// Build a follow-up attempt for an attempt that produced no change (#15364).
+///
+/// Unlike gate remediation, there is no candidate to repair, so the original
+/// task instructions and inputs are preserved and the feedback is appended.
+/// Any gate failures observed on the unchanged workspace are included, because
+/// they describe exactly what the task still has to fix.
+fn build_no_change_follow_up_request(
+    options: &AgentTaskCookLoopOptions,
+    failed_gates: &[AgentTaskCookLoopGateFailure],
+) -> AgentTaskRequest {
+    let mut request = options.source_request.clone();
+    let next_attempt = options.attempt.saturating_add(1);
+    let agent_visible_failed_gates = agent_visible_gate_failures(failed_gates);
+    request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
+    request.task_id = format!("{}-no-change-{}", request.task_id, next_attempt);
+    request.parent_plan_id = request
+        .parent_plan_id
+        .clone()
+        .or_else(|| options.source_run_id.clone());
+    request.instructions = format!(
+        "{}\n\n{}",
+        options.source_request.instructions.trim_end(),
+        no_change_feedback(options, &agent_visible_failed_gates),
+    );
+    if !request.inputs.is_object() {
+        request.inputs = json!({});
+    }
+    request.inputs["cook_loop"] = json!({
+        "source_run_id": options.source_run_id,
+        "source_task_id": options.source_request.task_id,
+        "source_patch_task_id": options.promotion_report.source.task_id,
+        "promotion_status": options.promotion_report.status,
+        "attempt": options.attempt,
+        "next_attempt": next_attempt,
+        "max_attempts": options.max_attempts,
+        "retry_budget_remaining_after_dispatch": options.max_attempts.saturating_sub(next_attempt),
+        "to_worktree": options.promotion_report.to_worktree,
+        "no_change_feedback": true,
+        "failed_gates": agent_visible_failed_gates,
+    });
+    request.source_refs.push(AgentTaskSourceRef {
+        kind: "agent-task-run".to_string(),
+        uri: options
+            .source_run_id
+            .as_ref()
+            .map(|run_id| format!("homeboy://agent-task/run/{run_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "homeboy://agent-task/task/{}",
+                    options.source_request.task_id
+                )
+            }),
+        revision: None,
+    });
+    request.workspace.mode = AgentTaskWorkspaceMode::Existing;
+    request.workspace.root = request
+        .workspace
+        .root
+        .clone()
+        .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.policy.grant_workspace_read_tool();
+    request.metadata = json!({
+        "cook_loop": {
+            "kind": "no-change-feedback",
+            "attempt": next_attempt,
+            "previous_attempt": options.attempt,
+            "max_attempts": options.max_attempts,
+            "source_task_id": options.source_request.task_id,
+            "source_run_id": options.source_run_id,
+            "failed_gate_count": failed_gates.len(),
+        }
+    });
+    request
+}
+
+fn no_change_feedback(
+    options: &AgentTaskCookLoopOptions,
+    failed_gates: &[AgentTaskCookLoopGateFailure],
+) -> String {
+    let next_attempt = options.attempt.saturating_add(1);
+    let gates = if failed_gates.is_empty() {
+        String::new()
+    } else {
+        let list = failed_gates
+            .iter()
+            .map(|failure| {
+                let label = if failure.command.is_empty() {
+                    failure.gate_id.as_str()
+                } else {
+                    failure.command.as_str()
+                };
+                format!(
+                    "- `{}` exited {}: {}",
+                    label, failure.exit_code, failure.summary
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nVerification of the unchanged workspace still fails:\n{list}")
+    };
+    format!(
+        "## Homeboy cook loop: attempt {next_attempt} of {max}\n\nThe previous attempt finished without changing any files in the workspace.{gates}\n\nYour deliverable is a committed change in this workspace that completes the task above, with tests. Build on what the previous attempt learned rather than restarting the investigation. If the task genuinely needs no change, declare a verified intentional no-change verdict instead of returning an empty result.",
+        max = options.max_attempts,
+    )
+}
+
+/// Whether a task is expected to produce a code change (a patch-writing policy
+/// or a declared change artifact), as opposed to review or investigation work.
+pub(crate) fn request_requires_substantive_candidate(
+    request: &crate::agent_task::AgentTaskRequest,
+) -> bool {
+    fn is_change_artifact(value: &str) -> bool {
+        matches!(
+            value,
+            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
+        )
+    }
+
+    request.policy.write == "patch"
+        || request
+            .expected_artifacts
+            .iter()
+            .any(|artifact| is_change_artifact(artifact))
+        || request.artifact_declarations.iter().any(|artifact| {
+            artifact.required
+                && (is_change_artifact(&artifact.name)
+                    || artifact
+                        .artifact_type
+                        .as_deref()
+                        .is_some_and(is_change_artifact))
+        })
 }
 
 /// Returns `Some(feedback)` describing why the AI review form is not yet
@@ -1592,8 +1742,10 @@ mod tests {
                 vec![green_gate()],
                 Vec::new(),
             ),
+            // Budget exhausted: a verified no-op stays terminal. With budget,
+            // a change task retries instead (#15364, see below).
             attempt: 1,
-            max_attempts: 3,
+            max_attempts: 1,
             source_run_id: Some("run-verified-no-op".to_string()),
             current_diff: String::new(),
             require_review_form: true,
@@ -1615,7 +1767,7 @@ mod tests {
                 Vec::new(),
             ),
             attempt: 1,
-            max_attempts: 3,
+            max_attempts: 1,
             source_run_id: Some("run-failed-no-op".to_string()),
             current_diff: String::new(),
             require_review_form: false,
@@ -1624,6 +1776,107 @@ mod tests {
         });
         assert_eq!(failed.status, AgentTaskCookLoopStatus::NoOpGateFailed);
         assert!(failed.follow_up_request.is_none());
+    }
+
+    /// #15364: an attempt that changed nothing is fed back like a red gate
+    /// while budget remains, keeping the original task and adding feedback.
+    #[test]
+    fn no_change_on_a_change_task_retries_with_feedback() {
+        let options = |status, gates, run| AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(status, gates, Vec::new()),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some(run),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        };
+
+        let verified = evaluate_cook_loop(options(
+            AgentTaskPromotionStatus::VerifiedNoChanges,
+            vec![green_gate()],
+            "run-empty".to_string(),
+        ));
+        assert_eq!(verified.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = verified.follow_up_request.expect("no-change follow-up");
+        assert_eq!(request.task_id, "cook-homeboy-no-change-2");
+        assert!(request.instructions.starts_with("Cook the issue"));
+        assert!(request
+            .instructions
+            .contains("finished without changing any files"));
+        assert!(request.instructions.contains("committed change"));
+        assert_eq!(request.inputs["cook_loop"]["no_change_feedback"], true);
+        assert_eq!(request.inputs["cook_loop"]["next_attempt"], 2);
+        assert_eq!(request.metadata["cook_loop"]["kind"], "no-change-feedback");
+        assert_eq!(request.expected_artifacts, vec!["patch".to_string()]);
+        assert!(request
+            .source_refs
+            .iter()
+            .any(|source| source.uri == "homeboy://agent-task/run/run-empty"));
+
+        let failed = evaluate_cook_loop(options(
+            AgentTaskPromotionStatus::NoChangesGateFailed,
+            vec![failed_gate()],
+            "run-empty-red".to_string(),
+        ));
+        assert_eq!(failed.status, AgentTaskCookLoopStatus::RetryRequested);
+        let request = failed.follow_up_request.expect("no-change follow-up");
+        assert!(request
+            .instructions
+            .contains("Verification of the unchanged workspace still fails"));
+        assert_eq!(
+            request.inputs["cook_loop"]["failed_gates"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn no_change_without_a_change_contract_or_with_a_declaration_does_not_retry() {
+        let mut review_only = source_request();
+        review_only.expected_artifacts.clear();
+        review_only.policy.write = "none".to_string();
+        let review = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: review_only,
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::VerifiedNoChanges,
+                vec![green_gate()],
+                Vec::new(),
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-review".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert_eq!(review.status, AgentTaskCookLoopStatus::GreenCompleted);
+        assert!(review.follow_up_request.is_none());
+
+        // An existing committed candidate on the destination is not a no-op.
+        let reviewed_candidate = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::VerifiedNoChanges,
+                vec![green_gate()],
+                vec!["src/lib.rs".to_string()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-reviewed".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert!(reviewed_candidate
+            .follow_up_request
+            .as_ref()
+            .is_none_or(|request| request.metadata["cook_loop"]["kind"] != "no-change-feedback"));
     }
 
     #[test]

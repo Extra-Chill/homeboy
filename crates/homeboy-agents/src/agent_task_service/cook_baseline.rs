@@ -713,7 +713,6 @@ fn materialize_follow_up_baseline_at(
         .and_then(Value::as_str)
         .filter(|diff| !diff.trim().is_empty())
         .unwrap_or(artifact);
-    let normalized = normalize_promotion_patch(complete_candidate, &promotion.to_worktree)?;
     let index = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -782,6 +781,10 @@ fn materialize_follow_up_baseline_at(
     let (commit, tree) = if head_tree == target_tree {
         (expected_head.to_string(), head_tree)
     } else {
+        // Normalized only when the candidate differs from the target HEAD: an
+        // attempt that produced no change has nothing to replay, and its empty
+        // artifact is not a promotable patch (#15364).
+        let normalized = normalize_promotion_patch(complete_candidate, &promotion.to_worktree)?;
         let patch_path = baseline.path.join(".homeboy-cook-baseline.patch");
         std::fs::write(&patch_path, normalized.content.as_bytes()).map_err(|error| {
             Error::internal_io(

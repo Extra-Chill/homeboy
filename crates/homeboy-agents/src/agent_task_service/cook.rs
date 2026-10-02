@@ -350,26 +350,7 @@ pub(crate) fn intentional_no_change_from_aggregate(
 }
 
 fn request_requires_substantive_candidate(request: &crate::agent_task::AgentTaskRequest) -> bool {
-    fn is_change_artifact(value: &str) -> bool {
-        matches!(
-            value,
-            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-        )
-    }
-
-    request.policy.write == "patch"
-        || request
-            .expected_artifacts
-            .iter()
-            .any(|artifact| is_change_artifact(artifact))
-        || request.artifact_declarations.iter().any(|artifact| {
-            artifact.required
-                && (is_change_artifact(&artifact.name)
-                    || artifact
-                        .artifact_type
-                        .as_deref()
-                        .is_some_and(is_change_artifact))
-        })
+    crate::agent_task_cook_loop::request_requires_substantive_candidate(request)
 }
 
 fn no_change_requires_substantive_candidate(
@@ -7015,6 +6996,37 @@ fn run_cook_spine(
             Some(&options.identity.initial_run_id),
         ));
     }
+    // Promotion gate setup installs dependencies on this controller with the
+    // providers' declared commands (e.g. `pnpm install --frozen-lockfile` for
+    // a pnpm lockfile). A missing package manager would otherwise fail only
+    // after a provider attempt was paid for, stranding its candidate (#15364).
+    if options.gates.hydrate_dependencies && !verification_pending_continuation {
+        if let Some(error) = dependency_tool_preflight_error(&options)? {
+            let error = with_pre_execution_phase(error, "dependency_tool_preflight");
+            record_pre_execution_failure(
+                lifecycle_store,
+                &options.identity.initial_plan,
+                &options.identity.initial_run_id,
+                &error,
+                "dependency_tool_preflight",
+            )?;
+            return Ok(pre_execution_failure_report(
+                options.identity.cook_id.clone(),
+                Vec::new(),
+                pre_execution_failure_details(
+                    agent_task_lifecycle::exact_record_in_store(
+                        lifecycle_store,
+                        &options.identity.initial_run_id,
+                    )
+                    .ok()
+                    .as_ref(),
+                    &error,
+                ),
+                error,
+                Some(&options.identity.initial_run_id),
+            ));
+        }
+    }
     if let Some(latest_attempt) = recipe.attempts.last() {
         // Recipe attempts retain logical input provenance. The controller plan
         // is the canonical dispatch contract once pending workspace resolution
@@ -10153,6 +10165,62 @@ fn materialize_pending_cook_workspace(
 /// need to resolve a review profile or component-scoped path for an
 /// already-admitted Cook should prefer this over re-deriving from the bare
 /// checkout path.
+/// Reject a Cook whose destination needs a dependency tool this controller
+/// lacks, before any provider runs (#15364).
+fn dependency_tool_preflight_error(options: &CookRequest) -> Result<Option<Error>> {
+    let Some(gate_workspace) = super::cook_promotion::component_workspace_path(options)?
+        .or_else(|| options.workspace.source_worktree_path.clone())
+    else {
+        return Ok(None);
+    };
+    if !gate_workspace.is_dir() {
+        return Ok(None);
+    }
+    let component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .clone()
+        .or_else(|| cook_repository_identity_component_id(&options.identity.initial_plan));
+    let missing =
+        homeboy_core::deps::missing_dependency_tools(&gate_workspace, component_id.as_deref());
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let summary = missing
+        .iter()
+        .map(|tool| {
+            format!(
+                "`{}` (needed by `{}` in {} for: {})",
+                tool.program,
+                tool.provider_id,
+                tool.package_root,
+                tool.install_command.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut programs = missing
+        .iter()
+        .map(|tool| tool.program.clone())
+        .collect::<Vec<_>>();
+    programs.dedup();
+    let mut error = Error::validation_invalid_argument(
+        "dependency_tools",
+        format!(
+            "this controller is missing dependency tool(s) its gates need: {summary}"
+        ),
+        Some(gate_workspace.display().to_string()),
+        Some(vec![format!(
+            "Install {} where the Homeboy controller runs gates (or put it on PATH), then start Cook again. No provider attempt was spent.",
+            programs.join(", ")
+        )]),
+    );
+    error.details["missing_dependency_tools"] = serde_json::to_value(&missing)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok(Some(error))
+}
+
 pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<String> {
     admitted_component_id(plan.metadata.get("cook_repository_identity"))
 }
