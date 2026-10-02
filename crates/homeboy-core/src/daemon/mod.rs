@@ -37,6 +37,8 @@ mod artifact_download;
 mod broker_config;
 mod completion_tracker;
 mod control;
+#[doc(hidden)]
+pub use control::bounded_redacted_reader;
 #[cfg(test)]
 mod controller_completion_tests;
 pub mod controller_job_driver;

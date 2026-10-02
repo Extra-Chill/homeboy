@@ -328,7 +328,7 @@ fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) 
 /// Redact complete, bounded records before retaining them. An overlong record
 /// is discarded rather than retaining an unredacted suffix whose key occurred
 /// before the retention boundary.
-fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
+pub fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     const LIMIT: usize = 4096;
     const RECORD_LIMIT: usize = 4096;
     let mut tail = VecDeque::with_capacity(LIMIT);
