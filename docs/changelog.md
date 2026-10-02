@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.16] - 2026-10-02
+
+### Fixed
+- reject deferred acknowledgments for terminal wait callers
+- initialize submodules and dependencies in cook checkouts before the provider starts
+
 ## [0.399.15] - 2026-10-02
 
 ### Fixed
