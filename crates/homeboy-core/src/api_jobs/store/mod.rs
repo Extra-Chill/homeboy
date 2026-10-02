@@ -30,6 +30,7 @@ use crate::error::{Error, Result};
 use crate::runner_execution_envelope::PathMaterializationPlan;
 use crate::source_snapshot::SourceSnapshot;
 
+mod controller_completion;
 mod reconciliation;
 
 /// A reservation bounds the interval between durable admission and persisting a
@@ -624,11 +625,13 @@ impl JobStore {
                 .unwrap_or_default()
                 .len();
         let (journal_count, journal_bytes) = tombstone_store_report(&path)?;
+        let controller_completions = controller_completion::pending_completion_report(&path)?;
         Ok(serde_json::json!({
             "jobs": { "count": durable.jobs.len(), "bytes": job_bytes, "active_count": active_count, "terminal_count": terminal_count },
             "live_submission_keys": { "count": live_submission_keys, "bytes": live_submission_bytes },
             "legacy_expired_submission_keys": { "count": legacy_count, "bytes": legacy_bytes },
             "replay_tombstone_journal": { "count": journal_count, "bytes": journal_bytes, "resident": false },
+            "controller_completion_ledger": controller_completions,
         }))
     }
 
@@ -1787,6 +1790,12 @@ impl JobStore {
             if stored.job.status == JobStatus::Cancelled || controller.cancellation_requested {
                 return Ok(stored.job.clone());
             }
+            if self.controller_completion_pending(job_id)? {
+                return Err(Error::validation_invalid_argument(
+                    "job_id", "controller execution already completed; its terminal projection is pending persistence",
+                    Some(job_id.to_string()), None,
+                ));
+            }
             if stored.job.status.is_terminal() {
                 return Err(Error::validation_invalid_argument(
                     "status",
@@ -1869,6 +1878,10 @@ impl JobStore {
 
     pub(crate) fn complete_controller_cancellation(&self, job_id: Uuid) -> Result<Job> {
         let state = self.controller_job_state(job_id)?;
+        let current = self.get(job_id)?;
+        if current.status.is_terminal() {
+            return Ok(current);
+        }
         if !state.cancellation_requested {
             return Err(Error::internal_unexpected(
                 "controller cancellation completed without a recorded request",
@@ -1925,85 +1938,6 @@ impl JobStore {
             "job succeeded".to_string(),
             result,
         )
-    }
-
-    fn terminalize_controller_job(
-        &self,
-        job_id: Uuid,
-        status: JobStatus,
-        event_kind: JobEventKind,
-        message: String,
-        data: Value,
-    ) -> Result<Job> {
-        self.durable_transaction(|inner| {
-            #[cfg(test)]
-            if self
-                .terminal_write_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                return Err(Error::internal_io(
-                    "injected controller terminal persistence failure",
-                    None,
-                ));
-            }
-            let now = timestamp_ms();
-            let first_sequence = self.next_event_sequence.fetch_add(2, Ordering::SeqCst) + 1;
-            let job = {
-                let stored = inner
-                    .jobs
-                    .get_mut(&job_id)
-                    .ok_or_else(|| job_not_found(job_id))?;
-                let controller = stored.controller_job.as_mut().ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "job_id",
-                        "job is not a controller job",
-                        Some(job_id.to_string()),
-                        None,
-                    )
-                })?;
-                if status == JobStatus::Succeeded && controller.cancellation_requested {
-                    return Err(Error::validation_invalid_argument(
-                        "status",
-                        "cannot complete a controller job after durable cancellation was requested",
-                        Some(job_id.to_string()),
-                        None,
-                    ));
-                }
-                validate_transition(stored.job.status, status)?;
-                stored.events.push(JobEvent {
-                    sequence: first_sequence,
-                    job_id,
-                    kind: event_kind,
-                    timestamp_ms: now,
-                    message: Some(message.clone()),
-                    data: Some(data),
-                });
-                stored.events.push(JobEvent {
-                    sequence: first_sequence + 1,
-                    job_id,
-                    kind: JobEventKind::Status,
-                    timestamp_ms: now,
-                    message: Some(message),
-                    data: Some(serde_json::json!({ "status": status })),
-                });
-                apply_event_retention(&mut stored.events, self.event_retention_limit());
-                stored.job.event_count = stored.events.len();
-                stored.job.status = status;
-                stored.job.updated_at_ms = now;
-                stored.job.finished_at_ms = Some(now);
-                controller.execution_claim_id = None;
-                stored.job.clone()
-            };
-            for submission in inner.controller_submissions.values_mut() {
-                if submission.job_id == job_id {
-                    submission.terminal_job = Some(job.clone());
-                }
-            }
-            Ok(job)
-        })
     }
 
     pub(crate) fn append_event(
@@ -2183,6 +2117,9 @@ impl JobStore {
         recovery: bool,
     ) -> Result<ControllerJobState> {
         self.durable_transaction(|inner| {
+            if self.controller_completion_pending(job_id)? {
+                return Err(Error::validation_invalid_argument("job_id", "completed controller execution is awaiting terminal persistence; refusing replay", Some(job_id.to_string()), None));
+            }
             let repeat_recovery_is_safe = recovery
                 && inner.jobs.get(&job_id).is_some_and(|stored| {
                     let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
@@ -2243,6 +2180,9 @@ impl JobStore {
         job_id: Uuid,
     ) -> Result<ControllerJobStartOutcome> {
         self.durable_transaction(|inner| {
+            if self.controller_completion_pending(job_id)? {
+                return Err(Error::validation_invalid_argument("job_id", "completed controller execution is awaiting terminal persistence; refusing replay", Some(job_id.to_string()), None));
+            }
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -3453,6 +3393,12 @@ impl JobHandle {
         self.store
             .get(self.job_id)
             .is_ok_and(|job| job.status.is_terminal())
+    }
+
+    pub(crate) fn completion_pending(&self) -> bool {
+        self.store
+            .controller_completion_pending(self.job_id)
+            .unwrap_or(false)
     }
 
     pub(crate) fn record_controller_prepared(&self, prepared: Value) -> Result<()> {
