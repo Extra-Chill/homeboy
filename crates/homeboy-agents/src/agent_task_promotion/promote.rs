@@ -2664,7 +2664,7 @@ fn gate_setup_outcome_failure(
     .into_iter()
     .flatten()
     .collect();
-    Error::dependency_step_failed(
+    let mut error = Error::dependency_step_failed(
         "promotion.gate_setup",
         outcome.provider_id.clone(),
         outcome.exit_code,
@@ -2676,7 +2676,58 @@ fn gate_setup_outcome_failure(
             "outcome": bounded_outcome,
             "retry_action": "retry_dependency_hydration",
         })),
-    )
+    );
+    // The generic message names only the dependency provider ("component
+    // 'pnpm'"), which reads like a missing Homeboy component rather than a
+    // missing tool or failed install (#15338). Say what actually happened.
+    error.message = format!("{}: {}", error.message, gate_setup_outcome_summary(outcome));
+    error
+}
+
+/// One-line operator explanation of a failed dependency hydration outcome.
+fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationOutcome) -> String {
+    use homeboy_core::deps::DependencyHydrationTermination as Termination;
+    let command = outcome.command.join(" ");
+    let program = outcome
+        .command
+        .first()
+        .map(String::as_str)
+        .unwrap_or("the dependency command");
+    let summary = match outcome.termination {
+        Termination::SpawnFailed => format!(
+            "`{command}` could not be started; install `{program}` where the Homeboy controller runs gates (or make it available on PATH)"
+        ),
+        Termination::TimedOut => format!(
+            "`{command}` timed out after {}ms",
+            outcome.duration_ms
+        ),
+        Termination::NoProgress => format!(
+            "`{command}` stopped making progress after {}ms",
+            outcome.duration_ms
+        ),
+        Termination::Cancelled => format!("`{command}` was cancelled"),
+        Termination::OutputValidationFailed => format!(
+            "`{command}` finished but did not produce its declared outputs"
+        ),
+        Termination::ExitFailure | Termination::Completed | Termination::NotStarted => {
+            match outcome.exit_code {
+                Some(code) => format!("`{command}` exited with status {code}"),
+                None => format!("`{command}` failed ({})", outcome.reason),
+            }
+        }
+    };
+    let first_stderr_line = outcome
+        .stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty());
+    match first_stderr_line {
+        Some(line) => format!(
+            "{summary}; stderr: {}",
+            bounded_setup_error_text(&homeboy_core::redaction::redact_string(line))
+        ),
+        None => summary,
+    }
 }
 
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
@@ -4094,4 +4145,78 @@ fn validate_workspace_handle(handle: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod gate_setup_message_tests {
+    use super::*;
+    use homeboy_core::deps::{
+        DependencyHydrationOutcome, DependencyHydrationStatus, DependencyHydrationTermination,
+    };
+
+    fn outcome(
+        termination: DependencyHydrationTermination,
+        exit_code: Option<i32>,
+        stderr: &str,
+    ) -> DependencyHydrationOutcome {
+        DependencyHydrationOutcome {
+            schema: "homeboy/dependency-hydration-outcome/v1".to_string(),
+            workspace: "destination_gate_workspace".to_string(),
+            package_root: ".".to_string(),
+            provider_id: "pnpm".to_string(),
+            command: vec![
+                "pnpm".to_string(),
+                "install".to_string(),
+                "--frozen-lockfile".to_string(),
+            ],
+            cwd: String::new(),
+            reason: "lockfile present".to_string(),
+            duration_ms: 12,
+            termination,
+            status: DependencyHydrationStatus::Failed,
+            exit_code,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    /// #15338: a missing package manager must read as a missing tool, not as
+    /// an unknown Homeboy component named after the provider.
+    #[test]
+    fn missing_package_manager_names_the_tool_to_install() {
+        let error = gate_setup_outcome_failure(
+            "destination_gate_setup",
+            &outcome(
+                DependencyHydrationTermination::SpawnFailed,
+                None,
+                "No such file or directory (os error 2)",
+            ),
+        );
+        assert!(error
+            .message
+            .starts_with("Dependency step 'promotion.gate_setup' failed for component 'pnpm': "));
+        assert!(error
+            .message
+            .contains("`pnpm install --frozen-lockfile` could not be started"));
+        assert!(error.message.contains("install `pnpm`"));
+        assert!(error.message.contains("stderr: No such file or directory"));
+        // Structured details are unchanged.
+        assert_eq!(error.details["component_id"], "pnpm");
+    }
+
+    #[test]
+    fn failed_install_reports_exit_status_and_first_stderr_line() {
+        let error = gate_setup_outcome_failure(
+            "destination_gate_setup",
+            &outcome(
+                DependencyHydrationTermination::ExitFailure,
+                Some(1),
+                "\n ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile\nmore detail",
+            ),
+        );
+        assert!(error.message.contains("exited with status 1"));
+        assert!(error
+            .message
+            .ends_with("stderr: ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile"));
+    }
 }
