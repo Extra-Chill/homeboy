@@ -821,6 +821,8 @@ pub(super) fn prepare_attempt_workspace(
     if let Some(candidate_baseline) = candidate_baseline {
         apply_gate_feedback_baseline(&attempt_root, candidate_baseline)?;
     }
+    let setup = hydrate_attempt_workspace(&attempt_root, &root, attempt_component_id(request));
+    request.metadata["cook_attempt_workspace_setup"] = setup;
     let attempt_base_sha = git_output(&attempt_root, &["rev-parse", "HEAD"])?;
     Arc::get_mut(&mut workspace)
         .expect("attempt workspace has no other owners during setup")
@@ -844,6 +846,64 @@ pub(super) fn prepare_attempt_workspace(
         adoption,
     });
     Ok(Some(workspace))
+}
+
+/// Workspace label recorded on attempt setup evidence.
+const ATTEMPT_SETUP_WORKSPACE: &str = "cook_attempt_workspace";
+
+/// Make the provider's checkout buildable before the provider starts (#15355).
+///
+/// `git worktree add --detach` produces a checkout without submodules or
+/// installed dependencies. Controller gates hydrate their own checkout, but
+/// only after the provider finishes, so a provider working in a submodule or
+/// workspace repository could not install, typecheck, or test, and could not
+/// read dependency sources that would otherwise resolve outside the checkout.
+///
+/// Setup is best-effort: a failure is recorded as evidence and the provider
+/// still runs, because a repository whose work does not need the missing piece
+/// must not be blocked by it. Installs use the providers' frozen-lockfile
+/// commands, so they never add lockfile changes to the harvested patch.
+fn hydrate_attempt_workspace(
+    attempt_root: &Path,
+    source_root: &Path,
+    component_id: Option<String>,
+) -> serde_json::Value {
+    let mut outcomes = Vec::new();
+    if let Some(outcome) = homeboy_core::deps::hydrate_git_submodules(
+        attempt_root,
+        Some(source_root),
+        ATTEMPT_SETUP_WORKSPACE,
+        homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
+    ) {
+        outcomes.push(outcome);
+    }
+    let mut error = None;
+    match crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
+        attempt_root,
+        true,
+        ATTEMPT_SETUP_WORKSPACE,
+        &homeboy_core::deps::DependencyHydrationPolicy::default(),
+        component_id.as_deref(),
+    ) {
+        Ok(installs) => outcomes.extend(installs),
+        Err(failure) => error = Some(failure.message),
+    }
+    serde_json::json!({
+        "schema": "homeboy/cook-attempt-workspace-setup/v1",
+        "outcomes": outcomes,
+        "error": error,
+    })
+}
+
+/// The admitted component, when the request records one, so dependency
+/// discovery does not have to re-resolve it from the scratch checkout path.
+fn attempt_component_id(request: &AgentTaskRequest) -> Option<String> {
+    request
+        .metadata
+        .pointer("/cook_repository_identity/component_id")
+        .or_else(|| request.metadata.get("component"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 /// Best-effort per-worktree push block for the attempt checkout.

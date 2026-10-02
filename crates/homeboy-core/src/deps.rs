@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod dependency_graph;
+mod submodules;
+pub use submodules::{
+    hydrate_git_submodules, SUBMODULE_HYDRATION_PROVIDER_ID, SUBMODULE_HYDRATION_TIMEOUT,
+};
 #[path = "deps_provider.rs"]
 pub(crate) mod provider;
 

@@ -913,6 +913,90 @@ mod committed_harvest_tests {
         (path, sha256)
     }
 
+    /// #15355: the provider's detached checkout must have its submodules
+    /// before the provider starts, or a submodule/workspace repository can
+    /// neither install nor build there.
+    #[test]
+    fn attempt_workspace_initializes_submodules_before_the_provider_starts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let library = temp.path().join("library");
+        std::fs::create_dir(&library).expect("library");
+        git(&library, &["init", "--quiet", "-b", "main"]);
+        git(&library, &["config", "user.email", "test@example.com"]);
+        git(&library, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(library.join("lib.txt"), "library\n").expect("library file");
+        git(&library, &["add", "lib.txt"]);
+        git(&library, &["commit", "--quiet", "-m", "library"]);
+
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "--quiet", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        git(
+            &workspace,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                &library.display().to_string(),
+                "vendor/library",
+            ],
+        );
+        // Only the source checkout can satisfy the submodule.
+        git(
+            &workspace,
+            &[
+                "config",
+                "--file",
+                ".gitmodules",
+                "submodule.vendor/library.url",
+                "https://example.invalid/library.git",
+            ],
+        );
+        git(&workspace, &["submodule", "sync", "--quiet"]);
+        git(&workspace, &["add", "--all"]);
+        git(&workspace, &["commit", "--quiet", "-m", "superproject"]);
+        let head = git(&workspace, &["rev-parse", "HEAD"]);
+
+        let mut request = gate_feedback_request(
+            &workspace,
+            String::new(),
+            &temp.path().join("unused.patch"),
+            "unused",
+        );
+        let scratch = tempfile::tempdir().expect("attempt scratch");
+        prepare_attempt_workspace(&mut request, Some(&head), None, scratch.path())
+            .expect("attempt workspace")
+            .expect("isolated attempt");
+
+        let attempt_root = PathBuf::from(request.workspace.root.as_deref().expect("attempt root"));
+        assert_ne!(attempt_root, workspace);
+        assert_eq!(
+            std::fs::read_to_string(attempt_root.join("vendor/library/lib.txt"))
+                .expect("submodule initialized in the attempt checkout"),
+            "library\n"
+        );
+        let setup = &request.metadata["cook_attempt_workspace_setup"];
+        assert_eq!(setup["schema"], "homeboy/cook-attempt-workspace-setup/v1");
+        let submodules = setup["outcomes"]
+            .as_array()
+            .expect("setup outcomes")
+            .iter()
+            .find(|outcome| outcome["provider_id"] == "git-submodules")
+            .expect("submodule setup evidence");
+        assert_eq!(submodules["status"], "succeeded", "{setup}");
+        assert_eq!(submodules["workspace"], "cook_attempt_workspace");
+        // An initialized submodule at its pinned commit is not a change.
+        assert_eq!(
+            git(&attempt_root, &["status", "--porcelain"]),
+            "",
+            "setup must not dirty the attempt checkout"
+        );
+    }
+
     #[test]
     fn gate_feedback_baseline_allows_only_the_recorded_candidate_and_harvests_remediation_delta() {
         let temp = tempfile::tempdir().expect("tempdir");
