@@ -2352,8 +2352,11 @@ mod tests {
         verify_lab_workspace_git_root(&workspace, &provenance).expect("fresh materialization");
 
         std::fs::create_dir_all(workspace.join("node_modules/pkg")).expect("hydrated dir");
-        std::fs::write(workspace.join("node_modules/pkg/index.js"), "module.exports = 1;\n")
-            .expect("hydrated file");
+        std::fs::write(
+            workspace.join("node_modules/pkg/index.js"),
+            "module.exports = 1;\n",
+        )
+        .expect("hydrated file");
         std::fs::write(workspace.join("composer.lock"), "{}\n").expect("hydrated lockfile");
         verify_lab_workspace_git_root(&workspace, &provenance)
             .expect("runner-hydrated gitignored paths are not snapshot content");
