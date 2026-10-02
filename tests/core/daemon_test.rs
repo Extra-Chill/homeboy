@@ -2189,6 +2189,15 @@ fn daemon_operation_lock_rejects_concurrent_start_or_stop() {
         "the refusal names the live holder: {}",
         err.message
     );
+    // The only lock holder is this test process, so the refusal must name
+    // its exact PID (#14706 holder naming, previously owned by a
+    // python3-gated test that silently skipped without python3).
+    assert!(
+        err.message
+            .contains(&format!("live PID {}", std::process::id())),
+        "the refusal names the live holder PID: {}",
+        err.message
+    );
     assert!(err.message.contains("operation.lock"));
     assert!(
         err.message.contains("daemon recover --yes"),
@@ -4054,54 +4063,11 @@ fn an_unowned_daemon_operation_lock_is_reclaimable() {
     let _home = HomeGuard::new();
     let path = test_operation_lock().expect("lock path");
     std::fs::create_dir_all(path.parent().expect("parent")).expect("create lock dir");
-    if operation_lock_holder_pids(&path) == OperationLockHolderState::Undetermined {
-        return;
-    }
-    let _reclaimed =
-        reclaim_unowned_daemon_operation_lock(&path).expect("reclaim unowned lock file");
+    // Reclaim provably takes the advisory lock on the fresh inode, then
+    // releases it; the reacquire proves the released lock is retaken
+    // normally. The reclaimed guard must drop first or the reacquire would
+    // classify this process as a live holder.
+    drop(reclaim_unowned_daemon_operation_lock(&path).expect("reclaim unowned lock file"));
     let reacquired = acquire_daemon_operation_lock().expect("acquire reclaimed lock");
     drop(reacquired);
-}
-
-/// A live, namable holder is reported with its PID instead of being killed.
-#[cfg(unix)]
-#[test]
-fn a_live_daemon_operation_lock_holder_is_named_by_the_error() {
-    if Command::new("python3").arg("-V").output().is_err() {
-        return;
-    }
-    let _home = HomeGuard::new();
-    let path = test_operation_lock().expect("lock path");
-    let mut holder = Command::new("python3")
-        .args([
-            "-c",
-            "import fcntl,sys,time;f=open(sys.argv[1],'a+');fcntl.flock(f,fcntl.LOCK_EX);time.sleep(60)",
-        ])
-        .arg(&path)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn lock holder");
-    let holder_pid = holder.id();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    for _ in 0..100 {
-        if matches!(
-            operation_lock_holder_pids(&path),
-            OperationLockHolderState::Live(holders) if holders.contains(&holder_pid)
-        ) {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("lsof never observed the spawned holder");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _wait = OperationLockWaitGuard::set("200");
-    let error = acquire_daemon_operation_lock().expect_err("live holder blocks acquire");
-    assert!(
-        error.message.contains(&format!("live PID {holder_pid}"))
-            || error.message.contains(&holder_pid.to_string()),
-        "the error names the holder: {}",
-        error.message
-    );
-    holder.kill().expect("kill holder");
 }
