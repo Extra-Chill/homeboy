@@ -39,7 +39,11 @@ mod completion_tracker;
 mod control;
 #[doc(hidden)]
 pub use control::bounded_redacted_reader;
+#[cfg(test)]
+mod controller_completion_tests;
 pub mod controller_job_driver;
+#[cfg(test)]
+mod controller_terminal_regression;
 mod daemon_lease;
 mod generation_store;
 mod lifetime;
@@ -2009,6 +2013,9 @@ fn orchestration_tick_loop(
         // supervisor died without persisting anything.
         isolated_tick(|| {
             let _ = job_store.reconcile_terminal_linked_daemon_jobs();
+        });
+        isolated_tick(|| {
+            let _ = job_store.reconcile_controller_completions();
         });
         // Generation retirement is lifecycle work, not a read-side effect. A
         // failed lease stop leaves its identity and completed job routes durable
@@ -4932,47 +4939,66 @@ fn dispatch_claimed_controller_job(
     let _ = start_tx.send(());
 }
 
-/// A terminal write failure after the driver returns must never turn into a
-/// checkpoint resume. After bounded retries of the same result, persist a
-/// fail-closed terminal uncertainty and keep ownership until that is durable.
+/// Release the worker only after a terminal winner or write-ahead completion
+/// owns its result. Without either durable proof, an unavailable index parks
+/// this one owner with capped backoff rather than amplifying whole-store writes.
+fn persist_controller_completion(
+    job: &crate::api_jobs::JobHandle,
+    cancellation_interrupts: bool,
+    mut persist: impl FnMut() -> Result<crate::api_jobs::Job>,
+) -> bool {
+    let mut failures = 0_u32;
+    loop {
+        if job.is_terminal() {
+            return true;
+        }
+        if cancellation_interrupts && job.is_cancelled() {
+            return false;
+        }
+        match persist() {
+            Ok(_) => return true,
+            Err(_) if job.is_terminal() => return true,
+            Err(_) if cancellation_interrupts && job.is_cancelled() => return false,
+            Err(_) if job.completion_pending() => return true,
+            Err(error) if error.code != crate::error::ErrorCode::InternalIoError => {
+                // Ownership and transition rejection is permanent, not an I/O
+                // outage. Never retry it, or rerun the completed driver.
+                eprintln!(
+                    "controller job {} terminal persistence rejected: {}",
+                    job.job_id(),
+                    error.code.as_str()
+                );
+                return true;
+            }
+            Err(_) => {}
+        }
+        let delay = match failures {
+            0 => Duration::from_millis(100),
+            1 => Duration::from_millis(200),
+            _ => Duration::from_secs(
+                1_u64
+                    .checked_shl((failures - 2).min(5))
+                    .unwrap_or(30)
+                    .min(30),
+            ),
+        };
+        failures = failures.saturating_add(1);
+        std::thread::sleep(delay);
+    }
+}
+
+/// Retry only result persistence. The driver side effect is already finished.
 fn persist_controller_success_or_uncertainty(
     job: &crate::api_jobs::JobHandle,
     result: serde_json::Value,
 ) -> bool {
-    for _ in 0..3 {
-        if job.complete_controller_success(result.clone()).is_ok() {
-            return true;
-        }
-        if job.is_cancelled() {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if job.is_cancelled() {
-        return false;
-    }
-    loop {
-        if job
-            .fail_controller_error(
-                "controller result could not be durably terminalized; driver side effect will not be retried"
-                    .to_string(),
-                json!({ "phase": "terminal_persistence_uncertain" }),
-            )
-            .is_ok()
-        {
-            return true;
-        }
-        if job.is_cancelled() {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    persist_controller_completion(job, true, || {
+        job.complete_controller_success(result.clone())
+    })
 }
 
 fn persist_controller_cancellation(job: &crate::api_jobs::JobHandle) {
-    while job.complete_controller_cancellation().is_err() && !job.is_terminal() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    persist_controller_completion(job, false, || job.complete_controller_cancellation());
 }
 
 fn persist_controller_cancellation_failure(
@@ -4980,13 +5006,9 @@ fn persist_controller_cancellation_failure(
     message: String,
     data: serde_json::Value,
 ) {
-    while job
-        .fail_controller_cancellation(message.clone(), data.clone())
-        .is_err()
-        && !job.is_terminal()
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    persist_controller_completion(job, false, || {
+        job.fail_controller_cancellation(message.clone(), data.clone())
+    });
 }
 
 fn persist_controller_failure(
@@ -4994,16 +5016,13 @@ fn persist_controller_failure(
     message: String,
     data: serde_json::Value,
 ) {
-    while job
-        .fail_controller_error(message.clone(), data.clone())
-        .is_err()
-        && !job.is_terminal()
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    persist_controller_completion(job, false, || {
+        job.fail_controller_error(message.clone(), data.clone())
+    });
 }
 
 pub(crate) fn recover_controller_jobs(job_store: &JobStore) {
+    let _ = job_store.reconcile_controller_completions();
     for (job_id, state) in job_store.active_controller_jobs() {
         recover_controller_job(job_store, job_id, state);
     }
@@ -5014,6 +5033,14 @@ fn recover_controller_job(
     job_id: Uuid,
     state: crate::api_jobs::ControllerJobState,
 ) {
+    // Completion custody fences every recovery entry point, including explicit
+    // cancellation recovery, before an already-finished driver can be resumed.
+    if job_store
+        .controller_completion_pending(job_id)
+        .unwrap_or(true)
+    {
+        return;
+    }
     if controller_job_runtimes()
         .lock()
         .expect("controller runtimes lock")

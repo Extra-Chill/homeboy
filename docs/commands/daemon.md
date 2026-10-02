@@ -38,6 +38,29 @@ orchestration passes. Older generations maintain their own jobs while draining.
 One blocked generation retirement does not prevent independent idle generations
 from being retired; failed entries retain their evidence and are retried.
 
+## Controller completion custody
+
+Controller drivers execute once; result persistence is a separate operation.
+A terminal winner is immutable: a delayed success, failure, or cancellation
+writer observes that winner without rewriting the queue or appending events.
+
+Before publishing a terminal queue snapshot, the store durably records the
+public completion and exact execution claim in its existing SQLite index. If
+the snapshot write fails, this completion ledger owns the result and the
+finished worker exits. Startup and periodic maintenance retry bounded batches
+of terminal projections rather than resuming completed driver side effects.
+Blocked entries rotate behind other completions. The retained-owner resource
+report includes the ledger's pending count and payload bytes.
+
+Cancellation recorded before completion retains priority. Once completion
+custody is durable, a new cancellation request reports that terminal
+persistence is pending instead of reopening finished execution.
+
+If storage cannot record either the terminal projection or completion custody,
+the one existing worker remains fail-closed with backoff capped at 30 seconds.
+Permanent transition/ownership rejections exit immediately. This bounds retry
+rate without pretending that unavailable storage durably recorded an outcome.
+
 ## Recovery dispatch
 
 `homeboy daemon status` is a bounded operator projection by default. It reports

@@ -76,7 +76,7 @@ fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Error) -> Erro
     )
 }
 
-fn open_tombstone_store(path: &Path) -> Result<Connection> {
+pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
     let journal = tombstone_path(path);
     if let Some(parent) = journal.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -101,7 +101,11 @@ fn open_tombstone_store(path: &Path) -> Result<Connection> {
                  job_id TEXT NOT NULL,
                  terminal_job TEXT,
                  PRIMARY KEY (kind, key)
-             );",
+              );
+              CREATE TABLE IF NOT EXISTS controller_completions (
+                  job_id TEXT PRIMARY KEY NOT NULL,
+                  payload TEXT NOT NULL
+              );",
         )
         .map_err(|error| tombstone_error(&journal, "initialize replay tombstone index", error))?;
     Ok(connection)
