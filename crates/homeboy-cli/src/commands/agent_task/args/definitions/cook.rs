@@ -126,6 +126,9 @@ pub struct VerifyGateArgs {
     )]
     #[arg(value_parser = ["inherit", "replace"])]
     pub gate_environment_mode: String,
+    /// Execute deterministic gates on this admitted Lab runner before selecting private HOME.
+    #[arg(long = "gate-runner", value_name = "RUNNER")]
+    pub gate_runner: Option<String>,
     /// Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable.
     #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
     pub gate_environment: Vec<(String, String)>,
@@ -385,6 +388,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             rerun_completed_gates: args.rerun_completed_gates,
             accept_inherited_failures: args.accept_inherited_failures,
             gate_environment: AgentTaskGateEnvironmentPolicy {
+                lab_runner: args.gate_runner,
                 mode: match args.gate_environment_mode.as_str() {
                     "replace" => AgentTaskGateEnvironmentMode::Replace,
                     _ => AgentTaskGateEnvironmentMode::Inherit,

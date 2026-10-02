@@ -1621,6 +1621,53 @@ fn parses_remote_daemon_status_lease_as_single_source_of_truth() {
 }
 
 #[test]
+fn remote_daemon_status_compact_unleased_producer_summary_allows_cold_start() {
+    // Actual daemon-status/v1 producer shape retained by full-transport-7.
+    // The non-null summary carries desired-build metadata, not a live lease.
+    let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
+        "schema":"homeboy/daemon-status/v1", "action":"status", "running":false,
+        "reachable":false, "fresh":false, "admits_work":false, "active_jobs":[],
+        "daemon":{"active_build":null,"active_version":null,"address":null,
+            "desired_build":"homeboy fixture+source","lease_id":null,"pid":null},
+        "recovery":{"restartable":true,"replacement_blocked":false,"stale_reason_code":"lease_missing"}
+    }));
+    assert!(status.daemon.is_none());
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action(None, &status).unwrap(),
+        remote_daemon::RemoteDaemonConnectAction::Start
+    );
+}
+
+#[test]
+fn remote_daemon_status_running_or_reachable_ambiguous_summary_retains_owner_and_refuses_start() {
+    for (running, reachable) in [(true, false), (false, true), (true, true)] {
+        let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
+            "running":running, "reachable":reachable, "fresh":false, "active_jobs":[],
+            "daemon":{"address":null,"lease_id":null,"pid":null,"desired_build":"homeboy fixture+source"}
+        }));
+        assert!(
+            status.daemon.is_some(),
+            "ambiguous ownership is not absence"
+        );
+        assert!(
+            remote_daemon::remote_daemon_connect_action(None, &status).is_err(),
+            "unproven running/reachable ownership cannot authorize creating another daemon"
+        );
+    }
+}
+
+#[test]
+fn remote_daemon_status_unleased_summary_with_active_work_is_not_cold_start_authority() {
+    let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
+        "running":false,"reachable":false,"fresh":false,"active_jobs":[{"id":"retained-work"}],
+        "truncation":{"active_jobs":{"omitted":2}},
+        "daemon":{"address":null,"lease_id":null,"pid":null}
+    }));
+    assert_eq!(status.active_jobs, 3);
+    assert!(remote_daemon::remote_daemon_connect_action(None, &status).is_err());
+}
+
+#[test]
 fn routine_disconnect_refuses_an_unbound_session_without_executing_a_configured_binary() {
     let mut session = direct_ssh_session("lease-live");
     session.local_url = None;

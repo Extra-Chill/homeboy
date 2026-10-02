@@ -26,6 +26,7 @@ use super::execution::{
 use super::Runner;
 
 struct DaemonPreparedPlan {
+    _private_files: super::worker::PrivateAtFileCleanup,
     plan: PreparedRunnerProcess,
     extension_env_providers: Vec<String>,
     authoritative_run_id: Option<String>,
@@ -102,9 +103,10 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
 }
 
 fn prepare_daemon_exec(
-    request: RunnerExecPrepareRequest,
+    mut request: RunnerExecPrepareRequest,
     staged: Option<DaemonStagedPlan>,
 ) -> Result<PreparedDaemonExec> {
+    let private_files = super::worker::verify_private_command_arguments(&mut request.command)?;
     let runner: Option<Runner> = match request.runner {
         Some(value) => Some(serde_json::from_value(value).map_err(|err| {
             homeboy_core::error::Error::validation_invalid_argument(
@@ -174,6 +176,7 @@ fn prepare_daemon_exec(
         // at `execute`.
         extension_env_provenance: serde_json::json!({ "providers": request.extension_env_providers.clone() }),
         plan_token: Arc::new(DaemonPreparedPlan {
+            _private_files: private_files,
             plan,
             extension_env_providers: request.extension_env_providers,
             authoritative_run_id,

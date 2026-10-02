@@ -412,6 +412,92 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 )?;
             Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
         }
+        AgentTaskCommand::GateExecute {
+            request,
+            resources,
+            receipt_file,
+        } => {
+            let request =
+                serde_json::from_str(&homeboy::core::config::read_json_spec_to_string(&request)?)
+                    .map_err(|error| {
+                    homeboy::core::Error::invalid_argument("gate.request", error.to_string())
+                })?;
+            let cwd = std::env::current_dir().map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("resolve Lab gate workspace".to_string()),
+                )
+            })?;
+            let receipt =
+                homeboy::agents::agent_tasks::gate::placement::execute_admitted_with_resources(
+                    request,
+                    &cwd,
+                    resources
+                        .map(|resources| {
+                            serde_json::from_str(&homeboy::core::config::read_json_spec_to_string(
+                                &resources,
+                            )?)
+                            .map_err(|error| {
+                                homeboy::core::Error::invalid_argument(
+                                    "gate.resources",
+                                    error.to_string(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                )?;
+            let exit_code = if receipt.report.status
+                == homeboy::agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
+                || receipt
+                    .readiness
+                    .as_ref()
+                    .and_then(|value| value.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("ready")
+            {
+                0
+            } else {
+                1
+            };
+            if let Some(path) = receipt_file {
+                let bytes = serde_json::to_vec(&receipt).map_err(|error| {
+                    homeboy::core::Error::internal_json(error.to_string(), None)
+                })?;
+                let path = std::path::Path::new(&path);
+                let parent = path.parent().ok_or_else(|| {
+                    homeboy::core::Error::invalid_argument(
+                        "gate.receipt_file",
+                        "receipt requires an owned directory",
+                    )
+                })?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+                let mut file = std::fs::OpenOptions::new();
+                file.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    file.mode(0o600);
+                }
+                use std::io::Write;
+                file.open(path)
+                    .and_then(|mut file| file.write_all(&bytes))
+                    .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+                return Ok((
+                    serde_json::json!({"schema":"homeboy/lab-gate-receipt-location/v1", "sha256":homeboy_engine_primitives::content_hash::sha256_hex(&bytes), "status":receipt.report.status, "readiness":receipt.readiness.as_ref().map(|value| value.get("status")), "executed":receipt.readiness.is_none()}),
+                    exit_code,
+                ));
+            }
+            Ok((
+                serde_json::to_value(receipt).map_err(|error| {
+                    homeboy::core::Error::internal_json(
+                        error.to_string(),
+                        Some("serialize Lab gate receipt".to_string()),
+                    )
+                })?,
+                exit_code,
+            ))
+        }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
         AgentTaskCommand::Capacity(capacity_args) => capacity::capacity(capacity_args),

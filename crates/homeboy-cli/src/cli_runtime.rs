@@ -922,6 +922,10 @@ fn register_startup_providers_after_reconcile(
     // Register the Lab-offload provider so core's lab_routing can execute an
     // offload without depending on runner behavior.
     crate::runner::register_runner_lab_offload_provider();
+    crate::runner::gate_transport::register();
+    crate::runner::set_gate_runner_resolver(
+        crate::commands::agent_task::gate_contract::declared_lab_gate_runner,
+    );
     // Register the workspace-snapshot provider so core's hygiene subsystem
     // can materialize an isolated validation-dependency workspace without
     // depending on runner behavior.

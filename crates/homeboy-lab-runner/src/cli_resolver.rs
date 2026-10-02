@@ -14,6 +14,24 @@ use std::sync::{OnceLock, RwLock};
 /// `lint`), if the argv parses to a routable command. Registered by the CLI
 /// layer via [`set_command_label_resolver`].
 type CommandLabelResolver = fn(&[String]) -> Option<String>;
+type GateRunnerResolver = fn(&str) -> homeboy_core::Result<Option<String>>;
+fn gate_runner_resolver() -> &'static RwLock<Option<GateRunnerResolver>> {
+    static RESOLVER: OnceLock<RwLock<Option<GateRunnerResolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| RwLock::new(None))
+}
+pub fn set_gate_runner_resolver(resolver: GateRunnerResolver) {
+    *gate_runner_resolver()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
+}
+pub(crate) fn resolve_gate_runner(command: &str) -> homeboy_core::Result<Option<String>> {
+    let resolver = *gate_runner_resolver()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    resolver
+        .map(|resolver| resolver(command))
+        .unwrap_or(Ok(None))
+}
 
 fn command_label_resolver() -> &'static RwLock<Option<CommandLabelResolver>> {
     static RESOLVER: OnceLock<RwLock<Option<CommandLabelResolver>>> = OnceLock::new();

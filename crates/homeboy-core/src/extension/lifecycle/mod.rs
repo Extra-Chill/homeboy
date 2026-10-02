@@ -1425,6 +1425,175 @@ exec '{}' "$@"
     }
 
     #[test]
+    fn declared_external_installation_shared_sources_and_writes_ignore_different_ambient_config() {
+        with_isolated_home(|home| {
+            let ambient = home.path().join("ambient-config");
+            let _config =
+                homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_CONFIG_ROOT", &ambient);
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_DATA_DIR",
+                home.path().join("data"),
+            );
+            let _runtime = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_RUNTIME_TMPDIR",
+                home.path().join("runtime"),
+            );
+            let source = home.path().join("source-repo");
+            write_extension_fixture(&source, "rust");
+            write_shared_runtime_fixture(&source);
+            let shared = [
+                "agent-runtimes",
+                "runtime-agent-ci",
+                "agent-task-contracts",
+                "scripts/lib",
+            ];
+            write_shared_asset_manifest(&source, &shared);
+            fs::create_dir_all(source.join("scripts/lib")).unwrap();
+            fs::write(source.join("scripts/lib/helper.sh"), "declared helper\n").unwrap();
+            let external = home.path().join("external-installation/config");
+            let extension = external.join("extensions/rust");
+            fs::create_dir_all(extension.parent().unwrap()).unwrap();
+            for path in shared {
+                let target = if path == "scripts/lib" {
+                    ambient.join("extensions").join(path)
+                } else {
+                    ambient.join(path)
+                };
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("ambient-sentinel"), "ambient unchanged").unwrap();
+            }
+            super::resolve_cloned_extension(&source, "rust", &extension, "fixture-source").unwrap();
+            let actual = shared_assets_for_extension_source(&extension);
+            assert_eq!(actual.len(), shared.len());
+            for path in shared {
+                let target = if path == "scripts/lib" {
+                    external.join("extensions").join(path)
+                } else {
+                    external.join(path)
+                };
+                assert!(actual.contains(&(path.to_string(), target.clone())));
+                assert!(target.is_dir());
+                let ambient_target = if path == "scripts/lib" {
+                    ambient.join("extensions").join(path)
+                } else {
+                    ambient.join(path)
+                };
+                assert_eq!(
+                    fs::read_to_string(ambient_target.join("ambient-sentinel")).unwrap(),
+                    "ambient unchanged"
+                );
+                assert_eq!(
+                    fs::read_dir(ambient_target).unwrap().count(),
+                    1,
+                    "install must not write selected assets into the ambient registry"
+                );
+            }
+            assert_eq!(
+                fs::read_to_string(
+                    external.join("agent-task-contracts/agent-task-provider-contract.js")
+                )
+                .unwrap(),
+                fs::read_to_string(
+                    source.join("agent-task-contracts/agent-task-provider-contract.js")
+                )
+                .unwrap()
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    external.join("runtime-agent-ci/lib/agent-task-provider-contract.js")
+                )
+                .unwrap(),
+                fs::read_to_string(
+                    source.join("runtime-agent-ci/lib/agent-task-provider-contract.js")
+                )
+                .unwrap()
+            );
+            assert!(external.join("agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs").is_file());
+            assert_eq!(
+                fs::read_to_string(external.join("extensions/scripts/lib/helper.sh")).unwrap(),
+                "declared helper\n"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn declared_source_install_preserves_runtime_generation_write_boundary() {
+        with_isolated_home(|home| {
+            let config = home.path().join(".config/homeboy");
+            let _config =
+                homeboy_core::test_support::EnvVarGuard::set("HOMEBOY_CONFIG_ROOT", &config);
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_DATA_DIR",
+                home.path().join("data"),
+            );
+            let _runtime = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_RUNTIME_TMPDIR",
+                home.path().join("runtime"),
+            );
+            let first = home.path().join("first-generation-source");
+            write_extension_fixture(&first, "rust");
+            write_declared_runtime_shared_assets(&first);
+            crate::runtime_package::refresh_shared_assets(&first).unwrap();
+            let generation_link = config.join("runtime-generations/current");
+            let old_link = fs::read_link(&generation_link).unwrap();
+            let old_generation = config.join("runtime-generations").join(&old_link);
+            let relative = ["agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
+                "runtime-agent-ci/lib/agent-task-provider-contract.js", "agent-task-contracts/agent-task-provider-contract.js"];
+            let old_contents: Vec<_> = relative
+                .iter()
+                .map(|path| fs::read(old_generation.join(path)).unwrap())
+                .collect();
+            let stable_runtime_link = fs::read_link(config.join("agent-runtimes")).unwrap();
+            let second = home.path().join("next-generation-source");
+            write_extension_fixture(&second, "rust");
+            write_shared_runtime_fixture(&second);
+            write_shared_asset_manifest(
+                &second,
+                &[
+                    "agent-runtimes",
+                    "runtime-agent-ci",
+                    "agent-task-contracts",
+                    "scripts/lib",
+                ],
+            );
+            fs::create_dir_all(second.join("scripts/lib")).unwrap();
+            fs::write(second.join("scripts/lib/helper.sh"), "second helper\n").unwrap();
+            for path in relative {
+                fs::write(second.join(path), "second generation\n").unwrap();
+            }
+            let extension = config.join("extensions/rust");
+            fs::create_dir_all(extension.parent().unwrap()).unwrap();
+            super::resolve_cloned_extension(&second, "rust", &extension, "fixture-source").unwrap();
+            assert_ne!(
+                fs::read_link(&generation_link).unwrap(),
+                old_link,
+                "publish a successor, not write through the active generation"
+            );
+            let new_generation = generation_link.canonicalize().unwrap();
+            for (path, content) in relative.iter().zip(&old_contents) {
+                assert_eq!(
+                    &fs::read(old_generation.join(path)).unwrap(),
+                    content,
+                    "previous immutable generation must remain untouched"
+                );
+                assert_eq!(
+                    fs::read_to_string(new_generation.join(path)).unwrap(),
+                    "second generation\n"
+                );
+            }
+            assert_eq!(
+                fs::read_link(config.join("agent-runtimes")).unwrap(),
+                stable_runtime_link
+            );
+            assert_eq!(
+                fs::read_to_string(config.join("extensions/scripts/lib/helper.sh")).unwrap(),
+                "second helper\n"
+            );
+        });
+    }
+
+    #[test]
     fn cloned_monorepo_install_materializes_declared_shared_agent_runtimes() {
         with_isolated_home(|home| {
             let home = home.path();

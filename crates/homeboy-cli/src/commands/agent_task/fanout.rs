@@ -7022,6 +7022,7 @@ fi
             provider_evidence_inputs: Vec::new(),
             ai_tool: None,
             gates: super::super::args::VerifyGateArgs {
+                gate_runner: None,
                 accept_inherited_failures: false,
                 gate_package_artifacts: Vec::new(),
                 gate_extension_inputs: Vec::new(),

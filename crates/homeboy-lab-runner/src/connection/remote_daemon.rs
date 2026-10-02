@@ -1522,8 +1522,21 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         .and_then(|value| serde_json::from_value(value).ok());
     let daemon = data
         .get("state")
-        .or_else(|| data.get("daemon"))
-        .map(remote_daemon_from_status);
+        .filter(|state| !state.is_null())
+        .or_else(|| data.get("daemon").filter(|daemon| !daemon.is_null()))
+        .map(remote_daemon_from_status)
+        // Compact status always has a daemon summary, including an unleased
+        // cold start with null coordinates. Desired-build metadata is not a
+        // daemon lease. Preserve reachable/running ambiguous owners fail-closed.
+        .filter(|daemon| {
+            data.get("running").and_then(Value::as_bool) == Some(true)
+                || data.get("reachable").and_then(Value::as_bool) == Some(true)
+                || daemon.pid.is_some()
+                || daemon
+                    .lease_id
+                    .as_deref()
+                    .is_some_and(|lease| !lease.is_empty())
+        });
     if !data
         .get("running")
         .and_then(Value::as_bool)
@@ -1860,10 +1873,21 @@ fn remote_daemon_from_status(state: &Value) -> RemoteDaemon {
 }
 
 pub(super) fn remote_daemon_active_jobs(data: &Value) -> usize {
-    data.pointer("/freshness/active_jobs")
-        .and_then(Value::as_u64)
-        .and_then(|count| usize::try_from(count).ok())
-        .unwrap_or(0)
+    let count = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_u64)
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            .unwrap_or(0)
+    };
+    // Compact daemon-status/v1 retains shown and omitted work outside the full
+    // freshness object. Absence of that object must not authorize cold start
+    // over retained work, even when lease coordinates are missing.
+    let shown = data
+        .get("active_jobs")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let compact = shown.saturating_add(count(data.pointer("/truncation/active_jobs/omitted")));
+    count(data.pointer("/freshness/active_jobs")).max(compact)
 }
 
 fn remote_daemon_ensure_running(

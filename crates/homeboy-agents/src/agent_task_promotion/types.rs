@@ -106,7 +106,7 @@ impl AgentTaskPromotionReport {
                 }
                 AgentTaskGateStatus::Failed
                 | AgentTaskGateStatus::Skipped
-                | AgentTaskGateStatus::Deferred => false,
+                | AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable => false,
             })
     }
 
@@ -218,7 +218,8 @@ fn durable_gate_passed(gate: &AgentTaskGateReport) -> bool {
         AgentTaskGateStatus::Failed
         | AgentTaskGateStatus::Skipped
         | AgentTaskGateStatus::AcceptedInheritedFailure
-        | AgentTaskGateStatus::Deferred => false,
+        | AgentTaskGateStatus::Deferred
+        | AgentTaskGateStatus::Unavailable => false,
     }
 }
 

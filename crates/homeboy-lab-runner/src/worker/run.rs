@@ -647,7 +647,7 @@ pub(super) fn resolve_runner_execution_context(
 /// them after execution so retries can resume before claim without retaining
 /// plaintext after consumption.
 #[derive(Debug)]
-pub(super) struct PrivateAtFileCleanup {
+pub(crate) struct PrivateAtFileCleanup {
     paths: Vec<std::path::PathBuf>,
     directories: Vec<std::path::PathBuf>,
 }
@@ -716,6 +716,21 @@ pub(super) fn verify_private_at_files(
             directories: Vec::new(),
         });
     };
+    verify_private_command_arguments(command)
+}
+
+/// Shared direct/reverse worker owner: verify private command inputs and retain
+/// immutable owner-only snapshots until the accepted child is reaped.
+pub(crate) fn verify_private_command_arguments(
+    command: &mut [String],
+) -> Result<PrivateAtFileCleanup> {
+    #[cfg(not(unix))]
+    if command.iter().any(|argument| is_private_at_file(argument)) {
+        return Err(Error::invalid_argument(
+            "at_file",
+            "private runner inputs require Unix owner-only filesystem guarantees",
+        ));
+    }
     let mut cleanup = PrivateAtFileCleanup {
         paths: Vec::new(),
         directories: Vec::new(),

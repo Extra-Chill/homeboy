@@ -6988,14 +6988,7 @@ fn run_cook_spine(
                     None,
                 )
             })?;
-        crate::agent_task_gate::preflight_gate_toolchains(
-            &gate_workspace,
-            &options.gates.gate_environment,
-            &required_toolchains,
-            &options.gates.gate_package_artifacts,
-            None,
-            options.gates.gate_timeout(),
-        )
+        crate::agent_task_gate::preflight_verify_gate_options(&gate_workspace, &options.gates)
     };
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
