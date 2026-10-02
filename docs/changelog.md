@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.15] - 2026-10-02
+
+### Fixed
+- keep host Playwright browser cache visible to isolated gates
+- apply controller transport to offline bundle hydration
+- bind worker roots and retain bounded startup evidence
+
 ## [0.399.14] - 2026-10-02
 
 ### Fixed
