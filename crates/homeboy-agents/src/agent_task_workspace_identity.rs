@@ -11,7 +11,7 @@ pub enum WorkspaceAttestationMatch {
 }
 
 #[cfg(unix)]
-pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
+pub fn attest_workspace(path: &Path) -> Result<Value> {
     use std::os::unix::fs::MetadataExt;
 
     let supplied_metadata = std::fs::symlink_metadata(path)
@@ -102,7 +102,7 @@ pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
+pub fn attest_workspace(path: &Path) -> Result<Value> {
     let canonical = std::fs::canonicalize(path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     Ok(serde_json::json!({ "canonical_path": canonical }))

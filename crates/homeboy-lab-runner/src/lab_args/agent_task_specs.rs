@@ -436,6 +436,9 @@ fn record_controller_workspace_provenance(remapped: &mut Value, controller: &Val
             "workspace_source_provenance".to_string(),
             serde_json::json!({ "controller_root": controller_root }),
         );
+        if let Some(identity) = controller_task.pointer("/metadata/cook_workspace_identity") {
+            metadata["workspace_source_provenance"]["cook_workspace_identity"] = identity.clone();
+        }
     }
 }
 
