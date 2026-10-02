@@ -16,7 +16,7 @@ use super::lab_workspaces_deps::{
     provider_config_source_cli_files,
 };
 use super::{
-    sync_workspace, RunnerGitDependencyMaterializationOutput, RunnerValidationDependencySyncOutput,
+    RunnerGitDependencyMaterializationOutput, RunnerValidationDependencySyncOutput,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
 };
 use crate::rig_materialization::LabStackComponentMaterialization;
@@ -164,47 +164,74 @@ pub(super) struct SyncedRuntimeOverlay {
     pub(super) build_provenance: super::runtime_overlay_freshness::RuntimeOverlayBuildProvenance,
 }
 
+#[cfg(test)]
 pub(super) fn sync_extra_lab_workspaces(
     runner_id: &str,
     primary_local_path: &str,
     extra_workspaces: Vec<ExtraLabWorkspace>,
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
 ) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
+    sync_extra_lab_workspaces_controlled(
+        runner_id,
+        primary_local_path,
+        extra_workspaces,
+        workspace_mapping,
+        &crate::workspace::WorkspaceControl::default(),
+    )
+}
+
+pub(crate) fn sync_extra_lab_workspaces_controlled(
+    runner_id: &str,
+    primary_local_path: &str,
+    extra_workspaces: Vec<ExtraLabWorkspace>,
+    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
+    control: &crate::workspace::WorkspaceControl,
+) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
     let primary = canonical_existing_dir(primary_local_path, "path")?;
     let mut seen = HashSet::from([primary]);
     let mut synced_entries = Vec::new();
 
-    for extra in extra_workspaces {
-        let local_path = canonical_existing_dir(&extra.path.display().to_string(), "workspace")?;
-        if !seen.insert(local_path.clone()) {
-            continue;
-        }
-        let synced = sync_workspace(
-            runner_id,
-            RunnerWorkspaceSyncOptions {
-                path: local_path.display().to_string(),
-                // A runtime root is shipped as exactly that directory, even
-                // when it lives inside a larger Git checkout.
-                mode: if extra.role == "agent_task_plan_runtime" {
-                    RunnerWorkspaceSyncMode::Snapshot
-                } else {
-                    extra_workspace_sync_mode(&local_path)
+    let result = (|| -> Result<()> {
+        for extra in extra_workspaces {
+            control.checkpoint()?;
+            let local_path =
+                canonical_existing_dir(&extra.path.display().to_string(), "workspace")?;
+            if !seen.insert(local_path.clone()) {
+                continue;
+            }
+            let synced = crate::workspace::sync_workspace_controlled(
+                runner_id,
+                RunnerWorkspaceSyncOptions {
+                    path: local_path.display().to_string(),
+                    // A runtime root is shipped as exactly that directory, even
+                    // when it lives inside a larger Git checkout.
+                    mode: if extra.role == "agent_task_plan_runtime" {
+                        RunnerWorkspaceSyncMode::Snapshot
+                    } else {
+                        extra_workspace_sync_mode(&local_path)
+                    },
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: extra.git_fetch_refs.clone(),
+                    snapshot_includes: extra.snapshot_includes.clone(),
+                    allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
+                    validation_dependency_ids: None,
+                    run_isolation_token: None,
                 },
-                controller_routed_git: false,
-                changed_since_base: None,
-                git_fetch_refs: extra.git_fetch_refs.clone(),
-                snapshot_includes: extra.snapshot_includes.clone(),
-                allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
-                validation_dependency_ids: None,
-                run_isolation_token: None,
-            },
-        )?
-        .0;
-        let mut entry = workspace_mapping_entry(&extra.role, &synced);
-        entry.source_provenance = extra.source_provenance.clone();
-        workspace_mapping.push(entry.clone());
-        synced_entries.push(synced);
-    }
+                control,
+            )?
+            .0;
+            let mut entry = workspace_mapping_entry(&extra.role, &synced);
+            entry.source_provenance = extra.source_provenance.clone();
+            workspace_mapping.push(entry.clone());
+            synced_entries.push(synced);
+        }
+        Ok(())
+    })();
+    result.map_err(|mut error| {
+        error.details["completed_extra_workspaces"] = serde_json::json!(synced_entries);
+        error
+    })?;
 
     Ok(synced_entries)
 }
@@ -492,6 +519,7 @@ pub(super) fn runtime_overlay_install_workdir(remote_path: &str, workdir: Option
 /// the synced overlays (with resolved remote paths) and folds their workspace
 /// mapping entries into `workspace_mapping`. An empty overlay list is a no-op,
 /// keeping non-overlay offload unchanged.
+#[cfg(test)]
 pub(super) fn sync_lab_runtime_overlays(
     runner_id: &str,
     primary_local_path: &str,
@@ -499,6 +527,26 @@ pub(super) fn sync_lab_runtime_overlays(
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
     skip_deps_hydration: bool,
     runner_settings: &homeboy_core::server::RunnerSettings,
+) -> Result<Vec<SyncedRuntimeOverlay>> {
+    sync_lab_runtime_overlays_controlled(
+        runner_id,
+        primary_local_path,
+        overlays,
+        workspace_mapping,
+        skip_deps_hydration,
+        runner_settings,
+        &crate::workspace::WorkspaceControl::default(),
+    )
+}
+
+pub(crate) fn sync_lab_runtime_overlays_controlled(
+    runner_id: &str,
+    primary_local_path: &str,
+    overlays: Vec<RuntimeOverlay>,
+    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
+    skip_deps_hydration: bool,
+    runner_settings: &homeboy_core::server::RunnerSettings,
+    control: &crate::workspace::WorkspaceControl,
 ) -> Result<Vec<SyncedRuntimeOverlay>> {
     if overlays.is_empty() {
         return Ok(Vec::new());
@@ -508,6 +556,7 @@ pub(super) fn sync_lab_runtime_overlays(
     let mut synced_overlays = Vec::new();
 
     for overlay in overlays {
+        control.checkpoint()?;
         let local_path = canonical_existing_dir(
             &overlay.workspace.path.display().to_string(),
             "runtime_overlay",
@@ -544,7 +593,7 @@ pub(super) fn sync_lab_runtime_overlays(
             eprintln!("{warning}");
         }
 
-        let synced = sync_workspace(
+        let synced = crate::workspace::sync_workspace_controlled(
             runner_id,
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),
@@ -557,6 +606,7 @@ pub(super) fn sync_lab_runtime_overlays(
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            control,
         )
         .map_err(|mut error| {
             // Generic workspace staging only knows filesystem children. Restore
@@ -577,6 +627,7 @@ pub(super) fn sync_lab_runtime_overlays(
         let mut install_workdir = None;
         let mut install_ran = false;
         if let Some(install) = overlay.install.as_ref() {
+            control.checkpoint()?;
             let workdir =
                 runtime_overlay_install_workdir(&synced.remote_path, install.workdir.as_deref());
             run_runtime_overlay_install_step(runner_id, &synced.local_path, &workdir, install)?;
@@ -596,6 +647,7 @@ pub(super) fn sync_lab_runtime_overlays(
                 "reason": "opt_out",
             })
         } else {
+            control.checkpoint()?;
             serde_json::to_value(super::lab::offload::hydrate_lab_workspace_dependencies(
                 runner_id,
                 &synced.local_path,
@@ -619,6 +671,7 @@ pub(super) fn sync_lab_runtime_overlays(
             expose_remote_path_env: overlay.expose_remote_path_env.clone(),
             build_provenance,
         });
+        control.checkpoint()?;
     }
 
     Ok(synced_overlays)

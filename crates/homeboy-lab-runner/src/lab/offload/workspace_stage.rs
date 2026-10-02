@@ -156,6 +156,40 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
     lifecycle_args: &[String],
     preferred_attempt_run_id: Option<&str>,
 ) -> Result<LabOffloadWorkspaceStage> {
+    let control = crate::lab_staging_controller::workspace_stage_control(
+        request.durable_agent_task_plan,
+        std::sync::Arc::new(|| false),
+    );
+    prepare_lab_offload_workspace_stage_controlled(
+        request,
+        contract,
+        plan,
+        runner_id,
+        source_path,
+        command_prefix_argv,
+        runner_workspace_root,
+        run_isolation_token,
+        lifecycle_args,
+        preferred_attempt_run_id,
+        &control,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_lab_offload_workspace_stage_controlled(
+    request: &LabOffloadRequest<'_>,
+    contract: LabWorkspaceStageCommand,
+    plan: HomeboyPlan,
+    runner_id: &str,
+    source_path: &Path,
+    command_prefix_argv: &[String],
+    runner_workspace_root: Option<&str>,
+    run_isolation_token: Option<String>,
+    lifecycle_args: &[String],
+    preferred_attempt_run_id: Option<&str>,
+    control: &crate::workspace::WorkspaceControl,
+) -> Result<LabOffloadWorkspaceStage> {
+    control.checkpoint()?;
     // Capture the orchestration facts known *before* staging so any
     // Lab-cannot-proceed error bubbling out of the pre-execution/dispatch path
     // names the selected runner, primary workspace, and ref/base, plus a
@@ -179,6 +213,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
         run_isolation_token,
         lifecycle_args,
         preferred_attempt_run_id,
+        control,
     )
     .map_err(|error| enrich_lab_cannot_proceed_error(error, &context))
 }
@@ -195,6 +230,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     run_isolation_token: Option<String>,
     lifecycle_args: &[String],
     preferred_attempt_run_id: Option<&str>,
+    control: &crate::workspace::WorkspaceControl,
 ) -> Result<LabOffloadWorkspaceStage> {
     let mut sync_mode =
         lab_workspace_sync_mode(contract.workspace_mode_policy, lifecycle_args, source_path)?;
@@ -286,13 +322,19 @@ fn prepare_lab_offload_workspace_stage_inner(
         requires_chunk_transfer,
         || lab_runner_file_transfer(runner_id).map(|_| ()),
         || {
+            control.checkpoint()?;
             Ok(
                 if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
-                    reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
-                        .map(|snapshot| (snapshot, 0))
-                        .unwrap_or(sync_workspace(runner_id, sync_options)?)
+                    match reuse_compatible_snapshot_workspace(runner_id, &sync_options)? {
+                        Some(snapshot) => (snapshot, 0),
+                        None => crate::workspace::sync_workspace_controlled(
+                            runner_id,
+                            sync_options,
+                            control,
+                        )?,
+                    }
                 } else {
-                    sync_workspace(runner_id, sync_options)?
+                    crate::workspace::sync_workspace_controlled(runner_id, sync_options, control)?
                 },
             )
         },
@@ -319,435 +361,454 @@ fn prepare_lab_offload_workspace_stage_inner(
         .materialization_plan
         .actual_materialization_mode
         .as_deref()
-        .unwrap_or_else(|| sync_mode.as_str());
+        .unwrap_or_else(|| sync_mode.as_str())
+        .to_string();
     let remote_cwd = synced.remote_path.clone();
-    let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
-    // The primary workspace sync materializes each declared dependency checkout
-    // alongside the primary remote path (as a sibling) and reports them as
-    // `validation_dependencies`. Fold those into the offload workspace mapping so
-    // their controller-local -> remote path pairs propagate into the remote
-    // command's path remaps. Without this the dependency graph exists on the
-    // runner but the offloaded command still carries controller-local dependency
-    // paths, so a remote dependency resolver cannot find the materialized
-    // checkouts (#3292). Components with no declared dependencies produce an
-    // empty list here, leaving the single-checkout offload path unchanged.
-    for dependency in &synced.validation_dependencies {
-        workspace_mapping.push(workspace_mapping_entry_for_validation_dependency(
-            dependency,
-        ));
-    }
-    if !synced.validation_dependencies.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.materialize_dependency_graph",
-                "lab.materialize_dependency_graph",
-            )
-            .inputs(
-                PlanValues::new()
-                    .json("count", synced.validation_dependencies.len())
-                    .json("dependencies", &synced.validation_dependencies),
-            )
-            .build(),
-        );
-    }
-    plan = with_step(
-        plan,
-        PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
-            .inputs(
-                PlanValues::new()
-                    .string("local_path", &synced.local_path)
-                    .string("remote_path", &remote_cwd)
-                    .json("materialization_plan", &synced.materialization_plan)
-                    .string("mode", lab_materialization_mode)
-                    .json(
-                        "allow_dirty_lab_workspace",
-                        request.allow_dirty_lab_workspace,
-                    )
-                    .json(
-                        "changed_since_requested_ref",
-                        &changed_since_preflight.requested_ref,
-                    )
-                    .json(
-                        "changed_since_resolved_base",
-                        &changed_since_preflight.resolved_base,
-                    )
-                    .json(
-                        "changed_since_scope_degradation",
-                        &changed_since_preflight.scope_degradation,
-                    )
-                    .json("git_fetch_refs", &git_fetch_refs)
-                    .string("workspace_cleanliness", &synced.workspace_cleanliness),
-            )
-            .build(),
-    );
-
-    let at_file_specs =
-        lab_at_file_specs(&offload_args, Path::new(&synced.local_path), &remote_cwd)?;
-    materialize_lab_at_files_on_runner(runner_id, &at_file_specs)?;
-    if !at_file_specs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.materialize_at_files", "lab.materialize_at_files")
-                .inputs(
-                    PlanValues::new().json("count", at_file_specs.len()).json(
-                        "files",
-                        at_file_specs
-                            .iter()
-                            .map(|spec| {
-                                serde_json::json!({
-                                    "local_path": spec.local_path.display().to_string(),
-                                    "remote_path": spec.remote_path.as_str(),
-                                })
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-                .build(),
-        );
-    }
-
-    let evidence_entries = materialize_agent_task_evidence_inputs_on_runner(
-        runner_id,
-        &offload_args,
-        source_path,
-        &remote_cwd,
-    )?;
-    if !evidence_entries.is_empty() {
-        let evidence_count = evidence_entries.len();
-        workspace_mapping.extend(evidence_entries);
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.materialize_provider_evidence",
-                "lab.materialize_provider_evidence",
-            )
-            .inputs(PlanValues::new().json("count", evidence_count))
-            .build(),
-        );
-    }
-
-    let synced_extra_workspaces = sync_extra_lab_workspaces(
-        runner_id,
-        &synced.local_path,
-        extra_workspaces,
-        &mut workspace_mapping,
-    )?;
-    if !synced_extra_workspaces.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_extra_workspaces", "lab.sync_extra_workspaces")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_extra_workspaces.len())
-                        .json("workspaces", &synced_extra_workspaces),
-                )
-                .build(),
-        );
-    }
-
-    // Materialize any declared runtime overlays: sync the built artifact
-    // directory, then run the overlay's opaque dependency-install step on the
-    // runner (after sync, before the hot command). This gives offloaded
-    // runtimes a deterministic way to install their deps remotely without
-    // syncing huge dependency trees. No-overlay offload returns an empty list
-    // here, leaving behavior unchanged (#3831).
-    let synced_runtime_overlays = sync_lab_runtime_overlays(
-        runner_id,
-        &synced.local_path,
-        lab_runtime_overlays()?,
-        &mut workspace_mapping,
-        request.skip_deps_hydration,
-        &runner.settings,
-    )?;
-    let runtime_overlay_env = runtime_overlay_env_overrides(&synced_runtime_overlays);
-    let runtime_overlay_metadata = lab_runtime_overlay_metadata(&synced_runtime_overlays);
-    if !synced_runtime_overlays.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_runtime_overlays", "lab.sync_runtime_overlays")
-                .inputs(
-                    PlanValues::new()
-                        .json("count", synced_runtime_overlays.len())
-                        .json("overlays", &synced_runtime_overlays),
-                )
-                .build(),
-        );
-    }
-
-    let mut source_snapshot = homeboy_core::source_snapshot::collect_local_checked(
-        runner_id,
-        Path::new(&synced.local_path),
-        Some(&remote_cwd),
-        "lab_offload",
-    )?;
-    // The effective workspace filters define the bytes shipped to Lab and are
-    // carried to the runner for deterministic post-materialization verification.
-    source_snapshot.sync_excludes = synced.excludes.clone();
-    if sync_mode == RunnerWorkspaceSyncMode::Git {
-        // Git materialization retains repository metadata. It is not source
-        // snapshot state, and it must not be reported as excluded evidence.
-        source_snapshot
-            .sync_excludes
-            .retain(|exclude| exclude != ".git" && exclude != ".git/**");
-    }
-    source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
-    source_snapshot.synthetic_checkout_commit =
-        synced.current_workspace.synthetic_checkout_commit.clone();
-    source_snapshot.synthetic_checkout_ref =
-        synced.current_workspace.synthetic_checkout_ref.clone();
-    source_snapshot.synthetic_checkout_tree =
-        synced.current_workspace.synthetic_checkout_tree.clone();
-    validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
-    let mut workspace_snapshots = vec![source_snapshot.clone()];
-    for extra in &synced_extra_workspaces {
-        let mut snapshot = homeboy_core::source_snapshot::collect_local_checked(
-            runner_id,
-            Path::new(&extra.local_path),
-            Some(&extra.remote_path),
-            "lab_offload",
-        )?;
-        snapshot.sync_excludes = extra.excludes.clone();
-        snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
-        snapshot.synthetic_checkout_commit =
-            extra.current_workspace.synthetic_checkout_commit.clone();
-        snapshot.synthetic_checkout_ref = extra.current_workspace.synthetic_checkout_ref.clone();
-        snapshot.synthetic_checkout_tree = extra.current_workspace.synthetic_checkout_tree.clone();
-        workspace_snapshots.push(snapshot);
-    }
-    if contract.requires_extension_parity {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
-        );
-    }
-
-    let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
-        runner_id,
-        &changed_since_preflight.args,
-        &request.job_overrides.env,
-        &synced.local_path,
-        &remote_cwd,
-        runner_workspace_root,
-        request.allow_dirty_lab_workspace,
-    )?;
-    let synced_rig_dependencies = rig_component_sync.materializations;
-    let synced_lab_stacks = rig_component_sync.lab_stack_materializations;
-    let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
-    let rig_component_path_overrides = rig_component_sync.component_path_env;
-    let selected_rig_component_path = rig_component_sync.selected_component_path;
-    let broker_target_sync = rig_materialization::sync_lab_offload_broker_targets(
-        runner_id,
-        &changed_since_preflight.args,
-        &remote_cwd,
-    )?;
-    let broker_target_home = broker_target_sync.home;
-    let broker_target_ids = broker_target_sync
-        .targets
-        .iter()
-        .map(|target| target.id.clone())
-        .collect::<Vec<_>>();
-    if !broker_target_sync.targets.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.sync_rig_broker_targets", "lab.sync_rig_broker_targets")
-                .inputs(PlanValues::new().json("targets", &broker_target_sync.targets))
-                .build(),
-        );
-    }
-    if !synced_rig_dependencies.is_empty() {
-        for dependency in &synced_rig_dependencies {
-            workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
-                "rig_component_dependency",
+    let completed_primary = serde_json::json!({"runner_id": runner_id, "remote_path": remote_cwd, "workspace_ref": synced.workspace_ref, "status": "materialized"});
+    let mut completed_extras = serde_json::Value::Null;
+    (|| -> Result<LabOffloadWorkspaceStage> {
+        control.checkpoint()?;
+        let mut workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
+        // The primary workspace sync materializes each declared dependency checkout
+        // alongside the primary remote path (as a sibling) and reports them as
+        // `validation_dependencies`. Fold those into the offload workspace mapping so
+        // their controller-local -> remote path pairs propagate into the remote
+        // command's path remaps. Without this the dependency graph exists on the
+        // runner but the offloaded command still carries controller-local dependency
+        // paths, so a remote dependency resolver cannot find the materialized
+        // checkouts (#3292). Components with no declared dependencies produce an
+        // empty list here, leaving the single-checkout offload path unchanged.
+        for dependency in &synced.validation_dependencies {
+            workspace_mapping.push(workspace_mapping_entry_for_validation_dependency(
                 dependency,
             ));
         }
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.sync_rig_component_dependencies",
-                "lab.sync_rig_component_dependencies",
-            )
-            .inputs(
-                PlanValues::new()
-                    .json("count", synced_rig_dependencies.len())
-                    .json("dependencies", &synced_rig_dependencies),
-            )
-            .build(),
-        );
-    }
-    if !synced_lab_stacks.is_empty() {
-        for stack in &synced_lab_stacks {
-            workspace_mapping.push(
-                crate::lab_workspaces::workspace_mapping_entry_for_lab_stack(
-                    "rig_component_lab_stack",
-                    stack,
-                ),
+        if !synced.validation_dependencies.is_empty() {
+            plan = with_step(
+                plan,
+                PlanStep::ready(
+                    "lab.materialize_dependency_graph",
+                    "lab.materialize_dependency_graph",
+                )
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced.validation_dependencies.len())
+                        .json("dependencies", &synced.validation_dependencies),
+                )
+                .build(),
             );
         }
         plan = with_step(
             plan,
-            PlanStep::ready(
-                "lab.materialize_rig_component_lab_stacks",
-                "lab.materialize_rig_component_lab_stacks",
-            )
-            .inputs(
-                PlanValues::new()
-                    .json("count", synced_lab_stacks.len())
-                    .json("stacks", &synced_lab_stacks),
-            )
-            .build(),
-        );
-    }
-
-    // Remap controller-local absolute paths embedded in --provider-config
-    // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
-    // to their synced remote locations, using every local->remote pair recorded
-    // during workspace sync. Without this the remote sandbox cannot resolve the
-    // workspace or runtime components a hand-authored cook config references.
-    let provider_config_materialization_plan = workspace_path_materialization_plan(
-        &workspace_mapping,
-        PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-        lab_path_materialization_mode(contract, sync_mode),
-    );
-    let path_remaps = path_remaps_from_materialization_plan(
-        &provider_config_materialization_plan,
-        Some((source_path, &remote_cwd)),
-    );
-    preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
-    preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
-    let remapped_args = rig_materialization::remap_rig_default_component_to_primary_snapshot(
-        &offload_args,
-        selected_rig_component_path.as_deref(),
-    )?;
-    let remapped_args = remap_provider_config_with_materialization_plan_in_args(
-        &remapped_args,
-        &provider_config_materialization_plan,
-    )?;
-    let agent_task_specs = materialize_agent_task_specs_in_args(
-        &remapped_args,
-        &path_remaps,
-        Path::new(&synced.local_path),
-        |spec| {
-            let temp = tempfile::tempdir().map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some("create remapped agent-task plan workspace".to_string()),
+            PlanStep::ready("lab.sync_workspace", "lab.sync_workspace")
+                .inputs(
+                    PlanValues::new()
+                        .string("local_path", &synced.local_path)
+                        .string("remote_path", &remote_cwd)
+                        .json("materialization_plan", &synced.materialization_plan)
+                        .string("mode", &lab_materialization_mode)
+                        .json(
+                            "allow_dirty_lab_workspace",
+                            request.allow_dirty_lab_workspace,
+                        )
+                        .json(
+                            "changed_since_requested_ref",
+                            &changed_since_preflight.requested_ref,
+                        )
+                        .json(
+                            "changed_since_resolved_base",
+                            &changed_since_preflight.resolved_base,
+                        )
+                        .json(
+                            "changed_since_scope_degradation",
+                            &changed_since_preflight.scope_degradation,
+                        )
+                        .json("git_fetch_refs", &git_fetch_refs)
+                        .string("workspace_cleanliness", &synced.workspace_cleanliness),
                 )
-            })?;
-            let plan_file = temp.path().join(spec.filename);
-            if spec.role == "agent_task_attempt_plan_remapped" {
-                crate::lab::agent_task_bridge::write_private_remapped_agent_task_plan(
-                    &plan_file, spec.spec,
-                )?;
-            } else {
-                std::fs::write(&plan_file, spec.spec).map_err(|err| {
+                .build(),
+        );
+
+        let at_file_specs =
+            lab_at_file_specs(&offload_args, Path::new(&synced.local_path), &remote_cwd)?;
+        control.checkpoint()?;
+        materialize_lab_at_files_on_runner(runner_id, &at_file_specs)?;
+        if !at_file_specs.is_empty() {
+            plan = with_step(
+                plan,
+                PlanStep::ready("lab.materialize_at_files", "lab.materialize_at_files")
+                    .inputs(
+                        PlanValues::new().json("count", at_file_specs.len()).json(
+                            "files",
+                            at_file_specs
+                                .iter()
+                                .map(|spec| {
+                                    serde_json::json!({
+                                        "local_path": spec.local_path.display().to_string(),
+                                        "remote_path": spec.remote_path.as_str(),
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                    )
+                    .build(),
+            );
+        }
+
+        let evidence_entries = materialize_agent_task_evidence_inputs_on_runner(
+            runner_id,
+            &offload_args,
+            source_path,
+            &remote_cwd,
+        )?;
+        if !evidence_entries.is_empty() {
+            let evidence_count = evidence_entries.len();
+            workspace_mapping.extend(evidence_entries);
+            plan = with_step(
+                plan,
+                PlanStep::ready(
+                    "lab.materialize_provider_evidence",
+                    "lab.materialize_provider_evidence",
+                )
+                .inputs(PlanValues::new().json("count", evidence_count))
+                .build(),
+            );
+        }
+
+        let synced_extra_workspaces = crate::lab_workspaces::sync_extra_lab_workspaces_controlled(
+            runner_id,
+            &synced.local_path,
+            extra_workspaces,
+            &mut workspace_mapping,
+            control,
+        )?;
+        completed_extras = serde_json::json!(synced_extra_workspaces);
+        if !synced_extra_workspaces.is_empty() {
+            plan = with_step(
+                plan,
+                PlanStep::ready("lab.sync_extra_workspaces", "lab.sync_extra_workspaces")
+                    .inputs(
+                        PlanValues::new()
+                            .json("count", synced_extra_workspaces.len())
+                            .json("workspaces", &synced_extra_workspaces),
+                    )
+                    .build(),
+            );
+        }
+
+        // Materialize any declared runtime overlays: sync the built artifact
+        // directory, then run the overlay's opaque dependency-install step on the
+        // runner (after sync, before the hot command). This gives offloaded
+        // runtimes a deterministic way to install their deps remotely without
+        // syncing huge dependency trees. No-overlay offload returns an empty list
+        // here, leaving behavior unchanged (#3831).
+        let synced_runtime_overlays = crate::lab_workspaces::sync_lab_runtime_overlays_controlled(
+            runner_id,
+            &synced.local_path,
+            lab_runtime_overlays()?,
+            &mut workspace_mapping,
+            request.skip_deps_hydration,
+            &runner.settings,
+            control,
+        )?;
+        let runtime_overlay_env = runtime_overlay_env_overrides(&synced_runtime_overlays);
+        let runtime_overlay_metadata = lab_runtime_overlay_metadata(&synced_runtime_overlays);
+        if !synced_runtime_overlays.is_empty() {
+            plan = with_step(
+                plan,
+                PlanStep::ready("lab.sync_runtime_overlays", "lab.sync_runtime_overlays")
+                    .inputs(
+                        PlanValues::new()
+                            .json("count", synced_runtime_overlays.len())
+                            .json("overlays", &synced_runtime_overlays),
+                    )
+                    .build(),
+            );
+        }
+
+        let mut source_snapshot = homeboy_core::source_snapshot::collect_local_checked(
+            runner_id,
+            Path::new(&synced.local_path),
+            Some(&remote_cwd),
+            "lab_offload",
+        )?;
+        // The effective workspace filters define the bytes shipped to Lab and are
+        // carried to the runner for deterministic post-materialization verification.
+        source_snapshot.sync_excludes = synced.excludes.clone();
+        if sync_mode == RunnerWorkspaceSyncMode::Git {
+            // Git materialization retains repository metadata. It is not source
+            // snapshot state, and it must not be reported as excluded evidence.
+            source_snapshot
+                .sync_excludes
+                .retain(|exclude| exclude != ".git" && exclude != ".git/**");
+        }
+        source_snapshot.workspace_snapshot_identity = Some(synced.snapshot_identity.clone());
+        source_snapshot.synthetic_checkout_commit =
+            synced.current_workspace.synthetic_checkout_commit.clone();
+        source_snapshot.synthetic_checkout_ref =
+            synced.current_workspace.synthetic_checkout_ref.clone();
+        source_snapshot.synthetic_checkout_tree =
+            synced.current_workspace.synthetic_checkout_tree.clone();
+        validate_lab_source_snapshot_handoff(source_path, &synced, &source_snapshot)?;
+        let mut workspace_snapshots = vec![source_snapshot.clone()];
+        for extra in &synced_extra_workspaces {
+            let mut snapshot = homeboy_core::source_snapshot::collect_local_checked(
+                runner_id,
+                Path::new(&extra.local_path),
+                Some(&extra.remote_path),
+                "lab_offload",
+            )?;
+            snapshot.sync_excludes = extra.excludes.clone();
+            snapshot.workspace_snapshot_identity = Some(extra.snapshot_identity.clone());
+            snapshot.synthetic_checkout_commit =
+                extra.current_workspace.synthetic_checkout_commit.clone();
+            snapshot.synthetic_checkout_ref =
+                extra.current_workspace.synthetic_checkout_ref.clone();
+            snapshot.synthetic_checkout_tree =
+                extra.current_workspace.synthetic_checkout_tree.clone();
+            workspace_snapshots.push(snapshot);
+        }
+        if contract.requires_extension_parity {
+            plan = with_step(
+                plan,
+                PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
+            );
+        }
+
+        let rig_component_sync = rig_materialization::sync_lab_offload_rig_component_dependencies(
+            runner_id,
+            &changed_since_preflight.args,
+            &request.job_overrides.env,
+            &synced.local_path,
+            &remote_cwd,
+            runner_workspace_root,
+            request.allow_dirty_lab_workspace,
+        )?;
+        let synced_rig_dependencies = rig_component_sync.materializations;
+        let synced_lab_stacks = rig_component_sync.lab_stack_materializations;
+        let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
+        let rig_component_path_overrides = rig_component_sync.component_path_env;
+        let selected_rig_component_path = rig_component_sync.selected_component_path;
+        let broker_target_sync = rig_materialization::sync_lab_offload_broker_targets(
+            runner_id,
+            &changed_since_preflight.args,
+            &remote_cwd,
+        )?;
+        let broker_target_home = broker_target_sync.home;
+        let broker_target_ids = broker_target_sync
+            .targets
+            .iter()
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>();
+        if !broker_target_sync.targets.is_empty() {
+            plan = with_step(
+                plan,
+                PlanStep::ready("lab.sync_rig_broker_targets", "lab.sync_rig_broker_targets")
+                    .inputs(PlanValues::new().json("targets", &broker_target_sync.targets))
+                    .build(),
+            );
+        }
+        if !synced_rig_dependencies.is_empty() {
+            for dependency in &synced_rig_dependencies {
+                workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
+                    "rig_component_dependency",
+                    dependency,
+                ));
+            }
+            plan = with_step(
+                plan,
+                PlanStep::ready(
+                    "lab.sync_rig_component_dependencies",
+                    "lab.sync_rig_component_dependencies",
+                )
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_rig_dependencies.len())
+                        .json("dependencies", &synced_rig_dependencies),
+                )
+                .build(),
+            );
+        }
+        if !synced_lab_stacks.is_empty() {
+            for stack in &synced_lab_stacks {
+                workspace_mapping.push(
+                    crate::lab_workspaces::workspace_mapping_entry_for_lab_stack(
+                        "rig_component_lab_stack",
+                        stack,
+                    ),
+                );
+            }
+            plan = with_step(
+                plan,
+                PlanStep::ready(
+                    "lab.materialize_rig_component_lab_stacks",
+                    "lab.materialize_rig_component_lab_stacks",
+                )
+                .inputs(
+                    PlanValues::new()
+                        .json("count", synced_lab_stacks.len())
+                        .json("stacks", &synced_lab_stacks),
+                )
+                .build(),
+            );
+        }
+
+        // Remap controller-local absolute paths embedded in --provider-config
+        // (mounts, workspace_root, runtime_component_paths, provider_plugin_paths)
+        // to their synced remote locations, using every local->remote pair recorded
+        // during workspace sync. Without this the remote sandbox cannot resolve the
+        // workspace or runtime components a hand-authored cook config references.
+        let provider_config_materialization_plan = workspace_path_materialization_plan(
+            &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
+            lab_path_materialization_mode(contract, sync_mode),
+        );
+        let path_remaps = path_remaps_from_materialization_plan(
+            &provider_config_materialization_plan,
+            Some((source_path, &remote_cwd)),
+        );
+        preflight_provider_config_source_cli_dependencies(&offload_args, &synced.excludes)?;
+        preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
+        let remapped_args = rig_materialization::remap_rig_default_component_to_primary_snapshot(
+            &offload_args,
+            selected_rig_component_path.as_deref(),
+        )?;
+        let remapped_args = remap_provider_config_with_materialization_plan_in_args(
+            &remapped_args,
+            &provider_config_materialization_plan,
+        )?;
+        let agent_task_specs = materialize_agent_task_specs_in_args(
+            &remapped_args,
+            &path_remaps,
+            Path::new(&synced.local_path),
+            |spec| {
+                let temp = tempfile::tempdir().map_err(|err| {
                     Error::internal_io(
                         err.to_string(),
-                        Some("write remapped agent-task plan".to_string()),
+                        Some("create remapped agent-task plan workspace".to_string()),
                     )
                 })?;
-            }
-            let mut specs = lab_at_file_specs(
-                &[format!("@{}", plan_file.display())],
-                Path::new(&synced.local_path),
-                &remote_cwd,
-            )?;
-            for file in &mut specs {
-                file.require_private();
-            }
-            materialize_lab_at_files_on_runner(runner_id, &specs)?;
-            let file = specs
-                .into_iter()
-                .next()
-                .ok_or_else(|| Error::internal_unexpected("missing remapped agent-task file"))?;
-            Ok(Some((
-                file.remote_spec.clone(),
-                workspace_mapping_entry_for_materialized_file(
-                    spec.role,
-                    file.local_path.display().to_string(),
-                    file.remote_path,
-                ),
-            )))
-        },
-    )?;
-    let remapped_args = agent_task_specs.argv;
-    for synced_entry in agent_task_specs.workspace_entries {
-        plan = record_synced_remapped_workspace_entry(
-            plan,
-            &mut workspace_mapping,
-            Some(synced_entry.entry),
-            synced_entry.step_id,
+                let plan_file = temp.path().join(spec.filename);
+                if spec.role == "agent_task_attempt_plan_remapped" {
+                    crate::lab::agent_task_bridge::write_private_remapped_agent_task_plan(
+                        &plan_file, spec.spec,
+                    )?;
+                } else {
+                    std::fs::write(&plan_file, spec.spec).map_err(|err| {
+                        Error::internal_io(
+                            err.to_string(),
+                            Some("write remapped agent-task plan".to_string()),
+                        )
+                    })?;
+                }
+                let mut specs = lab_at_file_specs(
+                    &[format!("@{}", plan_file.display())],
+                    Path::new(&synced.local_path),
+                    &remote_cwd,
+                )?;
+                for file in &mut specs {
+                    file.require_private();
+                }
+                materialize_lab_at_files_on_runner(runner_id, &specs)?;
+                let file = specs.into_iter().next().ok_or_else(|| {
+                    Error::internal_unexpected("missing remapped agent-task file")
+                })?;
+                Ok(Some((
+                    file.remote_spec.clone(),
+                    workspace_mapping_entry_for_materialized_file(
+                        spec.role,
+                        file.local_path.display().to_string(),
+                        file.remote_path,
+                    ),
+                )))
+            },
+        )?;
+        let remapped_args = agent_task_specs.argv;
+        for synced_entry in agent_task_specs.workspace_entries {
+            plan = record_synced_remapped_workspace_entry(
+                plan,
+                &mut workspace_mapping,
+                Some(synced_entry.entry),
+                synced_entry.step_id,
+            );
+        }
+        let path_materialization_plan = workspace_path_materialization_plan(
+            &workspace_mapping,
+            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
+            sync_mode.as_str(),
         );
-    }
-    let path_materialization_plan = workspace_path_materialization_plan(
-        &workspace_mapping,
-        PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-        sync_mode.as_str(),
-    );
-    let path_remaps = path_remaps_from_materialization_plan(
-        &path_materialization_plan,
-        Some((source_path, &remote_cwd)),
-    );
-    let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
-    let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
-    // Runner execution context binds native promotion to this materialized
-    // checkout while preserving the controller's worktree identity in argv.
-    let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
-        &remapped_args,
-        run_isolation_token.as_deref(),
-        preferred_attempt_run_id,
-    )
-    .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
+        let path_remaps = path_remaps_from_materialization_plan(
+            &path_materialization_plan,
+            Some((source_path, &remote_cwd)),
+        );
+        let remapped_args = remap_path_settings_in_args(&remapped_args, &path_remaps);
+        let remapped_args = remap_lab_at_file_args(&remapped_args, &at_file_specs);
+        // Runner execution context binds native promotion to this materialized
+        // checkout while preserving the controller's worktree identity in argv.
+        let (remapped_args, agent_task_run_id) = ensure_agent_task_lifecycle_identity_with(
+            &remapped_args,
+            run_isolation_token.as_deref(),
+            preferred_attempt_run_id,
+        )
+        .map_or((remapped_args, None), |(args, run_id)| (args, Some(run_id)));
 
-    let remote_output_file = request
-        .output_file_requested
-        .then(|| remote_lab_output_file(&remote_cwd));
-    let runner_command_plan = RunnerCommandPlan::for_offload(
-        contract.workload.as_ref(),
-        &contract.required_extensions,
-        Path::new(&synced.local_path),
-    )?;
-    let runner_required_extensions = runner_command_plan.required_extensions.clone();
-    let accepted_extension_settings = runner_command_plan.accepted_settings.clone();
-    let command = build_lab_offload_remote_command(
-        command_prefix_argv,
-        &remapped_args,
-        &remote_cwd,
-        &path_remaps,
-        remote_output_file.as_deref(),
-        &runner_command_plan,
-    );
-    let remote_command = command.clone();
-    plan = with_step(
-        plan,
-        PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
-            .inputs(PlanValues::new().json("argv", redact_argv(&command)))
-            .build(),
-    );
-    Ok(LabOffloadWorkspaceStage {
-        plan,
-        sync_mode,
-        changed_since_preflight,
-        synced,
-        remote_cwd,
-        workspace_mapping,
-        path_materialization_plan,
-        source_snapshot,
-        workspace_snapshots,
-        remapped_args,
-        agent_task_run_id,
-        runner_required_extensions,
-        accepted_extension_settings,
-        command,
-        remote_command,
-        remote_output_file,
-        rig_component_path_overrides,
-        broker_target_home,
-        broker_target_ids,
-        dependency_cache_saves,
-        runtime_overlay_env,
-        runtime_overlay_metadata,
+        let remote_output_file = request
+            .output_file_requested
+            .then(|| remote_lab_output_file(&remote_cwd));
+        let runner_command_plan = RunnerCommandPlan::for_offload(
+            contract.workload.as_ref(),
+            &contract.required_extensions,
+            Path::new(&synced.local_path),
+        )?;
+        let runner_required_extensions = runner_command_plan.required_extensions.clone();
+        let accepted_extension_settings = runner_command_plan.accepted_settings.clone();
+        let command = build_lab_offload_remote_command(
+            command_prefix_argv,
+            &remapped_args,
+            &remote_cwd,
+            &path_remaps,
+            remote_output_file.as_deref(),
+            &runner_command_plan,
+        );
+        let remote_command = command.clone();
+        plan = with_step(
+            plan,
+            PlanStep::ready("lab.rewrite_args", "lab.rewrite_args")
+                .inputs(PlanValues::new().json("argv", redact_argv(&command)))
+                .build(),
+        );
+        control.checkpoint()?;
+        Ok(LabOffloadWorkspaceStage {
+            plan,
+            sync_mode,
+            changed_since_preflight,
+            synced,
+            remote_cwd,
+            workspace_mapping,
+            path_materialization_plan,
+            source_snapshot,
+            workspace_snapshots,
+            remapped_args,
+            agent_task_run_id,
+            runner_required_extensions,
+            accepted_extension_settings,
+            command,
+            remote_command,
+            remote_output_file,
+            rig_component_path_overrides,
+            broker_target_home,
+            broker_target_ids,
+            dependency_cache_saves,
+            runtime_overlay_env,
+            runtime_overlay_metadata,
+        })
+    })()
+    .map_err(|mut error| {
+        error.details["completed_primary_workspace"] = completed_primary;
+        if error.details["completed_extra_workspaces"].is_null() {
+            error.details["completed_extra_workspaces"] = completed_extras;
+        }
+        error
     })
 }
 
