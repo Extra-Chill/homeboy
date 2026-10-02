@@ -37,6 +37,8 @@ mod artifact_download;
 mod broker_config;
 mod completion_tracker;
 mod control;
+#[doc(hidden)]
+pub use control::bounded_redacted_reader;
 pub mod controller_job_driver;
 mod daemon_lease;
 mod generation_store;

@@ -263,67 +263,144 @@ pub(crate) fn ensure_worker(config_root: &Path) -> homeboy::core::Result<()> {
                 "--startup-token",
                 &startup_token,
             ]);
-            // The ownership probe reads `/proc/<pid>/environ`, which the kernel
-            // populates at execve. The marker must therefore be set on the child
-            // command, not by the child once it is running (#12081).
-            command.env(deferred_workload::WORKER_OWNER_ENV, &startup_token);
-            // A singleton that outlives this command must not hold its working
-            // directory open. Inheriting it left workers pinned to worktrees that
-            // were finalized and deleted underneath them.
-            command.current_dir(deferred_workload::worker_root_in_roots(config_root)?);
-            // A detached worker must not keep an invoking client's capture pipes
-            // open after the foreground command exits.
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                unsafe {
-                    command.pre_exec(|| {
-                        if libc::setsid() == -1 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-            }
-            command.spawn().map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some("spawn deferred workload worker".to_string()),
-                )
-            })?;
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                if deferred_workload::worker_status_in_roots(config_root)?
-                    .as_ref()
-                    .is_some_and(|status| {
-                        deferred_workload::worker_is_live_in_roots(config_root, status)
-                    })
-                {
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            if deferred_workload::records_in_roots(config_root)?
-                .iter()
-                .any(|record| {
-                    matches!(
-                        record.state,
-                        deferred_workload::DeferredWorkloadState::Deferred
-                            | deferred_workload::DeferredWorkloadState::Claimed
-                    )
-                })
-            {
-                return Err(homeboy::core::Error::internal_unexpected(
-                    "deferred workload worker did not publish live ownership within 5 seconds",
-                ));
-            }
-            Ok(())
+            spawn_worker(config_root, command, &startup_token).map(|_| ())
         },
     )
+}
+
+fn spawn_worker(
+    config_root: &Path,
+    mut command: Command,
+    startup_token: &str,
+) -> homeboy::core::Result<std::process::Child> {
+    // Resolve before changing cwd. Relative environment roots and process-local
+    // overrides must cross exec as the same absolute installation as the probe.
+    let root = deferred_workload::worker_root_in_roots(config_root)?;
+    let config_root = root.as_path();
+    command.env(homeboy::core::paths::HOMEBOY_CONFIG_ROOT_ENV, config_root);
+    command.env("HOMEBOY_DEFERRED_STARTUP_CAPTURE", "1");
+    // Private files cannot block startup on pipe capacity or a descendant's EOF,
+    // and never retain an invoking client's capture pipes. Reopen gives the child
+    // and diagnostic reader independent offsets; the worker disconnects these
+    // descriptors after publication so detached output cannot grow the files.
+    let capture = || {
+        tempfile::NamedTempFile::new().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("capture deferred worker startup".to_string()),
+            )
+        })
+    };
+    let stdout = capture()?;
+    let stderr = capture()?;
+    let child_output = |file: &tempfile::NamedTempFile| {
+        file.reopen().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("open deferred worker startup capture".to_string()),
+            )
+        })
+    };
+    // The ownership probe reads `/proc/<pid>/environ`, which the kernel
+    // populates at execve. The marker must therefore be set on the child
+    // command, not by the child once it is running (#12081).
+    command.env(deferred_workload::WORKER_OWNER_ENV, startup_token);
+    // A singleton that outlives this command must not hold its working
+    // directory open. Inheriting it left workers pinned to worktrees that
+    // were finalized and deleted underneath them.
+    command.current_dir(config_root);
+    // A detached worker must not keep an invoking client's capture pipes
+    // open after the foreground command exits.
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(child_output(&stdout)?))
+        .stderr(Stdio::from(child_output(&stderr)?));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command.spawn().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("spawn deferred workload worker".to_string()),
+        )
+    })?;
+    let mut child_exit = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if deferred_workload::worker_status_in_roots(config_root)?
+            .as_ref()
+            .is_some_and(|status| deferred_workload::worker_is_live_in_roots(config_root, status))
+        {
+            return Ok(child);
+        }
+        child_exit = child.try_wait().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("observe deferred worker startup".to_string()),
+            )
+        })?;
+        if child_exit.is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if deferred_workload::records_in_roots(config_root)?
+        .iter()
+        .any(|record| {
+            matches!(
+                record.state,
+                deferred_workload::DeferredWorkloadState::Deferred
+                    | deferred_workload::DeferredWorkloadState::Claimed
+            )
+        })
+    {
+        use std::io::Read;
+        let read_output = |file: &tempfile::NamedTempFile| {
+            // Snapshot the length: a live writer cannot extend this read
+            // indefinitely. The shared reader retains only redacted 4KiB
+            // tails and discards overlong records rather than secret suffixes.
+            file.as_file().metadata().ok().and_then(|metadata| {
+                homeboy::core::daemon::bounded_redacted_reader(
+                    file.as_file().take(metadata.len().min(65536)),
+                )
+            })
+        };
+        let status = deferred_workload::worker_status_in_roots(config_root)?;
+        let mut error = homeboy::core::Error::internal_unexpected(
+                    if child_exit.is_some() {
+                        "deferred workload worker exited before publishing live ownership"
+                    } else {
+                        "deferred workload worker did not publish live ownership within 5 seconds"
+                    },
+                ).with_hint("Pending records were retained. Inspect `homeboy deferred-workload status` in this same isolated HOME/config root, repair the startup cause, then retry the review. A live waiting_for_runner worker needs a ready authorized runner satisfying the recorded runtime/capabilities, or execution in CI.".to_string());
+        error.details = serde_json::json!({
+            "classification": "deferred_worker_startup_failed",
+            "config_root": config_root,
+            "child_pid": child.id(),
+            "child_exit": child_exit.map(|exit| exit.to_string()),
+            "startup_output": {"stdout": read_output(&stdout), "stderr": read_output(&stderr)},
+            "startup_output_truncated": {
+                "stdout": stdout.as_file().metadata().ok().map(|metadata| metadata.len() > 65536),
+                "stderr": stderr.as_file().metadata().ok().map(|metadata| metadata.len() > 65536),
+            },
+            "status_published": status.is_some(),
+            "status_matches_child": status.as_ref().map(|status| status.pid == child.id() && status.owner_token == startup_token),
+            "status_state": status.as_ref().map(|status| &status.state),
+            "ownership_live": status.as_ref().map(|status| deferred_workload::worker_is_live_in_roots(config_root, status)),
+            "records_retained": true,
+        });
+        return Err(error);
+    }
+    Ok(child)
 }
 
 pub(crate) fn restart_worker_if_pending(config_root: &Path) -> homeboy::core::Result<()> {
@@ -394,6 +471,7 @@ fn run_worker(startup_token: &str) -> homeboy::core::Result<()> {
         &config_root,
         format!("worker started owner={owner}"),
     )?;
+    finish_startup_capture()?;
     run_worker_while_holding_lock(
         &config_root,
         &lock,
@@ -466,6 +544,33 @@ fn reexec_with_owner_marker(startup_token: &str) -> homeboy::core::Result<()> {
             None,
         ))
     }
+}
+
+/// Startup capture belongs to the foreground probe, not the detached workload.
+fn finish_startup_capture() -> homeboy::core::Result<()> {
+    #[cfg(unix)]
+    if std::env::var("HOMEBOY_DEFERRED_STARTUP_CAPTURE").as_deref() == Ok("1") {
+        use std::os::fd::AsRawFd;
+        let null = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("finish deferred startup capture".to_string()),
+                )
+            })?;
+        for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            if unsafe { libc::dup2(null.as_raw_fd(), fd) } == -1 {
+                return Err(homeboy::core::Error::internal_io(
+                    std::io::Error::last_os_error().to_string(),
+                    Some("finish deferred startup capture".to_string()),
+                ));
+            }
+        }
+        std::env::remove_var("HOMEBOY_DEFERRED_STARTUP_CAPTURE");
+    }
+    Ok(())
 }
 
 fn run_worker_while_holding_lock(
@@ -846,6 +951,126 @@ mod tests {
             .args
             .extend(extra.iter().map(|value| value.to_string()));
         input
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn startup_death_retains_bounded_redacted_evidence_and_pending_work() {
+        crate::test_support::with_isolated_home(|_| {
+            let _root = homeboy::core::test_support::EnvVarGuard::unset("HOMEBOY_CONFIG_ROOT");
+            let record = deferred_workload::defer(input()).unwrap();
+            let root = test_config_root();
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "printf 'startup failed password=fixture-secret\\n' >&2; i=0; while [ $i -lt 6000 ]; do printf x; i=$((i+1)); done; printf '\\n'; exit 23"]);
+            let started = Instant::now();
+            let error = spawn_worker(&root, command, "startup-fixture").unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(error.message.contains("exited before publishing"));
+            assert_eq!(error.details["child_exit"], "exit status: 23");
+            let evidence = error.details["startup_output"]["stderr"].as_str().unwrap();
+            assert!(evidence.contains("startup failed"));
+            assert!(evidence.contains("[REDACTED]"));
+            assert!(!evidence.contains("fixture-secret"));
+            assert!(error.details["startup_output"]["stdout"].is_null());
+            let records = deferred_workload::records_in_roots(&root).unwrap();
+            assert_eq!(records[0].id, record.id);
+            assert_eq!(
+                records[0].state,
+                deferred_workload::DeferredWorkloadState::Deferred
+            );
+            // try_wait reaped this owned direct child, rather than just observing
+            // process disappearance and leaving a zombie in the test controller.
+            let pid = error.details["child_pid"].as_u64().unwrap() as libc::pid_t;
+            assert_eq!(
+                unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn startup_child_fixture() {
+        if std::env::var("HOMEBOY_DEFERRED_STARTUP_FIXTURE").as_deref() != Ok("1") {
+            return;
+        }
+        let root = test_config_root();
+        let owner = std::env::var(deferred_workload::WORKER_OWNER_ENV).unwrap();
+        let _lock = deferred_workload::try_acquire_worker_lock_in_roots(&root)
+            .unwrap()
+            .unwrap();
+        finish_startup_capture().unwrap();
+        assert_eq!(
+            std::fs::read_link("/proc/self/fd/1").unwrap(),
+            Path::new("/dev/null")
+        );
+        assert_eq!(
+            std::fs::read_link("/proc/self/fd/2").unwrap(),
+            Path::new("/dev/null")
+        );
+        deferred_workload::write_worker_status_in_roots(
+            &root,
+            &owner,
+            "waiting_for_runner",
+            "no ready runner",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline
+            && deferred_workload::has_pending_work_in_roots(&root).unwrap()
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn startup_pins_root_and_accepts_live_waiting_for_runner() {
+        crate::test_support::with_isolated_home(|_| {
+            let _root = homeboy::core::test_support::EnvVarGuard::unset("HOMEBOY_CONFIG_ROOT");
+            let root = test_config_root();
+            let record = deferred_workload::defer(input()).unwrap();
+            let foreign_home = tempfile::tempdir().unwrap();
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "commands::deferred_workload::tests::startup_child_fixture",
+                "--nocapture",
+            ]);
+            command
+                .env("HOMEBOY_DEFERRED_STARTUP_FIXTURE", "1")
+                .env("HOME", foreign_home.path())
+                .env_remove("HOMEBOY_CONFIG_ROOT");
+            let result = spawn_worker(&root, command, "rooted-startup-fixture");
+            deferred_workload::terminalize_in_roots(&root, &record.id, false).unwrap();
+            // Reap only the fixture child on green and on a red reproduction.
+            match result {
+                Ok(mut child) => {
+                    child.kill().ok();
+                    child.wait().unwrap();
+                }
+                Err(error) => {
+                    if error.details["child_exit"].is_null() {
+                        let pid = error.details["child_pid"].as_u64().unwrap() as libc::pid_t;
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                            libc::waitpid(pid, std::ptr::null_mut(), 0);
+                        }
+                    }
+                    panic!("{error:?}");
+                }
+            }
+            let status = deferred_workload::worker_status_in_roots(&root)
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.owner_token, "rooted-startup-fixture");
+            assert_eq!(status.state, "waiting_for_runner");
+            assert!(!foreign_home.path().join(".config/homeboy").exists());
+        });
     }
 
     /// A deferred workload is replayed by a separate worker process, so its
