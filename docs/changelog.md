@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.14] - 2026-10-02
+
+### Fixed
+- treat abbreviated SHA as same revision in extension parity
+
 ## [0.399.13] - 2026-10-02
 
 ### Fixed
