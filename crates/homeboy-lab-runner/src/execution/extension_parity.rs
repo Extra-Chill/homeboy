@@ -976,6 +976,28 @@ fn remote_extension_ready_status(stdout: &str) -> Option<RemoteExtensionReadySta
     })
 }
 
+/// Two git revisions name the same commit when they are equal or one is an
+/// abbreviated (>= 7 hex chars) prefix of the other. Runners may report a short
+/// SHA while the controller records the full one.
+fn same_git_revision(left: &str, right: &str) -> bool {
+    const MIN_ABBREV: usize = 7;
+    let (left, right) = (left.trim(), right.trim());
+    if left.eq_ignore_ascii_case(right) {
+        return true;
+    }
+    let (short, long) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    short.len() >= MIN_ABBREV
+        && short.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && long.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && long
+            .get(..short.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(short))
+}
+
 fn validate_runner_extension_revision(
     runner_id: &str,
     runner: &Runner,
@@ -1040,7 +1062,7 @@ fn validate_runner_extension_revision(
         ));
     };
 
-    if local_revision == remote_revision {
+    if same_git_revision(&local_revision, &remote_revision) {
         warn_revision_only_extension_parity(runner_id, extension_id, &local_revision, &cleanliness);
         return Ok(());
     }
@@ -1334,7 +1356,7 @@ mod tests {
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, validate_extension_ready,
+        runner_extension_sync_command, same_git_revision, validate_extension_ready,
         validate_runner_extension_core_compatibility, validate_runner_extension_ready,
         validate_runner_extension_revision, validate_runner_extension_settings,
         ExtensionParityPlan, ExtensionParityPlanStep, ExtensionParityProbe, ExtensionShowOutput,
@@ -2566,5 +2588,17 @@ mod tests {
         assert!(controller_local_source_path("https://example.com/extensions.git").is_none());
         assert!(controller_local_source_path("git@example.com:org/extensions.git").is_none());
         assert!(controller_local_source_path("/runner/only/extensions/rust").is_none());
+    }
+
+    #[test]
+    fn same_git_revision_accepts_abbreviated_prefix_of_same_commit() {
+        let full = "5bbe0d7c4826570d84274a144521e06dfa42b76e";
+        assert!(same_git_revision(full, full));
+        assert!(same_git_revision(full, "5bbe0d7c"));
+        assert!(same_git_revision("5BBE0D7C", full));
+        assert!(!same_git_revision(full, "5bbe0d7d"));
+        assert!(!same_git_revision(full, "5bbe0d"));
+        assert!(!same_git_revision(full, "main"));
+        assert!(!same_git_revision("v3.50.7", "v3.50.7-rc1"));
     }
 }
