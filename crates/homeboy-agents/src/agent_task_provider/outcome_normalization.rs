@@ -135,6 +135,10 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
                 "provider reported success with an empty change artifact but produced substantive work evidence; the patch may have failed to capture real changes and needs review"
                     .to_string(),
             );
+                if !outcome.metadata.is_object() {
+                    outcome.metadata = json!({});
+                }
+                outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] = Value::Bool(true);
             }
             IntentionalNoChangeValidation::Absent if has_known_empty_change_set(outcome) => {
                 outcome.status = AgentTaskOutcomeStatus::NoOp;
@@ -143,6 +147,60 @@ pub(super) fn normalize_homeboy_local_artifact_sizes(
             IntentionalNoChangeValidation::Absent => {}
         }
     }
+}
+
+/// Set when an empty change artifact sat beside substantive work evidence, so
+/// the outcome was parked for patch-capture review (#7719).
+const HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY: &str = "homeboy_empty_change_with_evidence";
+
+/// Set when Homeboy verified that such an attempt left its checkout exactly at
+/// the attempt base, so nothing could have been lost (#15364).
+pub(crate) const HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY: &str = "homeboy_empty_attempt_verified";
+
+/// Distinguish "the provider changed nothing" from "the patch capture lost the
+/// provider's changes" (#15364).
+///
+/// An empty change artifact beside a transcript is parked as
+/// `CandidateRecoverable` so a capture failure cannot discard real work
+/// (#7719). When the attempt checkout itself proves nothing changed (HEAD is
+/// still the attempt base and the tree is clean apart from runner metadata),
+/// there is nothing to salvage. The outcome stays `Succeeded` so Cook's normal
+/// no-change promotion and feedback loop can act on it instead of parking it
+/// for an operator.
+pub(crate) fn accept_verified_unchanged_empty_attempt(
+    outcome: &mut AgentTaskOutcome,
+    workspace_root: Option<&std::path::Path>,
+    attempt_base: Option<&str>,
+) {
+    if outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
+        || outcome.metadata[HOMEBOY_EMPTY_CHANGE_WITH_EVIDENCE_KEY] != Value::Bool(true)
+    {
+        return;
+    }
+    let (Some(workspace_root), Some(attempt_base)) = (workspace_root, attempt_base) else {
+        return;
+    };
+    let attempt_base = attempt_base.trim();
+    if attempt_base.is_empty()
+        || git_output(workspace_root, &["rev-parse", "HEAD"]).as_deref() != Some(attempt_base)
+    {
+        return;
+    }
+    let mut status_args = vec!["status", "--porcelain", "--untracked-files=all", "--", "."];
+    status_args.extend(
+        crate::agent_task_scheduler::RUNNER_METADATA_EXCLUDE_PATHSPECS
+            .iter()
+            .copied(),
+    );
+    if git_output(workspace_root, &status_args).is_none_or(|status| !status.is_empty()) {
+        return;
+    }
+    outcome.status = AgentTaskOutcomeStatus::Succeeded;
+    outcome.summary = Some(
+        "provider produced no change; Homeboy verified the attempt checkout is unchanged from its base"
+            .to_string(),
+    );
+    outcome.metadata[HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY] = Value::Bool(true);
 }
 
 const INTENTIONAL_NO_CHANGE_SCHEMA: &str = "homeboy/intentional-no-change/v1";

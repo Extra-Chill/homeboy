@@ -9,7 +9,7 @@ use super::*;
 /// scratch under `.homeboy/`) after the snapshot baseline is established, so it
 /// is checkout drift rather than provider output — including it produces a patch
 /// that deletes/rewrites runner metadata and cannot be promoted cleanly. (#8534)
-pub(super) const RUNNER_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
+pub(crate) const RUNNER_METADATA_EXCLUDE_PATHSPECS: &[&str] = &[
     ":(exclude).homeboy/runner-workspace.json",
     ":(exclude).homeboy/lab-at-files/**",
 ];
