@@ -350,26 +350,7 @@ pub(crate) fn intentional_no_change_from_aggregate(
 }
 
 fn request_requires_substantive_candidate(request: &crate::agent_task::AgentTaskRequest) -> bool {
-    fn is_change_artifact(value: &str) -> bool {
-        matches!(
-            value,
-            "patch" | "diff" | "change_artifact" | "workspace_patch" | "artifact"
-        )
-    }
-
-    request.policy.write == "patch"
-        || request
-            .expected_artifacts
-            .iter()
-            .any(|artifact| is_change_artifact(artifact))
-        || request.artifact_declarations.iter().any(|artifact| {
-            artifact.required
-                && (is_change_artifact(&artifact.name)
-                    || artifact
-                        .artifact_type
-                        .as_deref()
-                        .is_some_and(is_change_artifact))
-        })
+    crate::agent_task_cook_loop::request_requires_substantive_candidate(request)
 }
 
 fn no_change_requires_substantive_candidate(

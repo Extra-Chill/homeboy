@@ -1487,6 +1487,21 @@ fn run_materialized_provider_command_once_contained(
                     .as_deref()
                     .map(std::path::Path::new),
             );
+            super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+                &mut outcome,
+                request
+                    .request
+                    .workspace
+                    .root
+                    .as_deref()
+                    .map(std::path::Path::new),
+                request
+                    .request
+                    .workspace
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.base_ref.as_str()),
+            );
             validate_declared_outputs(&mut outcome, request);
             describe_controller_owned_publication(request, &mut outcome);
             surface_provider_process_failure(

@@ -434,6 +434,115 @@ fn empty_patch_with_substantive_evidence_is_flagged_for_review_not_noop() {
         .contains("needs review"));
 }
 
+/// #15364: an empty patch beside a transcript is only a patch-capture risk if
+/// the attempt checkout holds unharvested state. A checkout verified at its
+/// base proves nothing was lost, so the outcome stays `Succeeded` and Cook's
+/// no-change feedback loop handles it. Any drift keeps the #7719 salvage path.
+#[test]
+fn empty_patch_with_evidence_is_accepted_only_when_the_attempt_checkout_is_unchanged() {
+    fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+        homeboy_core::test_support::git_command_output(cwd, args)
+    }
+    let workspace = tempfile::tempdir().expect("attempt checkout");
+    git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+    git(
+        workspace.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(workspace.path(), &["config", "user.name", "Homeboy Test"]);
+    fs::write(workspace.path().join("lib.rs"), "base\n").expect("base file");
+    git(workspace.path(), &["add", "lib.rs"]);
+    git(workspace.path(), &["commit", "--quiet", "-m", "base"]);
+    let base = git(workspace.path(), &["rev-parse", "HEAD"]);
+
+    let root = tempfile::tempdir().expect("artifact root");
+    let empty_patch_path = root.path().join("cook.patch");
+    let transcript_path = root.path().join("transcript.md");
+    fs::write(&empty_patch_path, "").expect("empty patch");
+    fs::write(&transcript_path, "# transcript\ninvestigated, gave up\n").expect("transcript");
+    let provenance = AgentTaskArtifactsPathProvenance {
+        owner: "homeboy".to_string(),
+        locality: "runner".to_string(),
+        plan_id: "plan".to_string(),
+        run_id: None,
+        task_id: "opencode-empty-attempt".to_string(),
+        attempt: 1,
+    };
+    let parked_outcome = || {
+        let mut empty_patch =
+            fixture_artifact("patch", "patch", &empty_patch_path, Some("text/x-patch"));
+        empty_patch.size_bytes = None;
+        let mut transcript = fixture_artifact(
+            "transcript",
+            "transcript",
+            &transcript_path,
+            Some("text/markdown"),
+        );
+        transcript.size_bytes = None;
+        let mut outcome = failed_outcome_with_run_result(Value::Null);
+        outcome.status = AgentTaskOutcomeStatus::Succeeded;
+        outcome.failure_classification = None;
+        outcome.artifacts = vec![empty_patch, transcript];
+        normalize_homeboy_local_artifact_sizes(
+            &mut outcome,
+            root.path(),
+            &provenance,
+            Some(workspace.path()),
+        );
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        outcome
+    };
+
+    // Clean checkout at its base: nothing to salvage.
+    let mut clean = parked_outcome();
+    super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+        &mut clean,
+        Some(workspace.path()),
+        Some(&base),
+    );
+    assert_eq!(clean.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(clean.metadata["homeboy_empty_attempt_verified"], true);
+
+    // No attempt base recorded: cannot verify, keep the salvage path.
+    let mut unknown = parked_outcome();
+    super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+        &mut unknown,
+        Some(workspace.path()),
+        None,
+    );
+    assert_eq!(unknown.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+
+    // Uncommitted work the patch capture missed.
+    fs::write(workspace.path().join("lib.rs"), "changed\n").expect("dirty");
+    let mut dirty = parked_outcome();
+    super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+        &mut dirty,
+        Some(workspace.path()),
+        Some(&base),
+    );
+    assert_eq!(dirty.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+
+    // Committed work the patch capture missed.
+    git(
+        workspace.path(),
+        &["commit", "--quiet", "-am", "provider commit"],
+    );
+    let mut committed = parked_outcome();
+    super::super::outcome_normalization::accept_verified_unchanged_empty_attempt(
+        &mut committed,
+        Some(workspace.path()),
+        Some(&base),
+    );
+    assert_eq!(
+        committed.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable
+    );
+    assert!(committed
+        .metadata
+        .get("homeboy_empty_attempt_verified")
+        .is_none());
+}
+
 #[test]
 fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_checkout() {
     let workspace = tempfile::tempdir().expect("workspace");
