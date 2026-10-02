@@ -2999,6 +2999,8 @@ fn selected_gate_environment(
         values.insert(name.clone(), value);
         report.preserved.insert(name.clone(), source.clone());
     }
+    let host_home = std::env::var_os("HOME").map(PathBuf::from);
+    preserve_playwright_cache(policy, host_home.as_deref(), &mut values, &mut report);
 
     // The invocation temp dir belongs to the shared environment definition, not
     // to individual call sites. Preflight and execution must agree on it, or
@@ -3064,6 +3066,32 @@ fn selected_gate_environment(
         _cargo_target: None,
         _scratch: scratch,
     })
+}
+
+fn preserve_playwright_cache(
+    policy: &AgentTaskGateEnvironmentPolicy,
+    host_home: Option<&Path>,
+    values: &mut BTreeMap<String, String>,
+    report: &mut AgentTaskGateEnvironment,
+) {
+    const NAME: &str = "PLAYWRIGHT_BROWSERS_PATH";
+    const SOURCE: &str = "HOME/.cache/ms-playwright";
+    if policy.mode == AgentTaskGateEnvironmentMode::Replace
+        || (!policy.isolate_home && !policy.isolate_xdg)
+        || policy.variables.contains_key(NAME)
+        || policy.preserve.contains_key(NAME)
+    {
+        return;
+    }
+    let Some(cache) = host_home.map(|home| home.join(".cache/ms-playwright")) else {
+        return;
+    };
+    if cache.is_dir() {
+        values.insert(NAME.to_string(), cache.display().to_string());
+        report
+            .preserved
+            .insert(NAME.to_string(), SOURCE.to_string());
+    }
 }
 
 fn materialize_extension_inputs(
@@ -6667,6 +6695,105 @@ mod tests {
         assert_eq!(report.environment.inherited.len(), 1);
         assert_eq!(report.environment.inherited[0].name, "DECLARED_INPUT");
         assert_eq!(report.environment.inherited[0].value, "kept");
+    }
+
+    #[test]
+    fn playwright_cache_is_mapped_only_for_isolated_non_replace_gate_environments() {
+        let home = tempfile::tempdir().expect("host home");
+        let cache = home.path().join(".cache/ms-playwright");
+        fs::create_dir_all(&cache).expect("browser cache");
+        let policy = AgentTaskGateEnvironmentPolicy::default();
+        let mut values = BTreeMap::new();
+        let mut report = AgentTaskGateEnvironment::default();
+
+        preserve_playwright_cache(&policy, Some(home.path()), &mut values, &mut report);
+
+        assert_eq!(
+            values["PLAYWRIGHT_BROWSERS_PATH"],
+            cache.display().to_string()
+        );
+        assert_eq!(
+            report.preserved["PLAYWRIGHT_BROWSERS_PATH"],
+            "HOME/.cache/ms-playwright"
+        );
+    }
+
+    #[test]
+    fn playwright_cache_mapping_respects_absence_explicit_values_and_replace_mode() {
+        // Absent cache: nothing is injected.
+        let empty_home = tempfile::tempdir().expect("host home without cache");
+        let mut values = BTreeMap::new();
+        let mut report = AgentTaskGateEnvironment::default();
+        preserve_playwright_cache(
+            &AgentTaskGateEnvironmentPolicy::default(),
+            Some(empty_home.path()),
+            &mut values,
+            &mut report,
+        );
+        assert!(values.is_empty());
+        assert!(report.preserved.is_empty());
+
+        // No host HOME: nothing is injected.
+        preserve_playwright_cache(
+            &AgentTaskGateEnvironmentPolicy::default(),
+            None,
+            &mut values,
+            &mut report,
+        );
+        assert!(values.is_empty());
+
+        let home = tempfile::tempdir().expect("host home");
+        fs::create_dir_all(home.path().join(".cache/ms-playwright")).expect("browser cache");
+
+        // Explicit values, explicit preserve mappings, replace mode, and
+        // non-isolated gates all suppress the automatic mapping.
+        let explicit = "/explicit/cache".to_string();
+        for (policy, existing) in [
+            (
+                AgentTaskGateEnvironmentPolicy {
+                    variables: BTreeMap::from([(
+                        "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                        explicit.clone(),
+                    )]),
+                    ..AgentTaskGateEnvironmentPolicy::default()
+                },
+                Some(explicit.clone()),
+            ),
+            (
+                AgentTaskGateEnvironmentPolicy {
+                    preserve: BTreeMap::from([(
+                        "PLAYWRIGHT_BROWSERS_PATH".to_string(),
+                        "HOME/custom".to_string(),
+                    )]),
+                    ..AgentTaskGateEnvironmentPolicy::default()
+                },
+                None,
+            ),
+            (
+                AgentTaskGateEnvironmentPolicy {
+                    mode: AgentTaskGateEnvironmentMode::Replace,
+                    ..AgentTaskGateEnvironmentPolicy::default()
+                },
+                None,
+            ),
+            (
+                AgentTaskGateEnvironmentPolicy {
+                    isolate_home: false,
+                    isolate_xdg: false,
+                    ..AgentTaskGateEnvironmentPolicy::default()
+                },
+                None,
+            ),
+        ] {
+            values.clear();
+            report.preserved.clear();
+            if let Some(value) = &existing {
+                values.insert("PLAYWRIGHT_BROWSERS_PATH".to_string(), value.clone());
+            }
+            preserve_playwright_cache(&policy, Some(home.path()), &mut values, &mut report);
+            assert_eq!(values.get("PLAYWRIGHT_BROWSERS_PATH"), existing.as_ref());
+            assert!(report.preserved.is_empty());
+        }
     }
 
     #[test]
