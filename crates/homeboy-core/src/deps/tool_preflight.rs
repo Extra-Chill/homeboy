@@ -85,6 +85,7 @@ fn candidate_roots(checkout: &Path) -> Vec<(PathBuf, String)> {
             .flatten()
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .filter(|entry| entry.file_name() != ".git")
+            .filter(|entry| !is_nested_repository(&entry.path()))
             .map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
                 (entry.path(), name)
@@ -116,6 +117,19 @@ pub(crate) fn required_program(program: &str, args: &[String]) -> Option<String>
         "for", "while", "case", "env", "command", "eval", "unset", "umask",
     ];
     (plain && !first.contains('=') && !SHELL_BUILTINS.contains(&first)).then(|| first.to_string())
+}
+
+/// Whether `dir` is its own Git repository (a submodule or a nested clone).
+///
+/// Gate setup hydrates the checkout root and its direct child package roots.
+/// A nested repository is owned by its own project: the superproject's
+/// workspace consumes its packages (e.g. a pnpm workspace that lists
+/// `subrouter/cli`), and its own lockfile is not part of this repository's
+/// contract, so it must not be installed independently. Before submodules
+/// were initialized in Cook checkouts (#15355) these directories were empty
+/// and never hydrated; this preserves that behavior.
+pub fn is_nested_repository(dir: &Path) -> bool {
+    dir.join(".git").exists()
 }
 
 /// Whether `program` can be spawned: an explicit path that exists, or a bare
@@ -184,6 +198,24 @@ mod tests {
             required_program("composer", &["install".to_string()]).as_deref(),
             Some("composer")
         );
+    }
+
+    #[test]
+    fn nested_repositories_are_not_dependency_roots() {
+        let checkout = tempfile::tempdir().unwrap();
+        let package = checkout.path().join("package");
+        let submodule = checkout.path().join("vendor");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&submodule).unwrap();
+        // Submodules carry a `.git` file pointing at the superproject's modules.
+        std::fs::write(submodule.join(".git"), "gitdir: ../.git/modules/vendor\n").unwrap();
+        assert!(is_nested_repository(&submodule));
+        assert!(!is_nested_repository(&package));
+        let roots = candidate_roots(checkout.path())
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect::<Vec<_>>();
+        assert_eq!(roots, vec![".".to_string(), "package".to_string()]);
     }
 
     #[test]
