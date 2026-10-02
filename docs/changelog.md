@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.11] - 2026-10-02
+
+### Fixed
+- cook homeboy
+- preserve recovery evidence diagnostics and valid fixture drivers
+- allow fresh loop starts before recovery ownership exists
+- share supervised execution ownership across recovery boundaries
+
+## [0.399.10] - 2026-10-02
+
+### Changed
+- prune discarded-result, duplicate, and retired provider tests
+
+### Fixed
+- anchor identity binding to retained workspace descriptor
+- bind Cook identity to verified runner workspace
+
 ## [0.399.9] - 2026-10-02
 
 ### Changed

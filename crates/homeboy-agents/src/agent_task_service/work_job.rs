@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use homeboy_core::daemon::controller_job_driver::{
-    self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
+    self, ControllerJobDriver, ControllerJobExecutionOwner, ControllerJobHandle,
+    ControllerJobPublicError,
 };
 use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -32,20 +33,16 @@ pub enum WorkJobPhase {
     Completed,
 }
 
-/// Whether a supervised detached child is still the exact process the job
-/// admitted. A recycled PID is not the same child, so start identity is part of
-/// the question rather than an optional refinement.
-pub(crate) fn supervised_child_is_live(
+/// Whether a supervised detached child must remain protected. A recycled PID
+/// is not the admitted child; unavailable inspection cannot prove it stopped.
+pub(crate) fn supervised_child_may_be_live(
     child_pid: u32,
     child_start_identity: &homeboy_core::process::ProcessStartIdentity,
 ) -> bool {
     matches!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            child_pid,
-            None,
-            Some(child_start_identity),
-        ),
+        ControllerJobExecutionOwner::supervised(child_pid, child_start_identity.clone()).inspect(),
         homeboy_core::process::ProcessIdentityState::Live
+            | homeboy_core::process::ProcessIdentityState::Unverifiable
     )
 }
 pub(crate) const WORK_JOB_REQUEST_SCHEMA: &str = "homeboy/work-job-request/v1";
@@ -104,10 +101,16 @@ pub enum WorkJobStep {
     Complete(Value),
 }
 
-/// Built-in orchestration adapter behind the generic lifecycle driver.
+/// Built-in orchestration adapter behind the generic lifecycle driver. Resume
+/// accepts either its published checkpoint or the admitted queued state when
+/// the daemon died before publishing one; it must never infer a new dispatch
+/// from a missing checkpoint.
 pub trait WorkJobHandler: Send + Sync {
     fn work_type(&self) -> &'static str;
     fn version(&self) -> u32;
+    fn execution_owner(&self, _state: &Value) -> Result<ControllerJobExecutionOwner> {
+        Ok(ControllerJobExecutionOwner::Unavailable)
+    }
     fn linked_durable_run_id(&self, _request: &Value) -> Option<String> {
         None
     }
@@ -208,6 +211,33 @@ fn handler(work_type: &str, version: u32) -> Result<Arc<dyn WorkJobHandler>> {
 pub struct WorkJobDriver;
 
 impl ControllerJobDriver for WorkJobDriver {
+    fn recovery_checkpoint(&self, request: &Value) -> Result<Option<Value>> {
+        let request = parse_request(request.clone())?;
+        // The domain resume contract interprets the admitted queued state. Do
+        // not call prepare: a loop may have dispatched before this checkpoint.
+        handler(&request.work_type, request.work_version)?;
+        Ok(Some(to_value(WorkJobCheckpoint {
+            schema: WORK_JOB_CHECKPOINT_SCHEMA.to_string(),
+            work_type: request.work_type,
+            work_version: request.work_version,
+            checkpoint: request.request,
+        })?))
+    }
+    fn execution_owner(
+        &self,
+        request: &Value,
+        checkpoint: Option<&Value>,
+    ) -> Result<Option<ControllerJobExecutionOwner>> {
+        let owner = if let Some(checkpoint) = checkpoint {
+            let checkpoint = parse_checkpoint(checkpoint.clone())?;
+            handler(&checkpoint.work_type, checkpoint.work_version)?
+                .execution_owner(&checkpoint.checkpoint)?
+        } else {
+            let request = parse_request(request.clone())?;
+            handler(&request.work_type, request.work_version)?.execution_owner(&request.request)?
+        };
+        Ok(Some(owner))
+    }
     fn job_type(&self) -> &'static str {
         WORK_JOB_TYPE
     }
@@ -276,7 +306,8 @@ impl ControllerJobDriver for WorkJobDriver {
 
     fn cancel(&self, prepared: &Value) -> Result<()> {
         let checkpoint = parse_checkpoint(prepared.clone())?;
-        handler(&checkpoint.work_type, checkpoint.work_version)?.cancel(&checkpoint.checkpoint)
+        let handler = handler(&checkpoint.work_type, checkpoint.work_version)?;
+        cancel_owned_work(handler.as_ref(), &checkpoint.checkpoint)
     }
 }
 
@@ -290,6 +321,14 @@ impl WorkJobDriver {
         let checkpoint = parse_checkpoint(prepared)?;
         let handler = handler(&checkpoint.work_type, checkpoint.work_version)?;
         if let Some(result) = handler.terminal_result(&checkpoint.checkpoint)? {
+            // Retain the outcome, but do not release a still-live launcher just
+            // because it published its domain completion before exiting.
+            if matches!(
+                handler.execution_owner(&checkpoint.checkpoint),
+                Ok(ControllerJobExecutionOwner::Processes(_))
+            ) {
+                wait_for_execution_owner_to_stop(handler.as_ref(), &checkpoint.checkpoint);
+            }
             return to_value(WorkJobResult {
                 schema: WORK_JOB_RESULT_SCHEMA.to_string(),
                 work_type: handler.work_type().to_string(),
@@ -304,7 +343,7 @@ impl WorkJobDriver {
         work_handle.progress(progress.clone())?;
         loop {
             if work_handle.is_cancelled() {
-                handler.cancel(&checkpoint)?;
+                cancel_owned_work(handler.as_ref(), &checkpoint)?;
                 let result = handler.cancelled(checkpoint)?;
                 return to_value(WorkJobResult {
                     schema: WORK_JOB_RESULT_SCHEMA.to_string(),
@@ -315,6 +354,12 @@ impl WorkJobDriver {
             }
             match handler.advance(checkpoint.clone(), invocation)? {
                 WorkJobStep::Complete(result) => {
+                    if matches!(
+                        handler.execution_owner(&checkpoint),
+                        Ok(ControllerJobExecutionOwner::Processes(_))
+                    ) {
+                        wait_for_execution_owner_to_stop(handler.as_ref(), &checkpoint);
+                    }
                     return to_value(WorkJobResult {
                         schema: WORK_JOB_RESULT_SCHEMA.to_string(),
                         work_type: handler.work_type().to_string(),
@@ -337,6 +382,32 @@ impl WorkJobDriver {
                     progress = next_progress;
                     std::thread::sleep(wait);
                 }
+            }
+        }
+    }
+}
+
+/// A cancellation marker alone is not proof that an externally supervised
+/// coordinator stopped. Keep the existing controller supervisor/drain owner
+/// until the same typed projection used by status proves stop.
+fn cancel_owned_work(handler: &dyn WorkJobHandler, checkpoint: &Value) -> Result<()> {
+    handler.cancel(checkpoint)?;
+    wait_for_execution_owner_to_stop(handler, checkpoint);
+    Ok(())
+}
+
+fn wait_for_execution_owner_to_stop(handler: &dyn WorkJobHandler, checkpoint: &Value) {
+    loop {
+        match handler
+            .execution_owner(checkpoint)
+            .unwrap_or(ControllerJobExecutionOwner::Unavailable)
+            .inspect()
+        {
+            homeboy_core::process::ProcessIdentityState::Dead
+            | homeboy_core::process::ProcessIdentityState::IdentityMismatch => return,
+            homeboy_core::process::ProcessIdentityState::Live
+            | homeboy_core::process::ProcessIdentityState::Unverifiable => {
+                std::thread::sleep(Duration::from_millis(100));
             }
         }
     }

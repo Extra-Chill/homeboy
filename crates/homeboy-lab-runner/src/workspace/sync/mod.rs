@@ -25,18 +25,22 @@ use super::super::{
     load, load_in_roots, source_materialization, Runner, RunnerKind, RunnerLifecycleOwner,
     RunnerWorkspaceLease,
 };
+use super::control::WorkspaceControl;
 use super::git::{
-    git_snapshot, materialize_git, materialize_git_from_controller_bundle,
-    materialize_git_snapshot_from_controller_bundle, ControllerGitBundleMaterializationRequest,
+    git_snapshot_controlled, materialize_git_bundle_controlled, materialize_git_controlled,
+    materialize_git_snapshot_controlled, ControllerGitBundleMaterializationRequest,
     GitMaterializationRequest,
 };
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
-    local_snapshot_stats, materialize_prepared_workspace_update, materialize_snapshot,
-    materialize_snapshot_git, materialize_snapshot_incremental_before,
-    materialize_snapshot_with_scratch, materialize_snapshot_with_scratch_before, snapshot_identity,
+    materialize_prepared_workspace_update, materialize_snapshot_git_controlled, snapshot_identity,
     snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
     WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+};
+use super::snapshot::{
+    local_snapshot_stats_controlled, materialize_snapshot_incremental_controlled,
+    materialize_snapshot_with_scratch_controlled, snapshot_identity_controlled,
+    workspace_content_manifest_and_hash_controlled,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -46,7 +50,7 @@ use super::types::{
     RunnerWorkspacePruneWithheldReason, RunnerWorkspaceRefResolution, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
     RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceUpdateOutput,
 };
 use super::util::{
     deterministic_remote_path, git_output, hex_prefix, parent_remote_path,
@@ -131,6 +135,35 @@ fn sync_workspace_in_roots_with_deadline(
     options: RunnerWorkspaceSyncOptions,
     deadline: Option<Instant>,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_controlled(
+        roots,
+        runner_id,
+        options,
+        &WorkspaceControl::before(deadline),
+    )
+}
+
+pub(crate) fn sync_workspace_controlled(
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    control: &WorkspaceControl,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    sync_workspace_in_roots_controlled(
+        &homeboy_core::paths::PathRoots::from_environment()?,
+        runner_id,
+        options,
+        control,
+    )
+}
+
+fn sync_workspace_in_roots_controlled(
+    roots: &homeboy_core::paths::PathRoots,
+    runner_id: &str,
+    options: RunnerWorkspaceSyncOptions,
+    control: &WorkspaceControl,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    control.checkpoint()?;
+    let deadline = control.deadline();
     let runner = load_in_roots(roots, runner_id)?;
     let local_path = canonical_workspace_path(&options.path)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
@@ -146,10 +179,7 @@ fn sync_workspace_in_roots_with_deadline(
     validate_absolute_path("workspace_root", workspace_root)?;
     require_runner_workspace_disk_headroom(&runner, workspace_root)?;
 
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
@@ -171,7 +201,8 @@ fn sync_workspace_in_roots_with_deadline(
     match options.mode {
         RunnerWorkspaceSyncMode::Snapshot | RunnerWorkspaceSyncMode::SnapshotGit => {
             ensure_no_runner_workspace_metadata_collision(&local_path)?;
-            let snapshot = snapshot_identity(&local_path, &excludes, &includes)?;
+            let snapshot =
+                snapshot_identity_controlled(&local_path, &excludes, &includes, control)?;
             let remote_path = temp::unique_name(
                 &deterministic_remote_path(
                     workspace_root,
@@ -195,12 +226,15 @@ fn sync_workspace_in_roots_with_deadline(
                 &includes,
                 workspace_cleanliness,
             );
-            let stats = local_snapshot_stats(&local_path, &excludes, &includes)?;
-            let content_manifest = workspace_content_manifest_for_policy(
+            let stats =
+                local_snapshot_stats_controlled(&local_path, &excludes, &includes, control)?;
+            let content_manifest = workspace_content_manifest_and_hash_controlled(
                 &local_path,
                 &excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-            )?;
+                control,
+            )?
+            .0;
             let admission = require_snapshot_filesystem_admission(
                 roots.data(),
                 &runner,
@@ -211,118 +245,118 @@ fn sync_workspace_in_roots_with_deadline(
             )?;
             let scratch = admission.scratch();
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
-            let (synthetic_checkout, fallback_reason) =
-                if options.mode == RunnerWorkspaceSyncMode::SnapshotGit && git_backed_snapshot {
-                    match materialize_git_snapshot_from_controller_bundle(
-                        &runner,
-                        &local_path,
-                        &remote_path,
-                        &excludes,
-                        &options.git_fetch_refs,
-                    ) {
-                        Ok(provenance) => {
-                            materialization_plan.controller_git_bundle = provenance;
-                            (None, None)
-                        }
-                        Err(error) => return Err(error),
+            let (synthetic_checkout, fallback_reason) = if options.mode
+                == RunnerWorkspaceSyncMode::SnapshotGit
+                && git_backed_snapshot
+            {
+                match materialize_git_snapshot_controlled(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                    &options.git_fetch_refs,
+                    control,
+                ) {
+                    Ok(provenance) => {
+                        materialization_plan.controller_git_bundle = provenance;
+                        (None, None)
                     }
-                } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
-                    match materialize_snapshot_git(
-                        &runner,
-                        &local_path,
-                        &remote_path,
-                        &excludes,
-                        &snapshot,
-                    ) {
-                        Ok(identity) => (Some(identity), None),
-                        Err(error) => {
+                    Err(error) => {
+                        return Err(workspace_sync_effect_error(error, &runner.id, &remote_path))
+                    }
+                }
+            } else if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
+                match materialize_snapshot_git_controlled(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &excludes,
+                    &snapshot,
+                    control,
+                ) {
+                    Ok(identity) => (Some(identity), None),
+                    Err(error) => {
+                        if error.details["workspace_sync"]["remote_effect_uncertain"] != true {
                             rollback_materialized_workspace_before(
                                 &runner,
                                 workspace_root,
                                 &remote_path,
                                 true,
                             );
-                            return Err(error);
                         }
+                        return Err(workspace_sync_effect_error(error, &runner.id, &remote_path));
                     }
-                } else {
-                    let seed = compatible_incremental_snapshot(
-                        &runner,
-                        &local_path,
-                        &excludes,
-                        &content_manifest,
-                    )?;
-                    materialization_plan.snapshot_transfer = Some(match (seed, deadline) {
-                        (Some((seed, delta)), deadline) => {
-                            match materialize_snapshot_incremental_before(
-                                &runner,
-                                &local_path,
-                                &remote_path,
-                                &seed.remote_path,
-                                &excludes,
-                                &delta,
-                                deadline,
-                            ) {
-                                Ok(transfer) => transfer,
-                                Err(error) => {
+                }
+            } else {
+                let seed = compatible_incremental_snapshot(
+                    &runner,
+                    &local_path,
+                    &excludes,
+                    &content_manifest,
+                )?;
+                materialization_plan.snapshot_transfer = Some(match seed {
+                    Some((seed, delta)) => {
+                        match materialize_snapshot_incremental_controlled(
+                            &runner,
+                            &local_path,
+                            &remote_path,
+                            &seed.remote_path,
+                            &excludes,
+                            &delta,
+                            control,
+                        ) {
+                            Ok(transfer) => transfer,
+                            Err(error) => {
+                                if error.details["workspace_sync"]["remote_effect_uncertain"]
+                                    != true
+                                {
                                     rollback_materialized_workspace_before(
                                         &runner,
                                         workspace_root,
                                         &remote_path,
                                         deadline.is_some(),
                                     );
-                                    return Err(error);
                                 }
+                                return Err(workspace_sync_effect_error(
+                                    error,
+                                    &runner.id,
+                                    &remote_path,
+                                ));
                             }
                         }
-                        (None, Some(deadline)) => {
-                            if let Err(error) = materialize_snapshot_with_scratch_before(
-                                &runner,
-                                &local_path,
-                                &remote_path,
-                                &excludes,
-                                Some(scratch),
-                                Some(deadline),
-                            ) {
+                    }
+                    None => {
+                        if let Err(error) = materialize_snapshot_with_scratch_controlled(
+                            &runner,
+                            &local_path,
+                            &remote_path,
+                            &excludes,
+                            Some(scratch),
+                            control,
+                        ) {
+                            if error.details["workspace_sync"]["remote_effect_uncertain"] != true {
                                 rollback_materialized_workspace_before(
                                     &runner,
                                     workspace_root,
                                     &remote_path,
                                     true,
                                 );
-                                return Err(error);
                             }
-                            super::types::SnapshotTransferStats {
-                                reused: ByteFileCounts::default(),
-                                transferred: stats,
-                                final_size: stats,
-                            }
-                        }
-                        (None, None) => {
-                            if let Err(error) = materialize_snapshot_with_scratch(
-                                &runner,
-                                &local_path,
+                            return Err(workspace_sync_effect_error(
+                                error,
+                                &runner.id,
                                 &remote_path,
-                                &excludes,
-                                Some(scratch),
-                            ) {
-                                rollback_materialized_workspace_before(
-                                    &runner,
-                                    workspace_root,
-                                    &remote_path,
-                                    deadline.is_some(),
-                                );
-                                return Err(error);
-                            }
-                            super::types::SnapshotTransferStats {
-                                reused: ByteFileCounts::default(),
-                                transferred: stats,
-                                final_size: stats,
-                            }
+                            ));
                         }
-                    });
-                    (None, None)
-                };
+                        super::types::SnapshotTransferStats {
+                            reused: ByteFileCounts::default(),
+                            transferred: stats,
+                            final_size: stats,
+                        }
+                    }
+                });
+                (None, None)
+            };
             if fallback_reason.is_some() || options.mode == RunnerWorkspaceSyncMode::Snapshot {
                 materialization_plan.actual_materialization_mode =
                     Some("filesystem_snapshot".to_string());
@@ -367,16 +401,23 @@ fn sync_workspace_in_roots_with_deadline(
                 &remote_path,
                 &excludes,
                 options.validation_dependency_ids.as_deref(),
+                control,
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
-                    rollback_materialized_workspace_before(
-                        &runner,
-                        workspace_root,
+                    if !err.details["workspace_sync"].is_object() {
+                        rollback_materialized_workspace_before(
+                            &runner,
+                            workspace_root,
+                            &remote_path,
+                            deadline.is_some(),
+                        );
+                    }
+                    return Err(workspace_materialized_effect_error(
+                        err,
+                        &runner.id,
                         &remote_path,
-                        deadline.is_some(),
-                    );
-                    return Err(err);
+                    ));
                 }
             };
             let current_workspace = current_workspace_summary(
@@ -412,11 +453,12 @@ fn sync_workspace_in_roots_with_deadline(
             ))
         }
         RunnerWorkspaceSyncMode::Git => {
-            let git = match git_snapshot(
+            let git = match git_snapshot_controlled(
                 &local_path,
                 options.changed_since_base.as_deref(),
                 options.git_fetch_refs.clone(),
                 options.controller_routed_git,
+                control,
             ) {
                 Ok(git) => git,
                 Err(error) if controller_object_closure_unavailable(&error) => {
@@ -428,6 +470,7 @@ fn sync_workspace_in_roots_with_deadline(
                         &includes,
                         &options,
                         &error,
+                        control,
                     );
                 }
                 Err(error) => return Err(error),
@@ -468,8 +511,12 @@ fn sync_workspace_in_roots_with_deadline(
             // ownership boundary.
             let prepared_cache =
                 prepared_source_cache_path(workspace_root, &git.remote_url, &git.head);
-            let reused_prepared_source =
-                materialize_prepared_source_view(&runner, &prepared_cache, &remote_path)?;
+            let reused_prepared_source = materialize_prepared_source_view_controlled(
+                &runner,
+                &prepared_cache,
+                &remote_path,
+                control,
+            )?;
             let materialized = if reused_prepared_source {
                 materialization_plan.actual_materialization_mode =
                     Some("prepared_source_view".to_string());
@@ -480,7 +527,7 @@ fn sync_workspace_in_roots_with_deadline(
                     &git.remote_url,
                 )
             {
-                materialize_git_from_controller_bundle(
+                materialize_git_bundle_controlled(
                     &runner,
                     ControllerGitBundleMaterializationRequest {
                         local_path: &local_path,
@@ -492,6 +539,7 @@ fn sync_workspace_in_roots_with_deadline(
                         git_fetch_refs: &git.git_fetch_refs,
                         allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
                     },
+                    control,
                 )
                 .map(Some)
             } else {
@@ -501,7 +549,7 @@ fn sync_workspace_in_roots_with_deadline(
                         &runner.id,
                     )?;
                 }
-                match materialize_git(
+                match materialize_git_controlled(
                     &runner,
                     GitMaterializationRequest {
                         remote_path: &remote_path,
@@ -512,13 +560,14 @@ fn sync_workspace_in_roots_with_deadline(
                         git_fetch_refs: &git.git_fetch_refs,
                         allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
                     },
+                    control,
                 ) {
                     Ok(()) => Ok(None),
                     Err(error) => {
                         if !is_runner_git_auth_or_network_failure(&error) {
                             Err(error)
                         } else {
-                            materialize_git_from_controller_bundle(
+                            materialize_git_bundle_controlled(
                                 &runner,
                                 ControllerGitBundleMaterializationRequest {
                                     local_path: &local_path,
@@ -530,6 +579,7 @@ fn sync_workspace_in_roots_with_deadline(
                                     git_fetch_refs: &git.git_fetch_refs,
                                     allow_dirty_lab_workspace: options.allow_dirty_lab_workspace,
                                 },
+                                control,
                             )
                             .map(Some)
                         }
@@ -547,9 +597,12 @@ fn sync_workspace_in_roots_with_deadline(
                         &includes,
                         &options,
                         &error,
+                        control,
                     );
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(workspace_sync_effect_error(error, &runner.id, &remote_path))
+                }
             }
             let metadata = workspace_metadata(WorkspaceMetadataRequest {
                 runner_id: &runner.id,
@@ -585,11 +638,23 @@ fn sync_workspace_in_roots_with_deadline(
                 &remote_path,
                 &excludes,
                 options.validation_dependency_ids.as_deref(),
+                control,
             ) {
                 Ok(dependencies) => dependencies,
                 Err(err) => {
-                    rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                    return Err(err);
+                    if !err.details["workspace_sync"].is_object() {
+                        rollback_materialized_workspace_before(
+                            &runner,
+                            workspace_root,
+                            &remote_path,
+                            control.deadline().is_some(),
+                        );
+                    }
+                    return Err(workspace_materialized_effect_error(
+                        err,
+                        &runner.id,
+                        &remote_path,
+                    ));
                 }
             };
             let current_workspace = current_workspace_summary(
@@ -633,6 +698,29 @@ fn sync_workspace_in_roots_with_deadline(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedSourceCacheLifecycle {
     pub observations: Vec<String>,
+}
+
+fn workspace_sync_effect_error(mut error: Error, runner_id: &str, remote_path: &str) -> Error {
+    error.details["workspace_effect"] = serde_json::json!({
+        "runner_id": runner_id,
+        "remote_path": remote_path,
+        "status": if error.details["workspace_sync"]["remote_effect_uncertain"] == true { "uncertain" } else { "construction_failed" },
+    });
+    error
+}
+
+fn workspace_materialized_effect_error(
+    mut error: Error,
+    runner_id: &str,
+    remote_path: &str,
+) -> Error {
+    error.details["workspace_effect"] = serde_json::json!({
+        "runner_id": runner_id,
+        "remote_path": remote_path,
+        "status": "materialized_before_metadata_or_dependency_failure",
+        "rollback_attempted": !error.details["workspace_sync"].is_object(),
+    });
+    error
 }
 
 pub(crate) fn save_prepared_source_cache(
@@ -715,14 +803,19 @@ fn prepared_source_cache_root(workspace_root: &str) -> String {
     )
 }
 
-fn materialize_prepared_source_view(
+fn materialize_prepared_source_view_controlled(
     runner: &super::super::Runner,
     cache: &str,
     remote_path: &str,
+    control: &WorkspaceControl,
 ) -> Result<bool> {
     let command = prepared_source_view_command(cache, remote_path);
-    run_workspace_shell_success(runner, &command, "materialize prepared Lab source view")
-        .map(|output| output.success)
+    let command = super::util::shell_command_for_runner(runner, &command)?;
+    let output = control.output(
+        std::process::Command::new("bash").args(["-o", "pipefail", "-c", &command]),
+        "materialize prepared Lab source view",
+    )?;
+    Ok(output.status.success())
 }
 
 pub(super) fn prepared_source_view_command(cache: &str, destination: &str) -> String {
@@ -807,9 +900,10 @@ fn materialize_git_fallback_filesystem_snapshot(
     includes: &[String],
     options: &RunnerWorkspaceSyncOptions,
     _closure_error: &Error,
+    control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
     ensure_no_runner_workspace_metadata_collision(local_path)?;
-    let snapshot = snapshot_identity(local_path, excludes, includes)?;
+    let snapshot = snapshot_identity_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
         &deterministic_remote_path(
             workspace_root,
@@ -819,12 +913,14 @@ fn materialize_git_fallback_filesystem_snapshot(
         ),
         "",
     );
-    let stats = local_snapshot_stats(local_path, excludes, includes)?;
-    let content_manifest = workspace_content_manifest_for_policy(
+    let stats = local_snapshot_stats_controlled(local_path, excludes, includes, control)?;
+    let content_manifest = workspace_content_manifest_and_hash_controlled(
         local_path,
         excludes,
         WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
-    )?;
+        control,
+    )?
+    .0;
     let workspace_cleanliness = "filesystem_snapshot_after_git_closure_failure";
     let mut materialization_plan = workspace_materialization_plan(
         workspace_root,
@@ -840,9 +936,23 @@ fn materialize_git_fallback_filesystem_snapshot(
         .requested_changed_since_base = options.changed_since_base.clone();
     materialization_plan.declared_inputs.changed_since_base = None;
     materialization_plan.declared_inputs.git_fetch_refs.clear();
-    if let Err(error) = materialize_snapshot(runner, local_path, &remote_path, excludes) {
-        rollback_materialized_workspace(runner, workspace_root, &remote_path);
-        return Err(error);
+    if let Err(error) = materialize_snapshot_with_scratch_controlled(
+        runner,
+        local_path,
+        &remote_path,
+        excludes,
+        None,
+        control,
+    ) {
+        if error.details["workspace_sync"]["remote_effect_uncertain"] != true {
+            rollback_materialized_workspace_before(
+                runner,
+                workspace_root,
+                &remote_path,
+                control.deadline().is_some(),
+            );
+        }
+        return Err(workspace_sync_effect_error(error, &runner.id, &remote_path));
     }
     materialization_plan.actual_materialization_mode = Some("filesystem_snapshot".to_string());
     materialization_plan.fallback_reason =
@@ -884,11 +994,23 @@ fn materialize_git_fallback_filesystem_snapshot(
         &remote_path,
         excludes,
         options.validation_dependency_ids.as_deref(),
+        control,
     ) {
         Ok(dependencies) => dependencies,
         Err(error) => {
-            rollback_materialized_workspace(runner, workspace_root, &remote_path);
-            return Err(error);
+            if !error.details["workspace_sync"].is_object() {
+                rollback_materialized_workspace_before(
+                    runner,
+                    workspace_root,
+                    &remote_path,
+                    control.deadline().is_some(),
+                );
+            }
+            return Err(workspace_materialized_effect_error(
+                error,
+                &runner.id,
+                &remote_path,
+            ));
         }
     };
     let current_workspace = current_workspace_summary(
@@ -971,10 +1093,7 @@ pub fn update_workspace(
             None,
         ));
     }
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
@@ -1365,10 +1484,7 @@ pub fn reuse_compatible_snapshot_workspace(
             ]),
         )
     })?;
-    let mut excludes = DEFAULT_EXCLUDES
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>();
+    let mut excludes = super::types::default_excludes_for(&local_path);
     for pattern in &runner.policy.snapshot_excludes {
         if !excludes.contains(pattern) {
             excludes.push(pattern.clone());
@@ -2499,14 +2615,18 @@ fn write_metadata_and_sync_validation_dependencies(
     remote_path: &str,
     excludes: &[String],
     selected_dependency_ids: Option<&[String]>,
+    control: &WorkspaceControl,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
+    control.checkpoint()?;
     write_workspace_metadata(runner, metadata)?;
+    control.checkpoint()?;
     sync_validation_dependency_workspaces(
         runner,
         local_path,
         remote_path,
         excludes,
         selected_dependency_ids,
+        control,
     )
 }
 

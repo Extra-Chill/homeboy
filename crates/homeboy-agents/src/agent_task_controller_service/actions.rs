@@ -1012,7 +1012,7 @@ fn record_dispatch_admission(
     record.metadata["active_provider_run_lineage"][run_id] = serde_json::json!({
         "loop_id": record.loop_id,
         "action_id": action_id,
-        "generation": record.updated_at,
+        "generation": record.metadata.pointer("/loop_dispatch_receipt/generation"),
     });
     controller::write_controller(record)
 }

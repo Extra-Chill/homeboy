@@ -361,23 +361,6 @@ mod tests {
 
     #[test]
     #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn test_set() {
-        let project_id = "homeboy-keychain-test-set";
-        let variable_name = "token";
-
-        remove(project_id, variable_name).expect("clean old value");
-        set(project_id, variable_name, "secret-value").expect("store value");
-        assert_eq!(
-            get(project_id, variable_name)
-                .expect("read value")
-                .as_deref(),
-            Some("secret-value")
-        );
-        remove(project_id, variable_name).expect("cleanup value");
-    }
-
-    #[test]
-    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
     fn test_get() {
         let project_id = "homeboy-keychain-test-get";
         let variable_name = "token";
@@ -438,24 +421,5 @@ mod tests {
         );
         assert!(!exists(project_id, "token"));
         assert!(!exists(project_id, "refresh"));
-    }
-
-    #[test]
-    #[ignore = "Requires a live OS keychain / secret store; run locally with `cargo test -- --ignored`"]
-    fn stores_reads_and_removes_keychain_value() {
-        let project_id = "homeboy-keychain-test";
-        let variable_name = "token";
-        let value = "secret-value";
-
-        set(project_id, variable_name, value).expect("store value");
-        assert_eq!(
-            get(project_id, variable_name).expect("read value"),
-            Some(value.to_string())
-        );
-        remove(project_id, variable_name).expect("remove value");
-        assert_eq!(
-            get(project_id, variable_name).expect("read missing value"),
-            None
-        );
     }
 }

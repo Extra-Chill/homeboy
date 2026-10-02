@@ -1,31 +1,46 @@
-use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 use std::process::Command;
-use std::process::Stdio;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
+use super::control::WorkspaceControl;
 use super::materializer::{WorkspaceMaterializationOperation, WorkspaceMaterializer};
-use super::snapshot::materialize_snapshot_overlay;
 use super::types::ControllerGitBundleProvenance;
 use super::types::GitSnapshot;
-use super::util::{
-    git_output, run_shell_command, ssh_args, ssh_client_for_runner, verify_valid_git_representation,
-};
+use super::util::{ssh_args, ssh_client_for_runner, verify_valid_git_representation};
 
+#[cfg(test)]
 pub(super) fn git_snapshot(
     local_path: &Path,
     changed_since_base: Option<&str>,
     git_fetch_refs: Vec<String>,
     controller_routed_git: bool,
 ) -> Result<GitSnapshot> {
-    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
-    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+    git_snapshot_controlled(
+        local_path,
+        changed_since_base,
+        git_fetch_refs,
+        controller_routed_git,
+        &WorkspaceControl::default(),
+    )
+}
+
+pub(super) fn git_snapshot_controlled(
+    local_path: &Path,
+    changed_since_base: Option<&str>,
+    git_fetch_refs: Vec<String>,
+    controller_routed_git: bool,
+    control: &WorkspaceControl,
+) -> Result<GitSnapshot> {
+    control.checkpoint()?;
+    let head = control.git(local_path, &["rev-parse", "HEAD"])?;
+    let branch = control
+        .git(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .filter(|branch| branch != "HEAD");
-    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])?;
+    let remote_url = control.git(local_path, &["config", "--get", "remote.origin.url"])?;
     if remote_url.trim().is_empty() {
         return Err(Error::validation_invalid_argument(
             "remote.origin.url",
@@ -42,12 +57,12 @@ pub(super) fn git_snapshot(
         )
         // A partial controller checkout may need its selected HEAD hydrated
         // before Git can even evaluate cleanliness.
-        || promisor_remote(local_path)?.is_some()
+        || promisor_remote(local_path, control)?.is_some()
     {
         let refs = controller_bundle_refs(&head, changed_since_base, &git_fetch_refs);
-        repair_controller_bundle_commit_closure(local_path, &refs)?;
+        repair_controller_bundle_commit_closure(local_path, &refs, control)?;
     }
-    ensure_clean_git_working_tree(local_path, changed_since_base)?;
+    ensure_clean_git_working_tree(local_path, changed_since_base, control)?;
 
     Ok(GitSnapshot {
         remote_url,
@@ -61,8 +76,9 @@ pub(super) fn git_snapshot(
 fn ensure_clean_git_working_tree(
     local_path: &Path,
     changed_since_base: Option<&str>,
+    control: &WorkspaceControl,
 ) -> Result<()> {
-    let status = git_output(local_path, &["status", "--porcelain=v1"])?;
+    let status = control.git(local_path, &["status", "--porcelain=v1"])?;
     if !status.trim().is_empty() {
         if changed_since_base.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -106,9 +122,10 @@ pub(super) struct GitMaterializationRequest<'a> {
     pub allow_dirty_lab_workspace: bool,
 }
 
-pub(super) fn materialize_git(
+pub(super) fn materialize_git_controlled(
     runner: &Runner,
     request: GitMaterializationRequest<'_>,
+    control: &WorkspaceControl,
 ) -> Result<()> {
     let command = materialize_git_command(
         request.remote_path,
@@ -119,28 +136,10 @@ pub(super) fn materialize_git(
         request.git_fetch_refs,
         request.allow_dirty_lab_workspace,
     );
-    match runner.kind {
-        RunnerKind::Local => run_shell_command(&command, "materialize local git workspace"),
-        RunnerKind::Ssh => {
-            let (_server, client) = ssh_client_for_runner(runner)?;
-            let output = client.execute(&command);
-            if output.success {
-                Ok(())
-            } else {
-                Err(Error::validation_invalid_argument(
-                    "changed_since",
-                    "runner dispatch could not make the requested --changed-since base reachable in the runner workspace before dispatch",
-                    request.changed_since_base.map(str::to_string),
-                    Some(vec![
-                        "Verify the branch and base commit are pushed to origin.".to_string(),
-                        "Run with --placement local to execute the changed-since command locally."
-                            .to_string(),
-                        format!("Remote git error: {}", output.stderr.trim()),
-                    ]),
-                ))
-            }
-        }
-    }
+    control.shell(
+        &super::util::shell_command_for_runner(runner, &command)?,
+        "materialize git workspace",
+    )
 }
 
 pub(super) struct ControllerGitBundleMaterializationRequest<'a> {
@@ -154,11 +153,13 @@ pub(super) struct ControllerGitBundleMaterializationRequest<'a> {
     pub allow_dirty_lab_workspace: bool,
 }
 
-pub(super) fn materialize_git_from_controller_bundle(
+pub(super) fn materialize_git_bundle_controlled(
     runner: &Runner,
     request: ControllerGitBundleMaterializationRequest<'_>,
+    control: &WorkspaceControl,
 ) -> Result<ControllerGitBundleProvenance> {
-    validate_controller_git_bundle_source(request.local_path)?;
+    control.checkpoint()?;
+    validate_controller_git_bundle_source(request.local_path, control)?;
 
     let bundle_dir = tempfile::tempdir().map_err(|err| {
         Error::internal_io(
@@ -171,25 +172,24 @@ pub(super) fn materialize_git_from_controller_bundle(
     // `HEAD` preserves the complete selected ancestry in a bundle. The exact
     // resolved SHA is recorded separately in provenance and verified on Lab.
     let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
-    hydrate_controller_bundle_objects(request.local_path, &refs)?;
+    hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control)?;
 
-    let output = Command::new("git")
-        .arg("bundle")
-        .arg("create")
-        .arg(&bundle_path)
-        .args(&refs)
-        .current_dir(request.local_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("create git bundle".to_string()))
-        })?;
+    let output = control.output(
+        Command::new("git")
+            .arg("bundle")
+            .arg("create")
+            .arg(&bundle_path)
+            .args(&refs)
+            .current_dir(request.local_path),
+        "create git bundle",
+    )?;
     if !output.status.success() {
         return Err(Error::internal_unexpected(format!(
             "create git bundle failed: {}",
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let sha256 = sha256_file(&bundle_path)?;
+    let sha256 = super::snapshot::snapshot_file_sha256(&bundle_path, control)?;
 
     let install_command = git_bundle_install_command(
         request.remote_path,
@@ -201,18 +201,20 @@ pub(super) fn materialize_git_from_controller_bundle(
         request.allow_dirty_lab_workspace,
     );
     let result = match runner.kind {
-        RunnerKind::Local => materialize_git_bundle_piped(
+        RunnerKind::Local => materialize_git_bundle_piped_controlled(
             &bundle_path,
             &format!("sh -c {}", shell::quote_arg(&install_command)),
             "materialize local git bundle workspace",
+            control,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
-                materialize_git_bundle_piped(
+                materialize_git_bundle_piped_controlled(
                     &bundle_path,
                     &format!("sh -c {}", shell::quote_arg(&install_command)),
                     "materialize local git bundle workspace",
+                    control,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
@@ -222,10 +224,11 @@ pub(super) fn materialize_git_from_controller_bundle(
                     remote = shell::quote_arg(&remote),
                     remote_command = shell::quote_arg(&install_command),
                 );
-                materialize_git_bundle_piped(
+                materialize_git_bundle_piped_controlled(
                     &bundle_path,
                     &target,
                     "materialize SSH git bundle workspace",
+                    control,
                 )
             }
         }
@@ -246,22 +249,26 @@ pub(super) fn materialize_git_from_controller_bundle(
 /// Materialize a controller Git workspace as its exact captured commit, then
 /// apply its filtered working-tree contents. The controller completes and
 /// transfers the object closure; a Lab must never contact the source remote.
-pub(super) fn materialize_git_snapshot_from_controller_bundle(
+pub(super) fn materialize_git_snapshot_controlled(
     runner: &Runner,
     local_path: &Path,
     remote_path: &str,
     excludes: &[String],
     git_fetch_refs: &[String],
+    control: &WorkspaceControl,
 ) -> Result<Option<ControllerGitBundleProvenance>> {
-    let head = git_output(local_path, &["rev-parse", "HEAD"])?;
-    let branch = git_output(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+    control.checkpoint()?;
+    let head = control.git(local_path, &["rev-parse", "HEAD"])?;
+    let branch = control
+        .git(local_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
         .filter(|branch| branch != "HEAD");
-    let remote_url = git_output(local_path, &["config", "--get", "remote.origin.url"])
+    let remote_url = control
+        .git(local_path, &["config", "--get", "remote.origin.url"])
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| "homeboy-controller-bundle".to_string());
-    let provenance = materialize_git_from_controller_bundle(
+    let provenance = materialize_git_bundle_controlled(
         runner,
         ControllerGitBundleMaterializationRequest {
             local_path,
@@ -273,8 +280,16 @@ pub(super) fn materialize_git_snapshot_from_controller_bundle(
             git_fetch_refs,
             allow_dirty_lab_workspace: false,
         },
+        control,
     )?;
-    materialize_snapshot_overlay(runner, local_path, remote_path, excludes)?;
+    super::snapshot::materialize_snapshot_overlay_controlled(
+        runner,
+        local_path,
+        remote_path,
+        excludes,
+        control,
+    )?;
+    control.checkpoint()?;
     verify_materialized_snapshot_git_representation(runner, remote_path)?;
     Ok(Some(provenance))
 }
@@ -313,92 +328,78 @@ fn verify_materialized_snapshot_git_representation(
     }
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    content_hash::sha256_file(path)
-}
-
 /// Resolve the exact object closure locally before `git bundle` can invoke a
 /// promisor remote itself. The controller is the only participant allowed to
 /// use the source checkout's authenticated transport.
+#[cfg(test)]
 pub(super) fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Result<()> {
-    repair_controller_bundle_commit_closure(local_path, refs)?;
-    if let Some(remote) = promisor_remote(local_path)? {
-        return hydrate_promisor_bundle_objects(local_path, &remote, refs);
-    }
-    let mut object_list = Command::new("git")
-        // A stale commit graph can name promisor objects that do not exist in
-        // the local database. Walk the repaired closure from real objects so
-        // Git can use the controller's promisor transport when needed.
-        .args([
-            "-c",
-            "core.commitGraph=false",
-            "rev-list",
-            "--objects",
-            "--no-object-names",
-        ])
-        .args(refs)
-        .current_dir(local_path)
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|err| {
-            Error::internal_io(err.to_string(), Some("list git bundle objects".to_string()))
-        })?;
-    let mut hydrate = Command::new("git")
-        .args(["cat-file", "--batch-check"])
-        .current_dir(local_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("hydrate git bundle objects".to_string()),
-            )
-        })?;
+    hydrate_controller_bundle_objects_controlled(local_path, refs, &WorkspaceControl::default())
+}
 
-    let mut object_list_stdout = object_list
-        .stdout
-        .take()
-        .expect("piped git object list stdout");
-    let mut hydrate_stdin = hydrate
-        .stdin
-        .take()
-        .expect("piped git object hydration stdin");
-    std::io::copy(&mut object_list_stdout, &mut hydrate_stdin).map_err(|err| {
+fn hydrate_controller_bundle_objects_controlled(
+    local_path: &Path,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<()> {
+    control.checkpoint()?;
+    repair_controller_bundle_commit_closure(local_path, refs, control)?;
+    if let Some(remote) = promisor_remote(local_path, control)? {
+        return hydrate_promisor_bundle_objects(local_path, &remote, refs, control);
+    }
+    // Spool the complete closure in owned scratch, retaining the producer's
+    // precise failure identity without an uncancellable pipe-copy or an
+    // object-list-sized in-memory allocation.
+    let objects = tempfile::NamedTempFile::new().map_err(|error| {
         Error::internal_io(
-            err.to_string(),
-            Some("stream git bundle objects".to_string()),
+            error.to_string(),
+            Some("list git bundle objects".to_string()),
         )
     })?;
-    drop(hydrate_stdin);
-
-    let object_list_status = object_list.wait().map_err(|err| {
-        Error::internal_io(err.to_string(), Some("list git bundle objects".to_string()))
-    })?;
-    if !object_list_status.success() {
+    let output = control.output_to_file(
+        Command::new("git")
+            .args([
+                "-c",
+                "core.commitGraph=false",
+                "rev-list",
+                "--objects",
+                "--no-object-names",
+            ])
+            .args(refs)
+            .current_dir(local_path),
+        objects
+            .reopen()
+            .map_err(|error| Error::internal_io(error.to_string(), None))?,
+        "list git bundle objects",
+    )?;
+    if !output.status.success() {
         return controller_bundle_failure(
             local_path,
             refs,
             "list git bundle objects",
-            object_list_status.code(),
+            output.status.code(),
+            control,
         );
     }
-    let hydrate_status = hydrate.wait().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("hydrate git bundle objects".to_string()),
-        )
-    })?;
-    if !hydrate_status.success() {
-        return controller_bundle_failure(
+    let script = format!(
+        "git -C {} cat-file --batch-check < {} >/dev/null",
+        shell::quote_arg(&local_path.display().to_string()),
+        shell::quote_arg(&objects.path().display().to_string())
+    );
+    let output = control.output(
+        Command::new("bash").args(["-o", "pipefail", "-c", &script]),
+        "hydrate git bundle objects",
+    )?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        controller_bundle_failure(
             local_path,
             refs,
             "hydrate git bundle objects",
-            hydrate_status.code(),
-        );
+            output.status.code(),
+            control,
+        )
     }
-
-    Ok(())
 }
 
 /// Hydrate a partial clone's bundle closure with one batched fetch.
@@ -411,13 +412,23 @@ pub(super) fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[Strin
 /// fetch exactly those ids in one request, the same shape as Git's own
 /// promisor fetch. One staging adds at most one pack, and the porcelain fetch
 /// runs Git's automatic maintenance, which consolidates packs over time.
-fn hydrate_promisor_bundle_objects(local_path: &Path, remote: &str, refs: &[String]) -> Result<()> {
-    let missing = all_missing_promisor_objects(local_path, refs)?;
+fn hydrate_promisor_bundle_objects(
+    local_path: &Path,
+    remote: &str,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<()> {
+    let missing = all_missing_promisor_objects(local_path, refs, control)?;
     if !missing.is_empty() {
-        if let Err(status) = fetch_promisor_objects(local_path, remote, &missing) {
+        if let Err(error) = fetch_promisor_objects(local_path, remote, &missing, control) {
+            if error.details["workspace_sync"].is_object() {
+                return Err(error);
+            }
             return Err(controller_object_closure_error(
                 "batched fetch of required promisor objects failed",
-                status,
+                error.details["git_exit_status"]
+                    .as_i64()
+                    .map(|value| value as i32),
                 local_path,
                 remote,
                 refs,
@@ -426,7 +437,7 @@ fn hydrate_promisor_bundle_objects(local_path: &Path, remote: &str, refs: &[Stri
         }
     }
 
-    let still_missing = missing_promisor_objects(local_path, refs)?;
+    let still_missing = missing_promisor_objects(local_path, refs, control)?;
     if !still_missing.is_empty() {
         return Err(controller_object_closure_error(
             "hydrate git bundle objects completed with required promisor objects still unavailable",
@@ -442,26 +453,26 @@ fn hydrate_promisor_bundle_objects(local_path: &Path, remote: &str, refs: &[Stri
 
 /// Every object id in `refs`' closure that is absent locally, listed without
 /// triggering lazy fetches. Unbounded, unlike the diagnostic probe.
-fn all_missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args([
-            "-c",
-            "core.commitGraph=false",
-            "rev-list",
-            "--objects",
-            "--no-object-names",
-            "--missing=print",
-        ])
-        .args(refs)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .current_dir(local_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("list missing git bundle objects".to_string()),
-            )
-        })?;
+fn all_missing_promisor_objects(
+    local_path: &Path,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
+    let output = control.output_exact(
+        Command::new("git")
+            .args([
+                "-c",
+                "core.commitGraph=false",
+                "rev-list",
+                "--objects",
+                "--no-object-names",
+                "--missing=print",
+            ])
+            .args(refs)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .current_dir(local_path),
+        "list missing git bundle objects",
+    )?;
     if !output.status.success() {
         return Err(git_command_failure(
             "list missing git bundle objects",
@@ -486,45 +497,36 @@ fn fetch_promisor_objects(
     local_path: &Path,
     remote: &str,
     object_ids: &[String],
-) -> std::result::Result<(), Option<i32>> {
+    control: &WorkspaceControl,
+) -> Result<()> {
     use std::io::Write as _;
 
-    let mut child = Command::new("git")
-        .args([
-            "-c",
-            "fetch.negotiationAlgorithm=noop",
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--recurse-submodules=no",
-            "--filter=blob:none",
-            "--stdin",
-        ])
-        .arg(remote)
-        .current_dir(local_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| None)?;
-    let mut body = object_ids.join("\n");
-    body.push('\n');
-    let wrote = child
-        .stdin
-        .take()
-        .map(|mut stdin| stdin.write_all(body.as_bytes()).is_ok())
-        .unwrap_or(false);
-    let status = child.wait().map_err(|_| None)?;
-    if wrote && status.success() {
+    control.checkpoint()?;
+    let mut input = tempfile::NamedTempFile::new()
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    for object in object_ids {
+        control.checkpoint()?;
+        writeln!(input, "{object}").map_err(|error| Error::internal_io(error.to_string(), None))?;
+    }
+    let output = control.output(Command::new("bash")
+        .args(["-o", "pipefail", "-c", &format!("git -C {} -c fetch.negotiationAlgorithm=noop fetch --no-tags --no-write-fetch-head --recurse-submodules=no --filter=blob:none --stdin {} < {}", shell::quote_arg(&local_path.display().to_string()), shell::quote_arg(remote), shell::quote_arg(&input.path().display().to_string()))]), "fetch promisor objects")?;
+    if output.status.success() {
         Ok(())
     } else {
-        Err(status.code())
+        Err(git_command_failure(
+            "fetch promisor objects",
+            output.status.code(),
+        ))
     }
 }
 
-fn repair_controller_bundle_commit_closure(local_path: &Path, refs: &[String]) -> Result<()> {
-    if let Some(remote) = promisor_remote(local_path)? {
-        refetch_controller_bundle_commits(local_path, &remote, refs)?;
+fn repair_controller_bundle_commit_closure(
+    local_path: &Path,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<()> {
+    if let Some(remote) = promisor_remote(local_path, control)? {
+        refetch_controller_bundle_commits(local_path, &remote, refs, control)?;
     }
     Ok(())
 }
@@ -537,6 +539,7 @@ fn refetch_controller_bundle_commits(
     local_path: &Path,
     remote: &str,
     refs: &[String],
+    control: &WorkspaceControl,
 ) -> Result<()> {
     // Only fetch refs whose local object closure is actually incomplete. A
     // changed-scope run selects the clean worktree HEAD alongside the resolved
@@ -548,7 +551,8 @@ fn refetch_controller_bundle_commits(
     // through the promisor transport while leaving fully-local commits alone.
     let mut incomplete_refs = Vec::new();
     for git_ref in refs {
-        if ref_has_missing_objects(local_path, git_ref)? {
+        control.checkpoint()?;
+        if !missing_promisor_objects(local_path, &[git_ref.clone()], control)?.is_empty() {
             incomplete_refs.push(git_ref.clone());
         }
     }
@@ -565,18 +569,14 @@ fn refetch_controller_bundle_commits(
     // that the controller must hydrate only the promised base/head closure.
     // Naming the exact refs completes their closure through the promisor
     // transport without re-fetching unrelated history.
-    let output = Command::new("git")
-        .args(["fetch", "--no-tags", "--filter=blob:none"])
-        .arg(remote)
-        .args(&incomplete_refs)
-        .current_dir(local_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("refetch controller git bundle commits".to_string()),
-            )
-        })?;
+    let output = control.output(
+        Command::new("git")
+            .args(["fetch", "--no-tags", "--filter=blob:none"])
+            .arg(remote)
+            .args(&incomplete_refs)
+            .current_dir(local_path),
+        "refetch controller git bundle commits",
+    )?;
     if output.status.success() {
         return Ok(());
     }
@@ -584,7 +584,8 @@ fn refetch_controller_bundle_commits(
     // `incomplete_refs` was derived from explicit missing-object probe output
     // in a promisor-configured checkout. The transport result itself stays out
     // of provenance: it may contain credentials or remote implementation data.
-    let missing = missing_promisor_objects(local_path, refs).unwrap_or_default();
+    let missing = missing_promisor_objects(local_path, refs, control).unwrap_or_default();
+    control.checkpoint()?;
     Err(controller_object_closure_error(
         "refetch controller git bundle commits failed while required promisor objects remained unavailable",
         output.status.code(),
@@ -600,11 +601,12 @@ fn controller_bundle_failure(
     refs: &[String],
     action: &str,
     exit_status: Option<i32>,
+    control: &WorkspaceControl,
 ) -> Result<()> {
-    match has_reported_missing_promisor_objects(local_path, refs) {
+    match missing_promisor_objects(local_path, refs, control).map(|missing| !missing.is_empty()) {
         Ok(true) => {
-            let remote = promisor_remote(local_path)?.unwrap_or_default();
-            let missing = missing_promisor_objects(local_path, refs)?;
+            let remote = promisor_remote(local_path, control)?.unwrap_or_default();
+            let missing = missing_promisor_objects(local_path, refs, control)?;
             Err(controller_object_closure_error(
                 format!("{action} failed while required promisor objects remained unavailable"),
                 exit_status,
@@ -667,15 +669,14 @@ fn git_command_failure(action: &str, exit_status: Option<i32>) -> Error {
 /// cannot serve an unpushed commit. A ref that cannot be resolved at all (its
 /// tip commit is itself absent) is treated as incomplete so the promisor fetch
 /// can attempt to hydrate it.
+#[cfg(test)]
 pub(super) fn ref_has_missing_objects(local_path: &Path, git_ref: &str) -> Result<bool> {
-    has_reported_missing_promisor_objects(local_path, &[git_ref.to_string()])
-}
-
-/// Return true only when a promisor-configured checkout explicitly reports a
-/// missing object. A non-zero Git exit is not proof of an incomplete object
-/// closure: it can be caused by invalid refs, permissions, or corruption.
-fn has_reported_missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<bool> {
-    Ok(!missing_promisor_objects(local_path, refs)?.is_empty())
+    Ok(!missing_promisor_objects(
+        local_path,
+        &[git_ref.to_string()],
+        &WorkspaceControl::default(),
+    )?
+    .is_empty())
 }
 
 const MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT: usize = 8;
@@ -683,32 +684,32 @@ const MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT: usize = 8;
 /// Return a bounded list of missing promised objects without allowing Git to
 /// hydrate them. The list is diagnostic only; closure hydration remains the
 /// controller's responsibility.
-fn missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<Vec<String>> {
-    if promisor_remote(local_path)?.is_none() {
+fn missing_promisor_objects(
+    local_path: &Path,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<Vec<String>> {
+    if promisor_remote(local_path, control)?.is_none() {
         return Ok(Vec::new());
     }
 
     let mut missing = Vec::new();
     for git_ref in refs {
-        let output = Command::new("git")
-            .args([
-                "-c",
-                "core.commitGraph=false",
-                "rev-list",
-                "--objects",
-                "--no-object-names",
-                "--missing=print",
-            ])
-            .arg(git_ref)
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .current_dir(local_path)
-            .output()
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some("probe controller bundle ref objects".to_string()),
-                )
-            })?;
+        let output = control.output_exact(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "core.commitGraph=false",
+                    "rev-list",
+                    "--objects",
+                    "--no-object-names",
+                    "--missing=print",
+                ])
+                .arg(git_ref)
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .current_dir(local_path),
+            "probe controller bundle ref objects",
+        )?;
 
         if !output.status.success() {
             return Err(git_command_failure(
@@ -731,17 +732,13 @@ fn missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<Vec<St
     Ok(missing)
 }
 
-fn promisor_remote(local_path: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["config", "--get-regexp", r"^remote\..*\.promisor$"])
-        .current_dir(local_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read git promisor remote".to_string()),
-            )
-        })?;
+fn promisor_remote(local_path: &Path, control: &WorkspaceControl) -> Result<Option<String>> {
+    let output = control.output_exact(
+        Command::new("git")
+            .args(["config", "--get-regexp", r"^remote\..*\.promisor$"])
+            .current_dir(local_path),
+        "read git promisor remote",
+    )?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -786,8 +783,11 @@ fn push_unique_bundle_ref(refs: &mut Vec<String>, git_ref: &str) {
     }
 }
 
-fn validate_controller_git_bundle_source(local_path: &Path) -> Result<()> {
-    let is_shallow = git_output(local_path, &["rev-parse", "--is-shallow-repository"])?;
+fn validate_controller_git_bundle_source(
+    local_path: &Path,
+    control: &WorkspaceControl,
+) -> Result<()> {
+    let is_shallow = control.git(local_path, &["rev-parse", "--is-shallow-repository"])?;
     if is_shallow.trim() != "true" {
         return Ok(());
     }
@@ -809,17 +809,18 @@ fn validate_controller_git_bundle_source(local_path: &Path) -> Result<()> {
     ))
 }
 
-fn materialize_git_bundle_piped(
+fn materialize_git_bundle_piped_controlled(
     bundle_path: &Path,
     target_command: &str,
     action: &str,
+    control: &WorkspaceControl,
 ) -> Result<()> {
     let command = format!(
         "cat {bundle} | {target_command}",
         bundle = shell::quote_arg(&bundle_path.display().to_string()),
         target_command = target_command,
     );
-    run_shell_command(&command, action)
+    control.shell(&command, action)
 }
 
 pub(crate) fn git_bundle_install_command(

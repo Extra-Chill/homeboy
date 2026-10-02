@@ -70,6 +70,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             )
         })?;
         request.cwd = dispatch.cwd.clone();
+        request.command = dispatch.command.clone();
         request.source_snapshot = dispatch.source_snapshot.clone();
         prepare_daemon_exec(
             request,

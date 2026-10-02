@@ -380,6 +380,10 @@ pub fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
 pub fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, PathBuf)> {
     install_sources::shared_assets_for_extension_source(source)
 }
+/// Resolves a declared shared asset beneath an explicit isolated Homeboy config root.
+pub fn isolated_shared_asset_target(config_root: &Path, asset_path: &str) -> Result<PathBuf> {
+    install_sources::isolated_shared_asset_target(config_root, asset_path)
+}
 pub(crate) use install_sources::{
     install_linked_shared_assets, rename_dir, resolve_cloned_extension,
 };

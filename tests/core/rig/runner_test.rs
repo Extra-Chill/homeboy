@@ -1353,53 +1353,30 @@ fn test_head_sha_and_branch_returns_none_for_non_repo_path() {
 
 #[test]
 fn test_head_sha_and_branch_returns_sha_and_branch_for_git_repo() {
-    use std::process::Command;
-
     let temp = tempfile::TempDir::new().expect("temp dir");
     let path = temp.path();
 
     // Initialize a minimal git repo with a deterministic commit so the
-    // helper has something to read. Skip the test gracefully when git is
-    // unavailable so the suite stays portable.
-    let init = Command::new("git")
-        .arg("init")
-        .arg("--quiet")
-        .arg("--initial-branch=fixture-main")
-        .current_dir(path)
-        .status();
-    let Ok(status) = init else {
-        eprintln!("git not available; skipping head_sha_and_branch repo test");
-        return;
-    };
-    if !status.success() {
-        eprintln!("git init failed; skipping head_sha_and_branch repo test");
-        return;
-    }
-
-    for (key, value) in [
-        ("user.email", "fixture@example.test"),
-        ("user.name", "Fixture"),
-        ("commit.gpgsign", "false"),
-    ] {
-        let _ = Command::new("git")
-            .args(["config", key, value])
-            .current_dir(path)
-            .status();
-    }
-
+    // helper has something to read. The shared fixture asserts every git
+    // step, so a missing or failing git is a test failure, not a skip.
+    // The branch name stays fixture-specific so the assertion proves the
+    // branch is read from the repository rather than assumed.
+    crate::rig_test_support::run_git(path, &["init", "--quiet", "-b", "fixture-main"]);
     std::fs::write(path.join("README"), b"fixture\n").expect("write readme");
-    let _ = Command::new("git")
-        .args(["add", "README"])
-        .current_dir(path)
-        .status();
-    let commit = Command::new("git")
-        .args(["commit", "--quiet", "-m", "fixture"])
-        .current_dir(path)
-        .status();
-    if !commit.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("git commit failed; skipping head_sha_and_branch repo test");
-        return;
-    }
+    crate::rig_test_support::run_git(path, &["add", "README"]);
+    crate::rig_test_support::run_git(
+        path,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
 
     let (sha, branch) = head_sha_and_branch(&path.to_string_lossy());
     let sha = sha.expect("HEAD SHA on a fresh git repo");

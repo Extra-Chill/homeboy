@@ -21,7 +21,17 @@ impl CooperativeControl {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        (self.is_cancelled)() || Instant::now() >= self.deadline
+        self.cancellation_requested() || Instant::now() >= self.deadline
+    }
+
+    /// Cancellation and expiry are separate owner facts even when a provider
+    /// treats either as a request to stop.
+    pub fn cancellation_requested(&self) -> bool {
+        (self.is_cancelled)()
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.deadline
     }
 
     pub fn remaining(&self) -> Option<Duration> {

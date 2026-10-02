@@ -239,6 +239,10 @@ pub(crate) fn run_shell_capture(command: &str) -> Option<String> {
 pub(crate) fn run_shell_command(command: &str, action: &str) -> Result<()> {
     let output = shell_output(command)
         .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
+    shell_output_failure(output, action)
+}
+
+pub(super) fn shell_output_failure(output: std::process::Output, action: &str) -> Result<()> {
     if output.status.success() {
         return Ok(());
     }

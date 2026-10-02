@@ -1080,7 +1080,13 @@ pub(crate) fn materialize_staged_source_artifact(
                 None,
             ));
         }
-        let directory = verify_controller_workspace(runner_id, &workspace, None)?;
+        let mut directory = verify_controller_workspace(runner_id, &workspace, None)?;
+        verify_staged_workspace_path(&directory, &workspace.remote_cwd)?;
+        directory._private_plans = Some(bind_materialized_cook_workspace_identity(
+            envelope,
+            &workspace.remote_cwd,
+        )?);
+        verify_staged_workspace_path(&directory, &workspace.remote_cwd)?;
         return Ok(Some(directory));
     }
     let Some(source) = envelope
@@ -1119,6 +1125,109 @@ pub(crate) fn materialize_staged_source_artifact(
 pub(crate) struct StagedWorkspaceDirectory {
     #[cfg(unix)]
     directory: File,
+    _private_plans: Option<PrivateAtFileCleanup>,
+}
+
+/// Controller filesystem identity ends at verified snapshot materialization.
+/// Bind the runner identity only inside the existing staged-workspace authority,
+/// retaining private command files for the lifetime of that authority.
+fn bind_materialized_cook_workspace_identity(
+    envelope: &mut RunnerExecutionEnvelope,
+    workspace_root: &str,
+) -> Result<PrivateAtFileCleanup> {
+    let mut cleanup = verify_private_at_files(envelope)?;
+    let Some(dispatch) = envelope.dispatch.as_mut() else {
+        return Ok(cleanup);
+    };
+    let authority_root = std::fs::canonicalize(workspace_root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(workspace_root.to_string())))?;
+    let mut plan_flag = false;
+    for argument in &mut dispatch.command {
+        if argument == "--" {
+            break;
+        }
+        if matches!(argument.as_str(), "--plan" | "--attempt-plan") {
+            plan_flag = true;
+            continue;
+        }
+        let spec = if plan_flag {
+            argument.as_str()
+        } else if let Some(spec) = argument
+            .strip_prefix("--plan=")
+            .or_else(|| argument.strip_prefix("--attempt-plan="))
+        {
+            spec
+        } else {
+            continue;
+        };
+        plan_flag = false;
+        let raw = homeboy_core::config::read_json_spec_to_string(spec)?;
+        let mut plan: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+            Error::validation_invalid_json(error, Some("bind staged Cook plan".to_string()), None)
+        })?;
+        let mut changed = false;
+        for task in plan["tasks"].as_array_mut().into_iter().flatten() {
+            if task.pointer("/metadata/cook_workspace_identity").is_none() {
+                continue;
+            }
+            let root = task
+                .pointer("/workspace/root")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "workspace",
+                        "staged Cook identity requires a workspace root",
+                        None,
+                        None,
+                    )
+                })?;
+            let identity = homeboy_agents::agent_task_workspace_identity::attest_workspace(
+                std::path::Path::new(root),
+            )?;
+            let canonical = identity["canonical_path"].as_str().ok_or_else(|| {
+                Error::internal_unexpected("workspace attestation has no canonical path")
+            })?;
+            if !std::path::Path::new(canonical).starts_with(&authority_root) {
+                return Err(Error::validation_invalid_argument(
+                    "workspace",
+                    "Cook identity lies outside the verified staged workspace",
+                    Some(root.to_string()),
+                    None,
+                ));
+            }
+            task["metadata"]["cook_workspace_identity"] = identity;
+            changed = true;
+        }
+        if changed {
+            let directory = private_at_file_snapshot_directory().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("staged Cook private plan".to_string()),
+                )
+            })?;
+            cleanup.directories.push(directory.clone());
+            let content = serde_json::to_vec(&plan).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize staged Cook plan".to_string()),
+                )
+            })?;
+            let path = write_private_at_file_snapshot(&directory, &content).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write staged Cook private plan".to_string()),
+                )
+            })?;
+            cleanup.paths.push(path.clone());
+            *argument = if argument.starts_with("--") {
+                let flag = argument.split_once('=').expect("inline plan option").0;
+                format!("{flag}=@{}", path.display())
+            } else {
+                format!("@{}", path.display())
+            };
+        }
+    }
+    Ok(cleanup)
 }
 
 impl StagedWorkspaceDirectory {
@@ -1191,7 +1300,10 @@ fn open_staged_workspace_directory(path: &std::path::Path) -> Result<StagedWorks
             None,
         )
     })?;
-    Ok(StagedWorkspaceDirectory { directory })
+    Ok(StagedWorkspaceDirectory {
+        directory,
+        _private_plans: None,
+    })
 }
 
 #[cfg(not(unix))]
@@ -1345,7 +1457,10 @@ fn verify_controller_workspace(
             None,
         ));
     }
-    Ok(StagedWorkspaceDirectory { directory: opened })
+    Ok(StagedWorkspaceDirectory {
+        directory: opened,
+        _private_plans: None,
+    })
 }
 
 #[cfg(not(unix))]
@@ -1635,9 +1750,159 @@ fn non_empty_run_id(run_id: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod provenance_tests {
     use super::{
-        open_staged_workspace_directory, reverse_worker_lab_offload, verify_staged_workspace_path,
+        bind_materialized_cook_workspace_identity, open_staged_workspace_directory,
+        reverse_worker_lab_offload, verify_staged_workspace_path,
     };
     use sha2::{Digest, Sha256};
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_cook_attestation_binds_materialized_git_identity_and_rejects_later_drift() {
+        use homeboy_agents::agent_task_workspace_identity::attest_workspace;
+        use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let repository = home.path().join("repository");
+            let source = home.path().join("controller-worktree");
+            let runner = home.path().join("runner-workspace");
+            let git = |cwd: &std::path::Path, args: &[&str]| {
+                let output = Command::new("git")
+                    .current_dir(cwd)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            std::fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "-q"]);
+            git(
+                &repository,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "baseline",
+                ],
+            );
+            git(
+                &repository,
+                &["worktree", "add", "--detach", source.to_str().unwrap()],
+            );
+            git(
+                home.path(),
+                &[
+                    "clone",
+                    "--local",
+                    repository.to_str().unwrap(),
+                    runner.to_str().unwrap(),
+                ],
+            );
+            let source_identity = attest_workspace(&source).unwrap();
+            assert_eq!(source_identity["git_representation"], "pointer_file");
+            assert_eq!(
+                attest_workspace(&runner).unwrap()["git_representation"],
+                "directory"
+            );
+            let mut transported_identity = source_identity.clone();
+            transported_identity["canonical_path"] =
+                serde_json::json!(runner.canonicalize().unwrap());
+            let plan = serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1", "plan_id": "cross-host",
+                "tasks": [{ "schema": "homeboy/agent-task-request/v1", "task_id": "task",
+                    "instructions": "private fixture", "executor": {"backend": "fixture"},
+                    "workspace": {"root": runner}, "metadata": {
+                        "cook_workspace_identity": transported_identity,
+                        "workspace_source_provenance": { "controller_root": source,
+                            "cook_workspace_identity": source_identity }
+                    }
+                }]
+            });
+            let bytes = serde_json::to_vec(&plan).unwrap();
+            let file = home.path().join(format!(
+                "private-sha256-{:x}-plan.json",
+                Sha256::digest(&bytes)
+            ));
+            std::fs::write(&file, &bytes).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let request = RemoteRunnerJobRequest {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec![
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "run-plan".to_string(),
+                    "--plan".to_string(),
+                    format!("@{}", file.display()),
+                ],
+                cwd: Some(runner.display().to_string()),
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: false,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                extension_env_providers: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                workspace_claim_binding: None,
+                workspace_owner_lease: None,
+                metadata: None,
+            };
+            let mut envelope = request.execution_envelope();
+            assert!(crate::lab_args::verify_cook_workspace_attestations_in_args(
+                &envelope.dispatch.as_ref().unwrap().command,
+                home.path()
+            )
+            .is_err());
+            let cleanup =
+                bind_materialized_cook_workspace_identity(&mut envelope, runner.to_str().unwrap())
+                    .unwrap();
+            let args = &envelope.dispatch.as_ref().unwrap().command;
+            crate::lab_args::verify_cook_workspace_attestations_in_args(args, home.path()).unwrap();
+            let snapshot = args[4].strip_prefix('@').unwrap();
+            let bound: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
+            assert_eq!(
+                bound["tasks"][0]["metadata"]["workspace_source_provenance"],
+                plan["tasks"][0]["metadata"]["workspace_source_provenance"]
+            );
+            assert_eq!(
+                std::fs::metadata(snapshot).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let authority = open_staged_workspace_directory(&runner).unwrap();
+            std::fs::rename(&runner, home.path().join("old-workspace")).unwrap();
+            git(
+                home.path(),
+                &[
+                    "clone",
+                    "--local",
+                    repository.to_str().unwrap(),
+                    runner.to_str().unwrap(),
+                ],
+            );
+            assert!(verify_staged_workspace_path(&authority, runner.to_str().unwrap()).is_err());
+            assert!(
+                crate::lab_args::verify_cook_workspace_attestations_in_args(args, home.path())
+                    .is_err()
+            );
+            drop(cleanup);
+            assert!(!std::path::Path::new(snapshot).exists());
+        });
+    }
 
     #[test]
     fn reverse_worker_resolves_referenced_lab_offload_metadata() {
