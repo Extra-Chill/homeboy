@@ -85,6 +85,17 @@ impl SupervisedProcessFixture {
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => return Ok(()),
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ECHILD)
+                        && crate::process::process_identity_state_with_start_identity(
+                            self.pid(),
+                            None,
+                            Some(&self.identity),
+                        ) == crate::process::ProcessIdentityState::Dead =>
+                {
+                    // The production owner can reap before this fixture observes it.
+                    return Ok(());
+                }
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
@@ -2770,6 +2781,27 @@ fn write_broker_response(stream: &mut TcpStream, body: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn supervised_fixture_observes_an_exit_already_reaped_by_the_driver() {
+        let mut fixture = SupervisedProcessFixture::spawn();
+        let pid = fixture.pid() as libc::pid_t;
+        let mut status = 0;
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        fixture
+            .wait_for_exit()
+            .expect("the driver already stopped and reaped this exact child");
+        assert_eq!(
+            crate::process::process_identity_state_with_start_identity(
+                fixture.pid(),
+                None,
+                Some(&fixture.identity)
+            ),
+            crate::process::ProcessIdentityState::Dead
+        );
+    }
 
     /// Holds the one environment lock across sentinel setup, HomeGuard's
     /// snapshot, both restoration boundaries, and panic unwinding.
