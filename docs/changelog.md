@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.26] - 2026-10-03
+
+### Fixed
+- wait for the runner's acceptance receipt instead of failing every detached Lab retry
+
 ## [0.399.25] - 2026-10-03
 
 ### Fixed
