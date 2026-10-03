@@ -1413,7 +1413,7 @@ pub fn load_recipe(cook_id: &str) -> Result<AgentTaskCookRecipe> {
 fn load_recipe_at(path: PathBuf, cook_id: &str) -> Result<AgentTaskCookRecipe> {
     let raw = fs::read_to_string(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let recipe = serde_json::from_str(&raw).map_err(|error| {
+    let mut recipe: AgentTaskCookRecipe = serde_json::from_str(&raw).map_err(|error| {
         Error::validation_invalid_argument(
             "cook_recipe",
             format!("malformed durable cook recipe: {error}"),
@@ -1421,6 +1421,7 @@ fn load_recipe_at(path: PathBuf, cook_id: &str) -> Result<AgentTaskCookRecipe> {
             None,
         )
     })?;
+    normalize_sensitive_mapping_projection(&mut recipe)?;
     validate_recipe(&recipe)?;
     if recipe.cook_id != cook_id {
         return Err(Error::validation_invalid_argument(
@@ -1469,7 +1470,7 @@ fn load_recipe_for_attempt_from(
         let raw = fs::read_to_string(&path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
-        let recipe: AgentTaskCookRecipe = serde_json::from_str(&raw).map_err(|error| {
+        let mut recipe: AgentTaskCookRecipe = serde_json::from_str(&raw).map_err(|error| {
             Error::validation_invalid_argument(
                 "cook_recipe",
                 format!("malformed durable cook recipe: {error}"),
@@ -1477,6 +1478,7 @@ fn load_recipe_for_attempt_from(
                 None,
             )
         })?;
+        normalize_sensitive_mapping_projection(&mut recipe)?;
         validate_recipe(&recipe)?;
         if recipe
             .attempts
@@ -3221,6 +3223,27 @@ fn validate_continuation(continuation: &AgentTaskCookContinuation) -> Result<()>
     Ok(())
 }
 
+/// Re-derive a loaded recipe's sensitive mapping projection from its attempt
+/// plans (#15338).
+///
+/// `sensitive_mappings` is not independent state: it is exactly the sorted,
+/// deduplicated `executor.secret_env` names of the attempt plans, which remain
+/// the authority. A recipe persisted with a stale projection (an in-place plan
+/// rewrite that did not recompute it) would otherwise fail validation on every
+/// load and strand its Cook, including `cook-continue`. Explicitly empty names
+/// are still rejected by validation.
+fn normalize_sensitive_mapping_projection(recipe: &mut AgentTaskCookRecipe) -> Result<()> {
+    if recipe
+        .sensitive_mappings
+        .iter()
+        .any(|mapping| mapping.trim().is_empty())
+    {
+        return Ok(());
+    }
+    recipe.sensitive_mappings = canonical_sensitive_mappings(&recipe.attempts)?;
+    Ok(())
+}
+
 fn sensitive_mappings(plan: &AgentTaskPlan) -> Result<Vec<String>> {
     let mappings = plan
         .tasks
@@ -3238,7 +3261,9 @@ fn sensitive_mappings(plan: &AgentTaskPlan) -> Result<Vec<String>> {
     Ok(mappings)
 }
 
-fn canonical_sensitive_mappings(attempts: &[AgentTaskCookRecipeAttempt]) -> Result<Vec<String>> {
+pub(crate) fn canonical_sensitive_mappings(
+    attempts: &[AgentTaskCookRecipeAttempt],
+) -> Result<Vec<String>> {
     let mut mappings = attempts
         .iter()
         .map(|attempt| sensitive_mappings(&attempt.plan))
@@ -3879,6 +3904,42 @@ mod tests {
             .unwrap_err()
             .message
             .contains("sensitive mappings"));
+    }
+
+    /// #15338: a recipe persisted with a stale sensitive mapping projection
+    /// loads with the projection re-derived from its attempt plans instead of
+    /// failing validation and stranding its Cook.
+    #[test]
+    fn stale_sensitive_mapping_projection_is_rederived_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let mut initial = recipe();
+        initial.cook_id = "stale-mappings".into();
+        store.persist_recipe(&initial).expect("initial recipe");
+
+        // Simulate the old in-place plan rewrite: the plan gains provider
+        // secrets but the stored projection is not recomputed.
+        let path = store.recipe_path("stale-mappings");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["attempts"][0]["plan"]["tasks"][0]["executor"]["secret_env"] =
+            serde_json::json!(["AI_PROVIDER_OPENCODE_OPENAI_ACCESS", "TEST_TOKEN"]);
+        std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        let loaded = store
+            .load_recipe("stale-mappings")
+            .expect("stale projection repaired");
+        assert_eq!(
+            loaded.sensitive_mappings,
+            ["AI_PROVIDER_OPENCODE_OPENAI_ACCESS", "TEST_TOKEN"]
+        );
+        assert_eq!(
+            load_recipe_for_attempt_from(&store.recipe_root(), &loaded.attempts[0].run_id)
+                .expect("scan")
+                .expect("found")
+                .sensitive_mappings,
+            loaded.sensitive_mappings
+        );
     }
 
     #[test]
