@@ -4470,11 +4470,21 @@ pub(crate) fn dispatch_cook_follow_up(
                 &dispatch_intent,
             )? {
                 agent_task_lifecycle::ClaimOutcome::Acquired => {
-                    dispatcher.dispatch_attempt(
+                    let dispatched = dispatcher.dispatch_attempt(
                         follow_up_plan,
                         &next_run_id,
                         Some(baseline.capability()),
-                    )?;
+                    );
+                    // A dispatcher can hand the baseline to work that outlives
+                    // this call: Lab staging materializes it from a separate
+                    // controller job after `dispatch_attempt` returns. Dropping
+                    // it here removed the worktree under that job, which then
+                    // failed its workspace attestation with an IO error. The
+                    // checkout is preserved for the dispatched attempt, as the
+                    // lifecycle retry path already does; reaping it belongs to
+                    // artifact retention (#15364).
+                    baseline.preserve_for_retry();
+                    dispatched?;
                     // The accepting daemon writes this receipt atomically with
                     // its handoff ownership. A dispatcher return alone is not
                     // acceptance evidence and cannot complete this operation.
