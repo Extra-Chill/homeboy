@@ -910,6 +910,56 @@ mod tests {
     use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
 
+    /// A follow-up baseline handed to a detached dispatcher must outlive the
+    /// dispatch call: Lab staging materializes it from a separate controller
+    /// job after `dispatch_attempt` returns. `preserve_for_retry` keeps the
+    /// checkout; dropping it removes the checkout.
+    #[test]
+    fn preserved_baseline_outlives_its_owner_and_dropped_baseline_is_removed() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("repository");
+            let root = temp.path();
+            git_output(root, &["init", "-b", "main"]).expect("init");
+            git_output(root, &["config", "user.name", "Homeboy Test"]).expect("name");
+            git_output(root, &["config", "user.email", "test@example.test"]).expect("email");
+            std::fs::write(root.join("README"), "base\n").expect("base file");
+            git_output(root, &["add", "README"]).expect("add");
+            git_output(root, &["commit", "-m", "base"]).expect("commit");
+
+            std::fs::write(root.join("README"), "candidate\n").expect("candidate");
+            let plan: AgentTaskPlan = serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "plan_id": "baseline-lifetime",
+                "tasks": [{
+                    "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+                    "task_id": "task",
+                    "executor": {"backend": "test"},
+                    "instructions": "fixture",
+                }],
+            }))
+            .expect("plan");
+            let preserved = materialize_initial_candidate_baseline(&plan, Some(root), "run-a")
+                .expect("materialize")
+                .expect("dirty candidate");
+            let preserved_path = preserved.path.clone();
+            preserved.preserve_for_retry();
+            assert!(
+                preserved_path.join("README").is_file(),
+                "a preserved baseline stays on disk for the dispatched attempt"
+            );
+
+            let dropped = materialize_initial_candidate_baseline(&plan, Some(root), "run-b")
+                .expect("materialize")
+                .expect("dirty candidate");
+            let dropped_path = dropped.path.clone();
+            drop(dropped);
+            assert!(
+                !dropped_path.exists(),
+                "an owned baseline is removed on drop"
+            );
+        });
+    }
+
     #[test]
     fn cook_baseline_resolves_referenced_parent_snapshot() {
         let directory = tempfile::tempdir().expect("transport directory");
