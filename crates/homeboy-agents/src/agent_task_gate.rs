@@ -3824,10 +3824,11 @@ fn gate_failure_evidence(
                 ))
     });
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
+    let capability_preflight = homeboy_capability_preflight_failure(stdout, stderr);
     let classification = invalid_focused_selection
         .then_some(AgentTaskGateFailureClassification::ZeroTestsSelected)
         .or_else(|| {
-            (missing_script.is_some() || shell_rejection.is_some())
+            (missing_script.is_some() || shell_rejection.is_some() || capability_preflight)
                 .then_some(AgentTaskGateFailureClassification::GateDeclaration)
         })
         .unwrap_or(AgentTaskGateFailureClassification::CandidateCode);
@@ -3847,6 +3848,9 @@ fn gate_failure_evidence(
             (None, Some(line)) => {
                 format!("gate shell `sh -lc` rejected the gate program itself: {line}")
             }
+            (None, None) if capability_preflight => format!(
+                "gate environment cannot run `{command}`: Homeboy capability preflight failed before checking the candidate"
+            ),
             (None, None) => {
                 format!("deterministic gate failed with exit code {exit_code}: {command}")
             }
@@ -3876,6 +3880,9 @@ fn gate_failure_evidence(
             (None, Some(line)) => format!(
                 "The declared gate is invalid, not candidate-code feedback. Gates run under POSIX `sh -lc`, which rejected the gate program before it checked anything (`{line}`). Rewrite it for POSIX sh (for example drop `set -o pipefail` and other bash-only syntax) or invoke bash explicitly, e.g. `bash ./verify.sh`, before rerunning Cook."
             ),
+            (None, None) if capability_preflight => format!(
+                "The gate environment is broken, not candidate-code feedback. `{command}` failed Homeboy's capability preflight (for example an extension manifest could not be read in the gate environment) before it checked the candidate. Repair the component or extension on the executing runner, or declare a gate that runs there, then resume Cook. Do not change repository code to satisfy this gate."
+            ),
             (None, None) => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
             ),
@@ -3892,6 +3899,19 @@ fn gate_failure_evidence(
         agent_feedback,
         diagnostics: Vec::new(),
     }
+}
+
+/// Detects a Homeboy gate (for example `homeboy review test <component>`)
+/// that failed its own capability preflight before checking the candidate.
+///
+/// Homeboy marks that error with the structured `review_capability_preflight`
+/// detail key. The failure is a property of the executing environment (such as
+/// an extension manifest the gate environment cannot read), so it is
+/// identical on any candidate and must never become gate-fix feedback asking
+/// the provider to change code (Extra-Chill/homeboy#15381).
+fn homeboy_capability_preflight_failure(stdout: &str, stderr: &str) -> bool {
+    const MARKER: &str = "\"review_capability_preflight\"";
+    stdout.contains(MARKER) || stderr.contains(MARKER)
 }
 
 /// Detects a gate program rejected by the `sh -lc` interpreter itself.
@@ -4510,6 +4530,64 @@ mod tests {
                 "stderr {stderr:?}"
             );
         }
+    }
+
+    /// A Homeboy gate that fails its own capability preflight never checked
+    /// the candidate, so it must stop the Cook instead of asking the provider
+    /// to change code (Extra-Chill/homeboy#15381).
+    #[test]
+    fn homeboy_capability_preflight_failure_is_a_gate_declaration_failure() {
+        let stdout = r#"{
+  "success": false,
+  "error": {
+    "code": "validation.invalid_argument",
+    "message": "Invalid argument 'extension': Component 'extrachill' has no linked extensions that provide test support, and 1 manifest(s) could not be read: wordpress",
+    "details": {
+      "field": "extension",
+      "review_capability_preflight": {
+        "capability": "test",
+        "effective_component": { "id": "extrachill" }
+      }
+    },
+    "hints": [
+      { "message": "Review capability preflight failed before resource admission or Lab routing; repair the component capability, then retry the same command." }
+    ]
+  }
+}"#;
+        let evidence = gate_failure_evidence("homeboy review test extrachill", 2, stdout, "", None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(
+            evidence.summary.contains("capability preflight"),
+            "summary must name the environment failure: {}",
+            evidence.summary
+        );
+        assert!(
+            evidence
+                .agent_feedback
+                .contains("not candidate-code feedback")
+                && !evidence.agent_feedback.contains("Fix the code"),
+            "feedback must not ask for a code change: {}",
+            evidence.agent_feedback
+        );
+    }
+
+    /// Mentioning the words in ordinary output is not the structured marker.
+    #[test]
+    fn prose_about_capability_preflight_stays_candidate_code() {
+        let evidence = gate_failure_evidence(
+            "./verify",
+            1,
+            "test review_capability_preflight_parser ... FAILED\n",
+            "",
+            None,
+        );
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
     }
 
     /// Ordinary failures stay candidate feedback: a missing tool, a shell
