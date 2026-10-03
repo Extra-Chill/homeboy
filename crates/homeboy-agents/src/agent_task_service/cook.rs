@@ -856,6 +856,56 @@ fn finalize_with_operation_claim_in_store(
     }
 }
 
+/// Automatic promotion retries after a gate setup failure (#15364).
+const GATE_SETUP_PROMOTION_RETRIES: u32 = 2;
+
+/// Whether a promotion error is dependency setup for the gates (install,
+/// submodules, toolchain materialization) rather than a verdict on the
+/// candidate. These are usually environmental (network, registry, a tool
+/// installed after the failure), and retrying promotion is idempotent: the
+/// candidate is durable and the operation claim is reacquirable after failure.
+fn is_gate_setup_failure(error: &Error) -> bool {
+    error.code == homeboy_core::ErrorCode::DependencyStepFailed
+        && error.details["step_id"] == "promotion.gate_setup"
+}
+
+/// Run promotion, retrying a bounded number of times with backoff when gate
+/// setup fails, so an environmental setup failure no longer strands a finished
+/// candidate until an operator runs `cook-continue`. Any other error, and the
+/// final setup failure, are returned unchanged.
+fn promote_with_gate_setup_retries(
+    side_effects: &mut CookSideEffects<'_>,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+    mut on_retry: impl FnMut(u32, std::time::Duration, &Error),
+) -> Result<AgentTaskPromotionReport> {
+    let mut retry = 0;
+    loop {
+        match side_effects.promote(lifecycle_store, options, run_id) {
+            Err(error) if is_gate_setup_failure(&error) && retry < GATE_SETUP_PROMOTION_RETRIES => {
+                retry += 1;
+                let delay = gate_setup_retry_delay(retry);
+                on_retry(retry, delay, &error);
+                std::thread::sleep(delay);
+            }
+            result => return result,
+        }
+    }
+}
+
+fn gate_setup_retry_delay(retry: u32) -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let _ = retry;
+        std::time::Duration::ZERO
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(30 * u64::from(retry))
+    }
+}
+
 fn promote_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -8403,7 +8453,27 @@ fn run_cook_spine(
             attempt,
             None,
         )?;
-        let mut promotion = match side_effects.promote(lifecycle_store, &options, &run_id) {
+        let mut promotion = match promote_with_gate_setup_retries(
+            side_effects,
+            lifecycle_store,
+            &options,
+            &run_id,
+            |retry, delay, error| {
+                let _ = report_cook_progress(
+                    lifecycle_store,
+                    durable_observer,
+                    &cook_id,
+                    &run_id,
+                    "promotion",
+                    attempt,
+                    Some(&format!(
+                        "gate setup failed; retrying promotion automatically ({retry} of {GATE_SETUP_PROMOTION_RETRIES}) in {}s: {}",
+                        delay.as_secs(),
+                        error.message
+                    )),
+                );
+            },
+        ) {
             Ok(report) => report,
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {

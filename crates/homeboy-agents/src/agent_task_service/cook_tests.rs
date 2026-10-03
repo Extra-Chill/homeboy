@@ -25115,3 +25115,98 @@ fn dependency_tool_preflight_is_a_noop_without_dependencies() {
             .is_none());
     });
 }
+
+/// #15364: a gate setup failure during promotion is environmental, so Cook
+/// retries promotion automatically instead of stranding the durable candidate
+/// until an operator runs `cook-continue`. Other promotion errors are final.
+#[test]
+fn gate_setup_failures_are_retried_and_other_promotion_errors_are_not() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let options = compile_options("gate-setup-retry");
+    let setup_failure = || {
+        homeboy_core::Error::dependency_step_failed(
+            "promotion.gate_setup",
+            "pnpm",
+            Some(1),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    };
+
+    let calls = std::cell::Cell::new(0);
+    let mut side_effects = CookSideEffects::for_test(
+        |_, _, run_id| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(setup_failure())
+            } else {
+                Ok(promotion(run_id))
+            }
+        },
+        |_, _, _| unreachable!("no recovery"),
+        |_, _, _, _| Ok(Value::Null),
+    );
+    let mut retries = Vec::new();
+    let promoted = super::promote_with_gate_setup_retries(
+        &mut side_effects,
+        &lifecycle_store,
+        &options,
+        "gate-setup-retry-run",
+        |retry, _, error| retries.push((retry, error.message.clone())),
+    )
+    .expect("second promotion succeeds");
+    assert_eq!(
+        promoted.source.run_id.as_deref(),
+        Some("gate-setup-retry-run")
+    );
+    assert_eq!(calls.get(), 2);
+    assert_eq!(retries.len(), 1);
+    assert!(retries[0].1.contains("promotion.gate_setup"));
+
+    let calls = std::cell::Cell::new(0);
+    let mut always_failing = CookSideEffects::for_test(
+        |_, _, _| {
+            calls.set(calls.get() + 1);
+            Err(setup_failure())
+        },
+        |_, _, _| unreachable!("no recovery"),
+        |_, _, _, _| Ok(Value::Null),
+    );
+    let error = super::promote_with_gate_setup_retries(
+        &mut always_failing,
+        &lifecycle_store,
+        &options,
+        "gate-setup-retry-run",
+        |_, _, _| {},
+    )
+    .expect_err("budget exhausted");
+    assert_eq!(error.details["step_id"], "promotion.gate_setup");
+    assert_eq!(calls.get(), 1 + super::GATE_SETUP_PROMOTION_RETRIES);
+
+    let calls = std::cell::Cell::new(0);
+    let mut rejected = CookSideEffects::for_test(
+        |_, _, _| {
+            calls.set(calls.get() + 1);
+            Err(homeboy_core::Error::validation_invalid_argument(
+                "patch",
+                "candidate patch does not apply",
+                None,
+                None,
+            ))
+        },
+        |_, _, _| unreachable!("no recovery"),
+        |_, _, _, _| Ok(Value::Null),
+    );
+    super::promote_with_gate_setup_retries(
+        &mut rejected,
+        &lifecycle_store,
+        &options,
+        "gate-setup-retry-run",
+        |_, _, _| panic!("a candidate rejection is not retried"),
+    )
+    .expect_err("rejection is final");
+    assert_eq!(calls.get(), 1);
+}
