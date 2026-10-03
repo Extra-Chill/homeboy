@@ -571,7 +571,10 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
         })?;
         // A linked directory can escape the detached candidate checkout. Setup
         // is allowed only in the candidate root or a real direct child.
-        if file_type.is_dir() && path.file_name().is_none_or(|name| name != ".git") {
+        if file_type.is_dir()
+            && path.file_name().is_none_or(|name| name != ".git")
+            && !homeboy_core::deps::is_nested_repository(&path)
+        {
             candidates.push(path);
         }
     }
@@ -5625,6 +5628,36 @@ mod tests {
                 "hydrated"
             );
             assert_eq!(evidence.len(), 1);
+        });
+    }
+
+    /// A child directory that is its own repository (a submodule) belongs to
+    /// another project: the root workspace consumes its packages, and its own
+    /// lockfile is not this checkout's contract. Gate setup hydrates real
+    /// package children but never installs inside a nested repository.
+    #[test]
+    fn nested_repository_children_are_not_hydrated() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            let provider = r#"{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}"#;
+            for directory in ["package", "vendor"] {
+                fs::create_dir(root.join(directory)).expect("child");
+                fs::write(root.join(directory).join("homeboy-deps.json"), provider)
+                    .expect("child provider");
+            }
+            fs::write(root.join("vendor/.git"), "gitdir: ../.git/modules/vendor\n")
+                .expect("submodule gitfile");
+
+            let evidence =
+                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let roots = evidence
+                .iter()
+                .map(|setup| setup.package_root.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(roots, vec!["package"], "{evidence:?}");
+            assert!(root.join("package/hydration-count").is_file());
+            assert!(!root.join("vendor/hydration-count").exists());
         });
     }
 

@@ -2684,6 +2684,30 @@ fn gate_setup_outcome_failure(
     error
 }
 
+/// The stderr line that best explains a failure. Tools commonly print
+/// runtime warnings (e.g. Node `DeprecationWarning`) before the real error, so
+/// prefer a line that looks like an error, then the last meaningful line.
+fn stderr_error_line(stderr: &str) -> Option<&str> {
+    let lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.contains("DeprecationWarning")
+                && !line.contains("--trace-deprecation")
+                && !line.contains("--trace-warnings")
+        })
+        .collect::<Vec<_>>();
+    lines
+        .iter()
+        .copied()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            line.contains("ERR_") || lower.starts_with("error") || lower.contains(" error")
+        })
+        .or_else(|| lines.last().copied())
+}
+
 /// One-line operator explanation of a failed dependency hydration outcome.
 fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationOutcome) -> String {
     use homeboy_core::deps::DependencyHydrationTermination as Termination;
@@ -2716,11 +2740,7 @@ fn gate_setup_outcome_summary(outcome: &homeboy_core::deps::DependencyHydrationO
             }
         }
     };
-    let first_stderr_line = outcome
-        .stderr
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty());
+    let first_stderr_line = stderr_error_line(&outcome.stderr);
     match first_stderr_line {
         Some(line) => format!(
             "{summary}; stderr: {}",
@@ -4215,6 +4235,21 @@ mod gate_setup_message_tests {
             ),
         );
         assert!(error.message.contains("exited with status 1"));
+        let noisy = gate_setup_outcome_failure(
+            "destination_gate_setup",
+            &outcome(
+                DependencyHydrationTermination::ExitFailure,
+                Some(1),
+                "(node:1) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized\n(Use `node --trace-deprecation ...` to show where the warning was created)\nScope: all 5 workspace projects\n ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation.\n\nUpdate your lockfile",
+            ),
+        );
+        assert!(
+            noisy
+                .message
+                .ends_with("stderr: ERR_PNPM_LOCKFILE_CONFIG_MISMATCH  Cannot proceed with the frozen installation."),
+            "{}",
+            noisy.message
+        );
         assert!(error
             .message
             .ends_with("stderr: ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with frozen-lockfile"));

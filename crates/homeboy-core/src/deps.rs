@@ -13,7 +13,7 @@ mod tool_preflight;
 pub use submodules::{
     hydrate_git_submodules, SUBMODULE_HYDRATION_PROVIDER_ID, SUBMODULE_HYDRATION_TIMEOUT,
 };
-pub use tool_preflight::{missing_dependency_tools, MissingDependencyTool};
+pub use tool_preflight::{is_nested_repository, missing_dependency_tools, MissingDependencyTool};
 #[path = "deps_provider.rs"]
 pub(crate) mod provider;
 
