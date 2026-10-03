@@ -349,6 +349,32 @@ impl BrokerAuthStore {
         revoked
     }
 
+    /// Merge this store's credentials into an existing enforcement store, as
+    /// installed on a broker host.
+    ///
+    /// Credentials are matched by id: this store's version replaces the
+    /// existing one (so revocations propagate), and credentials only the
+    /// existing store has are kept. Several controllers and the runner's own
+    /// worker can each have paired credentials on the same broker host, so
+    /// installing from one controller must never drop the others (#15368).
+    /// The result never carries plaintext tokens.
+    pub fn merged_enforcement_store(&self, existing: &Self) -> Self {
+        let mut merged = existing.enforcement_copy();
+        for credential in self.enforcement_copy().credentials {
+            match merged
+                .credentials
+                .iter_mut()
+                .find(|existing| existing.id == credential.id)
+            {
+                Some(slot) => *slot = credential,
+                None => merged.credentials.push(credential),
+            }
+        }
+        merged.allow_unauthenticated_loopback =
+            existing.allow_unauthenticated_loopback || self.allow_unauthenticated_loopback;
+        merged
+    }
+
     pub fn enforcement_copy(&self) -> Self {
         let mut copy = self.clone();
         for credential in &mut copy.credentials {
@@ -471,6 +497,57 @@ fn restrict_permissions(_path: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn merged_enforcement_store_keeps_other_credentials_and_strips_tokens() {
+        let credential = |id: &str, token: Option<&str>, revoked: bool| BrokerCredential {
+            id: id.to_string(),
+            runner_id: "lab".to_string(),
+            token_sha256: format!("sha-{id}"),
+            token: token.map(str::to_string),
+            scopes: [BrokerScope::Submit].into_iter().collect(),
+            revoked_at: revoked.then(|| "2026-10-03T00:00:00Z".to_string()),
+            created_at: "2026-10-03T00:00:00Z".to_string(),
+        };
+        let existing = BrokerAuthStore {
+            credentials: vec![
+                credential("other-controller", None, false),
+                credential("this-controller-old", None, false),
+            ],
+            allow_unauthenticated_loopback: false,
+        };
+        let local = BrokerAuthStore {
+            credentials: vec![
+                credential("this-controller-old", Some("old-token"), true),
+                credential("this-controller-new", Some("new-token"), false),
+            ],
+            allow_unauthenticated_loopback: false,
+        };
+
+        let merged = local.merged_enforcement_store(&existing);
+
+        let ids = merged
+            .credentials
+            .iter()
+            .map(|credential| credential.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "other-controller",
+                "this-controller-old",
+                "this-controller-new"
+            ]
+        );
+        assert!(
+            merged.credentials[1].revoked_at.is_some(),
+            "revocation propagates"
+        );
+        assert!(merged
+            .credentials
+            .iter()
+            .all(|credential| credential.token.is_none()));
+    }
     use super::*;
 
     fn scopes(values: &[BrokerScope]) -> BTreeSet<BrokerScope> {

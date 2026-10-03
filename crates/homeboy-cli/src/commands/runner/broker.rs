@@ -110,7 +110,38 @@ fn install_store_on_ssh_runner(
     let mut client = server::SshClient::from_server(&configured_server, server_id)?;
     client.env = runner::RunnerSpec::from_runner(&configured_runner).effective_env();
 
-    let enforcement_store = store.enforcement_copy();
+    let remote_dir = ".config/homeboy";
+    let remote_path = ".config/homeboy/broker_auth.json";
+    // Merge into the runner's existing store rather than replacing it: other
+    // controllers and the runner's own worker may have paired credentials
+    // there that this controller does not know about (#15368).
+    let read = client.execute(&format!(
+        "if [ -f {path} ]; then cat {path}; fi",
+        path = shell::quote_path(remote_path)
+    ));
+    if !read.success {
+        return Err(Error::internal_io(
+            read.stderr.trim().to_string(),
+            Some(format!(
+                "read existing broker auth store on runner `{runner_id}`"
+            )),
+        ));
+    }
+    let existing = if read.stdout.trim().is_empty() {
+        runner::BrokerAuthStore::default()
+    } else {
+        serde_json::from_str::<runner::BrokerAuthStore>(&read.stdout).map_err(|err| {
+            Error::validation_invalid_argument(
+                "broker_auth",
+                format!(
+                    "runner `{runner_id}` has an unreadable {remote_path} ({err}); refusing to overwrite it. Repair or move it aside, then pair again"
+                ),
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?
+    };
+    let enforcement_store = store.merged_enforcement_store(&existing);
     let serialized = serde_json::to_string_pretty(&enforcement_store).map_err(|err| {
         Error::internal_json(
             err.to_string(),
@@ -137,8 +168,6 @@ fn install_store_on_ssh_runner(
         )
     })?;
 
-    let remote_dir = ".config/homeboy";
-    let remote_path = ".config/homeboy/broker_auth.json";
     let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_path(remote_dir)));
     if !mkdir.success {
         return Err(Error::internal_io(
