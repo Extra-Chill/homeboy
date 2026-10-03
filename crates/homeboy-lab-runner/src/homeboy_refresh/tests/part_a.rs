@@ -624,6 +624,155 @@ fn materialize_plan_rejects_implicit_git_ancestry_downgrades() {
     );
 }
 
+/// #15376: a published release asset for the exact resolved commit is used
+/// instead of a source build. A tampered asset falls back to the source build.
+#[test]
+fn materialization_prefers_a_verified_release_asset_and_falls_back_to_source() {
+    fn run(cmd: &mut Command) -> String {
+        let output = cmd.output().expect("run");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let source = fixture.path().join("source");
+    let tools = fixture.path().join("tools");
+    let releases = fixture.path().join("releases");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&tools).unwrap();
+    for args in [
+        vec!["init", "--quiet", "--initial-branch=main"],
+        vec!["config", "user.name", "Homeboy Test"],
+        vec!["config", "user.email", "homeboy@example.test"],
+    ] {
+        run(Command::new("git").args(args).current_dir(&source));
+    }
+    std::fs::write(source.join("README.md"), "fixture\n").unwrap();
+    run(Command::new("git").args(["add", "."]).current_dir(&source));
+    run(Command::new("git")
+        .args(["commit", "-q", "-m", "fixture"])
+        .current_dir(&source));
+    run(Command::new("git")
+        .args(["tag", "-a", "v9.9.9", "-m", "release"])
+        .current_dir(&source));
+    let commit = run(Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&source));
+
+    // The release asset: a binary that reports the exact commit and identity.
+    let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        _ => return,
+    };
+    let stage = fixture
+        .path()
+        .join("stage")
+        .join(format!("homeboy-{triple}"));
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(
+        stage.join("homeboy"),
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'homeboy 9.9.9+{commit}'; fi\nif [ \"$1 $2\" = 'self identity' ]; then printf '%s\\n' '{{\"data\":{{\"git_commit\":\"{commit}\",\"git_dirty\":false,\"origin\":\"release\"}}}}'; fi\n"
+        ),
+    )
+    .unwrap();
+    run(Command::new("chmod")
+        .args(["0755"])
+        .arg(stage.join("homeboy")));
+    let tag_dir = releases.join("v9.9.9");
+    std::fs::create_dir_all(&tag_dir).unwrap();
+    let asset = tag_dir.join(format!("homeboy-{triple}.tar.xz"));
+    run(Command::new("tar")
+        .arg("-cJf")
+        .arg(&asset)
+        .arg("-C")
+        .arg(fixture.path().join("stage"))
+        .arg(format!("homeboy-{triple}")));
+    let asset_sha = run(Command::new("sh").arg("-c").arg(format!(
+        "(sha256sum '{0}' 2>/dev/null || shasum -a 256 '{0}') | awk '{{print $1}}'",
+        asset.display()
+    )));
+    std::fs::write(
+        tag_dir.join(format!("homeboy-{triple}.tar.xz.sha256")),
+        format!("{asset_sha} *homeboy-{triple}.tar.xz\n"),
+    )
+    .unwrap();
+
+    // curl serves file:// style paths from the releases directory; cargo marks
+    // that a source build happened.
+    std::fs::write(
+        tools.join("curl"),
+        "#!/bin/sh\nout=\nurl=\nwhile [ $# -gt 0 ]; do case \"$1\" in -o) out=$2; shift 2;; -*) [ \"$1\" = --retry ] || [ \"$1\" = --connect-timeout ] || [ \"$1\" = --max-time ] && shift; shift;; *) url=$1; shift;; esac; done\ncp \"$url\" \"$out\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tools.join("cargo"),
+        "#!/bin/sh\nset -e\nwhile [ \"$1\" != \"--manifest-path\" ]; do shift; done\ndir=$(dirname \"$2\")\nmkdir -p \"$dir/target/release\"\nprintf '%s\\n' '#!/bin/sh' 'if [ \"$1 $2\" = \"self identity\" ]; then printf \"%s\\n\" \"{\\\"data\\\":{\\\"git_commit\\\":\\\"'\"$(git -C \"$dir\" rev-parse HEAD)\"'\\\",\\\"git_dirty\\\":false,\\\"origin\\\":\\\"source\\\"}}\"; fi' > \"$dir/target/release/homeboy\"\nchmod 0755 \"$dir/target/release/homeboy\"\n",
+    )
+    .unwrap();
+    run(Command::new("chmod")
+        .args(["0755"])
+        .arg(tools.join("curl"))
+        .arg(tools.join("cargo")));
+
+    let materialize = |build: &Path, release_base: &Path| {
+        let binary = build.join("target/release/homeboy");
+        let script = materialize_script(
+            source.to_str().unwrap(),
+            "HEAD",
+            build.to_str().unwrap(),
+            binary.to_str().unwrap(),
+            false,
+            &[],
+        );
+        let mut command = fixture_build_shell(&script);
+        command
+            .env(
+                "PATH",
+                format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("HOMEBOY_REFRESH_RELEASE_BASE", release_base);
+        let output = command.output().expect("materialize");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let released = materialize(&fixture.path().join("build-release"), &releases);
+    assert!(
+        released.contains(&format!(
+            "HOMEBOY_REFRESH_BINARY_ORIGIN=release:v9.9.9/homeboy-{triple}.tar.xz"
+        )),
+        "{released}"
+    );
+    assert!(released.contains("\"origin\":\"release\""), "{released}");
+
+    // Tamper with the published checksum: the asset is rejected and the
+    // source build runs instead.
+    std::fs::write(
+        tag_dir.join(format!("homeboy-{triple}.tar.xz.sha256")),
+        "0000000000000000000000000000000000000000000000000000000000000000 *x\n",
+    )
+    .unwrap();
+    let rebuilt = materialize(&fixture.path().join("build-source"), &releases);
+    assert!(
+        !rebuilt.contains("HOMEBOY_REFRESH_BINARY_ORIGIN=release"),
+        "{rebuilt}"
+    );
+    assert!(rebuilt.contains("\"origin\":\"source\""), "{rebuilt}");
+}
+
 #[test]
 fn materialize_plan_checks_each_refresh_authority_individually() {
     let script = materialize_script(

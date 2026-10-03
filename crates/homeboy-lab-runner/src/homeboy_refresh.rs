@@ -3290,6 +3290,63 @@ done
     .replace("HOMEBOY_AUTHORITIES", authority_commits)
 }
 
+/// Shell fragment defining `release_binary_from_asset`, run on the runner
+/// before the source build (#15376).
+///
+/// When the resolved commit `$target` is a published release (a `v*` tag on
+/// `$source`) and the release has an asset for this host, the asset is
+/// downloaded, verified against its `.sha256`, required to report the exact
+/// commit, and placed at `$binary`. The rest of materialization (immutable
+/// slot, provenance, identity verification) is unchanged. Any miss (no curl,
+/// unknown platform, unreleased commit, network, checksum or identity
+/// mismatch) returns non-zero and the caller builds from source as before.
+/// `HOMEBOY_REFRESH_FROM_SOURCE=1` forces the source build;
+/// `HOMEBOY_REFRESH_RELEASE_BASE` overrides the release download base URL.
+const RELEASE_BINARY_FAST_PATH: &str = r#"release_binary_from_asset() {
+  [ "${HOMEBOY_REFRESH_FROM_SOURCE:-}" = 1 ] && return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v tar >/dev/null 2>&1 || return 1
+  release_base=${HOMEBOY_REFRESH_RELEASE_BASE:-}
+  if [ -z "$release_base" ]; then
+    case "$source" in
+      https://github.com/*) release_base="${source%.git}/releases/download" ;;
+      *) return 1 ;;
+    esac
+  fi
+  case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) triple=x86_64-unknown-linux-gnu ;;
+    Linux-aarch64|Linux-arm64) triple=aarch64-unknown-linux-gnu ;;
+    Darwin-arm64) triple=aarch64-apple-darwin ;;
+    *) return 1 ;;
+  esac
+  tag=$(git ls-remote --tags "$source" 'refs/tags/v*' 2>/dev/null | awk -v t="$target" '$1 == t { sub("refs/tags/", "", $2); sub(/\^\{\}$/, "", $2); print $2; exit }') || return 1
+  [ -n "$tag" ] || return 1
+  asset="homeboy-$triple.tar.xz"
+  release_work=$(mktemp -d) || return 1
+  if ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 300 -o "$release_work/$asset" "$release_base/$tag/$asset" \
+    || ! curl -fsSL --retry 2 --connect-timeout 20 --max-time 60 -o "$release_work/$asset.sha256" "$release_base/$tag/$asset.sha256"; then
+    rm -rf "$release_work"; return 1
+  fi
+  expected_asset_sha=$(awk '{print $1; exit}' "$release_work/$asset.sha256")
+  if [ -z "$expected_asset_sha" ] || [ "$(hash_binary "$release_work/$asset")" != "$expected_asset_sha" ]; then
+    echo "release asset checksum mismatch for $tag/$asset; building from source" >&2
+    rm -rf "$release_work"; return 1
+  fi
+  tar -xJf "$release_work/$asset" -C "$release_work" || { rm -rf "$release_work"; return 1; }
+  release_binary="$release_work/homeboy-$triple/homeboy"
+  [ -x "$release_binary" ] || { rm -rf "$release_work"; return 1; }
+  case "$("$release_binary" --version 2>/dev/null)" in
+    *"+$target"*) ;;
+    *) echo "release asset $tag/$asset does not report commit $target; building from source" >&2; rm -rf "$release_work"; return 1 ;;
+  esac
+  mkdir -p "$(dirname "$binary")" || { rm -rf "$release_work"; return 1; }
+  cp "$release_binary" "$binary" && chmod 0755 "$binary" || { rm -rf "$release_work"; return 1; }
+  rm -rf "$release_work"
+  echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$tag/$asset"
+  return 0
+}
+"#;
+
 fn materialize_script(
     source: &str,
     git_ref: &str,
@@ -3311,6 +3368,15 @@ fn materialize_script(
         .map(|authority| quote_path(authority))
         .collect::<Vec<_>>()
         .join(" ");
+    // Prefer the published release binary for this exact commit over a cold
+    // `cargo build --release` on the runner, which takes 15-20 minutes (#15376).
+    script = script.replacen(
+        "cargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\n",
+        &format!(
+            "{RELEASE_BINARY_FAST_PATH}if ! release_binary_from_asset; then\n  cargo build --release --bin homeboy --manifest-path \"$dir/Cargo.toml\"\nfi\n"
+        ),
+        1,
+    );
     let downgrade_guard = refresh_acquisition_preflight(&authority_commits);
     script = script.replacen(
         "mkdir -p \"$(dirname \"$dir\")\"",
