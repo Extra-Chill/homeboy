@@ -602,7 +602,17 @@ fn exec_applies_request_env_to_daemon_command() {
 #[test]
 fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     register_driver();
-    let _home = create_lab_local_runner();
+    let _home = HomeGuard::new();
+    let _config = homeboy_core::test_support::EnvVarGuard::set(
+        "HOMEBOY_CONFIG_ROOT",
+        homeboy_core::paths::home_root()
+            .expect("fixture home")
+            .join(".config/homeboy"),
+    );
+    write_runner_config(
+        "lab-local",
+        &serde_json::json!({"id": "lab-local", "kind": "local"}),
+    );
     let extension = tempfile::tempdir().expect("extension");
     let secret = extension.path().join("fixture-secret");
     std::fs::write(&secret, "runner-secret\n").expect("secret");
@@ -643,7 +653,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
                 "secret_env": { "FIXTURE_SECRET": { "file": secret } }
             },
             "cwd": std::env::current_dir().expect("cwd"),
-            "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s|%s|%s|%s' \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\""],
+            "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s|%s|%s|%s|%s' \"$FIXTURE_SECRET\" \"$HOMEBOY_ACTIVE_RUN_ID\" \"$HOMEBOY_RUN_ID\" \"$HOMEBOY_BENCH_RUN_ID\" \"${WORKFLOW_BENCH_RUN_ID-unset}\""],
             "extension_env_providers": ["fixture"],
             "idempotency_key": "daemon-explicit-run"
         })),
@@ -682,7 +692,7 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     assert!(!result.to_string().contains("runner-secret"));
     assert_eq!(
         result["stdout"],
-        "daemon-explicit-run|daemon-explicit-run|daemon-explicit-run|unset"
+        "[REDACTED]|daemon-explicit-run|daemon-explicit-run|daemon-explicit-run|unset"
     );
     let hints = result["diagnostic_hints"]
         .as_array()

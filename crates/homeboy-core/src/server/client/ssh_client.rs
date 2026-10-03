@@ -1104,10 +1104,18 @@ mod bounded_probe_tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn timed_out_local_probe_terminates_descendants() {
-        let marker =
-            std::env::temp_dir().join(format!("homeboy-probe-leak-{}", std::process::id()));
-        let _ = std::fs::remove_file(&marker);
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let fixture = tempfile::tempdir().expect("probe fixture");
+        let marker = fixture.path().join("leaked");
+        let release = fixture.path().join("release");
+        assert!(Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .expect("create FIFO")
+            .success());
         let client = localhost_client();
         let _limits = client.scoped_probe_limits(
             Duration::from_millis(50),
@@ -1116,12 +1124,23 @@ mod bounded_probe_tests {
         );
 
         let output = client.execute(&format!(
-            "(sleep 1; touch {}) & wait",
+            "(exec 3<>{}; printf child-ready; read release <&3; touch {}) & wait",
+            crate::engine::shell::quote_path(&release.to_string_lossy()),
             crate::engine::shell::quote_path(&marker.to_string_lossy())
         ));
 
         assert!(output.timed_out);
-        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(
+            output.stdout, "child-ready",
+            "descendant must execute before cancellation"
+        );
+        // No wall-clock race: a surviving child still holds the FIFO reader.
+        let reader = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&release)
+            .expect_err("timed-out probe descendant still holds its FIFO");
+        assert_eq!(reader.raw_os_error(), Some(libc::ENXIO));
         assert!(!marker.exists(), "timed-out probe child leaked");
     }
 

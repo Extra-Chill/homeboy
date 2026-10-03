@@ -57,6 +57,8 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     );
     assert!(!compact.contains("--runner <RUNNER_ID>"), "{compact}");
     assert!(!compact.contains("--max-provider-rotations"), "{compact}");
+    assert!(!compact.contains("--base <"), "{compact}");
+    assert!(!compact.contains("--head <"), "{compact}");
     assert!(full.contains("--max-provider-rotations"), "{full}");
     assert!(full.contains("--provider-command"), "{full}");
     assert!(full.contains("--backend <BACKEND>"), "{full}");
@@ -70,6 +72,8 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
         "--gate-env",
         "--provider-config",
         "--require-acceptance",
+        "--base",
+        "--head",
     ] {
         assert!(full.contains(advanced), "missing {advanced}:\n{full}");
     }

@@ -3096,13 +3096,28 @@ mod watch_tests {
 
     #[test]
     fn terminal_failure_and_cancellation_exit_nonzero() {
-        for state in ["failed", "cancelled", "gate_failed", "finalization_failed"] {
+        for state in ["failed", "cancelled"] {
             let (_, exit) = watch_status_output(
                 &args(),
                 result(state, WatchConclusion::Terminal),
                 StatusWatchProgress::default(),
             );
             assert_eq!(exit, 1, "{state}");
+        }
+        // Promotion outcomes are candidate facts, not lifecycle state names.
+        // The production owner projects gate failure as candidate_recoverable.
+        for (state, outcome) in [
+            ("candidate_recoverable", "gate_failed"),
+            ("failed", "finalization_failed"),
+        ] {
+            let mut terminal = result(state, WatchConclusion::Terminal);
+            terminal.item.0["blocker"] = json!({ "code": outcome });
+            if outcome == "gate_failed" {
+                terminal.item.0["candidate"] = json!({ "state": outcome });
+            }
+            assert!(status_is_terminal(&terminal.item.0), "{outcome}");
+            let (_, exit) = watch_status_output(&args(), terminal, StatusWatchProgress::default());
+            assert_eq!(exit, 1, "{outcome}");
         }
     }
 

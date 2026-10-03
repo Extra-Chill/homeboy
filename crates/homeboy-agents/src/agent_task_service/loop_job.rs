@@ -1009,7 +1009,14 @@ pub fn await_active_loop_stop_test_provider(loop_id: &str, marker: &std::path::P
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "provider never became active"
+            "provider never became active: {}",
+            homeboy_core::redaction::RedactionPolicy::default().redact_json(
+                &serde_json::to_value(
+                    crate::agent_task_loop_controller::load_controller(loop_id)
+                        .expect("read inactive controller")
+                )
+                .expect("serialize inactive controller")
+            )
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

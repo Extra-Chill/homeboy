@@ -89,8 +89,6 @@ fn scope_cook_help(command: Command) -> Command {
         "cwd",
         "verify",
         "verify_file",
-        "base",
-        "head",
         "no_finalize",
         "draft_pr",
         "max_attempts",
