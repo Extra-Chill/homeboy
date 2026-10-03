@@ -242,6 +242,59 @@ fn promotion_operation_key(run_id: &str) -> String {
 /// controller completes it, while a crashed controller's lease still elapses.
 const RETRY_DISPATCH_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// How long a dispatched retry waits for the runner daemon's acceptance
+/// receipt. Detached Lab dispatch returns once controller staging is queued;
+/// the daemon writes the receipt only after staging materializes the
+/// workspace, hydrates dependencies and hands the job off, which takes
+/// minutes. Checking once, immediately, failed every Lab retry even though the
+/// runner accepted and ran it (#15364). Bounded by the dispatch claim lease.
+const RETRY_DISPATCH_ACCEPTANCE_WAIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Poll for the receiver's durable acceptance receipt until `timeout`.
+/// Returns early once the attempt reaches a terminal state without one (the
+/// handoff failed and recorded why), so a rejected dispatch is not waited out.
+fn await_dispatch_acceptance_receipt(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    operation_key: &str,
+    timeout: std::time::Duration,
+) -> Result<Option<Value>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(receipt) = agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+            lifecycle_store,
+            run_id,
+            operation_key,
+        )? {
+            return Ok(Some(receipt));
+        }
+        let terminal = lifecycle_store
+            .read_record(run_id)
+            .is_ok_and(|record| record.state.is_terminal());
+        if terminal || std::time::Instant::now() >= deadline {
+            // One last read: the receipt and a terminal projection can land
+            // in the same window.
+            return agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                lifecycle_store,
+                run_id,
+                operation_key,
+            );
+        }
+        std::thread::sleep(dispatch_acceptance_poll_interval());
+    }
+}
+
+fn dispatch_acceptance_poll_interval() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        std::time::Duration::from_millis(10)
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(5)
+    }
+}
+
 /// A missing aggregate is a controller interruption, not provider output. Keep
 /// its claim separate from retry dispatch because no next run exists yet.
 const PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE: std::time::Duration =
@@ -4488,15 +4541,17 @@ pub(crate) fn dispatch_cook_follow_up(
                     // The accepting daemon writes this receipt atomically with
                     // its handoff ownership. A dispatcher return alone is not
                     // acceptance evidence and cannot complete this operation.
-                    let receipt = agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+                    let receipt = await_dispatch_acceptance_receipt(
                         lifecycle_store,
                         &next_run_id,
                         &operation_key,
+                        RETRY_DISPATCH_ACCEPTANCE_WAIT,
                     )?
                     .ok_or_else(|| {
                         Error::internal_unexpected(
                             "retry dispatcher returned without a durable receiver acceptance receipt",
                         )
+                        .with_retryable(true)
                     })?;
                     lifecycle_store.complete_cook_operation(
                         &next_run_id,

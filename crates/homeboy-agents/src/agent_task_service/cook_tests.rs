@@ -25210,3 +25210,85 @@ fn gate_setup_failures_are_retried_and_other_promotion_errors_are_not() {
     .expect_err("rejection is final");
     assert_eq!(calls.get(), 1);
 }
+
+/// #15364: detached Lab dispatch returns before the runner daemon accepts the
+/// handoff; the acceptance receipt is written minutes later by staging. The
+/// controller waits for it instead of failing on the first read, and a
+/// terminal attempt without a receipt stops the wait early.
+#[test]
+fn dispatch_acceptance_receipt_is_awaited_and_terminal_attempts_stop_the_wait() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let options = compile_options("receipt-wait");
+        let run_id = "receipt-wait-retry";
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        let operation_key = format!("dispatch:{run_id}");
+        let intent = serde_json::json!({
+            "schema": "homeboy/cook-dispatch-intent/v1",
+            "run_id": run_id,
+            "operation_key": operation_key,
+        });
+        agent_task_lifecycle::claim_operation_with_intent_in_store(
+            &store,
+            run_id,
+            &operation_key,
+            std::time::Duration::from_secs(60),
+            &intent,
+        )
+        .unwrap();
+        assert!(agent_task_lifecycle::dispatch_acceptance_receipt_in_store(
+            &store,
+            run_id,
+            &operation_key
+        )
+        .unwrap()
+        .is_none());
+
+        let accept = std::thread::spawn({
+            let run_id = run_id.to_string();
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                agent_task_lifecycle::record_detached_lab_run(
+                    agent_task_lifecycle::DetachedLabRunRecord {
+                        run_id: &run_id,
+                        runner_id: "fixture-lab",
+                        runner_job_id: "late-accepted-job",
+                        remote_workspace: "/runner/workspace",
+                        remote_command: &["homeboy".to_string()],
+                    },
+                )
+                .unwrap();
+            }
+        });
+        let receipt = super::await_dispatch_acceptance_receipt(
+            &store,
+            run_id,
+            &operation_key,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap()
+        .expect("late receipt is observed");
+        accept.join().unwrap();
+        assert_eq!(receipt["receipt"]["runner_job_id"], "late-accepted-job");
+
+        // A terminal attempt with no receipt returns promptly.
+        let rejected = "receipt-wait-rejected";
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(rejected)).unwrap();
+        store
+            .mutate_record(rejected, |record| {
+                record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                true
+            })
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(super::await_dispatch_acceptance_receipt(
+            &store,
+            rejected,
+            &format!("dispatch:{rejected}"),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap()
+        .is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    });
+}
