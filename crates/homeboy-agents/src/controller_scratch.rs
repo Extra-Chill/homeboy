@@ -1013,7 +1013,14 @@ fn cleanup_unlocked(
             size_bytes,
             owner_pid: resource.owner_pid,
             lease_id: resource.lease_id.clone(),
-            reason: resource.terminal_reason.clone().unwrap_or_default(),
+            reason: if resource.lifecycle_state == "interrupted"
+                && !homeboy_core::process::pid_is_running(resource.owner_pid)
+                && recovery_evidence_is_current(resource)
+            {
+                "interrupted_owner_dead".to_string()
+            } else {
+                resource.terminal_reason.clone().unwrap_or_default()
+            },
             lifecycle_state: resource.lifecycle_state.clone(),
             source_ref: resource.source_ref.clone(),
         });
@@ -1397,6 +1404,9 @@ fn cleanup_block_reason_with_observation(
             "resource has not been finalized by its owning run".to_string(),
         ));
     }
+    let interrupted_owner_dead = resource.lifecycle_state == "interrupted"
+        && !homeboy_core::process::pid_is_running(resource.owner_pid)
+        && recovery_evidence_is_current(resource);
     // Only the time-window comparison honors the override. All the guards above
     // (still-active run, running owner, active→orphaned transition, not yet
     // finalized) have already returned, and the dirty/unpushed guard below still
@@ -1405,7 +1415,9 @@ fn cleanup_block_reason_with_observation(
     let override_retention = retention_override_seconds.map(|seconds| format!("{seconds}s"));
     let default_retention = default_retention_window(resource);
     let retention = override_retention.as_deref().unwrap_or(default_retention);
-    if !retention_expired(resource.finalized_at.as_deref(), retention, path, now) {
+    if !interrupted_owner_dead
+        && !retention_expired(resource.finalized_at.as_deref(), retention, path, now)
+    {
         return Ok(Some("retention has not expired".to_string()));
     }
     if !resource.ephemeral {
@@ -2468,6 +2480,47 @@ mod tests {
         assert_eq!(
             cleanup_reason(&observation, &mut resource, &scratch, None),
             Some("owner process is still running".to_string())
+        );
+    }
+
+    #[test]
+    fn interrupted_dead_owner_with_harvested_ephemeral_evidence_bypasses_retention() {
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "interrupted".to_string();
+        resource.ephemeral = true;
+        resource.retention = "P7D".to_string();
+        resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
+        resource.terminal_evidence = Some(serde_json::json!({
+            "workspace_recovery": { "state": "explicitly_ephemeral" }
+        }));
+
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None),
+            None
+        );
+    }
+
+    #[test]
+    fn interrupted_live_owner_is_never_reclaimed_even_with_harvested_evidence() {
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let scratch = root.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+        let mut resource = resource(&scratch, root.path());
+        resource.lifecycle_state = "interrupted".to_string();
+        resource.ephemeral = true;
+        resource.owner_pid = std::process::id();
+        resource.terminal_evidence = Some(serde_json::json!({
+            "workspace_recovery": { "state": "explicitly_ephemeral" }
+        }));
+
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None).as_deref(),
+            Some("owner process is still running")
         );
     }
 
