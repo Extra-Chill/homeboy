@@ -673,6 +673,64 @@ fn create_accepts_an_existing_repository_path_without_component_registration() {
     });
 }
 
+/// #15364: a cook whose head branch already exists locally (an operator's
+/// branch for the task, not checked out anywhere) adopts it instead of failing
+/// `git worktree add -b` with "a branch named ... already exists".
+#[test]
+fn create_adopts_an_existing_unclaimed_local_branch() {
+    crate::test_support::with_isolated_home(|home| {
+        let parent = home.path().join("Developer");
+        let source = parent.join("adopt-fixture");
+        fs::create_dir_all(&source).expect("source directory");
+        run_git(&source, &["init", "-q", "-b", "main"]);
+        run_git(&source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(&source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("README.md"), "initial\n").expect("initial file");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "initial"]);
+        // An existing branch carrying the operator's work, not checked out.
+        run_git(&source, &["branch", "refactor/existing"]);
+        run_git(&source, &["checkout", "-q", "refactor/existing"]);
+        fs::write(source.join("work.txt"), "operator work\n").expect("work");
+        run_git(&source, &["add", "."]);
+        run_git(&source, &["commit", "-q", "-m", "operator work"]);
+        let branch_head = git::run_git(&source, &["rev-parse", "HEAD"], "head")
+            .unwrap()
+            .trim()
+            .to_string();
+        run_git(&source, &["checkout", "-q", "main"]);
+
+        let created = create(WorktreeCreateOptions {
+            component_id: source.to_string_lossy().to_string(),
+            branch: "refactor/existing".to_string(),
+            from: Some("main".to_string()),
+            task_url: None,
+            run_id: None,
+            cleanup_policy: None,
+            require_handoff_freshness: false,
+            source_path: None,
+        })
+        .expect("adopt the existing branch");
+
+        let path = PathBuf::from(&created.record.worktree_path);
+        assert_eq!(created.record.branch, "refactor/existing");
+        assert_eq!(
+            git::run_git(&path, &["rev-parse", "HEAD"], "head")
+                .unwrap()
+                .trim(),
+            branch_head,
+            "the operator's commits are kept"
+        );
+        assert!(path.join("work.txt").is_file());
+        assert_eq!(
+            git::run_git(&path, &["branch", "--show-current"], "branch")
+                .unwrap()
+                .trim(),
+            "refactor/existing"
+        );
+    });
+}
+
 /// CI has no component registry and runs from wherever the job happens to be,
 /// so a caller that already resolved a component must be able to create its
 /// worktree from that checkout. An unregistered monorepo component, named by
