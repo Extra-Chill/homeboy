@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.20] - 2026-10-03
+
+### Fixed
+- never hydrate dependencies inside nested repositories during gate setup
+
 ## [0.399.19] - 2026-10-02
 
 ### Fixed
