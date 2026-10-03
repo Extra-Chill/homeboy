@@ -1,3 +1,5 @@
+pub mod placement;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::OpenOptions;
@@ -46,7 +48,7 @@ pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
 type GateSpawnCallback = Arc<dyn Fn(u32, &str) -> Result<()> + Send + Sync>;
 type GateHeartbeatCallback = Arc<dyn Fn(&AgentTaskGateLiveStatus) -> Result<()> + Send + Sync>;
 
-pub(crate) struct GateSupervision {
+pub struct GateSupervision {
     pub timeout: Duration,
     pub no_progress_timeout: Duration,
     pub heartbeat_interval: Duration,
@@ -186,6 +188,12 @@ pub fn append_promotion_gate_argv(command: &mut Vec<String>, gates: &VerifyGateO
         }
     }
     if let Some(environment) = gates_json.get("gate_environment") {
+        if let Some(runner) = environment
+            .get("lab_runner")
+            .and_then(serde_json::Value::as_str)
+        {
+            command.extend(["--gate-runner".to_string(), runner.to_string()]);
+        }
         if let Some(mode) = environment.get("mode").and_then(serde_json::Value::as_str) {
             command.extend([
                 "--gate-environment-mode".to_string(),
@@ -285,6 +293,9 @@ pub enum AgentTaskGateEnvironmentMode {
 /// inputs; secrets remain outside reports and this policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironmentPolicy {
+    /// Explicit controller-owned Lab placement. Omission preserves local gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_runner: Option<String>,
     #[serde(default)]
     pub mode: AgentTaskGateEnvironmentMode,
     #[serde(default)]
@@ -371,6 +382,7 @@ fn default_toolchain_probe_arguments() -> Vec<String> {
 impl Default for AgentTaskGateEnvironmentPolicy {
     fn default() -> Self {
         Self {
+            lab_runner: None,
             mode: AgentTaskGateEnvironmentMode::Inherit,
             variables: BTreeMap::new(),
             preserve: BTreeMap::new(),
@@ -612,6 +624,9 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
+    /// Verified native runner admission and candidate-bound terminal evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_receipt: Option<serde_json::Value>,
     #[serde(default = "gate_report_schema")]
     pub schema: String,
     #[serde(skip, default = "default_gate_step")]
@@ -717,6 +732,8 @@ pub enum AgentTaskGateDifferentialResult {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lab_runner: Option<String>,
     #[serde(default)]
     pub mode: AgentTaskGateEnvironmentMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -857,13 +874,14 @@ impl AgentTaskGateEnvironment {
             && self.cargo_target.is_none()
     }
 
-    pub(crate) fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
+    pub fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
         let variables = self
             .inherited
             .iter()
             .map(|variable| (variable.name.clone(), variable.value.clone()))
             .collect();
         AgentTaskGateEnvironmentPolicy {
+            lab_runner: self.lab_runner.clone(),
             mode: self.mode,
             variables,
             preserve: self.preserved.clone(),
@@ -906,6 +924,8 @@ pub enum AgentTaskGateStatus {
     /// failure: no evidence was produced either way, so the candidate stays
     /// unverified rather than rejected (#14731).
     Deferred,
+    /// Runner admission/readiness prevented execution; never candidate blame.
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -970,7 +990,7 @@ pub struct AgentTaskGateCapture {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct AgentTaskGateLiveStatus {
+pub struct AgentTaskGateLiveStatus {
     pub visibility: AgentTaskGateVisibility,
     pub reveal_policy: AgentTaskGateRevealPolicy,
     pub elapsed_ms: u128,
@@ -1001,7 +1021,9 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
             // environment" for a lab-capability preflight; a deferred workload
             // is the same shape of evidence gap, so it reuses the variant
             // rather than adding a new one to the shared contract (#14731).
-            AgentTaskGateStatus::Deferred => HomeboyGateStatus::Blocked,
+            AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable => {
+                HomeboyGateStatus::Blocked
+            }
             AgentTaskGateStatus::AcceptedInheritedFailure => {
                 HomeboyGateStatus::AcceptedInheritedFailure
             }
@@ -1324,9 +1346,9 @@ impl AgentTaskGateReport {
                 AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure => {
                     PlanStepStatus::Failed
                 }
-                AgentTaskGateStatus::Skipped | AgentTaskGateStatus::Deferred => {
-                    PlanStepStatus::Skipped
-                }
+                AgentTaskGateStatus::Skipped
+                | AgentTaskGateStatus::Deferred
+                | AgentTaskGateStatus::Unavailable => PlanStepStatus::Skipped,
             },
         )
         .inputs(PlanValues::new().json("command", &command))
@@ -1336,6 +1358,7 @@ impl AgentTaskGateReport {
 
         Self {
             schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+            lab_receipt: None,
             step,
             id,
             visibility,
@@ -1405,6 +1428,7 @@ impl AgentTaskGateReport {
             visibility,
             reveal_policy,
             status: AgentTaskGateStatus::Skipped,
+            lab_receipt: None,
             command,
             invocation,
             exit_code: 0,
@@ -1795,7 +1819,7 @@ pub(crate) fn run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
     clippy::too_many_arguments,
     reason = "supervision callbacks and durable gate inputs remain independently auditable"
 )]
-pub(crate) fn run_gate_command_with_supervision(
+pub fn run_gate_command_with_supervision(
     cwd: &Path,
     index: usize,
     command: &str,
@@ -1910,6 +1934,70 @@ fn run_gate_argv_with_supervision(
     reason = "shell and declared gates share one process executor"
 )]
 fn run_gate_argv(
+    cwd: &Path,
+    index: usize,
+    command_vec: Vec<String>,
+    command: &str,
+    visibility: AgentTaskGateVisibility,
+    reveal_policy: AgentTaskGateRevealPolicy,
+    execution: GateExecution<'_>,
+    gate_environment: &AgentTaskGateEnvironmentPolicy,
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+    declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
+) -> Result<AgentTaskGateReport> {
+    let runner_id = gate_environment
+        .lab_runner
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| {
+            placement::declared_runner(command).map(|runner| runner.unwrap_or_default())
+        })?;
+    if !runner_id.is_empty() {
+        let request = placement::LabGateRequest {
+            preflight_only: false,
+            toolchains: vec![],
+            runner_id,
+            candidate: crate::agent_task_promotion::candidate_fingerprint(
+                &cwd.display().to_string(),
+            )?,
+            index,
+            argv: command_vec,
+            label: command.to_string(),
+            visibility,
+            reveal_policy,
+            environment: gate_environment.clone(),
+            package_artifacts: package_artifacts.to_vec(),
+            declared_plan: declared_plan.cloned(),
+            timeout_seconds: execution
+                .timeout
+                .unwrap_or(Duration::from_secs(1800))
+                .as_secs(),
+            no_progress_timeout_seconds: execution
+                .supervision
+                .map(|policy| policy.no_progress_timeout.as_secs())
+                .unwrap_or(300),
+        };
+        return placement::dispatch(cwd, &request, execution.supervision);
+    }
+    run_gate_argv_local(
+        cwd,
+        index,
+        command_vec,
+        command,
+        visibility,
+        reveal_policy,
+        execution,
+        gate_environment,
+        package_artifacts,
+        declared_plan,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "admitted runner gates reuse the local process owner without recursively routing"
+)]
+fn run_gate_argv_local(
     cwd: &Path,
     index: usize,
     command_vec: Vec<String>,
@@ -3163,7 +3251,7 @@ fn materialize_extension_inputs(
         let extension_identity = extension_tree_identity(&resolved_source)?;
         let mut shared_assets = Vec::new();
         for (path, asset_source) in
-            homeboy_core::extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
+            homeboy_core::extension::lifecycle::shared_assets_for_extension_source(source)
         {
             let target = homeboy_core::extension::lifecycle::isolated_shared_asset_target(
                 &home.join(".config/homeboy"),
@@ -3355,7 +3443,7 @@ fn preserved_environment_value(source: &str) -> Result<String> {
 /// Validate declared tools in the exact environment candidate gates will use.
 /// This is deliberately generic: callers declare executables and environment
 /// mappings while extensions own language-specific discovery.
-pub(crate) fn preflight_gate_toolchains(
+pub fn preflight_gate_toolchains(
     cwd: &Path,
     policy: &AgentTaskGateEnvironmentPolicy,
     requirements: &[AgentTaskGateToolchainRequirement],
@@ -3363,8 +3451,69 @@ pub(crate) fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
+    if let Some(runner_id) = policy.lab_runner.as_deref() {
+        return placement::preflight(
+            cwd,
+            runner_id,
+            policy,
+            requirements,
+            package_artifacts,
+            timeout,
+        );
+    }
+    preflight_gate_toolchains_local(
+        cwd,
+        policy,
+        requirements,
+        package_artifacts,
+        runtime_tmpdir,
+        timeout,
+        false,
+    )
+}
+
+pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
+    let mut placements = std::collections::BTreeSet::new();
+    if gates.gate_environment.lab_runner.is_some() {
+        placements.insert(gates.gate_environment.lab_runner.clone());
+    } else {
+        for command in gates.verify.iter().chain(&gates.private_verify) {
+            placements.insert(placement::declared_runner(command)?);
+        }
+        if gates.test_execution_plan.is_some() || placements.is_empty() {
+            placements.insert(None);
+        }
+    }
+    for runner in placements {
+        let mut environment = gates.gate_environment.clone();
+        environment.lab_runner = runner;
+        environment.hydrate_rust_cache &= gates.hydrate_dependencies;
+        preflight_gate_toolchains(
+            cwd,
+            &environment,
+            &gates.required_toolchains(),
+            &gates.gate_package_artifacts,
+            None,
+            gates.gate_timeout(),
+        )?;
+    }
+    Ok(())
+}
+
+fn preflight_gate_toolchains_local(
+    cwd: &Path,
+    policy: &AgentTaskGateEnvironmentPolicy,
+    requirements: &[AgentTaskGateToolchainRequirement],
+    package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
+    runtime_tmpdir: Option<&Path>,
+    timeout: Duration,
+    prepare_runner_cache: bool,
+) -> Result<()> {
     let (policy, _) = validate_package_artifacts(cwd, policy, package_artifacts)?;
-    let selected_environment = selected_gate_environment(&policy, runtime_tmpdir)?;
+    let mut selected_environment = selected_gate_environment(&policy, runtime_tmpdir)?;
+    if prepare_runner_cache && !requirements.is_empty() {
+        selected_environment.configure_rust_cache(cwd)?;
+    }
     // The deadline covers declared probe execution. Controller scheduling before
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
@@ -6698,6 +6847,7 @@ mod tests {
     fn replacing_gate_environment_preserves_declared_variables_and_reports_policy() {
         let temp = tempfile::tempdir().expect("tempdir");
         let policy = AgentTaskGateEnvironmentPolicy {
+            lab_runner: None,
             mode: AgentTaskGateEnvironmentMode::Replace,
             variables: BTreeMap::from([("DECLARED_INPUT".to_string(), "kept".to_string())]),
             preserve: BTreeMap::new(),

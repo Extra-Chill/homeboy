@@ -356,6 +356,53 @@ fn exact_simple_homeboy_invocation(command: &str) -> Option<Vec<String>> {
     (argv.first().map(String::as_str) == Some("homeboy")).then_some(argv)
 }
 
+pub(crate) fn declared_lab_gate_runner(command: &str) -> Result<Option<String>> {
+    use clap::Parser;
+    let Some(argv) = exact_simple_homeboy_invocation(command) else {
+        return Ok(None);
+    };
+    let cli = crate::cli_surface::Cli::try_parse_from(argv)
+        .map_err(|error| Error::invalid_argument("gate.declaration", error.to_string()))?;
+    if cli.placement != crate::cli_surface::Placement::Lab && cli.runner.is_none() {
+        return Ok(None);
+    }
+    let runner = cli.runner.or_else(|| {
+        homeboy::core::parsed_command_preflight::captured_result().and_then(|result| {
+            result
+                .lab_readiness
+                .and_then(|readiness| readiness.selected_runner_id)
+        })
+    });
+    runner.map(Some).ok_or_else(|| {
+        Error::invalid_argument(
+            "gate.placement",
+            "declared Lab gate has no admitted runner selection",
+        )
+    })
+}
+
+#[cfg(test)]
+mod admitted_placement_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_lab_gate_uses_the_owned_parser_and_local_gates_stay_local() {
+        assert_eq!(
+            declared_lab_gate_runner("homeboy --runner lab review test --path .").unwrap(),
+            Some("lab".to_string())
+        );
+        assert_eq!(
+            declared_lab_gate_runner("homeboy --placement local review test --path .").unwrap(),
+            None
+        );
+        assert_eq!(
+            declared_lab_gate_runner("homeboy --placement lab review test --path . && printf next")
+                .unwrap(),
+            None
+        );
+    }
+}
+
 fn command_path(argv: &[String], command: &Command) -> Vec<String> {
     let mut path = Vec::new();
     let mut index = 1;

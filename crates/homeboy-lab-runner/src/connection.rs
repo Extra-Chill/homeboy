@@ -4559,6 +4559,7 @@ mod remote_daemon;
 mod service;
 mod session_store;
 
+pub(crate) use remote_daemon::parse_json_from_mixed_stdout;
 use remote_daemon::*;
 pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_service;
 pub use service::{

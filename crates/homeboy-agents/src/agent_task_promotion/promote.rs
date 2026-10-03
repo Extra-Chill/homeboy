@@ -2386,6 +2386,11 @@ fn run_promotion_gates(
     let gate_workspace = gate_workspace
         .map(Path::to_path_buf)
         .unwrap_or_else(|| gate_workspace_path(options, worktree_path));
+    let gate_workspace = if options.gates.gate_environment.lab_runner.is_some() {
+        worktree_path.to_path_buf()
+    } else {
+        gate_workspace
+    };
     let destination_gate_setup = if gate_workspace.is_dir() {
         let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
             timeout: options.gates.gate_timeout(),
@@ -2480,9 +2485,13 @@ fn run_promotion_gates(
             Some("starting declared test plan".to_string()),
         );
         let gate = run_declared_promotion_test(options, &gate_workspace, 1, plan)?;
-        if gate.status == AgentTaskGateStatus::Failed
-            && options.gates.execution_policy
-                == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
+        if matches!(
+            gate.status,
+            AgentTaskGateStatus::Failed
+                | AgentTaskGateStatus::Deferred
+                | AgentTaskGateStatus::Unavailable
+        ) && options.gates.execution_policy
+            == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
         {
             blocking_gate_id = Some(gate.id.clone());
         }
@@ -2491,6 +2500,13 @@ fn run_promotion_gates(
     let legacy_gate_offset = deterministic_gates.len();
     for (index, (command, visibility, reveal_policy)) in declared_gates.enumerate() {
         let index = index + legacy_gate_offset + 1;
+        let execution_workspace = if options.gates.gate_environment.lab_runner.is_some()
+            || crate::agent_task_gate::placement::declared_runner(command)?.is_some()
+        {
+            worktree_path
+        } else {
+            &gate_workspace
+        };
         let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
             crate::agent_task_gate::AgentTaskGateReport::skipped(
                 format!("gate-{index}"),
@@ -2507,7 +2523,7 @@ fn run_promotion_gates(
             );
             run_promotion_gate(
                 options,
-                &gate_workspace,
+                execution_workspace,
                 index,
                 command,
                 visibility,
@@ -2515,16 +2531,20 @@ fn run_promotion_gates(
                 observation_store,
             )?
         };
-        if gate.status == AgentTaskGateStatus::Failed
-            && options.gates.execution_policy
-                == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
+        if matches!(
+            gate.status,
+            AgentTaskGateStatus::Failed
+                | AgentTaskGateStatus::Deferred
+                | AgentTaskGateStatus::Unavailable
+        ) && options.gates.execution_policy
+            == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
         {
             blocking_gate_id = Some(gate.id.clone());
         }
         let mut gate = gate;
         gate.cwd = Some(crate::agent_task_gate::AgentTaskGateCwdEvidence {
             requested: worktree_path.display().to_string(),
-            effective: gate_workspace.display().to_string(),
+            effective: execution_workspace.display().to_string(),
         });
         deterministic_gates.push(gate);
     }
@@ -2536,9 +2556,12 @@ fn run_promotion_gates(
     let has_gate_failure = deterministic_gates
         .iter()
         .any(|gate| gate.status == AgentTaskGateStatus::Failed);
-    let has_gate_deferral = deterministic_gates
-        .iter()
-        .any(|gate| gate.status == AgentTaskGateStatus::Deferred);
+    let has_gate_deferral = deterministic_gates.iter().any(|gate| {
+        matches!(
+            gate.status,
+            AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable
+        )
+    });
     let gate_results = deterministic_gates
         .iter()
         .cloned()
@@ -2548,7 +2571,7 @@ fn run_promotion_gates(
     let candidate_checkout = candidate_checkout.map(|checkout| checkout.identity());
     if let Some(candidate_checkout) = &candidate_checkout {
         for gate in &mut deterministic_gates {
-            gate.candidate_checkout = Some(candidate_checkout.clone());
+            bind_lab_gate_candidate_checkout(gate, candidate_checkout)?;
         }
     }
     Ok(PromotionGateRun {
@@ -2562,6 +2585,159 @@ fn run_promotion_gates(
         destination_gate_setup,
         candidate_checkout,
     })
+}
+
+fn bind_lab_gate_candidate_checkout(
+    gate: &mut crate::agent_task_gate::AgentTaskGateReport,
+    candidate: &crate::agent_task_gate::AgentTaskGateCandidateCheckout,
+) -> Result<()> {
+    use crate::agent_task_gate::placement::{LAB_GATE_DISPOSITION_SCHEMA, LAB_GATE_RECEIPT_SCHEMA};
+    if let Some(receipt) = &gate.lab_receipt {
+        match receipt.get("schema").and_then(Value::as_str) {
+            Some(LAB_GATE_RECEIPT_SCHEMA) => {
+                if receipt.pointer("/candidate/fingerprint/tree").and_then(Value::as_str) != Some(candidate.tree.as_str()) {
+                    return Err(Error::invalid_argument("gate.candidate", "Lab gate terminal proof differs from the canonical promotion destination tree"));
+                }
+            }
+            Some(LAB_GATE_DISPOSITION_SCHEMA) if receipt.get("executed").and_then(Value::as_bool) == Some(false)
+                && !matches!(gate.status, AgentTaskGateStatus::Succeeded | AgentTaskGateStatus::AcceptedInheritedFailure) => {}
+            _ => return Err(Error::invalid_argument("gate.receipt", "Lab gate evidence has no recognized non-passing disposition or admitted candidate receipt")),
+        }
+    }
+    gate.candidate_checkout = Some(candidate.clone());
+    Ok(())
+}
+
+#[cfg(test)]
+mod lab_gate_binding_tests {
+    use super::*;
+
+    fn with_git_candidate(test: impl FnOnce(&Path, &homeboy_core::observation::ObservationStore)) {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            // Root all four owners explicitly; broader CONFIG_ROOT isolation is
+            // independent work and must not leak into these new fixtures.
+            let _config = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_CONFIG_ROOT",
+                home.path().join(".config/homeboy"),
+            );
+            let _data = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_DATA_DIR",
+                home.path().join("data"),
+            );
+            let _runtime = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_RUNTIME_TMPDIR",
+                home.path().join("runtime"),
+            );
+            let _artifacts = homeboy_core::test_support::EnvVarGuard::set(
+                "HOMEBOY_ARTIFACT_ROOT",
+                home.path().join("artifacts"),
+            );
+            let repo = home.path().join("candidate");
+            std::fs::create_dir_all(&repo).unwrap();
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.name", "Fixture"],
+                vec!["config", "user.email", "fixture@example.invalid"],
+            ] {
+                homeboy_core::test_support::run_git_fixture_command(&repo, &args);
+            }
+            std::fs::write(repo.join("candidate.txt"), "candidate\n").unwrap();
+            homeboy_core::test_support::run_git_fixture_command(&repo, &["add", "."]);
+            homeboy_core::test_support::run_git_fixture_command(
+                &repo,
+                &["commit", "-qm", "candidate"],
+            );
+            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
+            test(&repo, &store);
+        });
+    }
+
+    #[test]
+    fn unavailable_lab_promotion_retains_checkout_and_blocks_ordered_successors() {
+        with_git_candidate(|repo, store| {
+            let candidate =
+                crate::agent_task_promotion::candidate_fingerprint(&repo.display().to_string())
+                    .unwrap();
+            let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
+                "source":"{}", "to_worktree":"fixture", "gates":{
+                    "verify":["printf must-not-run", "printf successor-must-not-run"], "hydrate_dependencies":false,
+                    "gate_environment":{"lab_runner":"absent-fixture-runner", "hydrate_rust_cache":false}
+                }
+            })).unwrap();
+            let report = run_promotion_gates(&options, repo, Some(&candidate), None, store)
+                .expect("non-execution is retained, not a fabricated candidate mismatch");
+            assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+            assert_eq!(report.deterministic_gates.len(), 2);
+            let unavailable = &report.deterministic_gates[0];
+            assert_eq!(unavailable.status, AgentTaskGateStatus::Unavailable);
+            assert!(unavailable.stdout.is_empty());
+            assert_eq!(unavailable.lab_receipt.as_ref().unwrap()["executed"], false);
+            assert!(unavailable.candidate_checkout.is_some());
+            assert_eq!(
+                report.gate_results[0].status,
+                homeboy_core::gate::HomeboyGateStatus::Blocked
+            );
+            assert_eq!(
+                report.deterministic_gates[1].status,
+                AgentTaskGateStatus::Skipped
+            );
+            assert_eq!(
+                report.deterministic_gates[1]
+                    .skip_reason
+                    .as_ref()
+                    .unwrap()
+                    .blocking_gate_id,
+                unavailable.id
+            );
+            assert_eq!(
+                report.candidate_checkout.as_ref().unwrap().tree,
+                unavailable.candidate_checkout.as_ref().unwrap().tree
+            );
+        });
+    }
+
+    #[test]
+    fn executed_lab_tree_mismatch_is_rejected_at_real_checkout_binding_boundary() {
+        with_git_candidate(|repo, store| {
+            let checkout =
+                ImmutableCandidateCheckout::materialize(repo, "lab-binding-fixture", None, store)
+                    .unwrap()
+                    .unwrap();
+            let environment = crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+                hydrate_rust_cache: false,
+                ..Default::default()
+            };
+            let mut gate = crate::agent_task_gate::run_gate_command_with_supervision(
+                repo,
+                1,
+                "printf executed",
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                None,
+                &environment,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(gate.stdout, "executed");
+            // Deliberately corrupt proof at this consumer boundary. This test
+            // does not claim synthetic admitted receipts as transport evidence.
+            gate.lab_receipt = Some(
+                json!({"schema":crate::agent_task_gate::placement::LAB_GATE_RECEIPT_SCHEMA,
+                "candidate":{"fingerprint":{"tree":"mismatched-executed-tree"}}}),
+            );
+            let error =
+                bind_lab_gate_candidate_checkout(&mut gate, &checkout.identity()).unwrap_err();
+            assert_eq!(error.details["field"], "gate.candidate");
+            gate.lab_receipt = Some(
+                json!({"schema":crate::agent_task_gate::placement::LAB_GATE_DISPOSITION_SCHEMA, "executed":false}),
+            );
+            assert!(
+                bind_lab_gate_candidate_checkout(&mut gate, &checkout.identity()).is_err(),
+                "non-execution evidence cannot make an executed passing gate green"
+            );
+        });
+    }
 }
 
 fn run_declared_promotion_test(
@@ -2953,6 +3129,9 @@ fn run_promotion_gate(
     // A dependency-hydration opt-out also opts out of controller Rust cache
     // hydration; verification then runs solely with its isolated gate state.
     gate_environment.hydrate_rust_cache &= options.gates.hydrate_dependencies;
+    if gate_environment.lab_runner.is_none() {
+        gate_environment.lab_runner = crate::agent_task_gate::placement::declared_runner(command)?;
+    }
     // Pre-dispatch validation protects provider budget. Recheck in this exact
     // runtime because every gate receives its own isolated HOME/XDG directory.
     let result = if let Err(error) = crate::agent_task_gate::preflight_gate_toolchains(
@@ -2965,11 +3144,29 @@ fn run_promotion_gate(
     ) {
         // This runs before provider verification. A missing destination tool is
         // setup evidence, not candidate blame or provider-budget consumption.
-        Err(gate_setup_failure(
-            "destination_gate_toolchain",
-            "destination_gate_workspace",
-            error,
-        ))
+        if gate_environment.lab_runner.is_some()
+            && error
+                .details
+                .get("gate_disposition")
+                .and_then(Value::as_str)
+                == Some("unavailable")
+        {
+            Ok(
+                crate::agent_task_gate::placement::gate_non_execution_report(
+                    index,
+                    vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                    visibility,
+                    reveal_policy,
+                    &error,
+                ),
+            )
+        } else {
+            Err(gate_setup_failure(
+                "destination_gate_toolchain",
+                "destination_gate_workspace",
+                error,
+            ))
+        }
     } else if let Some(supervision) = supervision.as_deref() {
         crate::agent_task_gate::run_gate_command_with_supervision(
             worktree_path,

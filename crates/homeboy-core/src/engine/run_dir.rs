@@ -620,7 +620,7 @@ mod tests {
     fn drop_retains_failed_run_under_bounded_policy() {
         let _guard = crate::test_support::home_env_guard();
         let root = tempfile::tempdir().expect("runtime root");
-        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+        let _runtime = crate::test_support::EnvVarGuard::set("HOMEBOY_RUNTIME_TMPDIR", root.path());
         let run_dir = RunDir::create().expect("run dir");
         let path = run_dir.path().to_path_buf();
         std::fs::write(run_dir.step_file(files::TEST_FAILURES), b"failure evidence")
@@ -642,10 +642,16 @@ mod tests {
         )
         .expect("cleanup inventory");
 
-        assert_eq!(output.removed_count, 0);
-        assert_eq!(output.rows[0].owner_state.as_deref(), Some("failed"));
+        // The aggregate also drains superseded/socket-safe roots. Only this
+        // fixture's failed owner must be retained; other removals are legitimate.
+        let retained = output
+            .rows
+            .iter()
+            .find(|row| row.path == path.to_string_lossy())
+            .expect("the failed fixture has its own cleanup row");
+        assert_eq!(retained.action, "skip");
+        assert_eq!(retained.owner_state.as_deref(), Some("failed"));
         assert!(path.exists());
-        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
     }
 
     #[test]

@@ -36,8 +36,8 @@ mod cli_resolver;
 pub(crate) mod test_support;
 pub use cli_resolver::{
     resolve_agent_task_dispatch, resolve_command_label, resolve_lab_runner_hint,
-    set_agent_task_dispatch_resolver, set_command_label_resolver, set_lab_runner_hint_provider,
-    LabRunnerHint,
+    set_agent_task_dispatch_resolver, set_command_label_resolver, set_gate_runner_resolver,
+    set_lab_runner_hint_provider, LabRunnerHint,
 };
 mod command_path;
 mod connection;
@@ -55,6 +55,7 @@ mod evidence;
 mod execution;
 mod execution_bundle;
 mod extension_materialization;
+pub mod gate_transport;
 mod generation_store;
 pub mod lab_staging_controller;
 pub mod runner_staging_operation;

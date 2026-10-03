@@ -188,6 +188,17 @@ pub enum AgentTaskCommand {
     Adopt(AdoptArgs),
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
+    /// Internal admitted runner gate execution boundary.
+    #[command(hide = true)]
+    GateExecute {
+        #[arg(long)]
+        request: String,
+        #[arg(long)]
+        resources: Option<String>,
+        /// Private terminal artifact location; stdout carries only its digest.
+        #[arg(long)]
+        receipt_file: Option<String>,
+    },
     /// Finalize a green run, or recover publication from a durable Cook record.
     ///
     /// This is the core-owned publication boundary for external runtimes.

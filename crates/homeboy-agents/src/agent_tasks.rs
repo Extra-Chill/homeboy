@@ -223,6 +223,11 @@ pub mod review_dossier {
 
 /// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
+    pub use super::super::agent_task_gate::placement;
+    pub use super::super::agent_task_gate::{
+        preflight_gate_toolchains, run_gate_command_with_supervision, AgentTaskGateLiveStatus,
+        AgentTaskGateReport, AgentTaskGateStatus, AgentTaskGateTermination, GateSupervision,
+    };
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
         AgentTaskGateExtensionInput, AgentTaskGateInputSource,
