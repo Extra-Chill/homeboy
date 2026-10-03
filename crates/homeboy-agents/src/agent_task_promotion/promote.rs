@@ -391,6 +391,19 @@ fn patch_artifact_admission(
     options: &AgentTaskPromotionRequest,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PatchArtifactAdmission> {
+    if is_pathless_verified_empty_patch(artifact) {
+        // A no-change attempt (for example a gate-fix retry that left the
+        // candidate untouched) declares a zero-byte patch whose digest is the
+        // empty SHA-256. Runner reconciliation deliberately never mirrors
+        // non-actionable patches, so there is no file to resolve; the declared
+        // size and digest already prove the content. Admit it as an empty patch
+        // so promotion takes its established empty-patch branch.
+        return Ok(PatchArtifactAdmission {
+            path: PathBuf::new(),
+            patch: String::new(),
+            normalized_patch: None,
+        });
+    }
     let path = resolve_artifact_path(
         artifact,
         &outcome.task_id,
@@ -4304,6 +4317,18 @@ fn canonical_patch_provenance(artifact: &AgentTaskArtifact) -> String {
 
 fn canonical_patch_kind(kind: &str) -> Option<&'static str> {
     is_patch_artifact_kind(kind).then_some("patch")
+}
+
+const EMPTY_PATCH_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// True only for a patch artifact that has no local path and whose declared
+/// size and SHA-256 both prove it is empty. Any other pathless artifact still
+/// requires a verified controller-side projection.
+pub(crate) fn is_pathless_verified_empty_patch(artifact: &AgentTaskArtifact) -> bool {
+    artifact.path.is_none()
+        && is_empty_patch_artifact(artifact)
+        && artifact.size_bytes == Some(0)
+        && artifact.sha256.as_deref() == Some(EMPTY_PATCH_SHA256)
 }
 
 fn resolve_artifact_path(

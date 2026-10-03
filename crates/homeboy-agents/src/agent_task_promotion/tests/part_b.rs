@@ -2548,3 +2548,75 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
         .is_err()
     );
 }
+
+/// Regression for Extra-Chill/homeboy#15378: a Lab gate-fix attempt that made no
+/// change reports a pathless, zero-byte patch with the empty SHA-256. Runner
+/// reconciliation never mirrors it, so promotion must admit it as an empty
+/// patch instead of demanding a controller-side projection.
+#[test]
+fn pathless_verified_empty_patch_is_admitted_without_controller_projection() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let outcome_for = |size: u64, sha: String| -> AgentTaskOutcome {
+            serde_json::from_value(serde_json::json!({
+                "schema": AGENT_TASK_OUTCOME_SCHEMA,
+                "task_id": "cook-extrachill-gate-fix-2-gate-fix-3",
+                "status": "succeeded",
+                "artifacts": [{
+                    "schema": AGENT_TASK_ARTIFACT_SCHEMA,
+                    "id": "patch",
+                    "kind": "patch",
+                    "size_bytes": size,
+                    "sha256": sha
+                }]
+            }))
+            .expect("outcome JSON")
+        };
+        let options_for = |outcome: &AgentTaskOutcome| AgentTaskPromotionRequest {
+            source: serde_json::to_string(outcome).expect("source"),
+            source_run_id: Some("cook-detached-x-attempt-3-lab".to_string()),
+            source_path: None,
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "repo@empty-gate-fix".to_string(),
+            task_id: None,
+            artifact_id: Some("patch".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        };
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+
+        let empty = outcome_for(0, sha256_hex(""));
+        preflight_patch_artifact_admission_in_observation_store(
+            &empty,
+            &options_for(&empty),
+            &store,
+        )
+        .expect("verified empty pathless patch needs no projection");
+
+        // A pathless patch that claims content still requires a verified projection.
+        let non_empty = outcome_for(VALID_PATCH.len() as u64, sha256_hex(VALID_PATCH));
+        let error = preflight_patch_artifact_admission_in_observation_store(
+            &non_empty,
+            &options_for(&non_empty),
+            &store,
+        )
+        .expect_err("non-empty pathless patch still needs a projection");
+        assert!(error
+            .message
+            .contains("verified controller-side artifact projection"));
+
+        // Zero size with a non-empty digest is not a proven-empty patch.
+        let mismatched = outcome_for(0, sha256_hex(VALID_PATCH));
+        assert!(preflight_patch_artifact_admission_in_observation_store(
+            &mismatched,
+            &options_for(&mismatched),
+            &store,
+        )
+        .is_err());
+    });
+}
