@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.21] - 2026-10-03
+
+### Fixed
+- align release fixtures with their owning contracts
+- verify fixture owners instead of aggregate cleanup
+- execute isolated gates on admitted Lab runners
+
 ## [0.399.20] - 2026-10-03
 
 ### Fixed
