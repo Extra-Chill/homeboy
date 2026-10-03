@@ -1480,7 +1480,17 @@ mod tests {
 
     #[test]
     fn loop_stop_cli_adapter_cancels_active_work_through_the_daemon() {
-        with_isolated_home(|_| {
+        with_isolated_home(|home| {
+            let _config = homeboy::core::test_support::EnvVarGuard::set(
+                "HOMEBOY_CONFIG_ROOT",
+                home.path().join(".config/homeboy"),
+            );
+            let _source = homeboy::core::test_support::EnvVarGuard::unset(
+                homeboy::core::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+            );
+            let _lab = homeboy::core::test_support::EnvVarGuard::unset(
+                homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV,
+            );
             homeboy::agents::orchestration::register();
             homeboy::agents::agent_task_service::register_work_job_driver();
             homeboy::agents::agent_task_service::register_loop_work_job_handler();
@@ -1495,8 +1505,11 @@ mod tests {
             )
             .expect("build active loop work submission");
             let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server_shutdown = shutdown.clone();
             let server = std::thread::spawn(move || {
-                homeboy::core::daemon::serve_listener_for_requests(listener, 10)
+                homeboy::core::daemon::serve_listener_until_shutdown(listener, server_shutdown)
                     .expect("serve bounded daemon")
             });
             let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()
@@ -1531,9 +1544,8 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(value["on"], false);
             homeboy::agents::agent_task_service::await_cancelled_loop_stop_test_job(&job_id);
-            for _ in 0..5 {
-                let _ = client.status(&job_id);
-            }
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(address);
             server.join().expect("join daemon");
         });
     }

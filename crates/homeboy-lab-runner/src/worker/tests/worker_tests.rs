@@ -553,6 +553,20 @@ fn reverse_worker_rejects_tampered_private_at_file() {
     });
 }
 
+#[test]
+fn private_at_file_verifier_preserves_commands_without_private_inputs() {
+    let mut command = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf unchanged".to_string(),
+        "@missing-public-input.json".to_string(),
+    ];
+    let original = command.clone();
+    let _cleanup = crate::worker::verify_private_command_arguments(&mut command)
+        .expect("non-private command needs no filesystem inputs");
+    assert_eq!(command, original);
+}
+
 #[cfg(unix)]
 #[test]
 fn private_at_file_snapshot_survives_source_replacement_before_exec() {
