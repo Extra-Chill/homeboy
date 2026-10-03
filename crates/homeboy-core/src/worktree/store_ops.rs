@@ -693,19 +693,39 @@ fn create_with_store_unlocked(
         &source_checkout,
         &options.from.unwrap_or_else(|| "HEAD".to_string()),
     )?;
-    git::run_git_with_env(
-        &source_checkout,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &options.branch,
-            &worktree_path.to_string_lossy(),
-            &base_ref,
-        ],
-        "git worktree add",
-        &hydration_transport,
-    )?;
+    if branch_exists(&source_checkout, &options.branch)? {
+        // The branch already exists locally (e.g. an operator's branch for this
+        // task) and, per the ownership check above, is not checked out
+        // anywhere else. Adopt it instead of failing `worktree add -b` with
+        // "a branch named ... already exists" (#15364). Its history is kept;
+        // the recorded base stays the declared start point, which promotion
+        // diffs against.
+        git::run_git_with_env(
+            &source_checkout,
+            &[
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                &options.branch,
+            ],
+            "git worktree add existing branch",
+            &hydration_transport,
+        )?;
+    } else {
+        git::run_git_with_env(
+            &source_checkout,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &options.branch,
+                &worktree_path.to_string_lossy(),
+                &base_ref,
+            ],
+            "git worktree add",
+            &hydration_transport,
+        )?;
+    }
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
     pin_worktree_identity(&worktree_path)?;
 
