@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.22] - 2026-10-03
+
+### Fixed
+- retry promotion automatically after a gate setup failure
+- adopt an existing unclaimed local branch instead of failing worktree creation
+- merge paired broker credentials and report a missing submit credential as not ready
+
 ## [0.399.21] - 2026-10-03
 
 ### Fixed
