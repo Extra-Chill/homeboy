@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.24] - 2026-10-03
+
+### Changed
+- install the published release binary instead of rebuilding Homeboy from source on runner refresh
+
+### Fixed
+- classify Homeboy capability-preflight gate failures as gate declaration
+- admit a verified empty pathless patch at promotion
+- keep a dispatched Cook retry baseline alive for detached Lab staging
+
 ## [0.399.23] - 2026-10-03
 
 ### Fixed
