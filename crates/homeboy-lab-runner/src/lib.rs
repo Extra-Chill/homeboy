@@ -1042,6 +1042,28 @@ fn lab_runner_admission_candidate(
     capabilities_ready: bool,
     exact_version: bool,
 ) -> DefaultLabRunnerCandidate {
+    let submit_credential_ready =
+        mode != RunnerTunnelMode::Reverse || controller_has_submit_credential(runner_id);
+    lab_runner_admission_candidate_with_credential(
+        runner_id,
+        mode,
+        capacity,
+        status,
+        capabilities_ready,
+        exact_version,
+        submit_credential_ready,
+    )
+}
+
+fn lab_runner_admission_candidate_with_credential(
+    runner_id: &str,
+    mode: RunnerTunnelMode,
+    capacity: Option<usize>,
+    status: &RunnerStatusReport,
+    capabilities_ready: bool,
+    exact_version: bool,
+    submit_credential_ready: bool,
+) -> DefaultLabRunnerCandidate {
     let version_blocked = status.stale_daemon.is_none()
         && lab::offload::metadata::session_reported_version_blocks_admission(status);
     let admission_warning = status.admission_blocking_stale_daemon().filter(|_| {
@@ -1070,7 +1092,16 @@ fn lab_runner_admission_candidate(
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
         active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
         capabilities_ready,
+        submit_credential_ready,
     }
+}
+
+/// Whether this controller can authenticate submissions to `runner_id`'s
+/// reverse broker: an explicit `HOMEBOY_BROKER_TOKEN` or a paired, active
+/// submit credential with its controller-local token.
+fn controller_has_submit_credential(runner_id: &str) -> bool {
+    homeboy_core::broker_auth::broker_submit_token_for_runner(runner_id)
+        .is_ok_and(|token| token.is_some())
 }
 
 fn lab_runner_readiness_from_refresh_observations(
@@ -1234,7 +1265,17 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::ConnectedIneligible | LabRunnerReadinessState::CapacityBlocked => {
             candidates
                 .iter()
-                .map(|candidate| format!("homeboy runner status {}", candidate.id))
+                .map(|candidate| {
+                    if candidate.submit_credential_ready {
+                        format!("homeboy runner status {}", candidate.id)
+                    } else {
+                        // Merges into the runner's store; see `runner broker pair`.
+                        format!(
+                            "homeboy runner broker pair <credential-id> --runner-id {} --submit",
+                            candidate.id
+                        )
+                    }
+                })
                 .collect()
         }
         LabRunnerReadinessState::Stale => candidates
@@ -1279,6 +1320,10 @@ struct DefaultLabRunnerCandidate {
     active_jobs: usize,
     active_jobs_available: bool,
     capabilities_ready: bool,
+    /// Reverse-tunnel brokers require a paired submit token on every
+    /// controller request. Without one, every staging/submit call is
+    /// rejected, so the runner cannot accept this controller's work (#15368).
+    submit_credential_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1332,6 +1377,12 @@ impl DefaultLabRunnerCandidate {
                 .push("required_capabilities_unavailable".to_string());
             availability.accepts_jobs = false;
         }
+        if !self.submit_credential_ready {
+            availability
+                .reasons
+                .push("broker_submit_credential_missing".to_string());
+            availability.accepts_jobs = false;
+        }
         // Named, not fenced: an unverifiable runner keeps accepting work, but
         // an operator reading availability can see that nothing checked it.
         if self.unverified_daemon {
@@ -1352,6 +1403,7 @@ impl DefaultLabRunnerCandidate {
         let at_capacity = matches!(self.capacity, Some(capacity) if self.active_jobs >= capacity);
         let capacity_unknown = self.capacity.is_none() && self.active_jobs > 0;
         if !self.capabilities_ready
+            || !self.submit_credential_ready
             || !self.active_jobs_available
             || self.stale_daemon
             || !self.admission_fresh
@@ -2193,7 +2245,35 @@ mod tests {
             active_jobs: 0,
             active_jobs_available: true,
             capabilities_ready: true,
+            submit_credential_ready: true,
         }
+    }
+
+    /// #15368: a reverse runner this controller cannot authenticate to is
+    /// connected but must not be reported (or selected) as ready.
+    #[test]
+    fn reverse_runner_without_submit_credential_is_not_ready() {
+        let mut candidate = default_lab_candidate("homeboy-lab", RunnerTunnelMode::Reverse, true);
+        candidate.submit_credential_ready = false;
+        let availability = candidate.availability();
+        assert!(!availability.accepts_jobs);
+        assert!(availability
+            .reasons
+            .iter()
+            .any(|reason| reason == "broker_submit_credential_missing"));
+        assert!(!candidate.readiness().eligible);
+
+        let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
+        assert_eq!(
+            readiness.state,
+            LabRunnerReadinessState::ConnectedIneligible
+        );
+        assert!(readiness.available_runner_ids.is_empty());
+        assert!(readiness.remediation_commands[0].contains("runner broker pair"));
+        assert!(readiness.remediation_commands[0].contains("--runner-id homeboy-lab --submit"));
+
+        let ready = default_lab_candidate("homeboy-lab", RunnerTunnelMode::Reverse, true);
+        assert!(ready.availability().accepts_jobs);
     }
 
     fn skewed_runner_status(version: String) -> RunnerStatusReport {
@@ -2317,13 +2397,14 @@ mod tests {
     #[test]
     fn current_release_refresh_selects_provider_ready_compatible_skewed_runner() {
         let status = skewed_runner_status(patch_drift_version());
-        let candidate = lab_runner_admission_candidate(
+        let candidate = lab_runner_admission_candidate_with_credential(
             "homeboy-lab",
             RunnerTunnelMode::Reverse,
             Some(1),
             &status,
             true,
             false,
+            true,
         );
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
@@ -2335,11 +2416,12 @@ mod tests {
     #[test]
     fn current_release_refresh_respects_exact_version_admission() {
         let status = skewed_runner_status(patch_drift_version());
-        let candidate = lab_runner_admission_candidate(
+        let candidate = lab_runner_admission_candidate_with_credential(
             "homeboy-lab",
             RunnerTunnelMode::Reverse,
             Some(1),
             &status,
+            true,
             true,
             true,
         );
@@ -2366,13 +2448,14 @@ mod tests {
         let freshness = status.daemon_freshness.as_mut().expect("fixture freshness");
         freshness.fresh = true;
         freshness.stale_reason_code = None;
-        let candidate = lab_runner_admission_candidate(
+        let candidate = lab_runner_admission_candidate_with_credential(
             "homeboy-lab",
             RunnerTunnelMode::Reverse,
             Some(1),
             &status,
             true,
             false,
+            true,
         );
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
