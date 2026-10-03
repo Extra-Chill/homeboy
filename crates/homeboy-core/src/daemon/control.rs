@@ -414,6 +414,25 @@ fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>)
     (status.code(), None)
 }
 
+/// Whether the image `pid` is executing is the current binary. On Linux the
+/// running image stays readable through `/proc/<pid>/exe` even after its file
+/// was replaced. `None` when it cannot be inspected (other platforms, no
+/// digest, permissions), so the caller keeps its previous behavior.
+fn running_image_matches_current(pid: u32, current_digest: Option<&str>) -> Option<bool> {
+    let current_digest = current_digest?;
+    #[cfg(target_os = "linux")]
+    {
+        let image = Path::new("/proc").join(pid.to_string()).join("exe");
+        let digest = homeboy_engine_primitives::content_hash::sha256_file(&image).ok()?;
+        Some(digest == current_digest)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, current_digest);
+        None
+    }
+}
+
 #[cfg(test)]
 fn parse_daemon_process_candidate(
     line: &str,
@@ -477,9 +496,16 @@ fn parse_daemon_process_candidate_with_digest(
             }
         },
     };
-    let executable_matches = current_exe.is_some_and(|current| {
+    let path_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
+    // Same path is not the same binary: an upgrade that replaces the binary in
+    // place leaves a running daemon on the old (now unlinked) file. Claiming
+    // it runs the current executable gives it the new digest, so its own lease
+    // (which recorded the old binary) no longer matches and every replacement
+    // is refused while it stays alive. Prove it from the running image.
+    let executable_matches =
+        path_matches && running_image_matches_current(pid, current_digest).unwrap_or(true);
     let mut candidate = DaemonProcessCandidate {
         pid,
         process_start_identity: process_start_identity(pid).ok().flatten(),
@@ -698,6 +724,28 @@ mod command_state_dir_tests {
 
 #[cfg(test)]
 mod process_candidate_tests {
+    /// An in-place binary replacement leaves a running process on the old,
+    /// unlinked image; it must not be identified as the current executable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_image_is_compared_by_content_not_path() {
+        let me = std::process::id();
+        let digest = homeboy_engine_primitives::content_hash::sha256_file(std::path::Path::new(
+            "/proc/self/exe",
+        ))
+        .expect("hash own image");
+        assert_eq!(
+            super::running_image_matches_current(me, Some(&digest)),
+            Some(true)
+        );
+        assert_eq!(
+            super::running_image_matches_current(me, Some("0000000000000000")),
+            Some(false),
+            "a different image at the same path is not the current binary"
+        );
+        assert_eq!(super::running_image_matches_current(me, None), None);
+    }
+
     use super::*;
 
     #[test]

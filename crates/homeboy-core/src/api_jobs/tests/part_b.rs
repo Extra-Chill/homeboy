@@ -378,6 +378,136 @@ fn admitted_staging_dispatch(store: &JobStore, linked_durable_run_id: Option<&st
     job_id
 }
 
+/// A driver that, like the production `work` driver, reports execution
+/// ownership it cannot establish for a job that has not started.
+struct UnavailableOwnerFixtureDriver;
+
+impl crate::daemon::controller_job_driver::ControllerJobDriver for UnavailableOwnerFixtureDriver {
+    fn job_type(&self) -> &'static str {
+        "never-started-owner-fixture"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn execution_owner(
+        &self,
+        _request: &serde_json::Value,
+        _checkpoint: Option<&serde_json::Value>,
+    ) -> crate::error::Result<
+        Option<crate::daemon::controller_job_driver::ControllerJobExecutionOwner>,
+    > {
+        Ok(Some(
+            crate::daemon::controller_job_driver::ControllerJobExecutionOwner::Unavailable,
+        ))
+    }
+    fn public_request(&self, value: &serde_json::Value) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_progress(
+        &self,
+        value: &serde_json::Value,
+    ) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_result(&self, value: &serde_json::Value) -> crate::error::Result<serde_json::Value> {
+        Ok(value.clone())
+    }
+    fn public_error(
+        &self,
+        _: &crate::error::Error,
+    ) -> crate::daemon::controller_job_driver::ControllerJobPublicError {
+        crate::daemon::controller_job_driver::ControllerJobPublicError {
+            message: "owner fixture error".to_string(),
+            data: json!({}),
+        }
+    }
+    fn validate_secret_references(&self, _: &serde_json::Value) -> crate::error::Result<()> {
+        Ok(())
+    }
+    fn execute(
+        &self,
+        _: serde_json::Value,
+        _: crate::daemon::controller_job_driver::ControllerJobHandle,
+    ) -> crate::error::Result<serde_json::Value> {
+        Err(crate::error::Error::internal_unexpected(
+            "owner fixture must not execute",
+        ))
+    }
+    fn cancel(&self, _: &serde_json::Value) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
+fn admitted_owner_fixture_job(store: &JobStore, linked_durable_run_id: &str) -> Uuid {
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        crate::daemon::controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
+            UnavailableOwnerFixtureDriver,
+        ))
+        .unwrap()
+    });
+    let outcome = store
+        .admit_controller_job(
+            "controller.never-started-owner-fixture".to_string(),
+            format!("never-started-{}", Uuid::new_v4()),
+            ControllerJobState {
+                job_type: "never-started-owner-fixture".to_string(),
+                version: 1,
+                request: json!({ "schema": "fixture/v1" }),
+                public_request: json!({ "schema": "fixture/v1" }),
+                request_digest: format!("digest-{}", Uuid::new_v4()),
+                active_idempotency_key: None,
+                linked_durable_run_id: Some(linked_durable_run_id.to_string()),
+                checkpoint: None,
+                cancellation_requested: false,
+                cancellation_reason: None,
+                execution_claim_id: None,
+                recovery_attempted: false,
+            },
+        )
+        .expect("admit owner fixture job");
+    let ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {
+        panic!("unique fixture submission was unexpectedly replayed");
+    };
+    job_id
+}
+
+/// A driver-owned controller job that is still queued and never started has
+/// no execution: its linked run's terminal evidence retires it. Otherwise it
+/// stays `queued` on a draining daemon generation forever and blocks that
+/// generation's stop and every upgrade handoff. Once started, driver
+/// ownership protects it again.
+#[test]
+fn never_started_driver_owned_job_is_retired_by_terminal_linked_evidence() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-never-started-{}", Uuid::new_v4());
+    fixtures.terminal_run(&run_id, JobStatus::Succeeded);
+    let store = JobStore::default().with_daemon_lease("lease-draining".to_string());
+
+    let queued = admitted_owner_fixture_job(&store, &run_id);
+    assert_eq!(store.get(queued).expect("queued").status, JobStatus::Queued);
+    let reconciled = store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile terminal evidence");
+    assert_eq!(reconciled, vec![queued]);
+    assert_eq!(
+        store.get(queued).expect("retired").status,
+        JobStatus::Succeeded
+    );
+
+    let started = admitted_owner_fixture_job(&store, &run_id);
+    store
+        .start_controller_execution(started)
+        .expect("claim execution");
+    let reconciled = store
+        .reconcile_terminal_linked_daemon_jobs()
+        .expect("reconcile terminal evidence");
+    assert!(
+        reconciled.is_empty(),
+        "a started driver-owned job stays protected by its driver"
+    );
+}
+
 /// #13619: a staging dispatch whose linked agent task cancelled at the same
 /// timestamp it was created — before any child identity, checkpoint, or
 /// lifecycle-metadata linkage was recorded — must be classified and
