@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.25] - 2026-10-03
+
+### Fixed
+- continue a Cook from its candidate attempt when the latest retry failed before any provider ran
+- reclaim interrupted scratch whose owner is dead and evidence is harvested
+
 ## [0.399.24] - 2026-10-03
 
 ### Changed
