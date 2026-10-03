@@ -2651,7 +2651,52 @@ pub fn resolve_cook_continuation_run_id_in_store(
             None,
         ));
     }
-    Ok(run_id)
+    Ok(continuation_source_run_id(lifecycle_store, &recipe, run_id))
+}
+
+/// A latest attempt that failed before any provider ran, with a failure that
+/// is not retryable, has nothing to continue: it produced no candidate and
+/// replaying it reproduces the same failure. The Cook still owns earlier
+/// attempts. Continue from the newest one that holds a recoverable candidate,
+/// so its promotion and feedback loop can dispatch a fresh retry. This is also
+/// the only continuation a historical recipe admits after a controller upgrade
+/// (`historical_terminal_continuation_is_eligible`), so a Cook stranded by a
+/// pre-provider failure no longer becomes unrecoverable on every upgrade.
+fn continuation_source_run_id(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    recipe: &AgentTaskCookRecipe,
+    latest_run_id: String,
+) -> String {
+    use agent_task_lifecycle::AgentTaskRunState;
+    let Ok(latest) = lifecycle_store.read_record(&latest_run_id) else {
+        return latest_run_id;
+    };
+    let stranded_pre_provider_failure = latest.state == AgentTaskRunState::Failed
+        && latest.metadata.get("pre_execution_failure").is_some()
+        && has_unambiguous_zero_execution(&latest)
+        && !super::cook_pre_execution::retryable_pre_execution_failure(&latest);
+    if !stranded_pre_provider_failure {
+        return latest_run_id;
+    }
+    recipe
+        .attempts
+        .iter()
+        .rev()
+        .filter(|attempt| attempt.run_id != latest_run_id)
+        .find(|attempt| {
+            lifecycle_store
+                .read_record(&attempt.run_id)
+                .is_ok_and(|record| {
+                    matches!(
+                        record.state,
+                        AgentTaskRunState::CandidateRecoverable
+                            | AgentTaskRunState::PartialRecoverable
+                            | AgentTaskRunState::Succeeded
+                    )
+                })
+        })
+        .map(|attempt| attempt.run_id.clone())
+        .unwrap_or(latest_run_id)
 }
 
 /// Adoption accepts historical policy, but a remediation retry still needs the
@@ -3845,6 +3890,66 @@ mod tests {
         assert_eq!(
             resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "run").unwrap(),
             "run"
+        );
+    }
+
+    /// A latest attempt that failed before any provider ran with a
+    /// non-retryable failure is skipped: continuation resumes the newest
+    /// attempt that holds a recoverable candidate. A retryable pre-provider
+    /// failure is still selected so it can be retried.
+    #[test]
+    fn continuation_skips_a_stranded_pre_provider_retry_for_the_candidate_attempt() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, lifecycle_store) = rooted_stores(&context);
+        let (_, plan) = persist_recipe_run(&store, &lifecycle_store);
+        lifecycle_store
+            .mutate_record("run", |record| {
+                record.state = agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable;
+                true
+            })
+            .unwrap();
+        record_recipe_attempt_in_store(&store, "cook", 2, "retry", &plan).unwrap();
+        lifecycle_store
+            .submit_plan_with_runtime_admission(&plan, "retry", |_| Ok(serde_json::json!({})))
+            .unwrap();
+        crate::agent_task_lifecycle::record_cook_attempt_in_store(
+            &lifecycle_store,
+            "cook",
+            2,
+            "retry",
+        )
+        .unwrap();
+        let fail = |retryable: bool| {
+            lifecycle_store
+                .mutate_record("retry", |record| {
+                    record.state = agent_task_lifecycle::AgentTaskRunState::Failed;
+                    let metadata = record.ensure_metadata_object();
+                    metadata.insert("provider_executions_consumed".into(), serde_json::json!(0));
+                    metadata.insert("provider_run_ids".into(), serde_json::json!([]));
+                    metadata.insert(
+                        "pre_execution_failure".into(),
+                        serde_json::json!({
+                            "phase": "lab_staging_controller",
+                            "retryable": retryable,
+                        }),
+                    );
+                    true
+                })
+                .unwrap();
+        };
+
+        fail(false);
+        assert_eq!(
+            resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "cook").unwrap(),
+            "run",
+            "a stranded pre-provider retry resumes from the candidate attempt"
+        );
+
+        fail(true);
+        assert_eq!(
+            resolve_cook_continuation_run_id_in_store(&store, &lifecycle_store, "cook").unwrap(),
+            "retry",
+            "a retryable pre-provider failure is retried"
         );
     }
 
