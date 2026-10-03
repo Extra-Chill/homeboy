@@ -2498,7 +2498,10 @@ mod tests {
             "workspace_recovery": { "state": "explicitly_ephemeral" }
         }));
 
-        assert_eq!(cleanup_reason(&observation, &mut resource, &scratch, None), None);
+        assert_eq!(
+            cleanup_reason(&observation, &mut resource, &scratch, None),
+            None
+        );
     }
 
     #[test]
