@@ -442,6 +442,14 @@ impl JobStore {
     /// deliberately does not inspect, stop, or alter live children, so it is
     /// safe when a daemon's aggregate count includes both stale handoffs and
     /// genuine work.
+    /// Reconcile active jobs whose durable terminal evidence proves no workload
+    /// remains. Driver-owned jobs are normally left to their driver, but a job
+    /// that is still queued and never started has no execution at all: no
+    /// child, no checkpoint, no start time. It cannot hold a workload, so its
+    /// linked run's terminal evidence retires it too. Otherwise such a job,
+    /// left on a draining daemon generation that no longer schedules queued
+    /// work, blocks that generation's stop forever (and with it every daemon
+    /// upgrade handoff).
     pub fn reconcile_terminal_linked_daemon_jobs(&self) -> Result<Vec<Uuid>> {
         self.reconcile_terminal_linked_daemon_jobs_with_resolver(
             recovered_terminal_agent_task_evidence,
@@ -461,7 +469,9 @@ impl JobStore {
                     matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
                 })
                 .filter(|stored| {
-                    !stored_job_execution_liveness(stored, &local_child_liveness).driver_owned
+                    never_started(stored)
+                        || !stored_job_execution_liveness(stored, &local_child_liveness)
+                            .driver_owned
                 })
                 .filter_map(|stored| resolve_terminal(stored).map(|result| (stored.job.id, result)))
                 .collect::<Vec<_>>()
@@ -1104,4 +1114,15 @@ impl JobStore {
         jobs.sort_by_key(|job| (job.updated_at_ms, job.job_id.clone()));
         jobs
     }
+}
+
+/// A queued job that was never started has no execution to protect.
+fn never_started(stored: &StoredJob) -> bool {
+    stored.job.status == JobStatus::Queued
+        && stored.job.started_at_ms.is_none()
+        && stored.local_child.is_none()
+        && stored
+            .controller_job
+            .as_ref()
+            .is_none_or(|controller| controller.checkpoint.is_none())
 }
