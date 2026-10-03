@@ -9429,6 +9429,12 @@ fn pin_and_persist_initial_cook_workspace_base(
                 )
             })?;
         attempt.plan = options.identity.initial_plan.clone();
+        // The recipe's sensitive mapping projection is derived from its attempt
+        // plans. Replacing a plan must recompute it, as every other recipe write
+        // does, or the recipe fails validation the next time it is persisted or
+        // loaded (#15338).
+        recipe.sensitive_mappings =
+            super::cook_recipe::canonical_sensitive_mappings(&recipe.attempts)?;
         recipe.finalization["task_base_sha"] = Value::String(task_base_sha.clone());
         store.persist_recipe(&recipe)?;
         #[cfg(test)]
