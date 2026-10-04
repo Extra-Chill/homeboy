@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.20.13] - 2026-10-04
+
+### Fixed
+- pass the args input through to homeboy release
+
 ## [2.20.12] - 2026-09-30
 
 ### Fixed
