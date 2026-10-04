@@ -119,11 +119,18 @@ function validate(args, env) {
   // Only a state the session might act on is worth a turn. A run that merely
   // started reports no outcome and no decision, so it is posted for the human
   // to read without interrupting the agent.
-  const sessionThreadId = value(env.KIMAKI_THREAD_ID);
+  //
+  // The route names the owning thread: resolve-route.mjs only ever derives a
+  // thread route from the launching session's KIMAKI_THREAD_ID. Ownership must
+  // not be re-derived from the *delivering* process's environment. A
+  // long-lived daemon, an outbox retry, or a continuation started elsewhere
+  // carries some other session's thread id (or a stale one), and requiring a
+  // match there silently fell back to REST — invisible to the owning session,
+  // and a hard failure on hosts with no bot token. Any Kimaki host can deliver
+  // to any thread its bot owns.
   if (
     parsedRoute?.kind === 'thread' &&
-    sessionThreadId !== undefined &&
-    sessionThreadId === parsedRoute.id &&
+    isKimakiHost(env) &&
     !isProgressOnlyStatus(args.status)
   ) {
     return {
@@ -248,6 +255,12 @@ function finish(result) {
 // Statuses that announce progress rather than an outcome. Homeboy emits one of
 // these when a run begins, before any result exists to act on.
 const PROGRESS_ONLY_STATUSES = new Set(['started', 'running', 'queued']);
+
+// A delivering process runs on a Kimaki host when it was started from a Kimaki
+// session (KIMAKI_THREAD_ID) or the operator configured the CLI explicitly.
+function isKimakiHost(env) {
+  return value(env.KIMAKI_THREAD_ID) !== undefined || value(env.KIMAKI_CLI) !== undefined;
+}
 
 function isProgressOnlyStatus(status) {
   return PROGRESS_ONLY_STATUSES.has(String(status || '').trim().toLowerCase());

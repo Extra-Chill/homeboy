@@ -108,12 +108,30 @@ async function testOwningSessionThreadDeliversThroughKimaki() {
     assert.equal(requests[0].url, `/api/v10/channels/${threadOneId}/messages`);
   });
 
-  // A thread that is not this session's own thread keeps REST delivery.
+  // The route, not the delivering process, names the owner. A long-lived
+  // daemon started from another (or a stale) session still delivers the
+  // routed thread through Kimaki, and needs no REST credentials to do it.
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      {
+        KIMAKI_THREAD_ID: threadOneId,
+        KIMAKI_CLI: stub,
+        DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
+      },
+      { route: threadRoute(threadTwoId), status: 'durable_failure', body: 'cook needs attention' },
+    );
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.delivery.mode, 'kimaki_session');
+    assert.equal(requests.length, 0);
+  });
+  const foreignArgv = JSON.parse(fs.readFileSync(argvLog, 'utf8'));
+  assert.deepEqual(foreignArgv.slice(0, 3), ['send', '--thread', threadTwoId]);
+
+  // A host that is not running Kimaki keeps REST delivery for thread routes.
   await withServer(async ({ baseUrl, requests }) => {
     const result = await notify(
       {
         KIMAKI_BOT_TOKEN: secretToken,
-        KIMAKI_THREAD_ID: threadOneId,
         DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
       },
       { route: threadRoute(threadTwoId) },
