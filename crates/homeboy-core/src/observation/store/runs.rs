@@ -1664,6 +1664,50 @@ impl ObservationStore {
         Ok(rows > 0)
     }
 
+    /// Correct a settled `pass` observation that a later, authoritative
+    /// terminal outcome contradicts, for example a detached Cook whose handoff
+    /// observation finished `pass` before the controller's continuation
+    /// failed (Extra-Chill/homeboy#15393).
+    ///
+    /// Only `pass` -> `fail` is allowed: a failure is never upgraded, and a run
+    /// that is still `running` is left to its own writer. The run's
+    /// `notification_delivered` marker is cleared in the same statement so the
+    /// completion watcher announces the corrected status. The previous status
+    /// and when it changed are kept under `status_correction`.
+    ///
+    /// Returns `Ok(true)` when the status was corrected.
+    pub fn correct_passed_run_to_failed(&self, run_id: &str, reason: &str) -> Result<bool> {
+        validate_required("run_id", run_id)?;
+        let correction = serde_json::json!({
+            "previous_status": "pass",
+            "status": "fail",
+            "reason": reason,
+            "at": chrono::Utc::now().to_rfc3339(),
+        });
+        let correction_str = serde_json::to_string(&correction).map_err(|e| {
+            Error::internal_json(
+                e.to_string(),
+                Some("serialize status correction".to_string()),
+            )
+        })?;
+        let rows = execute_with_retry("correct passed run to failed", || {
+            self.connection.execute(
+                r#"
+                UPDATE runs
+                SET status = 'fail',
+                    metadata_json = json_set(
+                        json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered'),
+                        '$.status_correction',
+                        json(?1)
+                    )
+                WHERE id = ?2 AND status = 'pass'
+                "#,
+                params![correction_str, run_id],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
     /// Check whether a run's notification has already been delivered.
     pub fn is_notification_delivered(&self, run_id: &str) -> Result<bool> {
         validate_required("run_id", run_id)?;
@@ -2045,6 +2089,89 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    fn imported_run(id: &str, status: &str) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: "agent-task".to_string(),
+            component_id: Some("lab_offload_detached_handoff".to_string()),
+            started_at: "2026-10-04T13:05:28Z".to_string(),
+            finished_at: (status != "running").then(|| "2026-10-04T13:18:23Z".to_string()),
+            status: status.to_string(),
+            command: Some("homeboy agent-task".to_string()),
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({}),
+        }
+    }
+
+    /// Extra-Chill/homeboy#15393: a detached Cook's handoff run settled `pass`
+    /// and announced it, then the Cook failed. The lifecycle record keeps
+    /// `Succeeded` (Cook failure is a read-time projection), so nothing ever
+    /// rewrote the observation. The correction flips it and re-arms the
+    /// completion notification so the real outcome is announced.
+    #[test]
+    fn a_settled_pass_is_corrected_to_fail_and_renotified() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .upsert_imported_run(&imported_run("cook-attempt", "pass"))
+                .expect("settled pass");
+            assert!(store
+                .mark_notification_delivered("cook-attempt", "controller")
+                .expect("announce pass"));
+
+            assert!(store
+                .correct_passed_run_to_failed("cook-attempt", "cook finished candidate_recoverable")
+                .expect("correct"));
+            let run = store.get_run("cook-attempt").unwrap().unwrap();
+            assert_eq!(run.status, "fail");
+            assert_eq!(
+                run.metadata_json["status_correction"]["previous_status"],
+                "pass"
+            );
+            assert_eq!(
+                run.metadata_json["status_correction"]["reason"],
+                "cook finished candidate_recoverable"
+            );
+            assert!(!store.is_notification_delivered("cook-attempt").unwrap());
+            assert!(store
+                .mark_notification_delivered("cook-attempt", "controller")
+                .expect("corrected status can be announced"));
+        });
+    }
+
+    #[test]
+    fn correction_never_touches_running_failed_or_missing_runs() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            store
+                .upsert_imported_run(&imported_run("still-running", "running"))
+                .unwrap();
+            store
+                .upsert_imported_run(&imported_run("already-failed", "fail"))
+                .unwrap();
+            assert!(store
+                .mark_notification_delivered("already-failed", "controller")
+                .unwrap());
+
+            assert!(!store
+                .correct_passed_run_to_failed("still-running", "r")
+                .unwrap());
+            assert!(!store
+                .correct_passed_run_to_failed("already-failed", "r")
+                .unwrap());
+            assert!(!store.correct_passed_run_to_failed("missing", "r").unwrap());
+
+            assert_eq!(
+                store.get_run("still-running").unwrap().unwrap().status,
+                "running"
+            );
+            assert!(store.is_notification_delivered("already-failed").unwrap());
+        });
+    }
 
     #[test]
     fn detached_handoff_requires_acknowledgement_or_persists_terminal_error() {
