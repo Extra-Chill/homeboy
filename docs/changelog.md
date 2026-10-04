@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.30] - 2026-10-04
+
+### Fixed
+- keep supervising a detached cook until its child exits
+- flatten multi-line gate summaries in reviewer evidence
+
 ## [0.399.29] - 2026-10-04
 
 ### Fixed
