@@ -1394,7 +1394,27 @@ impl AgentTaskScheduler {
                             }),
                         });
                     }
-                    if !rotation_takes_over {
+                    let retry_allowed = AgentTaskScheduleSupport::should_retry(
+                        &outcome,
+                        result.attempt,
+                        execution_budget.max_same_provider_retries,
+                        execution_budget.max_provider_executions,
+                        retry_max_attempts,
+                        retry_budget_total,
+                        retry_budget_used,
+                        &plan.options.retry.retryable_failure_classifications,
+                    );
+                    // An explicit classification opt-in may retry a failed
+                    // provider in a clean workspace while reset_attempt_request
+                    // retains its patch. Default policy still stops for review;
+                    // terminal recovery still happens after retry exhaustion.
+                    let explicit_retry_allowed = retry_allowed
+                        && !plan
+                            .options
+                            .retry
+                            .retryable_failure_classifications
+                            .is_empty();
+                    if !rotation_takes_over && !explicit_retry_allowed {
                         AgentTaskScheduleSupport::preserve_base_bound_patch_after_provider_failure(
                             &mut outcome,
                         );
@@ -1406,16 +1426,9 @@ impl AgentTaskScheduler {
                         result.attempt,
                         outcome.summary.clone(),
                     ));
-                    if AgentTaskScheduleSupport::should_retry(
-                        &outcome,
-                        result.attempt,
-                        execution_budget.max_same_provider_retries,
-                        execution_budget.max_provider_executions,
-                        retry_max_attempts,
-                        retry_budget_total,
-                        retry_budget_used,
-                        &plan.options.retry.retryable_failure_classifications,
-                    ) {
+                    if retry_allowed
+                        && outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
+                    {
                         let timeout_compaction = (outcome.failure_classification
                             == Some(AgentTaskFailureClassification::Timeout))
                         .then_some("timeout");

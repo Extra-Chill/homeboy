@@ -826,6 +826,7 @@ pub(super) mod concurrency_tests {
     struct PermissionDeniedThenCommitExecutor {
         attempts: Arc<AtomicUsize>,
         workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
+        failures_before_success: usize,
     }
 
     impl AgentTaskExecutorAdapter for PermissionDeniedThenCommitExecutor {
@@ -853,13 +854,17 @@ pub(super) mod concurrency_tests {
                 request.executor.config["workspace_root"],
                 workspace.display().to_string()
             );
+            assert!(
+                !workspace.join("agent-change.txt").exists(),
+                "retry must start without the prior attempt's edits"
+            );
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             std::fs::write(
                 workspace.join("agent-change.txt"),
                 format!("attempt {attempt}\n"),
             )
             .expect("write agent change");
-            if attempt == 1 {
+            if attempt <= self.failures_before_success {
                 return AgentTaskOutcome {
                     task_id: request.task_id,
                     status: AgentTaskOutcomeStatus::Failed,
@@ -890,11 +895,6 @@ pub(super) mod concurrency_tests {
     }
 
     #[test]
-    #[ignore = "homeboy#15007: preserve_base_bound_patch_after_provider_failure \
-freezes any provider failure that left a base-bound patch into \
-CandidateRecoverable and should_retry unconditionally refuses to retry that \
-status, even though this plan explicitly lists the failure's classification \
-in retry.retryable_failure_classifications"]
     fn retry_uses_clean_isolated_workspace_after_permission_denial() {
         // Attempt worktrees are now retained when they hold work (#8579), so
         // isolate the controller-scratch home to keep those retained checkouts
@@ -916,6 +916,7 @@ in retry.retryable_failure_classifications"]
         let executor = PermissionDeniedThenCommitExecutor {
             attempts: Arc::new(AtomicUsize::new(0)),
             workspaces: Arc::new(Mutex::new(Vec::new())),
+            failures_before_success: 1,
         };
         let attempts = Arc::clone(&executor.attempts);
         let workspaces = Arc::clone(&executor.workspaces);
@@ -984,6 +985,97 @@ in retry.retryable_failure_classifications"]
             retry.data["artifacts"][0]["metadata"]["change_source"],
             "uncommitted_attempt_workspace"
         );
+    }
+
+    #[test]
+    fn failed_patch_retries_preserve_candidates_and_respect_policy_and_budget() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        for (name, classifications, executions, expected_attempts) in [
+            (
+                "explicit-exhaustion",
+                vec![AgentTaskFailureClassification::Transient],
+                2,
+                2,
+            ),
+            ("default-review", vec![], 2, 1),
+            (
+                "classification-mismatch",
+                vec![AgentTaskFailureClassification::Provider],
+                2,
+                1,
+            ),
+            (
+                "execution-budget",
+                vec![AgentTaskFailureClassification::Transient],
+                1,
+                1,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let source = temp.path().join("source");
+            init_git_workspace(&source);
+            let executor = PermissionDeniedThenCommitExecutor {
+                attempts: Arc::new(AtomicUsize::new(0)),
+                workspaces: Arc::new(Mutex::new(Vec::new())),
+                failures_before_success: 2,
+            };
+            let attempts = Arc::clone(&executor.attempts);
+            let workspaces = Arc::clone(&executor.workspaces);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor)).with_run_id(name);
+            let mut plan = plan_with_tasks(1);
+            plan.tasks[0].workspace.root = Some(source.display().to_string());
+            plan.tasks[0].executor.config = json!({
+                "workspace": { "root": source.display().to_string() },
+                "workspace_root": source.display().to_string(),
+            });
+            plan.options.retry.max_attempts = 2;
+            plan.options.execution_budget.max_provider_executions = executions;
+            plan.options.execution_budget.max_same_provider_retries = 1;
+            plan.options.retry.retryable_failure_classifications = classifications;
+            crate::agent_task_lifecycle::submit_plan(&plan, Some(name)).expect("durable run");
+
+            let aggregate = scheduler.run(plan);
+
+            assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts, "{name}");
+            assert_eq!(
+                aggregate.status,
+                AgentTaskAggregateStatus::PartialRecoverable,
+                "{name}"
+            );
+            let outcome = &aggregate.outcomes[0];
+            assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+            assert_eq!(
+                outcome.failure_classification,
+                Some(AgentTaskFailureClassification::Transient)
+            );
+            for attempt in 1..=expected_attempts {
+                let patch = outcome
+                    .artifacts
+                    .iter()
+                    .find(|artifact| {
+                        artifact.id == format!("task-1-attempt-{attempt}-uncommitted-changes")
+                    })
+                    .expect("each failed attempt's patch remains available");
+                assert!(patch.size_bytes.is_some_and(|size| size > 0));
+                assert!(patch.sha256.is_some());
+                assert!(patch.metadata["base_ref"].is_string());
+            }
+            let workspaces = workspaces.lock().expect("workspaces");
+            if expected_attempts == 2 {
+                assert_ne!(workspaces[0], workspaces[1]);
+                assert!(outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.retry_attempt"
+                        && diagnostic.data["artifacts"][0]["id"]
+                            == "task-1-attempt-1-uncommitted-changes"
+                }));
+            }
+            assert_eq!(
+                std::fs::read_to_string(workspaces[0].join("agent-change.txt"))
+                    .expect("retained first workspace"),
+                "attempt 1\n"
+            );
+            assert!(!source.join("agent-change.txt").exists());
+        }
     }
 
     #[test]
