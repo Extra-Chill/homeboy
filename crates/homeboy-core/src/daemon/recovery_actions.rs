@@ -87,6 +87,22 @@ pub fn start() -> ExecutableAction {
     )
 }
 
+/// Resolve and run the daemon recovery the current status report authorizes.
+/// Used where the caller knows the resident daemon is stale but not which
+/// exact repair applies; `recover` derives that from live status.
+pub fn recover() -> ExecutableAction {
+    action(
+        "daemon.recover",
+        "restart the resident daemon onto the installed Homeboy binary".to_string(),
+        [
+            "daemon".to_string(),
+            "recover".to_string(),
+            "--yes".to_string(),
+        ],
+        ActionSafety::Mutating,
+    )
+}
+
 pub fn adopt_orphan(lease_id: &str) -> ExecutableAction {
     action(
         "daemon.adopt_orphan",
