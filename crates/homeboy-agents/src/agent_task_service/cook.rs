@@ -6375,9 +6375,40 @@ fn run_cook_reported(
                     error,
                 );
             }
+            if result.exit_code != 0 {
+                correct_settled_pass_observation(lifecycle_store, run_id, &result.value.status);
+            }
         }
     }
     Ok(result)
+}
+
+/// A detached Cook's handoff observation can settle `pass` (the runner job
+/// finished) before the controller's continuation fails. The observation and
+/// its completion notification must follow the Cook's real outcome, so a
+/// failed Cook corrects such a run to `fail`, which also re-arms the
+/// completion notification (Extra-Chill/homeboy#15393). Best effort: the
+/// lifecycle record already holds the authoritative outcome.
+fn correct_settled_pass_observation(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    cook_status: &str,
+) {
+    let corrected = lifecycle_store
+        .open_observation_initialized()
+        .and_then(|observation| {
+            observation.correct_passed_run_to_failed(
+                run_id,
+                &format!("cook finished {cook_status} after the run was recorded pass"),
+            )
+        });
+    if let Err(error) = corrected {
+        homeboy_core::log_status!(
+            "agent-task",
+            "Could not correct the observation status of {run_id}: {}",
+            error.message
+        );
+    }
 }
 
 /// Convert an error that occurs after recipe materialization into the normal

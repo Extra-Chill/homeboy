@@ -2096,21 +2096,42 @@ fn terminal_artifact_projection_readiness_for_record_with(
     ))
 }
 
+/// Observation status for a terminal lifecycle state. A run whose observation
+/// was already corrected from `pass` to `fail` (a Cook that failed after its
+/// run settled, see `ObservationStore::correct_passed_run_to_failed`) stays
+/// `fail`: the lifecycle record still says `Succeeded` for those, and
+/// re-projecting it must not undo the correction (Extra-Chill/homeboy#15393).
+fn terminal_observation_status(
+    state: &AgentTaskRunState,
+    existing_metadata: Option<&Value>,
+) -> Option<&'static str> {
+    let status = match state {
+        AgentTaskRunState::Succeeded => "pass",
+        AgentTaskRunState::CandidateRecoverable
+        | AgentTaskRunState::PartialRecoverable
+        | AgentTaskRunState::PartialFailure
+        | AgentTaskRunState::Failed
+        | AgentTaskRunState::Cancelled => "fail",
+        _ => return None,
+    };
+    let corrected = existing_metadata
+        .and_then(|metadata| metadata.get("status_correction"))
+        .is_some_and(|correction| correction["status"] == "fail");
+    Some(if corrected { "fail" } else { status })
+}
+
 fn project_terminal_artifacts_in_store(
     store: &homeboy_core::observation::ObservationStore,
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
-    let status = match record.state {
-        AgentTaskRunState::Succeeded => "pass",
-        AgentTaskRunState::CandidateRecoverable => "fail",
-        AgentTaskRunState::PartialRecoverable => "fail",
-        AgentTaskRunState::PartialFailure => "fail",
-        AgentTaskRunState::Failed => "fail",
-        AgentTaskRunState::Cancelled => "fail",
-        _ => return Ok(()),
-    };
     let existing = store.get_run(&record.run_id)?;
+    let Some(status) = terminal_observation_status(
+        &record.state,
+        existing.as_ref().map(|run| &run.metadata_json),
+    ) else {
+        return Ok(());
+    };
     let homeboy_version = existing
         .as_ref()
         .map(|run| run.homeboy_version.clone())
@@ -3677,5 +3698,36 @@ mod tests {
                 error.message
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod terminal_observation_status_tests {
+    use super::*;
+
+    #[test]
+    fn a_corrected_run_is_not_reprojected_back_to_pass() {
+        let corrected =
+            json!({ "status_correction": { "previous_status": "pass", "status": "fail" } });
+        assert_eq!(
+            terminal_observation_status(&AgentTaskRunState::Succeeded, Some(&corrected)),
+            Some("fail")
+        );
+        assert_eq!(
+            terminal_observation_status(&AgentTaskRunState::Succeeded, Some(&json!({}))),
+            Some("pass")
+        );
+        assert_eq!(
+            terminal_observation_status(&AgentTaskRunState::Succeeded, None),
+            Some("pass")
+        );
+        assert_eq!(
+            terminal_observation_status(&AgentTaskRunState::Failed, None),
+            Some("fail")
+        );
+        assert_eq!(
+            terminal_observation_status(&AgentTaskRunState::Running, None),
+            None
+        );
     }
 }
