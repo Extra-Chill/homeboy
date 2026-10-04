@@ -2200,20 +2200,39 @@ fn converge_resident_daemon_after_controller_reconciliation(
     ) {
         PromotedDaemonStart::InProcess => converge_invoking_daemon(),
         PromotedDaemonStart::AlreadyInstalled => Ok(false),
-        PromotedDaemonStart::BlockedActiveJobs => Err(upgrade_daemon_start_required(
-            "active daemon jobs prevent a safe restart; wait for them to finish, then rerun the upgrade",
-        )),
-        PromotedDaemonStart::BlockedUnsafeRestart => Err(upgrade_daemon_inspection_required(
-            "the stale daemon is not eligible for an automatic idle restart; inspect homeboy daemon status before retrying",
-        )),
-        PromotedDaemonStart::MissingLease => Err(upgrade_daemon_start_required(
-            "the stale resident daemon has no exact lease identity to stop safely",
-        )),
+        PromotedDaemonStart::PendingRestart => {
+            warn_pending_daemon_restart(if status.freshness.active_jobs > 0 {
+                "the stale resident daemon has jobs in flight"
+            } else {
+                "the stale resident daemon has no exact lease identity to stop safely"
+            });
+            Ok(false)
+        }
+        PromotedDaemonStart::StopForLease => {
+            // Homeboy did not launch this daemon (for example a systemd unit
+            // running `daemon serve`), so it cannot restart it, but stopping an
+            // idle daemon by its exact lease is safe: the lease-bound stop
+            // fences new admissions and revalidates that no work is active.
+            // Its supervisor, or the next command, starts the installed binary.
+            // A refused stop (work admitted in between) leaves it pending
+            // rather than failing an otherwise complete upgrade (#15431).
+            let lease_id = status
+                .freshness
+                .lease_id
+                .as_deref()
+                .expect("StopForLease requires a lease");
+            if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {
+                warn_pending_daemon_restart(&format!(
+                    "the idle stale daemon could not be stopped: {}",
+                    error.message
+                ));
+            }
+            Ok(false)
+        }
         PromotedDaemonStart::InstalledBinary => start_installed_daemon(installed_identity, None),
-        PromotedDaemonStart::RestartInstalledBinary => start_installed_daemon(
-            installed_identity,
-            status.freshness.lease_id.as_deref(),
-        ),
+        PromotedDaemonStart::RestartInstalledBinary => {
+            start_installed_daemon(installed_identity, status.freshness.lease_id.as_deref())
+        }
     }
 }
 
@@ -2223,9 +2242,8 @@ enum PromotedDaemonStart {
     AlreadyInstalled,
     InstalledBinary,
     RestartInstalledBinary,
-    BlockedActiveJobs,
-    BlockedUnsafeRestart,
-    MissingLease,
+    StopForLease,
+    PendingRestart,
 }
 
 fn promoted_daemon_start(
@@ -2242,24 +2260,31 @@ fn promoted_daemon_start(
     }
     if !daemon_running {
         if active_jobs > 0 {
-            return PromotedDaemonStart::BlockedActiveJobs;
+            return PromotedDaemonStart::PendingRestart;
         }
         return PromotedDaemonStart::InstalledBinary;
     }
     if daemon_identity == Some(installed_identity) {
         return PromotedDaemonStart::AlreadyInstalled;
     }
-    if active_jobs == 0 && idle_restart_authorized {
-        if has_lease {
-            PromotedDaemonStart::RestartInstalledBinary
-        } else {
-            PromotedDaemonStart::MissingLease
-        }
-    } else if active_jobs > 0 {
-        PromotedDaemonStart::BlockedActiveJobs
+    if active_jobs > 0 || !has_lease {
+        PromotedDaemonStart::PendingRestart
+    } else if idle_restart_authorized {
+        PromotedDaemonStart::RestartInstalledBinary
     } else {
-        PromotedDaemonStart::BlockedUnsafeRestart
+        // An externally supervised daemon cannot be automatically restarted by
+        // Homeboy, but an idle daemon with an exact lease can be safely stopped.
+        PromotedDaemonStart::StopForLease
     }
+}
+
+/// The upgrade itself succeeded; only the resident daemon still runs the old
+/// build. Say so on stderr, which stays visible when a controller captures
+/// output, with the command that converges it once the daemon is idle.
+fn warn_pending_daemon_restart(reason: &str) {
+    eprintln!(
+        "[upgrade] daemon restart pending: {reason}; once it is idle run `homeboy daemon recover --yes` (or restart its service)"
+    );
 }
 
 fn converge_invoking_daemon() -> Result<bool> {
@@ -2293,19 +2318,6 @@ fn upgrade_daemon_start_required(cause: &str) -> Error {
     );
     error.details["restart_required"] = serde_json::Value::Bool(true);
     error.details["recovery_command"] = serde_json::Value::String(command);
-    error
-}
-
-fn upgrade_daemon_inspection_required(cause: &str) -> Error {
-    let command = "homeboy daemon status";
-    let mut error = Error::validation_invalid_argument(
-        "daemon_build_identity",
-        format!("controller upgrade could not safely replace the stale resident daemon: {cause}"),
-        None,
-        Some(vec![format!("Run: {command}")]),
-    );
-    error.details["restart_required"] = serde_json::Value::Bool(true);
-    error.details["recovery_command"] = serde_json::Value::String(command.to_string());
     error
 }
 
@@ -5221,36 +5233,47 @@ mod promoted_daemon_tests {
     }
 
     #[test]
-    fn active_jobs_block_automatic_restart_with_actionable_error() {
+    fn active_jobs_leave_restart_pending() {
         let decision = promoted_daemon_start(OLD, NEW, true, Some(OLD), 1, false, true);
-        assert_eq!(decision, PromotedDaemonStart::BlockedActiveJobs,);
-        let error = super::upgrade_daemon_start_required(
-            "active daemon jobs prevent a safe restart; wait for them to finish, then rerun the upgrade",
-        );
-        assert_eq!(error.details["restart_required"], true);
-        assert!(error.message.contains("active daemon jobs"));
-        assert_eq!(error.details["recovery_command"], "homeboy daemon start");
+        assert_eq!(decision, PromotedDaemonStart::PendingRestart);
     }
 
     #[test]
-    fn stale_resident_without_lease_refuses_restart_with_typed_recovery() {
+    fn stale_resident_without_lease_leaves_restart_pending() {
         let decision = promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, true, false);
-        assert_eq!(decision, PromotedDaemonStart::MissingLease);
-        let error = upgrade_daemon_start_required(
-            "the stale resident daemon has no exact lease identity to stop safely",
-        );
-        assert_eq!(error.details["restart_required"], true);
-        assert_eq!(error.details["recovery_command"], "homeboy daemon start");
+        assert_eq!(decision, PromotedDaemonStart::PendingRestart);
     }
 
     #[test]
-    fn stale_resident_without_restart_authority_never_starts_the_old_binary() {
+    fn idle_non_restartable_resident_with_lease_selects_lease_bound_stop() {
         assert_eq!(
             promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, false, true),
-            PromotedDaemonStart::BlockedUnsafeRestart
+            PromotedDaemonStart::StopForLease
         );
-        let error = super::upgrade_daemon_inspection_required("idle restart not authorized");
-        assert_eq!(error.details["recovery_command"], "homeboy daemon status");
+    }
+
+    #[test]
+    fn idle_external_daemon_without_lease_is_pending_not_an_error() {
+        assert_eq!(
+            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, false, false),
+            PromotedDaemonStart::PendingRestart
+        );
+    }
+
+    #[test]
+    fn active_jobs_leave_restart_pending_even_when_lease_is_known() {
+        assert_eq!(
+            promoted_daemon_start(OLD, NEW, true, Some(OLD), 1, false, true),
+            PromotedDaemonStart::PendingRestart
+        );
+    }
+
+    #[test]
+    fn restartable_daemon_keeps_the_existing_restart_path() {
+        assert_eq!(
+            promoted_daemon_start(OLD, NEW, true, Some(OLD), 0, true, true),
+            PromotedDaemonStart::RestartInstalledBinary
+        );
     }
 
     #[test]
