@@ -9,7 +9,8 @@ use std::path::Path;
 
 use homeboy_engine_primitives::codebase_scan::{self, ExtensionFilter, ScanConfig};
 
-use crate::conventions::AuditFinding;
+use crate::conventions::{AuditFinding, Language};
+use crate::detectors::source_text::SourceMasks;
 use crate::findings::{Finding, Severity};
 use crate::walker::is_test_path;
 
@@ -507,14 +508,19 @@ fn strip_use_lines(body: &str) -> String {
 
 fn extract_test_functions(content: &str) -> Vec<TestFunction> {
     let lines: Vec<&str> = content.lines().collect();
+    let masks = SourceMasks::new(content, Language::Rust);
     let mut tests = Vec::new();
     let mut i = 0;
     let mut enclosing_depth = 0i32;
     let mut function_end_depths = Vec::new();
 
     while i < lines.len() {
-        if !lines[i].trim().starts_with("#[test]") {
-            update_enclosing_context(lines[i], &mut enclosing_depth, &mut function_end_depths);
+        if !masks.syntax(i).trim().starts_with("#[test]") {
+            update_enclosing_context(
+                masks.syntax(i),
+                &mut enclosing_depth,
+                &mut function_end_depths,
+            );
             i += 1;
             continue;
         }
@@ -536,7 +542,7 @@ fn extract_test_functions(content: &str) -> Vec<TestFunction> {
             break;
         }
         let mut fn_line = i + 1;
-        while fn_line < lines.len() && !lines[fn_line].contains("fn ") {
+        while fn_line < lines.len() && !masks.syntax(fn_line).contains("fn ") {
             if lines[fn_line].trim().starts_with("#[cfg(") {
                 cfgs.push(lines[fn_line].trim().to_string());
             }
@@ -546,52 +552,56 @@ fn extract_test_functions(content: &str) -> Vec<TestFunction> {
             break;
         }
 
-        let Some(name) = extract_fn_name(lines[fn_line]) else {
+        let Some(name) = extract_fn_name(masks.syntax(fn_line)) else {
             i = fn_line + 1;
             continue;
         };
 
         let mut depth = 0i32;
         let mut started = false;
-        let mut body_lines = Vec::new();
+        let mut body = String::new();
         let mut j = fn_line;
 
         while j < lines.len() {
-            let line = lines[j];
-            if started {
-                body_lines.push(line);
-            }
-            for ch in line.chars() {
-                match ch {
+            for (original, code) in lines[j].chars().zip(masks.syntax(j).chars()) {
+                match code {
                     '{' => {
                         depth += 1;
-                        started = true;
+                        if !started {
+                            started = true;
+                            continue;
+                        }
                     }
-                    '}' => depth -= 1,
+                    '}' => {
+                        depth -= 1;
+                        if started && depth == 0 {
+                            break;
+                        }
+                    }
                     _ => {}
+                }
+                if started {
+                    body.push(original);
                 }
             }
             if started && depth == 0 {
                 break;
             }
-            j += 1;
-        }
-
-        if let Some(last) = body_lines.last_mut() {
-            if let Some((before, _)) = last.rsplit_once('}') {
-                *last = before;
+            if started {
+                body.push('\n');
             }
+            j += 1;
         }
 
         tests.push(TestFunction {
             name,
-            body: body_lines.join("\n"),
+            body,
             line: fn_line + 1,
             nested,
             cfgs,
         });
-        for line in &lines[i..=j.min(lines.len().saturating_sub(1))] {
-            enclosing_depth += brace_delta(line);
+        for index in i..=j.min(lines.len().saturating_sub(1)) {
+            enclosing_depth += brace_delta(masks.syntax(index));
         }
         pop_closed_functions(enclosing_depth, &mut function_end_depths);
         i = j + 1;
@@ -601,7 +611,7 @@ fn extract_test_functions(content: &str) -> Vec<TestFunction> {
 }
 
 fn update_enclosing_context(line: &str, depth: &mut i32, function_end_depths: &mut Vec<i32>) {
-    let code = line.split_once("//").map(|(code, _)| code).unwrap_or(line);
+    let code = line;
     let opens = code.chars().filter(|ch| *ch == '{').count() as i32;
     let closes = code.chars().filter(|ch| *ch == '}').count() as i32;
     if code.contains("fn ") && opens > closes {
@@ -621,8 +631,7 @@ fn pop_closed_functions(depth: i32, function_end_depths: &mut Vec<i32>) {
 }
 
 fn brace_delta(line: &str) -> i32 {
-    let code = line.split_once("//").map(|(code, _)| code).unwrap_or(line);
-    code.chars().fold(0, |delta, ch| match ch {
+    line.chars().fold(0, |delta, ch| match ch {
         '{' => delta + 1,
         '}' => delta - 1,
         _ => delta,
@@ -649,11 +658,9 @@ fn extract_fn_name(line: &str) -> Option<String> {
 /// embedded in test fixtures is never mistaken for a real attribute. A line
 /// whose trimmed text is exactly `#[ignore]` is flagged.
 fn detect_ignored_without_reason(file: &str, content: &str) -> Vec<Finding> {
-    let masked = blank_string_literals(content);
-    masked
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| line.trim() == "#[ignore]")
+    let masks = SourceMasks::new(content, Language::Rust);
+    content.lines().enumerate()
+        .filter(|(index, _)| masks.syntax(*index).trim() == "#[ignore]")
         .map(|(index, _)| Finding {
             convention: "test_quality".to_string(),
             severity: Severity::Info,
@@ -669,101 +676,6 @@ fn detect_ignored_without_reason(file: &str, content: &str) -> Vec<Finding> {
             line: Some(index as u32 + 1),
         })
         .collect()
-}
-
-/// Replace the contents of Rust string literals (regular `"..."` and raw
-/// `r#"..."#`) with spaces while preserving newlines, so line-oriented scans
-/// see the code skeleton but not literal payloads such as test fixtures.
-///
-/// Operates purely on bytes (never slicing `&str` at an arbitrary offset) so it
-/// is safe on files containing multi-byte UTF-8 characters. Every non-newline
-/// byte inside a literal is replaced by a single space; because ASCII spaces
-/// and newlines are one byte each, the output preserves line boundaries and
-/// column-agnostic line numbers.
-fn blank_string_literals(content: &str) -> String {
-    let bytes = content.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-
-    let blank = |byte: u8| if byte == b'\n' { b'\n' } else { b' ' };
-
-    while i < bytes.len() {
-        let byte = bytes[i];
-
-        // Raw string: r"...", r#"..."#, r##"..."##, ...
-        if byte == b'r' {
-            let mut j = i + 1;
-            let mut hashes = 0;
-            while j < bytes.len() && bytes[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'"' {
-                out.push(b'r');
-                out.extend(std::iter::repeat_n(b'#', hashes));
-                out.push(b'"');
-                j += 1;
-                // Closing delimiter is `"` followed by `hashes` `#` bytes.
-                loop {
-                    if j >= bytes.len() {
-                        break;
-                    }
-                    let is_close = bytes[j] == b'"'
-                        && bytes[j + 1..]
-                            .iter()
-                            .take(hashes)
-                            .filter(|b| **b == b'#')
-                            .count()
-                            == hashes;
-                    if is_close {
-                        out.push(b'"');
-                        out.extend(std::iter::repeat_n(b'#', hashes));
-                        j += 1 + hashes;
-                        break;
-                    }
-                    out.push(blank(bytes[j]));
-                    j += 1;
-                }
-                i = j;
-                continue;
-            }
-        }
-
-        // Regular string: "...", honoring backslash escapes.
-        if byte == b'"' {
-            out.push(b'"');
-            let mut j = i + 1;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b'\\' => {
-                        out.push(b' ');
-                        if j + 1 < bytes.len() {
-                            out.push(blank(bytes[j + 1]));
-                        }
-                        j += 2;
-                    }
-                    b'"' => {
-                        out.push(b'"');
-                        j += 1;
-                        break;
-                    }
-                    other => {
-                        out.push(blank(other));
-                        j += 1;
-                    }
-                }
-            }
-            i = j;
-            continue;
-        }
-
-        out.push(byte);
-        i += 1;
-    }
-
-    // Every replaced byte is ASCII (space/newline) and untouched bytes retain
-    // their original UTF-8 sequences, so the result is always valid UTF-8.
-    String::from_utf8(out).unwrap_or_else(|_| content.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1072,6 +984,104 @@ fn helper() {
             .contains("Unreachable test `nested_test`")));
     }
 
+    #[test]
+    fn literal_and_comment_braces_do_not_change_test_reachability() {
+        let source = r###"
+const SOURCE_FIXTURE: &str = r##"
+#[test]
+fn fake_test() { assert!(true); }
+"##;
+fn helper<'a>(text: &'a str) {
+    let open = '{';
+    let close = b'}';
+    let url = "https://example.test/{";
+    /* } fn fake_helper() {
+       /* nested { */
+    */
+}
+#[test]
+fn real_test() {
+    let fixture = r#"unclosed { and // text
+    #[test]
+    fn not_a_test() {}
+    "#;
+    crate::product::run(fixture);
+}
+fn enclosing() {
+    let text = "}";
+    #[test]
+    fn actually_nested() { crate::product::run("{"); }
+}
+#[test]
+fn after_nested() { crate::product::run("é"); }
+"###;
+        let tests = extract_test_functions(source);
+        assert_eq!(
+            tests
+                .iter()
+                .map(|test| (test.name.as_str(), test.nested))
+                .collect::<Vec<_>>(),
+            vec![
+                ("real_test", false),
+                ("actually_nested", true),
+                ("after_nested", false)
+            ]
+        );
+        assert!(
+            tests[0].body.contains("not_a_test"),
+            "retain original body for behavioral analysis"
+        );
+        assert!(tests[2].body.contains("é"));
+        let root = tempfile::tempdir().expect("audit root");
+        std::fs::create_dir(root.path().join("tests")).expect("test directory");
+        std::fs::write(root.path().join("tests/lexical_test.rs"), source).expect("source fixture");
+        let findings = run(root.path());
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0]
+            .description
+            .contains("Unreachable test `actually_nested`"));
+    }
+
+    #[test]
+    fn actual_owned_args_and_bench_tests_are_not_reported_unreachable() {
+        for (file, content) in [
+            (
+                "owned_args_guard_test.rs",
+                include_str!("../../homeboy-cli/src/owned_args_guard_test.rs"),
+            ),
+            (
+                "commands/bench/tests/mod.rs",
+                include_str!("../../homeboy-cli/src/commands/bench/tests/mod.rs"),
+            ),
+        ] {
+            let tests = extract_test_functions(content);
+            assert!(!tests.is_empty(), "discover real tests in {file}");
+            assert!(
+                tests.iter().all(|test| !test.nested),
+                "incorrect nesting in {file}: {tests:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_line_test_body_keeps_its_vacuity_signal() {
+        let findings = detect_vacuous_tests(
+            "tests/placeholder_test.rs",
+            "#[test]\nfn placeholder() { assert!(true); }\n",
+        );
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("body only asserts true"));
+    }
+
+    #[test]
+    fn bare_ignores_inside_comments_are_not_disabled_tests() {
+        let findings = detect_ignored_without_reason(
+            "tests/skip_test.rs",
+            "/*\n#[ignore]\n*/\n#[test]\n#[ignore]\nfn real_skip() {}\n",
+        );
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, Some(5));
+    }
     #[test]
     fn keeps_module_scoped_tests_as_reachable() {
         let findings = detect_vacuous_tests(
