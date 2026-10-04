@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task_lifecycle::{
-    resolve_cook_reader_run_id_in_store, select_cook_candidate_in_store,
+    resolve_cook_reader_target_in_store, AgentTaskCookReaderTarget,
 };
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -268,35 +268,19 @@ fn stable_evidence_refs(value: &Value) -> Vec<Value> {
     refs
 }
 
-/// Cook IDs are logical candidate readers. Exact attempt IDs remain immutable
-/// attempt readers, even when a newer Cook attempt produced no patch.
-pub(super) struct CookReaderTarget {
-    pub(super) run_id: String,
-    pub(super) selection: Option<Value>,
-}
-
 pub(super) fn resolve_cook_reader_target(
     run_or_cook_id: &str,
     exact: bool,
-) -> homeboy::core::Result<CookReaderTarget> {
+) -> homeboy::core::Result<AgentTaskCookReaderTarget> {
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     if exact {
-        return Ok(CookReaderTarget {
+        return Ok(AgentTaskCookReaderTarget {
             run_id: run_or_cook_id.to_string(),
             selection: None,
         });
     }
-    let run_id = resolve_cook_reader_run_id_in_store(&lifecycle_store, run_or_cook_id)?;
-    let selection =
-        agent_task_lifecycle::cook_index_exists_in_store(&lifecycle_store, run_or_cook_id)?
-            .then(|| select_cook_candidate_in_store(&lifecycle_store, run_or_cook_id))
-            .transpose()?;
-    Ok(CookReaderTarget {
-        run_id,
-        selection: selection
-            .map(|selection| serde_json::to_value(selection).unwrap_or(Value::Null)),
-    })
+    resolve_cook_reader_target_in_store(&lifecycle_store, run_or_cook_id)
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
@@ -1909,7 +1893,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     })
     .unwrap_or(Value::Null);
     if let Some(selection) = target.selection {
-        value["candidate_selection"] = selection;
+        value["candidate_selection"] = json!(selection);
     }
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     if !args.full {
@@ -2085,7 +2069,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     if let Some(selection) = target.selection {
-        value["candidate_selection"] = selection;
+        value["candidate_selection"] = json!(selection);
     }
     if !args.full {
         attach_collection_budget(

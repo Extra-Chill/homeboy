@@ -615,7 +615,10 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             json!({
                 "status": "gate_failed",
                 "gate_results": [{ "name": "cargo test", "exit_code": 1 }],
-                "provenance": { "gate_retry": "intentional_no_change" }
+                "provenance": {
+                    "gate_retry": "intentional_no_change",
+                    "private_verify": ["printf private-contributing-gate-marker"]
+                }
             }),
         )
         .expect("record retry verification provenance");
@@ -635,6 +638,62 @@ fn cook_readers_keep_the_substantive_candidate_after_a_no_change_retry() {
             provider_argv: Vec::new(),
         })
         .expect("Cook review is bounded");
+        let store = test_lifecycle_store();
+        let rows_before = [candidate_run_id, retry_run_id]
+            .map(|run| store.read_record(run).expect("row before review"));
+        let index_before =
+            serde_json::to_value(store.read_cook_index(cook_id).expect("Cook index"))
+                .expect("index value");
+        let direct = homeboy::agents::orchestration::review_from_current_environment(
+            cook_id,
+            &homeboy_control_plane_contract::ControlPlaneRunReviewRequest::default(),
+        )
+        .expect("canonical alias review");
+        homeboy::agents::orchestration::register();
+        let http = homeboy::core::http_api::handle(homeboy::core::http_api::HttpApiRequest {
+            method: homeboy::core::http_api::HttpMethod::Get,
+            path: format!("/v1/control-plane/runs/{cook_id}/review"),
+            body: None,
+        })
+        .expect("HTTP alias review");
+        assert_eq!(http.status, 200);
+        assert_eq!(
+            serde_json::to_value(direct).expect("direct review value"),
+            review_value
+        );
+        assert_eq!(http.body["resource"], review_value);
+        assert_eq!(
+            review_value["evidence"]["contributing_attempt"]["verification"]["provenance"]
+                ["private_verify"],
+            json!(["[private]"])
+        );
+        assert!(!serde_json::to_string(&review_value)
+            .expect("review JSON")
+            .contains("private-contributing-gate-marker"));
+        assert_eq!(review_value["run"], candidate_run_id);
+        assert_eq!(review_value["resource"]["state"], status_value["state"]);
+        assert_eq!(
+            review_value["evidence"]["record"]["run_id"],
+            candidate_run_id
+        );
+        assert_eq!(
+            review_value["evidence"]["artifacts"]["run_id"],
+            candidate_run_id
+        );
+        assert_eq!(
+            review_value["evidence"]["retry_context"]["run_id"],
+            candidate_run_id
+        );
+        assert_eq!(
+            [candidate_run_id, retry_run_id]
+                .map(|run| store.read_record(run).expect("row after review")),
+            rows_before
+        );
+        assert_eq!(
+            serde_json::to_value(store.read_cook_index(cook_id).expect("Cook index after"))
+                .expect("index value after"),
+            index_before
+        );
         let (diagnose_value, _) = diagnose(DiagnoseArgs {
             run_id: cook_id.to_string(),
             full: false,

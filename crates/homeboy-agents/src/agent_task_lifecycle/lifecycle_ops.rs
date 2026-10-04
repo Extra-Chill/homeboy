@@ -8225,17 +8225,36 @@ pub fn resolve_cook_reader_run_id_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<String> {
+    Ok(resolve_cook_reader_target_in_store(lifecycle_store, run_id)?.run_id)
+}
+
+/// One candidate selection supplies both the concrete reader identity and its
+/// context. Callers must not reselect a mutable Cook alias to describe that row.
+#[derive(Debug, Clone)]
+pub struct AgentTaskCookReaderTarget {
+    pub run_id: String,
+    pub selection: Option<AgentTaskCookCandidateSelection>,
+}
+
+pub fn resolve_cook_reader_target_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<AgentTaskCookReaderTarget> {
     let requested = sanitize_run_id(run_id);
     if !lifecycle_store.cook_index_exists(&requested) {
-        if let Some(materializing) =
-            resolve_detached_cook_materializing_attempt_in_store(lifecycle_store, &requested)?
-        {
-            return Ok(materializing.run_id);
-        }
-        return Ok(requested);
+        return Ok(AgentTaskCookReaderTarget {
+            run_id: resolve_detached_cook_materializing_attempt_in_store(
+                lifecycle_store,
+                &requested,
+            )?
+            .map(|materializing| materializing.run_id)
+            .unwrap_or(requested),
+            selection: None,
+        });
     }
     let index = lifecycle_store.read_cook_index(&requested)?;
-    let selection = select_cook_candidate_in_store(lifecycle_store, &requested)?;
+    let mut selection =
+        select_cook_candidate_from_index(&requested, index.clone(), Some(lifecycle_store))?;
     if selection.incomplete || selection.run_id.is_empty() {
         return Err(Error::validation_invalid_argument(
             "cook_id",
@@ -8244,27 +8263,39 @@ pub fn resolve_cook_reader_run_id_in_store(
             None,
         ));
     }
-    if !selection.reason.starts_with("no_substantive_candidate") {
-        return Ok(selection.run_id);
+    if selection.reason.starts_with("no_substantive_candidate") {
+        if let Some((run_id, attempt)) = preserved_candidate_attempt(lifecycle_store, &index) {
+            selection.run_id = run_id;
+            selection.attempt = attempt;
+            selection.reason = "preserved_candidate_or_gate_evidence".to_string();
+            if let Some(position) = selection
+                .skipped_newer_run_ids
+                .iter()
+                .position(|run_id| *run_id == selection.run_id)
+            {
+                selection.skipped_newer_run_ids.truncate(position);
+                selection.skipped_newer_attempts.truncate(position);
+            }
+        }
     }
-    if let Some(run_id) = preserved_candidate_attempt_run_id(lifecycle_store, &index) {
-        return Ok(run_id);
-    }
-    Ok(selection.run_id)
+    Ok(AgentTaskCookReaderTarget {
+        run_id: selection.run_id.clone(),
+        selection: Some(selection),
+    })
 }
 
-fn preserved_candidate_attempt_run_id(
+fn preserved_candidate_attempt(
     lifecycle_store: &AgentTaskLifecycleStore,
     index: &AgentTaskCookIndex,
-) -> Option<String> {
+) -> Option<(String, u32)> {
     if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
         if attempt_preserves_candidate_or_gate(lifecycle_store, &candidate.run_id) {
-            return Some(candidate.run_id.clone());
+            return Some((candidate.run_id.clone(), candidate.attempt));
         }
     }
     index.attempts.iter().rev().find_map(|attempt| {
         attempt_preserves_candidate_or_gate(lifecycle_store, &attempt.run_id)
-            .then(|| attempt.run_id.clone())
+            .then(|| (attempt.run_id.clone(), attempt.attempt))
     })
 }
 
