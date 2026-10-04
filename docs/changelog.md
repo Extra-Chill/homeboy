@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.31] - 2026-10-04
+
+### Changed
+- package tests don't depend on host free disk space
+
+### Fixed
+- restore remote-less reverse Cook acceptance coverage
+- advance a retired issue-derived cook destination to the next generation
+- report a replaced running executable instead of an opaque IO error
+- share canonical PR receipt interpretation
+
 ## [0.399.30] - 2026-10-04
 
 ### Fixed
