@@ -1418,18 +1418,7 @@ pub fn hydrate_prepared_workspace_source_snapshot(
     if !remote_path.starts_with(&prepared_root) {
         return Ok(());
     }
-    let (snapshots, _) = workspace_snapshots_for_runner(
-        runner,
-        RunnerWorkspaceSnapshotFilters {
-            limit: usize::MAX,
-            ..Default::default()
-        },
-    )?;
-    let Some(snapshot) = snapshots
-        .snapshots
-        .into_iter()
-        .find(|snapshot| snapshot.remote_path == remote_path)
-    else {
+    let Some(snapshot) = snapshots::workspace_snapshot_for_path(runner, remote_path)? else {
         return Ok(());
     };
     let Some(original) = snapshot.original_prepared_snapshot_identity else {
