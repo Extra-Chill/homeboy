@@ -1063,12 +1063,53 @@ fn current_executable() -> Result<PathBuf> {
     }
 
     #[cfg(all(not(test), not(feature = "test-support")))]
-    std::env::current_exe().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve controller executable".to_string()),
-        )
-    })
+    std::env::current_exe()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve controller executable".to_string()),
+            )
+        })
+        .and_then(|executable| reject_replaced_executable(executable))
+}
+
+/// Suffix Linux appends to `/proc/self/exe` (and therefore to
+/// `std::env::current_exe()`) once the running executable has been unlinked.
+const REPLACED_EXECUTABLE_SUFFIX: &str = " (deleted)";
+
+/// Refuse to pin an executable that was replaced after this process started.
+///
+/// A long-lived process (the resident daemon) keeps running the binary it was
+/// started from. When an upgrade, installer, or operator replaces that file,
+/// Linux reports the running image as `<path> (deleted)`. That path does not
+/// exist, so hashing it failed with a bare `IO error`, and admitting work from
+/// the old image would pin a controller that no longer matches what is
+/// installed. Report the real cause and the repair instead (#15403).
+#[cfg_attr(all(not(test), feature = "test-support"), allow(dead_code))]
+fn reject_replaced_executable(executable: PathBuf) -> Result<PathBuf> {
+    if executable.exists() {
+        return Ok(executable);
+    }
+    let rendered = executable.to_string_lossy();
+    let Some(installed) = rendered.strip_suffix(REPLACED_EXECUTABLE_SUFFIX) else {
+        return Ok(executable);
+    };
+    let installed = installed.to_string();
+    Err(Error::new(
+        crate::error::ErrorCode::InternalIoError,
+        format!(
+            "this Homeboy process is running a controller executable that was replaced after it started ({installed})"
+        ),
+        json!({
+            "context": "resolve controller executable",
+            "error": "running executable was unlinked; the installed binary at this path is a different file",
+            "executable": installed,
+        }),
+    )
+    .with_hint(
+        "A resident daemon must be restarted onto the installed binary: `homeboy daemon recover --yes`. A foreground command can simply be rerun.",
+    )
+    .with_action(crate::daemon::recovery_actions::recover()))
 }
 
 /// Seal a verified executable for a command-scoped controller continuation.
@@ -3025,10 +3066,22 @@ fn executable_digest(path: &Path) -> Result<String> {
     #[cfg(unix)]
     let hashing_started = std::time::Instant::now();
     let digest = content_hash::sha256_file(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("hash pinned controller executable".to_string()),
-        )
+        // `sha256_file` already carries the failing path and the OS error in
+        // its details. `Error`'s Display is only its generic message ("IO
+        // error"), so re-wrapping via `to_string()` discarded both (#15403).
+        let detail = |key: &str| {
+            error
+                .details
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let cause = match (detail("context"), detail("error")) {
+            (Some(context), Some(os_error)) => format!("{context}: {os_error}"),
+            (None, Some(os_error)) => format!("{}: {os_error}", path.display()),
+            _ => format!("{}: {}", path.display(), error.message),
+        };
+        Error::internal_io(cause, Some("hash pinned controller executable".to_string()))
     })?;
     #[cfg(unix)]
     if hashing_started.elapsed() >= digest_memo_min_hash_time() {
@@ -3442,6 +3495,84 @@ mod identity_probe_tests {
 
 #[cfg(test)]
 mod tests {
+
+    /// A long-lived process whose binary was replaced sees `<path> (deleted)`
+    /// from `current_exe()`. Pinning it must name the cause and the repair
+    /// rather than fail hashing a path that does not exist (#15403).
+    #[test]
+    fn replaced_running_executable_is_reported_with_daemon_recovery() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installed = temp.path().join("homeboy");
+        fs::write(&installed, b"new build").expect("write installed binary");
+        let running = temp.path().join("homeboy (deleted)");
+
+        let error = reject_replaced_executable(running).expect_err("replaced executable refused");
+        assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+        assert!(
+            error.message.contains("replaced after it started"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.details["executable"],
+            installed.to_string_lossy().as_ref()
+        );
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("homeboy daemon recover --yes")));
+        let actions = error.details[crate::error::ACTIONS_DETAILS_KEY]
+            .as_array()
+            .expect("actions");
+        assert_eq!(actions[0]["id"], "daemon.recover");
+        assert_eq!(actions[0]["args"], json!(["daemon", "recover", "--yes"]));
+    }
+
+    #[test]
+    fn current_executables_that_exist_or_are_not_replaced_pass_through() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let present = temp.path().join("homeboy");
+        fs::write(&present, b"build").expect("write binary");
+        assert_eq!(
+            reject_replaced_executable(present.clone()).unwrap(),
+            present
+        );
+
+        // A file genuinely named with the suffix is still the running binary.
+        let literal = temp.path().join("homeboy (deleted)");
+        fs::write(&literal, b"build").expect("write binary");
+        assert_eq!(
+            reject_replaced_executable(literal.clone()).unwrap(),
+            literal
+        );
+
+        // A missing path without the suffix is left to the hashing step, which
+        // reports it with full detail.
+        let missing = temp.path().join("absent");
+        assert_eq!(
+            reject_replaced_executable(missing.clone()).unwrap(),
+            missing
+        );
+    }
+
+    /// The digest failure keeps the path and OS error instead of collapsing to
+    /// the generic "IO error" message (#15403).
+    #[test]
+    fn executable_digest_failure_keeps_path_and_os_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("homeboy-missing");
+
+        let error = executable_digest(&missing).expect_err("missing executable");
+        assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+        assert_eq!(
+            error.details["context"],
+            "hash pinned controller executable"
+        );
+        let cause = error.details["error"].as_str().expect("error detail");
+        assert!(cause.contains(&missing.display().to_string()), "{cause}");
+        assert!(cause.contains("No such file or directory"), "{cause}");
+        assert_ne!(cause, "IO error");
+    }
 
     /// A test is the entry point for its own unit of work, so the runtime root
     /// resolves once here and the rooted entry points take it (#7505).
