@@ -287,7 +287,12 @@ fn wait_for_daemon_with_lifetime(
                 || launcher.as_ref().is_some_and(|launcher| launcher.is_live())
             {
                 idle.touch();
-            } else if idle.expired(draining) {
+            } else if idle.expired(draining)
+                || idle.replaced_and_settled(super::lifetime::running_executable_replaced())
+            {
+                // An idle daemon whose binary was replaced stops now instead of
+                // serving stale code until its idle window lapses; the next
+                // command starts the installed binary (#15403).
                 if stopper
                     .as_mut()
                     .is_some_and(|stopper| stopper.try_wait().ok().flatten().is_some())
@@ -295,7 +300,10 @@ fn wait_for_daemon_with_lifetime(
                     stopper = None;
                 }
                 if stopper.is_none() {
-                    stopper = Command::new(std::env::current_exe()?)
+                    // `current_exe()` names `<path> (deleted)` once the binary
+                    // is replaced; launch the installed file instead, or this
+                    // stop could never spawn (#15403).
+                    stopper = Command::new(super::lifetime::launchable_executable()?)
                         .args(["daemon", "stop", "--lease-id", &state.lease_id])
                         .env(
                             crate::paths::DAEMON_STATE_DIR_ENV,
