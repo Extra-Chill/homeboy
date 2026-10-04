@@ -547,7 +547,7 @@ fn create_upload_file(
     let temp = root.join(format!("{upload_id}.payload"));
     let record = root.join(format!("{upload_id}.json"));
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
