@@ -2372,7 +2372,7 @@ impl SelectedGateEnvironment {
             .join("controller-state/gate-rust-cache");
         let cache = root.join(&identity);
         ensure_safe_rust_cache_root(&root)?;
-        fs::create_dir_all(&cache).map_err(|error| {
+        create_private_dir(&cache).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!("create Rust gate cache {identity}")),
@@ -2989,8 +2989,48 @@ fn rust_cache_repair_command() -> String {
     "rm -rf \"$(homeboy paths data)/controller-state/gate-rust-cache\"".to_string()
 }
 
+/// Create `path` (and missing parents) with the leaf directory private to
+/// the current user. Plain `create_dir_all` follows the process umask, so on a
+/// host with umask 0002 (stock Ubuntu) the cache came out group-writable and
+/// was then refused by the ownership check below (Extra-Chill/homeboy#15393).
+/// `umask` can only remove bits, so creating with 0700 yields 0700 or less.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        match fs::DirBuilder::new().mode(0o700).create(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+            _ => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
+
+/// Self-contained so an operator can act on it even when hints are not shown.
+fn unsafe_rust_cache_root_message(
+    path: &Path,
+    owner_uid: u32,
+    mode: u32,
+    expected_uid: u32,
+) -> String {
+    format!(
+        "Rust gate cache root {} has unsafe ownership or permissions: owned by uid {} with mode {:o}, expected uid {} and no group/other write; repair with: {}",
+        path.display(),
+        owner_uid,
+        mode & 0o7777,
+        expected_uid,
+        rust_cache_repair_command()
+    )
+}
+
 fn ensure_safe_rust_cache_root(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|error| {
+    create_private_dir(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("create {}", path.display())),
@@ -3012,11 +3052,15 @@ fn ensure_safe_rust_cache_root(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o022 != 0
-        {
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid || metadata.permissions().mode() & 0o022 != 0 {
             return Err(Error::internal_io(
-                "Rust gate cache root has unsafe ownership or permissions".to_string(),
+                unsafe_rust_cache_root_message(
+                    path,
+                    metadata.uid(),
+                    metadata.permissions().mode(),
+                    euid,
+                ),
                 Some("validate Rust gate cache".to_string()),
             )
             .with_hint(rust_cache_repair_command()));
@@ -7961,6 +8005,44 @@ mod tests {
                 .expect("isolated path metadata")
                 .file_type()
                 .is_symlink());
+        }
+    }
+
+    /// Extra-Chill/homeboy#15393: a freshly created cache root must pass the
+    /// safety check whatever the umask. Run the suite under `umask 002` to
+    /// exercise the case that failed on the lab runner.
+    #[cfg(unix)]
+    #[test]
+    fn rust_cache_root_is_created_private_and_accepted() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("controller-state/gate-rust-cache");
+        super::ensure_safe_rust_cache_root(&root).expect("fresh root is accepted");
+        let mode = fs::metadata(&root).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Idempotent on the second call.
+        super::ensure_safe_rust_cache_root(&root).expect("existing private root is accepted");
+    }
+
+    #[test]
+    fn unsafe_rust_cache_root_message_names_path_owner_mode_and_repair() {
+        let message = super::unsafe_rust_cache_root_message(
+            Path::new("/data/controller-state/gate-rust-cache"),
+            0,
+            0o40775,
+            1000,
+        );
+        for expected in [
+            "/data/controller-state/gate-rust-cache",
+            "owned by uid 0",
+            "mode 775",
+            "expected uid 1000",
+            "rm -rf",
+        ] {
+            assert!(
+                message.contains(expected),
+                "{expected} missing from: {message}"
+            );
         }
     }
 }
