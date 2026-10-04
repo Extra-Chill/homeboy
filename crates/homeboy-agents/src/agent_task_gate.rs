@@ -2712,26 +2712,49 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
     Ok(relative.to_path_buf())
 }
 
+/// Find the host `rustup` to proxy into the isolated gate cache.
+///
+/// `PATH` first, then rustup's own install locations: `$CARGO_HOME/bin` and
+/// `$HOME/.cargo/bin`. A daemon or service started outside a login shell
+/// usually lacks `~/.cargo/bin` on `PATH` even though rustup is installed
+/// there, which failed every Rust gate on such hosts.
+fn locate_host_rustup(
+    path: Option<&std::ffi::OsStr>,
+    cargo_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let path_dirs = path
+        .map(|path| std::env::split_paths(path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let install_dirs = cargo_home
+        .filter(|value| !value.is_empty())
+        .map(|cargo_home| PathBuf::from(cargo_home).join("bin"))
+        .into_iter()
+        .chain(
+            home.filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".cargo").join("bin")),
+        );
+    path_dirs
+        .into_iter()
+        .chain(install_dirs)
+        .map(|directory| directory.join("rustup"))
+        .find(|candidate| candidate.is_file())
+}
+
 fn prepare_rustup_proxy(cache: &Path) -> Result<PathBuf> {
-    let host_path = std::env::var_os("PATH").ok_or_else(|| {
+    let source = locate_host_rustup(
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("CARGO_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| {
         Error::validation_invalid_argument(
-            "PATH",
-            "unavailable for Rust gate cache hydration",
+            "rustup",
+            "unavailable for Rust gate cache hydration: not found on PATH, in $CARGO_HOME/bin, or in ~/.cargo/bin",
             None,
             None,
         )
     })?;
-    let source = std::env::split_paths(&host_path)
-        .map(|directory| directory.join("rustup"))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "rustup",
-                "unavailable for Rust gate cache hydration",
-                None,
-                None,
-            )
-        })?;
     let destination = cache.join("cargo/bin/rustup");
     fs::create_dir_all(destination.parent().expect("rustup proxy has a parent")).map_err(
         |error| {
@@ -4527,6 +4550,67 @@ fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
         "cargo_selection": report.cargo_selection,
         "environment": report.environment,
     })
+}
+
+#[cfg(test)]
+mod rustup_location_tests {
+    use super::locate_host_rustup;
+
+    fn rustup_in(dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let rustup = dir.join("rustup");
+        std::fs::write(&rustup, b"#!/bin/sh\n").unwrap();
+        rustup
+    }
+
+    #[test]
+    fn path_wins_over_install_locations() {
+        let temp = tempfile::tempdir().unwrap();
+        let on_path = rustup_in(&temp.path().join("path-bin"));
+        rustup_in(&temp.path().join("home/.cargo/bin"));
+        let path = std::env::join_paths([temp.path().join("path-bin")]).unwrap();
+        assert_eq!(
+            locate_host_rustup(
+                Some(&path),
+                None,
+                Some(temp.path().join("home").as_os_str())
+            ),
+            Some(on_path)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_cargo_home_then_home_when_path_lacks_rustup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = std::env::join_paths([temp.path().join("empty")]).unwrap();
+        let home = temp.path().join("home");
+        let home_rustup = rustup_in(&home.join(".cargo/bin"));
+        assert_eq!(
+            locate_host_rustup(Some(&path), None, Some(home.as_os_str())),
+            Some(home_rustup),
+            "a daemon without ~/.cargo/bin on PATH still finds rustup"
+        );
+        let cargo_home = temp.path().join("custom-cargo");
+        let custom = rustup_in(&cargo_home.join("bin"));
+        assert_eq!(
+            locate_host_rustup(
+                Some(&path),
+                Some(cargo_home.as_os_str()),
+                Some(home.as_os_str())
+            ),
+            Some(custom),
+            "$CARGO_HOME takes precedence over ~/.cargo"
+        );
+    }
+
+    #[test]
+    fn missing_everywhere_is_none() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            locate_host_rustup(None, None, Some(temp.path().as_os_str())),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
