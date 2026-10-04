@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.34] - 2026-10-04
+
+### Changed
+- assert the resulting prepared snapshot identity
+
+### Fixed
+- a terminal run's exit code follows its recorded state
+- create the Rust gate cache private regardless of umask
+- hydrate provenance from the exact workspace
+- retain terminal custody and fence explicit resume rearm
+
 ## [0.399.33] - 2026-10-04
 
 ### Changed
