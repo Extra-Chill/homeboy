@@ -998,9 +998,23 @@ mod tests {
         });
     }
 
+    /// The build step's capacity admission measures the real host filesystem.
+    /// These tests are about packaging, so they must not depend on how much
+    /// disk the machine running them has free.
+    fn disable_host_capacity_admission() {
+        let config_root = homeboy_core::paths::homeboy().expect("resolve isolated config root");
+        std::fs::create_dir_all(&config_root).expect("create isolated config root");
+        std::fs::write(
+            config_root.join("homeboy.json"),
+            r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+        )
+        .expect("disable host-capacity admission for this hermetic test");
+    }
+
     #[test]
     fn run_package_persists_declared_component_artifact_before_provider_can_delete_it() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            disable_host_capacity_admission();
             let component_dir = tempfile::tempdir().expect("component tempdir");
             let package = release_package_extension(
                 "nodejs",
@@ -1069,6 +1083,7 @@ mod tests {
     #[test]
     fn run_package_collects_component_build_artifact_without_extension() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            disable_host_capacity_admission();
             let component_dir = tempfile::tempdir().expect("component tempdir");
             let component = Component {
                 id: "plugin".to_string(),
