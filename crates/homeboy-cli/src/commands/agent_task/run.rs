@@ -5606,11 +5606,13 @@ pub(crate) fn resolve_cook_destination(
     args.dispatch.task_url = Some(task_url.clone());
     // Resolve the requested branch before task discovery. An explicit --head is
     // authoritative through candidate reuse, provisioning, and finalization.
+    let handle_repository = cook_component_id(&args).unwrap_or(repo).to_string();
     let head = match args.head.clone() {
         Some(head) => head,
-        None => derived_cook_branch(&task_url)?,
+        None => {
+            next_live_derived_cook_branch(&handle_repository, &derived_cook_branch(&task_url)?)?
+        }
     };
-    let handle_repository = cook_component_id(&args).unwrap_or(repo);
     args.to_worktree = Some(format!(
         "{handle_repository}@{}",
         slugify_cook_branch(&head)
@@ -6748,6 +6750,44 @@ fn repository_identity_error(
         None,
         Some(recovery),
     )
+}
+
+/// Upper bound on follow-up cooks for one issue before derivation gives up.
+const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
+
+/// Pick the issue-derived branch whose destination is not retired.
+///
+/// The derived handle is a pure function of the issue, so once an earlier
+/// cook's destination is removed or finalized its terminal record would block
+/// every later cook on the same issue ("is no longer active"). Multi-phase
+/// work on one issue is normal, so a derived destination advances to the next
+/// generation (`-2`, `-3`, ...) instead. An active or absent destination is
+/// reused as before, and an explicitly named `--to-worktree` or `--head` never
+/// reaches this path, so naming a retired destination still fails. (#15408)
+fn next_live_derived_cook_branch(repository: &str, base: &str) -> homeboy::core::Result<String> {
+    for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
+        let branch = if generation == 1 {
+            base.to_string()
+        } else {
+            format!("{base}-{generation}")
+        };
+        let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
+        let retired = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?
+            .is_some_and(|record| {
+                record.state() != &homeboy::core::worktree::TaskWorktreeState::Active
+            });
+        if !retired {
+            return Ok(branch);
+        }
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "every derived destination for `{base}` up to generation {MAX_DERIVED_COOK_GENERATIONS} is retired; pass --to-worktree and --head explicitly"
+        ),
+        Some(base.to_string()),
+        None,
+    ))
 }
 
 fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
