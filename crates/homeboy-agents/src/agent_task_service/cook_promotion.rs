@@ -4874,26 +4874,9 @@ fn completed_finalization_receipt_for_recovery(
         manual_finalization_run_ids(recipe)
     };
     for run_id in run_ids {
-        let record = agent_task_lifecycle::reconcile_status(run_id)?;
-        let Some(value) = record.metadata.get("cook_finalization") else {
-            continue;
-        };
-        if value["status"].as_str() == Some("intentional_no_change_finalized") {
-            return Ok(Some(value.clone()));
+        if let Some(receipt) = completed_finalization_receipt_for_run(run_id)? {
+            return Ok(Some(receipt));
         }
-        if !matches!(
-            value["status"].as_str(),
-            Some("review_ready" | "draft_published")
-        ) {
-            continue;
-        }
-        // Normal Cook finalization receipts intentionally have a lightweight,
-        // generic shape. Only the explicit manual receipt schema requires the
-        // additional recovery integrity contract.
-        if value["manual_finalization"] == true {
-            return manual_finalization_receipt_for_run(&record, run_id);
-        }
-        return Ok(Some(value.clone()));
     }
     Ok(None)
 }
@@ -4906,12 +4889,11 @@ fn completed_finalization_receipt_for_run(run_id: &str) -> Result<Option<Value>>
     if value["status"].as_str() == Some("intentional_no_change_finalized") {
         return Ok(Some(value.clone()));
     }
-    if !matches!(
-        value["status"].as_str(),
-        Some("review_ready" | "draft_published")
-    ) {
+    if !cook_finalization_is_pr_receipt(value) {
         return Ok(None);
     }
+    // Normal Cook receipts are lightweight; explicit manual receipts also
+    // require their candidate-bound recovery integrity contract.
     if value["manual_finalization"] == true {
         return manual_finalization_receipt_for_run(&record, run_id);
     }
@@ -4925,11 +4907,7 @@ fn manual_finalization_receipt_for_run(
     let Some(value) = record.metadata.get("cook_finalization") else {
         return Ok(None);
     };
-    if !matches!(
-        value["status"].as_str(),
-        Some("review_ready" | "draft_published")
-    ) || value["manual_finalization"] != true
-    {
+    if !cook_finalization_is_pr_receipt(value) || value["manual_finalization"] != true {
         return Ok(None);
     }
     let report =

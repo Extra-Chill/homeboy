@@ -1854,10 +1854,32 @@ pub fn cook_finalization_is_pr_receipt(finalization: &Value) -> bool {
     matches!(
         finalization["status"].as_str(),
         Some("review_ready" | "draft_published")
-    ) && (finalization["pr_number"].is_u64()
-        || finalization["pr"]["number"].is_u64()
-        || finalization["pr_url"].as_str().is_some()
-        || finalization["pr"]["url"].as_str().is_some())
+    ) && cook_finalization_pr_identity(finalization).is_some()
+}
+
+/// Resolve identity from the supported persisted PR receipt shapes. Empty or
+/// malformed fields do not hide a valid identity in another supported field.
+pub(crate) fn cook_finalization_pr_identity(finalization: &Value) -> Option<String> {
+    ["/pr_number", "/pr/number"]
+        .into_iter()
+        .find_map(|path| {
+            finalization
+                .pointer(path)?
+                .as_u64()
+                .filter(|number| *number > 0)
+                .map(|number| number.to_string())
+        })
+        .or_else(|| {
+            ["/pr_url", "/pull_request_url", "/pr/url"]
+                .into_iter()
+                .find_map(|path| {
+                    finalization
+                        .pointer(path)?
+                        .as_str()
+                        .filter(|url| !url.trim().is_empty())
+                        .map(str::to_string)
+                })
+        })
 }
 
 /// Project durable candidate and publication facts for both immediate Cook
