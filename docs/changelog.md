@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.36] - 2026-10-04
+
+### Fixed
+- resume checkpointed in-daemon controller work after a dead lease
+
 ## [0.399.35] - 2026-10-04
 
 ### Fixed
