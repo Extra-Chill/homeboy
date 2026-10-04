@@ -313,6 +313,139 @@ fn promote_recoverable_candidate_rejects_mismatched_run_provenance() {
     assert!(provider.apply_calls.is_empty());
 }
 
+const TASK_BASE_SHA: &str = "1111111111111111111111111111111111111111";
+const DERIVED_BASELINE_COMMIT: &str = "2222222222222222222222222222222222222222";
+const DERIVED_BASELINE_TREE: &str = "3333333333333333333333333333333333333333";
+
+/// A recoverable candidate harvested against a Cook-derived pre-existing
+/// candidate baseline: `base_ref` is the derived commit, and the artifact's own
+/// verified baseline provenance names it.
+fn preexisting_baseline_recoverable_source(
+    temp: &tempfile::TempDir,
+    baseline_run_id: &str,
+) -> (PathBuf, Value) {
+    let (source_path, source) = recoverable_patch_source(temp, 1);
+    let mut source: Value = serde_json::from_str(&source).expect("source JSON");
+    let metadata = &mut source["artifacts"][0]["metadata"];
+    metadata["base_ref"] = Value::String(DERIVED_BASELINE_COMMIT.to_string());
+    metadata["source_provenance"] = serde_json::json!({
+        "parent_snapshot": null,
+        "verified_cook_baseline": {
+            "baseline_commit": DERIVED_BASELINE_COMMIT,
+            "baseline_tree": DERIVED_BASELINE_TREE,
+            "parent_snapshot_identity": null,
+            "preexisting_candidate": true,
+            "promoted_patch_artifact_sha256": sha256_hex("pre-existing candidate tree"),
+            "source_run_id": baseline_run_id,
+            "source_task_id": "task-1",
+        }
+    });
+    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
+    (source_path, source)
+}
+
+fn recoverable_request_with_task_base(
+    source: &Value,
+    source_path: PathBuf,
+) -> AgentTaskPromotionRequest {
+    AgentTaskPromotionRequest {
+        source: source.to_string(),
+        source_run_id: Some("recoverable-run".to_string()),
+        source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: None,
+        task_base_sha: Some(TASK_BASE_SHA.to_string()),
+        candidate_ref: None,
+        to_worktree: "repo@recoverable".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions::default(),
+        provider_command: None,
+        provider_invocation: None,
+        repository_integrity_evidence: None,
+    }
+}
+
+// Regression: a Cook launched into a dirty worktree derives a pre-existing
+// candidate baseline and harvests against it. On timeout, the recovered
+// candidate's base_ref is that derived commit, not the task base, and
+// recoverable promotion rejected it as unfingerprinted even though the
+// artifact carried the baseline provenance that explains it.
+#[test]
+fn promote_recoverable_candidate_accepts_bound_preexisting_cook_baseline() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "recoverable-run");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        recoverable_request_with_task_base(&source, source_path),
+        &mut provider,
+    )
+    .expect("candidate on a bound pre-existing baseline is promotable");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.apply_calls.len(), 1);
+    // The destination is still bound to the derived baseline tree: the apply
+    // request carries the promotion-chain baseline, not the bare task base.
+    let applied_baseline = provider.apply_calls[0]
+        .gate_feedback_baseline
+        .as_ref()
+        .expect("apply carries the derived baseline");
+    assert_eq!(applied_baseline["source_tree"], DERIVED_BASELINE_TREE);
+    assert_eq!(
+        report.provenance["prior_baseline"]["source_tree"],
+        DERIVED_BASELINE_TREE
+    );
+}
+
+#[test]
+fn promote_recoverable_candidate_rejects_preexisting_baseline_from_another_run() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, source) = preexisting_baseline_recoverable_source(&temp, "other-run");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        recoverable_request_with_task_base(&source, source_path),
+        &mut provider,
+    )
+    .expect_err("baseline bound to another run is rejected");
+
+    assert!(error.message.contains("fingerprinted artifact"));
+    assert!(provider.apply_calls.is_empty());
+}
+
+#[test]
+fn promote_recoverable_candidate_rejects_unexplained_base_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (source_path, mut source) =
+        preexisting_baseline_recoverable_source(&temp, "recoverable-run");
+    source["artifacts"][0]["metadata"]
+        .as_object_mut()
+        .expect("artifact metadata")
+        .remove("source_provenance");
+    std::fs::write(&source_path, source.to_string()).expect("write recoverable source");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        recoverable_request_with_task_base(&source, source_path),
+        &mut provider,
+    )
+    .expect_err("base mismatch without baseline provenance is rejected");
+
+    assert!(error.message.contains("fingerprinted artifact"));
+    assert!(provider.apply_calls.is_empty());
+}
+
 #[test]
 fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
     let patch = "diff --git a/workspace/fixture.txt b/workspace/fixture.txt\n--- a/workspace/fixture.txt\n+++ b/workspace/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n";

@@ -1630,8 +1630,49 @@ fn has_recoverable_candidate_provenance(
         && options.source_run_id.as_deref().is_none_or(|run_id| {
             artifact.metadata.get("run_id").and_then(Value::as_str) == Some(run_id)
         })
-        && options.task_base_sha.as_deref().is_none_or(|base_ref| {
-            artifact.metadata.get("base_ref").and_then(Value::as_str) == Some(base_ref)
+        && options.task_base_sha.as_deref().is_none_or(|task_base| {
+            let base_ref = artifact.metadata.get("base_ref").and_then(Value::as_str);
+            base_ref == Some(task_base)
+                || base_ref.is_some_and(|base_ref| {
+                    is_bound_preexisting_cook_baseline(options, outcome, artifact, base_ref)
+                })
+        })
+}
+
+/// A Cook launched into a dirty destination commits that pre-existing work as
+/// a derived baseline and harvests the attempt against it, so a recovered
+/// candidate's `base_ref` is the derived baseline commit rather than the task
+/// base. Accept it only when the artifact's own verified baseline provenance
+/// names that commit as a pre-existing candidate produced by this same run and
+/// task. The destination tree is still checked against the baseline tree by
+/// the promotion-chain baseline that admission derives next.
+fn is_bound_preexisting_cook_baseline(
+    options: &AgentTaskPromotionRequest,
+    outcome: &AgentTaskOutcome,
+    artifact: &AgentTaskArtifact,
+    base_ref: &str,
+) -> bool {
+    let Some(baseline) = artifact
+        .metadata
+        .pointer("/source_provenance/verified_cook_baseline")
+    else {
+        return false;
+    };
+    let field = |key: &str| baseline.get(key).and_then(Value::as_str);
+    baseline
+        .get("preexisting_candidate")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && valid_git_object_id(base_ref)
+        && field("baseline_commit") == Some(base_ref)
+        && field("baseline_tree").is_some_and(valid_git_object_id)
+        && field("source_task_id") == Some(outcome.task_id.as_str())
+        && field("source_run_id").is_some_and(|baseline_run| {
+            artifact.metadata.get("run_id").and_then(Value::as_str) == Some(baseline_run)
+                && options
+                    .source_run_id
+                    .as_deref()
+                    .is_none_or(|run_id| run_id == baseline_run)
         })
 }
 
