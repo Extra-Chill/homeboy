@@ -746,7 +746,20 @@ pub(crate) fn save_prepared_source_cache(
     // parameter: every worktree of the same repository shares this config, so
     // the cache the hydrating child saves under is the same cache a sibling
     // worktree at the same commit looks up (#14684).
-    let remote_url = git_output(&local_path, &["config", "--get", "remote.origin.url"])?;
+    let Some(remote_url) = git_output(&local_path, &["config", "--get", "remote.origin.url"])
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        // Snapshot materialization also supports local repositories with no
+        // remote. They have no canonical repository key for this optional
+        // cross-worktree cache; hydrated job execution must still proceed.
+        return Ok(PreparedSourceCacheLifecycle {
+            observations: vec![
+                "homeboy_prepared_source_cache event=skipped reason=no_repository_remote"
+                    .to_string(),
+            ],
+        });
+    };
     let cache = prepared_source_cache_path(workspace_root, &remote_url, &commit);
     let cache_root = prepared_source_cache_root(workspace_root);
     let output = run_workspace_shell_command(

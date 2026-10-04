@@ -397,21 +397,36 @@ impl CookWorkHandler {
             }
         }
 
+        // A terminal *attempt* is not a terminal *cook*: after the provider
+        // attempt ends, the cook child still harvests, runs the deterministic
+        // gates, and promotes the candidate. Completing here while that child
+        // is alive announced a premature "needs attention" built from the
+        // attempt state alone and consumed the once-per-cook terminal marker,
+        // so the cook's real outcome was never delivered. The child owns its
+        // own terminal notification; supervise until it exits. (#15401)
+        let child_live = super::work_job::supervised_child_may_be_live(
+            job.request.child_pid,
+            &job.request.child_start_identity,
+        );
+
         if let Some(run_id) = job.run_id.as_deref() {
             let lifecycle_store =
                 agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
             let mut record = lifecycle_store.read_record(run_id)?;
-            if record.state.is_terminal() {
+            if record.state.is_terminal() && !child_live {
                 return Ok(WorkJobStep::Complete(
                     job.observe_terminal(Some(record.run_id))?,
                 ));
             }
-            if record.runner_id().is_some() && record.runner_job_id().is_some() {
+            if !record.state.is_terminal()
+                && record.runner_id().is_some()
+                && record.runner_job_id().is_some()
+            {
                 agent_task_lifecycle::reconcile_runner_job_state_in_store(
                     &lifecycle_store,
                     &mut record,
                 )?;
-                if record.state.is_terminal() {
+                if record.state.is_terminal() && !child_live {
                     return Ok(WorkJobStep::Complete(
                         job.observe_terminal(Some(record.run_id))?,
                     ));
@@ -419,10 +434,7 @@ impl CookWorkHandler {
             }
         }
 
-        if !super::work_job::supervised_child_may_be_live(
-            job.request.child_pid,
-            &job.request.child_start_identity,
-        ) {
+        if !child_live {
             return Ok(WorkJobStep::Complete(
                 job.observe_terminal(job.run_id.clone())?,
             ));
@@ -1329,6 +1341,72 @@ mod tests {
                 parent.metadata["detached_cook_handoff"]["state"],
                 "exited_before_handoff"
             );
+        });
+    }
+
+    /// Regression: a terminal attempt while the cook child is still running
+    /// its gates and promotion must not complete supervision. Completing there
+    /// announced a premature "needs attention" from the attempt state and
+    /// consumed the once-per-cook terminal marker, suppressing the real
+    /// outcome. Supervision completes once the child exits.
+    #[test]
+    fn terminal_attempt_does_not_complete_supervision_while_the_cook_child_lives() {
+        with_isolated_home(|_| {
+            let cook_id = "cook-attempt-terminal-child-live";
+            let plan = crate::agent_task_scheduler::AgentTaskPlan::new(
+                "attempt-terminal-child-live",
+                Vec::new(),
+            );
+            let mut run = agent_task_lifecycle::submit_plan(&plan, None).expect("submit attempt");
+            run.state = agent_task_lifecycle::AgentTaskRunState::Succeeded;
+            test_lifecycle_store()
+                .write_record(&run)
+                .expect("persist terminal attempt");
+
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn cook child fixture");
+            let identity = homeboy_core::process::process_start_identity(child.id())
+                .expect("inspect child")
+                .expect("kernel identity");
+            register_cook_work_handler();
+            let request = cook_job_submission_for_launcher(
+                cook_id,
+                Some("test-launcher"),
+                child.id(),
+                &identity,
+            )
+            .expect("submission")["request"]["request"]
+                .clone();
+            let mut job = AgentTaskCookJob::parse(request).expect("parse request");
+            job.run_id = Some(run.run_id.clone());
+
+            let live_step = CookWorkHandler
+                .observe(&mut job, WorkJobInvocation::Resume)
+                .expect("observe with live child");
+            let claimed_while_live = test_lifecycle_store()
+                .cook_index_path(cook_id)
+                .with_file_name("notification-claim.json")
+                .exists();
+            child.kill().expect("stop cook child fixture");
+            child.wait().expect("reap cook child fixture");
+
+            assert!(
+                matches!(live_step, WorkJobStep::Continue { .. }),
+                "a live cook child still owns promotion"
+            );
+            assert_ne!(job.phase, WorkJobPhase::Completed);
+            assert!(
+                !claimed_while_live,
+                "no cook-terminal notification may be claimed while the child lives"
+            );
+
+            let exited_step = CookWorkHandler
+                .observe(&mut job, WorkJobInvocation::Resume)
+                .expect("observe after child exit");
+            assert!(matches!(exited_step, WorkJobStep::Complete(_)));
+            assert_eq!(job.phase, WorkJobPhase::Completed);
         });
     }
 

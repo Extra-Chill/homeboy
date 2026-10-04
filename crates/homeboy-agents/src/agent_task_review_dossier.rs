@@ -928,13 +928,32 @@ impl AgentTaskReviewDossier {
 /// `"deterministic gate passed: <command>"`, and for a private/withheld gate it
 /// is already redacted by policy. Prefer that; only fall back to the positional
 /// id when no summary was recorded.
+/// Upper bound on the reviewer-facing gate description, in characters.
+const GATE_EVIDENCE_SUMMARY_MAX_CHARS: usize = 240;
+
+/// Reviewer-facing, single-line projection of a gate. The durable gate record
+/// keeps the exact executable bytes; this label must satisfy the dossier's
+/// scalar contract, so a multi-line `--verify-file` program (or its output) is
+/// flattened and bounded here rather than rejected at finalization. (#15312)
 fn gate_evidence_summary(gate: &HomeboyGateResult) -> String {
-    let summary = gate.summary.trim();
+    // Shell gates routinely contain `</dev/null`; break markup openers so the
+    // label cannot close or open reviewer-body markup, without dropping text.
+    let summary = single_line_prose(&gate.summary)
+        .replace("<!--", "<! --")
+        .replace("</", "< /");
     if summary.is_empty() {
-        format!("{}: {:?}", gate.name, gate.status)
-    } else {
-        format!("{summary} ({:?})", gate.status)
+        return format!("{}: {:?}", single_line_prose(&gate.name), gate.status);
     }
+    let summary = if summary.chars().count() > GATE_EVIDENCE_SUMMARY_MAX_CHARS {
+        let truncated: String = summary
+            .chars()
+            .take(GATE_EVIDENCE_SUMMARY_MAX_CHARS - 1)
+            .collect();
+        format!("{}…", truncated.trim_end())
+    } else {
+        summary
+    };
+    format!("{summary} ({:?})", gate.status)
 }
 
 pub fn enrich_dossier(
@@ -2013,6 +2032,31 @@ mod tests {
             homeboy_core::gate::HomeboyGateStatus::Passed,
         );
         assert_eq!(gate_evidence_summary(&gate), "gate-2: Passed");
+    }
+
+    /// Regression for #15312: a multi-line `--verify-file` gate passed, then
+    /// finalization rejected the evidence summary for containing newlines.
+    #[test]
+    fn gate_evidence_summary_flattens_and_bounds_multi_line_programs() {
+        let program = format!(
+            "deterministic gate passed: set -e\nfor d in inc tests; do\n  php -l \"$d\" </dev/null <!-- x\ndone\n{}",
+            "echo ok; ".repeat(60)
+        );
+        let gate = HomeboyGateResult::new(
+            "gate-3",
+            "gate-3",
+            homeboy_core::gate::HomeboyGateKind::Command,
+            homeboy_core::gate::HomeboyGateStatus::Passed,
+        )
+        .summary(program);
+        let label = gate_evidence_summary(&gate);
+        assert!(
+            label.starts_with("deterministic gate passed: set -e for d in inc tests; do php -l")
+        );
+        assert!(label.ends_with("… (Passed)"), "got: {label}");
+        assert!(label.chars().count() <= GATE_EVIDENCE_SUMMARY_MAX_CHARS + " (Passed)".len());
+        scalar("evidence.summary", &label)
+            .expect("gate evidence passes the dossier scalar contract");
     }
 
     #[test]

@@ -1854,10 +1854,32 @@ pub fn cook_finalization_is_pr_receipt(finalization: &Value) -> bool {
     matches!(
         finalization["status"].as_str(),
         Some("review_ready" | "draft_published")
-    ) && (finalization["pr_number"].is_u64()
-        || finalization["pr"]["number"].is_u64()
-        || finalization["pr_url"].as_str().is_some()
-        || finalization["pr"]["url"].as_str().is_some())
+    ) && cook_finalization_pr_identity(finalization).is_some()
+}
+
+/// Resolve identity from the supported persisted PR receipt shapes. Empty or
+/// malformed fields do not hide a valid identity in another supported field.
+pub(crate) fn cook_finalization_pr_identity(finalization: &Value) -> Option<String> {
+    ["/pr_number", "/pr/number"]
+        .into_iter()
+        .find_map(|path| {
+            finalization
+                .pointer(path)?
+                .as_u64()
+                .filter(|number| *number > 0)
+                .map(|number| number.to_string())
+        })
+        .or_else(|| {
+            ["/pr_url", "/pull_request_url", "/pr/url"]
+                .into_iter()
+                .find_map(|path| {
+                    finalization
+                        .pointer(path)?
+                        .as_str()
+                        .filter(|url| !url.trim().is_empty())
+                        .map(str::to_string)
+                })
+        })
 }
 
 /// Project durable candidate and publication facts for both immediate Cook
@@ -3257,11 +3279,15 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
     // Preserve the early static rejection for a single route. Rotation plans
     // are checked as complete effective plans below so an unavailable primary
-    // cannot hide a valid fallback.
+    // cannot hide a valid fallback. The in-tree test double is not a catalog
+    // provider; plan admission selects it through the same `is_fixture_backend`
+    // gate [`crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers`]
+    // applies, so the static preflight must not reject it ahead of that gate.
     if initial_route
         .rotation
         .as_ref()
         .is_none_or(|rotation| rotation.entries.is_empty())
+        && !crate::agent_task_provider::is_fixture_backend(&initial_route.backend)
     {
         crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
             catalog,

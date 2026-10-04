@@ -179,10 +179,6 @@ fn json_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde
 
 #[cfg(unix)]
 #[test]
-#[ignore = "homeboy#15010: reverse worker provider_start fails with 'git config \
---get remote.origin.url failed' because the cook-source fixture repo has no \
-origin remote; the earlier --full stale-flag fix (homeboy#14984) is kept and \
-unlocked this deeper finding"]
 fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_lifecycle() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -214,6 +210,25 @@ fn explicit_lab_route_persists_the_verified_lab_outcome_through_detached_cook_li
     std::env::set_var("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1");
     ledger.mark("hermetic_context");
     let broker = ReverseBrokerFixture::start("lab");
+    // Reverse-runner admission requires the controller to hold a paired
+    // submit credential for this runner (#15368). The hermetic HOME is
+    // already this context's, so the daemon observes the same store.
+    let mut broker_auth = homeboy_core::broker_auth::BrokerAuthStore::default();
+    broker_auth
+        .pair(
+            "test-lab-submit",
+            "lab",
+            [
+                homeboy_core::broker_auth::BrokerScope::Submit,
+                homeboy_core::broker_auth::BrokerScope::Work,
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("mint controller submit credential for reverse admission");
+    broker_auth
+        .save()
+        .expect("persist controller submit credential for reverse admission");
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("cook-source");
     let _checkout_permissions = WritableTreeOnDrop(checkout.clone());
