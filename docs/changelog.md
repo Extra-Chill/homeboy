@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.33] - 2026-10-04
+
+### Changed
+- replace release deadline race with a blocked-read fixture
+
+### Fixed
+- unify canonical review reads across clients
+
 ## [0.399.32] - 2026-10-04
 
 ### Fixed
