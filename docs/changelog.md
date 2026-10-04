@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.35] - 2026-10-04
+
+### Fixed
+- honor explicit retries while preserving failed patches
+
 ## [0.399.34] - 2026-10-04
 
 ### Changed
