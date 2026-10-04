@@ -3257,11 +3257,15 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
     // Preserve the early static rejection for a single route. Rotation plans
     // are checked as complete effective plans below so an unavailable primary
-    // cannot hide a valid fallback.
+    // cannot hide a valid fallback. The in-tree test double is not a catalog
+    // provider; plan admission selects it through the same `is_fixture_backend`
+    // gate [`crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers`]
+    // applies, so the static preflight must not reject it ahead of that gate.
     if initial_route
         .rotation
         .as_ref()
         .is_none_or(|rotation| rotation.entries.is_empty())
+        && !crate::agent_task_provider::is_fixture_backend(&initial_route.backend)
     {
         crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
             catalog,
