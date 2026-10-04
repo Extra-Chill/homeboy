@@ -25292,3 +25292,84 @@ fn dispatch_acceptance_receipt_is_awaited_and_terminal_attempts_stop_the_wait() 
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     });
 }
+
+/// A Cook continuation that already holds a promoted candidate must not
+/// fast-forward its destination to the original base pin: the candidate was
+/// verified on the destination's recorded HEAD, and moving it made
+/// finalization refuse "candidate changed after promotion" (roadie#5 on
+/// extrachill.com). Without a tracked candidate the behind-destination path
+/// is unchanged and still reports the ancestry error for non-native targets.
+#[test]
+fn tracked_candidate_destination_is_not_converged_to_a_newer_pinned_base() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let remote = tempfile::tempdir().expect("bare origin");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.email=t@example.com", "-c", "user.name=T"])
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(workspace.path(), &["init", "-b", "main"]);
+        git(
+            workspace.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
+        git(workspace.path(), &["add", "."]);
+        git(workspace.path(), &["commit", "-q", "-m", "base"]);
+        git(workspace.path(), &["push", "-q", "-u", "origin", "main"]);
+        let promoted_head = git(workspace.path(), &["rev-parse", "HEAD"]);
+        let destination = tempfile::tempdir().expect("destination");
+        git(
+            destination.path(),
+            &["clone", "-q", remote.path().to_str().unwrap(), "."],
+        );
+        // The base moves on after the candidate was promoted.
+        std::fs::write(workspace.path().join("newer.txt"), "newer\n").unwrap();
+        git(workspace.path(), &["add", "."]);
+        git(workspace.path(), &["commit", "-q", "-m", "newer base"]);
+        git(workspace.path(), &["push", "-q"]);
+        let pinned_base = git(workspace.path(), &["rev-parse", "HEAD"]);
+        git(destination.path(), &["fetch", "-q", "origin"]);
+
+        let mut options = compile_options("tracked-candidate-base");
+        options.workspace.to_worktree = destination.path().display().to_string();
+        options.workspace.task_base_sha = Some(pinned_base.clone());
+
+        let tracked = super::preflight_cook_workspace_base_ancestry_with_provider(
+            destination.path(),
+            &options,
+            false,
+            true,
+        )
+        .expect("a tracked candidate's verified destination is accepted");
+        assert!(tracked.is_none());
+        assert_eq!(
+            git(destination.path(), &["rev-parse", "HEAD"]),
+            promoted_head,
+            "the destination stays on the HEAD its candidate was verified on"
+        );
+
+        let untracked = super::preflight_cook_workspace_base_ancestry_with_provider(
+            destination.path(),
+            &options,
+            false,
+            false,
+        );
+        assert!(
+            untracked.is_err(),
+            "without a tracked candidate a behind destination is still reported"
+        );
+    });
+}
