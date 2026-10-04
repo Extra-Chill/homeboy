@@ -38,6 +38,12 @@ pub struct ControllerScratchResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
     pub created_at: String,
+    /// Component whose checkout this scratch holds, when the task named one.
+    /// Its declared rebuildable paths (`cleanup_artifacts` and extension
+    /// `build.cleanup_paths`) are expected build output, not local work, when
+    /// deciding whether the workspace is safe to reclaim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalized_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +101,7 @@ pub fn allocate_attempt(
         plan_id,
         task_id,
         attempt,
+        None,
         paths::controller_scratch_store()?.join("attempts"),
         index_path()?,
     )
@@ -107,12 +114,26 @@ pub(crate) fn allocate_attempt_at(
     task_id: &str,
     attempt: u32,
 ) -> Result<ControllerScratchAllocation> {
+    allocate_attempt_for_component_at(data_root, run_id, plan_id, task_id, attempt, None)
+}
+
+/// [`allocate_attempt_at`] for a task that names the component it checks out,
+/// so reclaim can tell that component's build output from local work.
+pub(crate) fn allocate_attempt_for_component_at(
+    data_root: &Path,
+    run_id: &str,
+    plan_id: &str,
+    task_id: &str,
+    attempt: u32,
+    component_id: Option<&str>,
+) -> Result<ControllerScratchAllocation> {
     let store = data_root.join("controller-scratch");
     allocate_attempt_at_roots(
         run_id,
         plan_id,
         task_id,
         attempt,
+        component_id,
         store.join("attempts"),
         store.join("resources.json"),
     )
@@ -123,6 +144,7 @@ fn allocate_attempt_at_roots(
     plan_id: &str,
     task_id: &str,
     attempt: u32,
+    component_id: Option<&str>,
     root: PathBuf,
     index_path: PathBuf,
 ) -> Result<ControllerScratchAllocation> {
@@ -188,6 +210,7 @@ fn allocate_attempt_at_roots(
             terminal_evidence: None,
             interrupted_at: None,
             git_worktree: None,
+            component_id: component_id.map(str::to_string),
         });
         write_index_at_unlocked(&index_path, &index)
     })?;
@@ -802,6 +825,7 @@ fn register_outcome_resources_unlocked(
                 terminal_evidence: None,
                 interrupted_at: None,
                 git_worktree: None,
+                component_id: None,
             };
             index
                 .resources
@@ -873,8 +897,9 @@ fn finalize_run_unlocked(
             }
             let has_recovery_evidence = recovery_evidence_is_current(resource);
             let stale_dirty_workspace = !resource.ephemeral
-                && git_safety_path(resource, Path::new(&resource.path))
-                    .is_some_and(|workspace| git_dirty_or_unpushed(&workspace));
+                && git_safety_path(resource, Path::new(&resource.path)).is_some_and(|workspace| {
+                    git_dirty_or_unpushed(&workspace, &rebuildable_paths(resource))
+                });
             let needs_recovery = !has_recovery_evidence
                 && (matches!(
                     resource.lifecycle_state.as_str(),
@@ -1425,7 +1450,7 @@ fn cleanup_block_reason_with_observation(
             Some(path) if recovered_workspace_matches(resource, &path) => {}
             Some(path) if terminal_evidence_attempt_workspace_matches(resource, &path) => {}
             Some(path) if promoted_attempt_workspace_matches(resource, &path) => {}
-            Some(path) if git_dirty_or_unpushed(&path) => {
+            Some(path) if git_dirty_or_unpushed(&path, &rebuildable_paths(resource)) => {
                 return Ok(Some("git checkout has dirty or unpushed state".to_string()));
             }
             Some(_) => {}
@@ -1601,9 +1626,11 @@ fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
     command
 }
 
-fn git_dirty_or_unpushed(path: &Path) -> bool {
+fn git_dirty_or_unpushed(path: &Path, rebuildable: &[String]) -> bool {
     // Include ignored files. They are still local source state and therefore
-    // must be retained unless the terminal recovery path has preserved it.
+    // must be retained unless the terminal recovery path has preserved it,
+    // except the component's declared rebuildable output (see
+    // `rebuildable_paths`), which a build recreates.
     let status = git::run_git(
         path,
         &["status", "--porcelain=v1", "--ignored"],
@@ -1612,7 +1639,10 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     let Ok(status) = status else {
         return true;
     };
-    if !status.trim().is_empty() {
+    if status
+        .lines()
+        .any(|line| !line.trim().is_empty() && !is_rebuildable_status_line(line, rebuildable))
+    {
         return true;
     }
     // A linked attempt worktree is created with `git worktree add --detach`, so
@@ -1933,6 +1963,40 @@ fn recover_authoritative_workspace(
     })
 }
 
+/// Paths the scratch's component declares as rebuildable build output
+/// (`cleanup_artifacts` plus each extension's `build.cleanup_paths`, e.g.
+/// `node_modules`, `vendor`, `target`). Untracked or ignored files under them
+/// are expected churn from installing or building the checkout, not local
+/// work, so they neither block recovery nor make the workspace "dirty".
+/// Without a recorded component (older index rows) or a loadable one, this
+/// is empty and every untracked or ignored file still fails closed
+/// (Extra-Chill/homeboy#15404).
+fn rebuildable_paths(resource: &ControllerScratchResource) -> Vec<String> {
+    let Some(component_id) = resource.component_id.as_deref() else {
+        return Vec::new();
+    };
+    homeboy_core::component::load(component_id)
+        .and_then(|component| homeboy_core::component::declared_cleanup_artifact_paths(&component))
+        .unwrap_or_default()
+}
+
+/// Whether one `git status --porcelain=v1` line is an untracked (`??`) or
+/// ignored (`!!`) entry inside a declared rebuildable path. Tracked changes
+/// never qualify: they are always real work.
+fn is_rebuildable_status_line(line: &str, rebuildable: &[String]) -> bool {
+    let Some(entry) = line
+        .strip_prefix("?? ")
+        .or_else(|| line.strip_prefix("!! "))
+    else {
+        return false;
+    };
+    let entry = entry.trim_matches('"').trim_end_matches('/');
+    rebuildable.iter().any(|declared| {
+        let declared = declared.trim_end_matches('/');
+        !declared.is_empty() && (entry == declared || entry.starts_with(&format!("{declared}/")))
+    })
+}
+
 fn recover_authoritative_workspace_inner(
     resource: &ControllerScratchResource,
     artifact_root: &Path,
@@ -1950,15 +2014,16 @@ fn recover_authoritative_workspace_inner(
             },
         }));
     };
+    let rebuildable = rebuildable_paths(resource);
     let status = git::run_git(
         &workspace,
         &["status", "--porcelain=v1", "--ignored"],
         "git status",
     )?;
-    if status
-        .lines()
-        .any(|line| line.starts_with("??") || line.starts_with("!!"))
-    {
+    if status.lines().any(|line| {
+        (line.starts_with("??") || line.starts_with("!!"))
+            && !is_rebuildable_status_line(line, &rebuildable)
+    }) {
         return Ok(serde_json::json!({
             "state": "untracked_changes_retained",
             "workspace": workspace,
@@ -2392,10 +2457,25 @@ mod tests {
             plan_id,
             task_id,
             attempt,
+            None,
             data_root.join("controller-scratch/attempts"),
             data_root.join("controller-scratch/resources.json"),
         )
         .expect("allocate scratch")
+    }
+
+    /// The working-tree half of `git_dirty_or_unpushed`, without the
+    /// upstream/reachability half that a bare test repository cannot answer.
+    fn git_dirty_or_unpushed_status_only(path: &Path, rebuildable: &[String]) -> bool {
+        let status = git::run_git(
+            path,
+            &["status", "--porcelain=v1", "--ignored"],
+            "git status",
+        )
+        .expect("status");
+        status
+            .lines()
+            .any(|line| !line.trim().is_empty() && !is_rebuildable_status_line(line, rebuildable))
     }
 
     fn read_index_at(data_root: &Path) -> ControllerScratchIndex {
@@ -2465,6 +2545,7 @@ mod tests {
             terminal_evidence: None,
             interrupted_at: None,
             git_worktree: None,
+            component_id: None,
         }
     }
 
@@ -3092,6 +3173,93 @@ mod tests {
             output.skipped[0].reason,
             "git checkout has dirty or unpushed state"
         );
+    }
+
+    #[test]
+    fn rebuildable_status_lines_match_only_declared_untracked_or_ignored_paths() {
+        let declared = vec!["node_modules".to_string(), "vendor/".to_string()];
+        assert!(is_rebuildable_status_line("!! node_modules/", &declared));
+        assert!(is_rebuildable_status_line(
+            "?? node_modules/left-pad/index.js",
+            &declared
+        ));
+        assert!(is_rebuildable_status_line(
+            "!! vendor/autoload.php",
+            &declared
+        ));
+        // Look-alike names, other paths, and tracked changes are real work.
+        assert!(!is_rebuildable_status_line(
+            "!! node_modules_backup/",
+            &declared
+        ));
+        assert!(!is_rebuildable_status_line("?? src/new.rs", &declared));
+        assert!(!is_rebuildable_status_line(" M node_modules/x", &declared));
+        assert!(!is_rebuildable_status_line("!! node_modules/", &[]));
+    }
+
+    /// Extra-Chill/homeboy#15404: a cook that installed its component's
+    /// dependencies left an ignored `node_modules`, so recovery refused with
+    /// `untracked_changes_retained` and the attempt was kept forever. With the
+    /// component's declared rebuildable paths, that output no longer blocks
+    /// recovery, while anything else still does.
+    #[test]
+    fn declared_rebuildable_output_does_not_block_recovery_but_other_files_do() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let allocation = allocate_at(data_root.path(), "built-run", "scheduler-plan", "task", 1);
+        let workspace = allocation.path.join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        run_git(&workspace, &["init", "-b", "main"]);
+        fs::write(workspace.join(".gitignore"), "node_modules\n").expect("ignore rule");
+        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        fs::create_dir_all(workspace.join("node_modules/left-pad")).expect("installed deps");
+        fs::write(workspace.join("node_modules/left-pad/index.js"), "x").expect("dep file");
+
+        let resource = read_index_at(data_root.path())
+            .resources
+            .into_iter()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("resource");
+        let declared = vec!["node_modules".to_string()];
+
+        let status = git::run_git(
+            &workspace,
+            &["status", "--porcelain=v1", "--ignored"],
+            "git status",
+        )
+        .expect("status");
+        assert!(
+            status
+                .lines()
+                .any(|line| line.starts_with("!! node_modules")),
+            "{status}"
+        );
+        assert!(status
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| is_rebuildable_status_line(line, &declared)));
+        assert!(!git_dirty_or_unpushed_status_only(&workspace, &declared));
+        // Without the declaration the same workspace stays retained.
+        assert!(git_dirty_or_unpushed_status_only(&workspace, &[]));
+        let undeclared = recover_authoritative_workspace_inner(&resource, data_root.path())
+            .expect("recover without component");
+        assert_eq!(undeclared["state"], "untracked_changes_retained");
+
+        // A real untracked source file is still retained, declaration or not.
+        fs::write(workspace.join("notes.md"), "local work").expect("local file");
+        assert!(git_dirty_or_unpushed_status_only(&workspace, &declared));
     }
 
     #[test]
