@@ -483,6 +483,21 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
         )
         .expect("update");
 
+        // An unrelated retained workspace must not supply this path's provenance.
+        // Its metadata deliberately claims the target path and sorts newest.
+        let metadata_path = Path::new(&updated.remote_path).join(".homeboy/runner-workspace.json");
+        let mut unrelated: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                .expect("parse metadata");
+        unrelated["snapshot_identity"] = serde_json::json!("unrelated-snapshot");
+        unrelated["original_prepared_snapshot_identity"] = serde_json::json!("unrelated-original");
+        unrelated["synced_at"] = serde_json::json!("9999-01-01T00:00:00Z");
+        let unrelated_path = runner_root
+            .path()
+            .join("_lab_workspaces/unrelated/.homeboy/runner-workspace.json");
+        fs::create_dir_all(unrelated_path.parent().unwrap()).expect("unrelated directory");
+        fs::write(&unrelated_path, unrelated.to_string()).expect("unrelated metadata");
+
         let mut source_snapshot = homeboy_core::source_snapshot::existing_remote(
             "execution-provenance",
             &updated.remote_path,
@@ -504,6 +519,43 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
         assert_eq!(
             source_snapshot.prepared_workspace_update_lineage,
             updated.update_lineage
+        );
+        assert_eq!(
+            source_snapshot.workspace_snapshot_identity.as_deref(),
+            Some(updated.resulting_snapshot_identity.as_str())
+        );
+
+        // Localhost SSH exercises the emitted shell read as well as local I/O.
+        homeboy_core::server::create(
+            r#"{"id":"execution-provenance","host":"localhost","user":"test"}"#,
+            false,
+        )
+        .expect("localhost server");
+        let mut ssh_runner = runner.clone();
+        ssh_runner.kind = crate::RunnerKind::Ssh;
+        ssh_runner.server_id = Some("execution-provenance".to_string());
+        let mut ssh_snapshot = homeboy_core::source_snapshot::existing_remote(
+            "execution-provenance",
+            &updated.remote_path,
+            Some(&runner_root.path().display().to_string()),
+        );
+        crate::hydrate_prepared_workspace_source_snapshot(
+            &ssh_runner,
+            &updated.remote_path,
+            &mut ssh_snapshot,
+        )
+        .expect("hydrate SSH execution source snapshot");
+        assert_eq!(
+            ssh_snapshot.workspace_snapshot_identity,
+            source_snapshot.workspace_snapshot_identity
+        );
+        assert_eq!(
+            ssh_snapshot.prepared_workspace_original_snapshot_identity,
+            source_snapshot.prepared_workspace_original_snapshot_identity
+        );
+        assert_eq!(
+            ssh_snapshot.prepared_workspace_update_lineage,
+            source_snapshot.prepared_workspace_update_lineage
         );
     });
 }

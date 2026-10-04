@@ -75,6 +75,44 @@ pub fn workspace_snapshots(
     workspace_snapshots_for_runner(&runner, filters)
 }
 
+/// Read provenance for a known workspace without inventorying unrelated ones.
+pub(super) fn workspace_snapshot_for_path(
+    runner: &crate::Runner,
+    remote_path: &str,
+) -> Result<Option<RunnerWorkspaceSnapshotEntry>> {
+    validate_absolute_path("remote_path", remote_path)?;
+    let metadata_path = Path::new(remote_path).join(WORKSPACE_METADATA_FILE);
+    let content = match runner.kind {
+        RunnerKind::Local => match fs::read_to_string(&metadata_path) {
+            Ok(content) => content,
+            Err(_) => return Ok(None),
+        },
+        RunnerKind::Ssh => {
+            let (_server, mut client) = ssh_client_for_runner(runner)?;
+            client.env.extend(runner.env.clone());
+            let command = format!(
+                "meta={}; if [ -f \"$meta\" ]; then cat -- \"$meta\"; fi",
+                shell::quote_arg(&metadata_path.display().to_string()),
+            );
+            let output = client.execute_with_timeout(&command, std::time::Duration::from_secs(30));
+            if !output.success {
+                return Err(Error::internal_unexpected(format!(
+                    "runner workspace metadata read failed: {}",
+                    output.stderr.trim()
+                )));
+            }
+            output.stdout
+        }
+    };
+    let Ok(metadata) = serde_json::from_str::<RunnerWorkspaceMetadata>(&content) else {
+        return Ok(None);
+    };
+    if metadata.runner_id != runner.id || metadata.remote_path != remote_path {
+        return Ok(None);
+    }
+    Ok(workspace_snapshot_entry(metadata))
+}
+
 /// [`workspace_snapshots`] for a runner the caller has already resolved.
 ///
 /// Callers inside a rooted sync already hold the runner; re-resolving it by id
