@@ -197,42 +197,15 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
 }
 
 pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
-    let target = super::status::resolve_cook_reader_target(&args.run_id, false)?;
     let review = homeboy::agents::orchestration::review_from_current_environment(
-        &target.run_id,
+        &args.run_id,
         &homeboy_control_plane_contract::ControlPlaneRunReviewRequest {
             to_worktree: args.to_worktree,
             provider_command: args.provider_command,
             provider_argv: args.provider_argv,
         },
     )?;
-    let mut value = serde_json::to_value(review).unwrap_or(Value::Null);
-    if let Some(selection) = target.selection {
-        let selected_run_id = value.pointer("/resource/run").and_then(Value::as_str);
-        let latest_attempt_run_id = selection["latest_attempt_run_id"].as_str();
-        if latest_attempt_run_id.is_some_and(|latest| Some(latest) != selected_run_id) {
-            let latest = agent_task_lifecycle::durable_local_read(
-                latest_attempt_run_id.expect("latest attempt was checked"),
-            )?;
-            let review_form = latest.aggregate.as_ref().and_then(|aggregate| {
-                aggregate
-                    .selected_outcome()
-                    .or_else(|| {
-                        (aggregate.outcomes.len() == 1)
-                            .then(|| aggregate.outcomes.first())
-                            .flatten()
-                    })
-                    .and_then(|outcome| outcome.outputs.get("review_form"))
-                    .cloned()
-            });
-            value["evidence"]["contributing_attempt"] = serde_json::json!({
-                "run_id": latest.record.run_id,
-                "review_form": review_form,
-                "verification": latest.record.metadata.get("latest_promotion"),
-            });
-        }
-        value["evidence"]["candidate_selection"] = selection;
-    }
+    let value = serde_json::to_value(review).unwrap_or(Value::Null);
     Ok((compact_review(value, args.full), 0))
 }
 

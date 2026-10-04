@@ -2936,20 +2936,25 @@ impl OrchestrationService<LifecycleStoreLookup> {
         request: &ControlPlaneRunReviewRequest,
     ) -> Result<ControlPlaneRunReview, ControlPlaneError> {
         request.validate()?;
-        let snapshot = self.lookup.get(requested_id)?.ok_or_else(|| {
-            ControlPlaneError::not_found(format!("agent-task run not found: {requested_id}"))
-        })?;
-        let durable_read = crate::agent_task_lifecycle::durable_local_read_in_store(
+        let target = crate::agent_task_lifecycle::resolve_cook_reader_target_in_store(
             &self.lookup.store,
             requested_id.as_str(),
         )
         .map_err(map_lifecycle_error)?;
-        let resource = project_record(&durable_read.record, snapshot.plan.as_ref())?;
+        let durable_read = crate::agent_task_lifecycle::exact_durable_local_read_in_store(
+            &self.lookup.store,
+            &target.run_id,
+        )
+        .map_err(map_lifecycle_error)?;
+        let snapshot = self.lookup.snapshot(durable_read.record.clone())?;
+        let record = &snapshot.record;
+        let run_id = record.run_id.as_str();
+        let resource = project_record(record, snapshot.plan.as_ref())?;
         let aggregate = durable_read.aggregate;
         let aggregate_review = aggregate.as_ref().map(|aggregate| {
             crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
         });
-        let cook_contract = review_cook_contract(&self.lookup.store, requested_id.as_str())?;
+        let cook_contract = review_cook_contract(&self.lookup.store, run_id)?;
         let observation_store =
             homeboy_core::observation::ObservationStore::open_initialized_for_lifecycle_in_roots(
                 self.lookup.store.roots(),
@@ -2960,11 +2965,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .zip(aggregate_review.as_ref())
             .map(|(aggregate, review)| {
                 review_promotion_candidates(
-                    requested_id.as_str(),
+                    run_id,
                     request,
                     aggregate,
                     review,
-                    &durable_read.record,
+                    record,
                     cook_contract.as_ref(),
                     &observation_store,
                 )
@@ -2975,31 +2980,56 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .map(review_failure_reasons)
             .filter(|reasons| !reasons.is_empty());
         let canonical_candidate =
-            review_canonical_candidate(&durable_read.record, aggregate_review.as_ref(), &resource);
-        let (record, cleanup_evidence) = review_record_projection(&durable_read.record);
-        let evidence = bounded_review_evidence(serde_json::json!({
-            "record": record,
-            "logs": crate::agent_task_lifecycle::logs_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
-            "artifacts": crate::agent_task_lifecycle::artifacts_in_store(&self.lookup.store, requested_id.as_str()).map_err(map_lifecycle_error)?,
+            review_canonical_candidate(record, aggregate_review.as_ref(), &resource);
+        let (source_record, cleanup_evidence) = review_record_projection(&durable_read.record);
+        let mut evidence = serde_json::json!({
+            "record": source_record,
+            "logs": crate::agent_task_lifecycle::logs_in_store(&self.lookup.store, run_id).map_err(map_lifecycle_error)?,
+            "artifacts": crate::agent_task_lifecycle::artifacts_in_store(&self.lookup.store, run_id).map_err(map_lifecycle_error)?,
             "aggregate": aggregate,
             "aggregate_review": aggregate_review,
             "promotion_candidates": promotion_candidates,
             "diagnostic_summary": failure_reasons.as_ref().and_then(|reasons| reasons.first()).cloned(),
             "failure_reasons": failure_reasons,
-            "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, &durable_read.record, &resource),
+            "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, record, &resource),
             "canonical_candidate": canonical_candidate,
-            "next_actions": review_next_actions(&durable_read.record, aggregate_review.as_ref(), request.to_worktree.is_some()),
+            "next_actions": review_next_actions(record, aggregate_review.as_ref(), request.to_worktree.is_some()),
             "cleanup_evidence": cleanup_evidence,
             "transport": { "authoritative": "homeboy-agent-task-lifecycle", "chat_state_required": false },
             "action_eligibility": resource.action_eligibility,
-            "retry_context": review_retry_context(requested_id.as_str()),
+            "retry_context": review_retry_context(run_id),
             "read": { "phase": "controller_local", "mutated": false, "unavailable_sources": durable_read.unavailable_sources },
-        }));
+        });
+        if let Some(selection) = target.selection {
+            if selection.latest_attempt_run_id != run_id {
+                let latest = crate::agent_task_lifecycle::exact_durable_local_read_in_store(
+                    &self.lookup.store,
+                    &selection.latest_attempt_run_id,
+                )
+                .map_err(map_lifecycle_error)?;
+                let review_form = latest.aggregate.as_ref().and_then(|aggregate| {
+                    aggregate
+                        .selected_outcome()
+                        .or_else(|| {
+                            (aggregate.outcomes.len() == 1)
+                                .then(|| aggregate.outcomes.first())
+                                .flatten()
+                        })
+                        .and_then(|outcome| outcome.outputs.get("review_form"))
+                });
+                evidence["contributing_attempt"] = serde_json::json!({
+                    "run_id": latest.record.run_id,
+                    "review_form": review_form,
+                    "verification": latest.record.metadata.get("latest_promotion"),
+                });
+            }
+            evidence["candidate_selection"] = serde_json::json!(selection);
+        }
         Ok(ControlPlaneRunReview {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_RUN_REVIEW_SCHEMA.to_string(),
-            run: requested_id.clone(),
+            run: resource.run.clone(),
             resource,
-            evidence,
+            evidence: bounded_review_evidence(evidence),
         })
     }
 
@@ -9364,7 +9394,9 @@ mod tests {
     fn review_preserves_authoritative_aggregate_absence() {
         with_isolated_home(|_| {
             let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
-            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
+            let mut persisted = record(AGENT_TASK_RUN);
+            persisted.metadata["cook_id"] = json!("unverified-cook");
+            store.write_record(&persisted).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
 
             let review = service
@@ -9373,6 +9405,16 @@ mod tests {
                     &ControlPlaneRunReviewRequest::default(),
                 )
                 .expect("review");
+
+            let detail = service
+                .run(&RunId::new(AGENT_TASK_RUN).expect("run"))
+                .expect("canonical detail");
+            assert_eq!(review.resource, detail);
+            assert_eq!(
+                review.resource.state,
+                ControlPlaneRunState::CandidateRecoverable
+            );
+            assert_eq!(review.evidence["record"]["state"], "succeeded");
 
             assert!(review.evidence["aggregate"].is_null());
             assert_eq!(
@@ -9532,6 +9574,92 @@ mod tests {
                     events_before
                 );
             }
+        });
+    }
+
+    #[test]
+    fn review_preserved_gate_candidate_keeps_one_rooted_subject_and_selection() {
+        with_isolated_home(|_| {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let store = AgentTaskLifecycleStore::new(context.path_roots());
+            let cook_id = "preserved-gate-cook";
+            let candidate_id = "preserved-gate-cook-attempt-1";
+            let latest_id = "preserved-gate-cook-attempt-2";
+            let mut candidate = record(candidate_id);
+            candidate.state = AgentTaskRunState::CandidateRecoverable;
+            candidate.metadata["cook_id"] = json!(cook_id);
+            candidate.metadata["latest_promotion"] = json!({ "status": "gate_failed" });
+            let mut latest = record(latest_id);
+            latest.metadata["cook_id"] = json!(cook_id);
+            latest.metadata["latest_promotion"] = Value::Null;
+            latest.metadata["cook_finalization"] = Value::Null;
+            for (attempt, row) in [(1, &candidate), (2, &latest)] {
+                store.write_record(row).expect("rooted record");
+                store
+                    .write_cook_index_attempt(
+                        cook_id,
+                        attempt,
+                        &row.run_id,
+                        row.submitted_at.clone(),
+                        None,
+                    )
+                    .expect("rooted index attempt");
+            }
+            // Colliding ambient IDs must never supply this service's evidence.
+            let ambient = AgentTaskLifecycleStore::from_current_environment().expect("ambient");
+            let mut foreign = record(candidate_id);
+            foreign.metadata["cook_finalization"] =
+                json!({ "status": "review_ready", "pr_number": 999 });
+            ambient.write_record(&foreign).expect("foreign sentinel");
+            let foreign_before = ambient.read_record(candidate_id).expect("sentinel before");
+            let rows_before = store.read_record_page(None, 20).expect("rows before");
+            let index_before = serde_json::to_value(store.read_cook_index(cook_id).expect("index"))
+                .expect("index value");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let review = service
+                .review(
+                    &RunId::new(cook_id).expect("alias"),
+                    &ControlPlaneRunReviewRequest::default(),
+                )
+                .expect("rooted preserved-candidate review");
+            assert_eq!(review.run.as_str(), candidate_id);
+            assert_eq!(review.resource.run.as_str(), candidate_id);
+            assert_eq!(
+                review.resource.state,
+                ControlPlaneRunState::CandidateRecoverable
+            );
+            assert_eq!(review.evidence["record"]["run_id"], candidate_id);
+            assert_eq!(review.evidence["artifacts"]["run_id"], candidate_id);
+            assert_eq!(review.evidence["retry_context"]["run_id"], candidate_id);
+            assert_eq!(
+                review.evidence["candidate_selection"]["run_id"],
+                candidate_id
+            );
+            assert_eq!(review.evidence["candidate_selection"]["attempt"], 1);
+            assert_eq!(
+                review.evidence["candidate_selection"]["latest_attempt_run_id"],
+                latest_id
+            );
+            assert_eq!(
+                review.evidence["candidate_selection"]["skipped_newer_run_ids"],
+                json!([latest_id])
+            );
+            assert_eq!(review.evidence["contributing_attempt"]["run_id"], latest_id);
+            assert_eq!(review.evidence["canonical_candidate"]["finalized"], false);
+            assert!(review.evidence["aggregate"].is_null());
+            assert_eq!(
+                store.read_record_page(None, 20).expect("rows after"),
+                rows_before
+            );
+            assert_eq!(
+                serde_json::to_value(store.read_cook_index(cook_id).expect("index after"))
+                    .expect("index value after"),
+                index_before
+            );
+            assert_eq!(
+                ambient.read_record(candidate_id).expect("sentinel after"),
+                foreign_before
+            );
         });
     }
 
