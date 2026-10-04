@@ -247,8 +247,10 @@ pub struct AiFilledReviewForm {
 /// because the parse error short-circuits before the review-form nudge loop can
 /// see it. Reporting shape is not worth a thrown-away cook. (#12386)
 ///
-/// Joining with newlines preserves the agent's own separation; the renderer
-/// treats these fields as prose blocks.
+/// The same applies to line breaks: the dossier renders these fields as
+/// single-line prose and `validate` refuses newlines and control characters,
+/// so a multi-paragraph summary or a list answer must be normalized here rather
+/// than rejected at promotion after the candidate is already verified. (#15397)
 fn prose_field<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -261,9 +263,18 @@ where
     }
 
     Ok(match Prose::deserialize(deserializer)? {
-        Prose::One(text) => text,
-        Prose::Many(entries) => entries.join("\n"),
+        Prose::One(text) => single_line_prose(&text),
+        Prose::Many(entries) => single_line_prose(&entries.join(" ")),
     })
+}
+
+/// Collapse line breaks, control characters, and whitespace runs into single
+/// spaces. Content is preserved; only its layout is flattened.
+fn single_line_prose(text: &str) -> String {
+    text.split(|character: char| character.is_whitespace() || character.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The inverse shape for a list field: accept a single string as one entry.
@@ -287,8 +298,9 @@ where
         Lines::Many(entries) => entries,
     };
     Ok(entries
-        .into_iter()
-        .filter(|entry| !entry.trim().is_empty())
+        .iter()
+        .map(|entry| single_line_prose(entry))
+        .filter(|entry| !entry.is_empty())
         .collect())
 }
 
@@ -1469,17 +1481,62 @@ mod tests {
             .expect("a list-shaped prose field must not be a hard error")
             .expect("form present");
 
-        assert_eq!(form.summary, "Adds the guard.\nRefs #12386.");
-        assert_eq!(form.compatibility, "No breaking changes.\nDefault is off.");
+        assert_eq!(form.summary, "Adds the guard. Refs #12386.");
+        assert_eq!(form.compatibility, "No breaking changes. Default is off.");
         assert_eq!(
             form.used_for,
-            "Diagnosed the failure.\nWrote the regression test."
+            "Diagnosed the failure. Wrote the regression test."
         );
         assert_eq!(
             form.what_changed,
             vec!["one".to_string(), "two".to_string()]
         );
         form.validate().expect("a coerced form is still valid");
+    }
+
+    /// Regression for #15397 / #15051: a model that writes multi-paragraph
+    /// prose must not lose a verified candidate at promotion, where the dossier
+    /// refuses newlines and control characters in these fields.
+    #[test]
+    fn multi_line_prose_is_flattened_so_the_dossier_accepts_it() {
+        let outputs = serde_json::json!({
+            "review_form": {
+                "pr_title": "Add a render-video ability",
+                "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests.\r\n",
+                "what_changed": ["First line\nwraps here", "  ", "Second"],
+                "compatibility": "Additive.\nNo existing behavior changes.",
+                "used_for": "Read the issue.\n- Wrote the plan.\n- Ran lint.",
+            }
+        });
+
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("multi-line prose parses")
+            .expect("form present");
+
+        assert_eq!(form.summary, "Adds a render plan. Also adds smoke tests.");
+        assert_eq!(
+            form.what_changed,
+            vec!["First line wraps here".to_string(), "Second".to_string()]
+        );
+        assert_eq!(
+            form.compatibility,
+            "Additive. No existing behavior changes."
+        );
+        assert_eq!(
+            form.used_for,
+            "Read the issue. - Wrote the plan. - Ran lint."
+        );
+        form.validate().expect("flattened form is valid");
+        for (field, value) in [
+            ("summary", &form.summary),
+            ("compatibility", &form.compatibility),
+            ("ai_assistance.used_for", &form.used_for),
+        ] {
+            scalar(field, value).expect("flattened prose passes dossier validation");
+        }
+        for entry in &form.what_changed {
+            scalar("what_changed", entry).expect("flattened bullets pass dossier validation");
+        }
     }
 
     /// The inverse shape: a single paragraph where a bullet list was asked for.
