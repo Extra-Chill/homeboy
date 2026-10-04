@@ -1969,15 +1969,24 @@ fn spawn_orchestration_reconciler(
     serving_lease_id: String,
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let Some(interval) = orchestration_tick_interval() else {
-            // Disabled: still consume the shutdown signal so the join at
-            // teardown returns promptly.
-            let _ = shutdown.recv();
-            return;
-        };
-        orchestration_tick_loop(job_store, serving_lease_id, interval, shutdown)
-    })
+    // The tick invokes registered CLI-owned orchestration drivers. The Cook
+    // admission replay driver parses the full clap `Cli` tree, whose recursive
+    // derive builders overflow the default spawned-thread stack and abort the
+    // whole daemon mid-tick (homeboy#15010). The 32 MiB working stack matches
+    // the established CLI-parse thread convention.
+    std::thread::Builder::new()
+        .name("orchestration-tick".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let Some(interval) = orchestration_tick_interval() else {
+                // Disabled: still consume the shutdown signal so the join at
+                // teardown returns promptly.
+                let _ = shutdown.recv();
+                return;
+            };
+            orchestration_tick_loop(job_store, serving_lease_id, interval, shutdown)
+        })
+        .expect("spawn orchestration reconciler")
 }
 
 /// One pass per remaining global mechanism, per interval.
