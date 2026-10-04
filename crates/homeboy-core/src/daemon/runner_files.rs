@@ -1060,6 +1060,12 @@ mod tests {
                 .collect(),
         ] {
             let workspace = tempfile::tempdir().expect("workspace");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(workspace.path(), fs::Permissions::from_mode(0o700))
+                    .expect("private upload parent");
+            }
             let runner = format!("chunk-round-trip-{}", uuid::Uuid::new_v4());
             let id = uuid::Uuid::new_v4();
             let destination = workspace.path().join("evidence.bin");
