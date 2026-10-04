@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.28] - 2026-10-04
+
+### Fixed
+- apply the pre-1.0 bump rule to the semver recommendation
+- resolve relative validation dependencies against the declaring checkout
+- give the runner service the user's login-shell PATH so per-user toolchains resolve
+- never move a promoted candidate's destination to a newer pinned base on continuation
+
 ## [0.399.27] - 2026-10-03
 
 ### Fixed
