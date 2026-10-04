@@ -15,6 +15,7 @@
       "node agent-runtimes/opencode/tests/opencode-progress-relay.test.js",
       "node agent-runtimes/claude-code/tests/claude-code-agent-task-executor-boundary.test.js",
       "node agent-runtimes/pi/tests/pi-agent-task-executor-boundary.test.js",
+      "node agent-runtimes/pi/tests/pi-runtime-readiness.test.js",
       "node tests/browser-result-shapes-smoke.mjs",
       "bash tests/cross-extension-sidecar-normalization-smoke.sh",
       "node tests/deferred-init-browser-helper-smoke.mjs",

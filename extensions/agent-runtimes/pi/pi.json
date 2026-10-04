@@ -3,7 +3,7 @@
   "id": "pi",
   "name": "Pi",
   "version": "1.1.1",
-  "description": "Conservative Pi agent runtime integration for generic Homeboy agent task requests.",
+  "description": "Pi agent runtime: runs Pi headless in JSON mode for Homeboy agent task requests.",
   "contract_producers": [
     {
       "id": "pi.agent-task-result",
@@ -37,6 +37,19 @@
         ],
         "display": "node {{runtime_path}}/scripts/agent/homeboy-pi-agent-task-executor.cjs"
       },
+      "readiness_invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/homeboy-pi-provider-readiness.cjs"
+        ],
+        "env_allowlist": [
+          "HOMEBOY_PI_COMMAND",
+          "HOMEBOY_PI_COMMAND_ARGS",
+          "PI_CODING_AGENT_DIR"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/homeboy-pi-provider-readiness.cjs"
+      },
       "request_schema": "homeboy/agent-task-request/v1",
       "outcome_schema": "homeboy/agent-task-outcome/v1",
       "request_required_fields": [
@@ -51,6 +64,7 @@
         "unable_to_remediate",
         "provider_error",
         "timeout",
+        "candidate_recoverable",
         "failed",
         "follow_up_issue",
         "cancelled"
@@ -59,6 +73,12 @@
         "provider",
         "transient",
         "timeout",
+        "stalled",
+        "rate_limited",
+        "provider_account_blocked",
+        "provider_quota_exhausted",
+        "provider_billing_blocked",
+        "provider_credentials_exhausted",
         "policy_denied",
         "capability_missing",
         "invalid_input",
@@ -75,14 +95,23 @@
         "cli_runtime",
         "workspace_materialization",
         "structured_outcome",
-        "runtime_tool_attachment"
+        "provider_owned_auth",
+        "provider_owned_session"
       ],
       "workspace_materialization": {
         "cwd": "request_workspace",
         "requires_git": false,
         "write_scope": "workspace"
       },
-      "provider_defaults": {},
+      "provider_defaults": {
+        "pi": {
+          "command": "pi",
+          "command_args": [
+            "--mode",
+            "json"
+          ]
+        }
+      },
       "lifecycle": {
         "completion": "synchronous_process",
         "cancellation": "process_signal"
