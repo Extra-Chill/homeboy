@@ -59,9 +59,9 @@ const OPENCODE_GO_WINDOWS = ['rolling', 'weekly', 'monthly'];
  * Look up plan capacity for one OpenCode provider across every connected
  * account.
  *
- * OpenCode multi-account plugins (for example Kimaki's) keep a pool of OAuth
- * accounts per provider in `<provider>-oauth-accounts.json` beside the auth
- * store and rotate between them, so the route's capacity is the pool's
+ * OpenCode multi-account plugins keep a pool of OAuth accounts per provider
+ * in `<provider>-oauth-accounts.json` beside the auth store and rotate between
+ * them, so the route's capacity is the pool's
  * capacity. Without a pool, the single `auth.json` entry is the account.
  *
  * Resolves to null when the provider publishes no usage endpoint or has no

@@ -13,6 +13,7 @@ const threadOneId = '323456789012345678';
 const threadTwoId = '423456789012345678';
 
 await testMatchedRoute();
+await testDeprecatedAliasStillMatches();
 await testMissingContextIsUnmatched();
 await testInvalidRequestsFailClosed();
 await testInvalidContextFailsClosedWithoutDisclosure();
@@ -20,7 +21,7 @@ await testConcurrentInvocationsDoNotCrossRoutes();
 console.log('discord route resolver tests passed');
 
 async function testMatchedRoute() {
-  const result = await resolve({ KIMAKI_THREAD_ID: threadOneId });
+  const result = await resolve({ HOMEBOY_SESSION_THREAD_ID: threadOneId });
   assert.equal(result.code, 0);
   assert.equal(result.stderr, '');
   assert.deepEqual(JSON.parse(result.stdout), {
@@ -29,6 +30,17 @@ async function testMatchedRoute() {
     route: `discord:v1:thread:${threadOneId}`,
   });
   assert.equal(result.stdout.split('\n').filter(Boolean).length, 1);
+}
+
+// The bridge-specific name is accepted for one release; the generic contract
+// wins when both are present.
+async function testDeprecatedAliasStillMatches() {
+  const legacy = await resolve({ KIMAKI_THREAD_ID: threadOneId });
+  assert.equal(legacy.code, 0);
+  assert.equal(JSON.parse(legacy.stdout).route, `discord:v1:thread:${threadOneId}`);
+
+  const both = await resolve({ HOMEBOY_SESSION_THREAD_ID: threadTwoId, KIMAKI_THREAD_ID: threadOneId });
+  assert.equal(JSON.parse(both.stdout).route, `discord:v1:thread:${threadTwoId}`);
 }
 
 async function testMissingContextIsUnmatched() {
@@ -48,7 +60,7 @@ async function testInvalidRequestsFailClosed() {
     JSON.stringify({ ...request, unexpected: true }),
   ];
   for (const input of invalidRequests) {
-    const result = await resolve({ KIMAKI_THREAD_ID: threadOneId }, input);
+    const result = await resolve({ HOMEBOY_SESSION_THREAD_ID: threadOneId }, input);
     assert.equal(result.code, 2);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, 'Invalid notification route resolver request\n');
@@ -58,7 +70,7 @@ async function testInvalidRequestsFailClosed() {
 async function testInvalidContextFailsClosedWithoutDisclosure() {
   const secret = 'token=do-not-disclose';
   for (const threadId of ['123', 'not-a-snowflake', '1'.repeat(21), secret]) {
-    const result = await resolve({ KIMAKI_THREAD_ID: threadId });
+    const result = await resolve({ HOMEBOY_SESSION_THREAD_ID: threadId });
     assert.equal(result.code, 2);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, 'Invalid Discord thread attribution\n');
@@ -68,8 +80,8 @@ async function testInvalidContextFailsClosedWithoutDisclosure() {
 
 async function testConcurrentInvocationsDoNotCrossRoutes() {
   const [first, second] = await Promise.all([
-    resolve({ KIMAKI_THREAD_ID: threadOneId }),
-    resolve({ KIMAKI_THREAD_ID: threadTwoId }),
+    resolve({ HOMEBOY_SESSION_THREAD_ID: threadOneId }),
+    resolve({ HOMEBOY_SESSION_THREAD_ID: threadTwoId }),
   ]);
   assert.equal(JSON.parse(first.stdout).route, `discord:v1:thread:${threadOneId}`);
   assert.equal(JSON.parse(second.stdout).route, `discord:v1:thread:${threadTwoId}`);

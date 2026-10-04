@@ -27,12 +27,79 @@ notification CLI or environment routes always take precedence.
 
 ## Usage
 
-Kimaki-backed shell commands expose the owning Discord thread as
-`KIMAKI_THREAD_ID`. The extension validates that invocation-scoped value and
-derives `discord:v1:thread:<thread-id>` without notification flags. Homeboy
-persists the opaque route with the run, so concurrent detached runs deliver
-independently. Missing Kimaki context preserves route-less behavior; invalid
-context fails closed.
+### Session context
+
+A chat bridge that runs agent sessions describes the session that invoked
+Homeboy through a bridge-neutral environment contract. The bridge (or its
+installer) maps its own variables onto these names; this extension names no
+bridge.
+
+| Variable | Meaning |
+| --- | --- |
+| `HOMEBOY_SESSION_THREAD_ID` | Discord thread that owns the invoking session. |
+| `HOMEBOY_SESSION_SEND_COMMAND` | Optional. Command that delivers a prompt into that session as a real turn. Split on whitespace and run without a shell as `<command...> --thread <thread-id> --prompt <text>`. |
+| `HOMEBOY_SESSION_SEND_URL` | Optional, instead of the command. HTTP(S) endpoint that does the same. |
+| `HOMEBOY_SESSION_SEND_TOKEN` / `HOMEBOY_SESSION_SEND_TOKEN_FILE` | Bearer token for the HTTP sender, inline or read from a file. |
+
+The extension validates `HOMEBOY_SESSION_THREAD_ID` and derives
+`discord:v1:thread:<thread-id>` without notification flags. Homeboy persists the
+opaque route with the run, so concurrent detached runs deliver independently.
+Missing session context preserves route-less behavior; invalid context fails
+closed.
+
+### Session delivery
+
+A bridge usually ignores messages authored by its own bot, so a REST post to the
+thread that owns a run never reaches the agent in that thread. When the route is
+a thread, the status is an outcome (not `started`, `running`, or `queued`), and
+the delivering host has a session sender configured, the notification is
+delivered to the routed thread through the sender and becomes a turn the agent
+can act on (`"mode":"session"`). Without a sender, for progress-only statuses,
+and for channel routes, delivery uses the bot or webhook REST path below.
+
+The route names the owning thread; ownership is not re-checked against the
+delivering process's own session. A long-lived daemon, an outbox retry, or a
+continuation started from another session delivers the routed thread all the
+same.
+
+The HTTP sender posts:
+
+```json
+{"options":{"thread":"<thread-id>","prompt":"<notification text>"}}
+```
+
+with `authorization: Bearer <token>`. Any 2xx response is delivered. The
+response may stream NDJSON; a final `{"exit":<code>}` line with a non-zero code
+is a delivery failure. `401`/`403` is reported as `auth_error`. The token, its
+file path, and the endpoint never appear in results.
+
+For example, a [Roadie](https://github.com/Extra-Chill/roadie) host exports:
+
+```sh
+export HOMEBOY_SESSION_THREAD_ID="$ROADIE_THREAD_ID"
+export HOMEBOY_SESSION_SEND_COMMAND='roadie send'
+# Or, from a different OS user, through the running bot's local send API:
+export HOMEBOY_SESSION_SEND_URL='http://127.0.0.1:<port>/roadie/send'
+export HOMEBOY_SESSION_SEND_TOKEN_FILE=/path/to/roadie-service-token
+```
+
+### Deprecated names
+
+The bridge-specific names `KIMAKI_THREAD_ID`, `KIMAKI_CLI`, and
+`KIMAKI_BOT_TOKEN` are still accepted for one release and will then be
+removed. A host that sets `KIMAKI_THREAD_ID` or `KIMAKI_CLI` but no generic
+sender delivers thread routes through `kimaki send` (or `$KIMAKI_CLI send`), as
+before.
+While any of them is in use, every result envelope carries a `deprecations`
+list naming each one and its replacement:
+
+```json
+"deprecations":[{"name":"KIMAKI_THREAD_ID","replacement":"HOMEBOY_SESSION_THREAD_ID"}]
+```
+
+The generic names take precedence when both are set.
+
+### Explicit routes
 
 Explicit routes remain available for other callers. The canonical thread form
 is `discord:v1:thread:<thread-id>`; legacy guild-bearing routes remain accepted

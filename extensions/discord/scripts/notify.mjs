@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { deprecatedBotToken, deprecation, sessionSender, value } from './session.mjs';
 
 const DISCORD_CONTENT_LIMIT = 2000;
 const MAX_RETRIES = 2;
@@ -12,6 +13,9 @@ async function main() {
   if (!validation.ok) {
     return finish(failure('input_error', validation.error));
   }
+  // Deprecated configuration in use is reported on every envelope so an
+  // operator sees it without failing delivery.
+  const notes = validation.deprecations.length ? { deprecations: validation.deprecations } : {};
 
   const rendered = renderContent(args);
   const proof = {
@@ -28,15 +32,16 @@ async function main() {
       status: 'dry_run',
       delivery: proof,
       attempts: 0,
+      ...notes,
     });
   }
 
-  if (validation.mode === 'kimaki_session') {
-    const delivered = await sendThroughKimaki(validation, rendered.content);
+  if (validation.mode === 'session') {
+    const delivered = await sendToSession(validation, rendered.content);
     return finish(
       delivered.ok
-        ? { schema: 'homeboy/discord-notification-result/v1', status: 'delivered', delivery: proof, attempts: 1 }
-        : failure('delivery_error', delivered.error, proof, 1),
+        ? { schema: 'homeboy/discord-notification-result/v1', status: 'delivered', delivery: proof, attempts: 1, ...notes }
+        : { ...failure(delivered.kind || 'delivery_error', delivered.error, proof, 1, delivered.httpStatus), ...notes },
     );
   }
 
@@ -60,6 +65,7 @@ async function main() {
         status: 'delivered',
         delivery: proof,
         attempts,
+        ...notes,
       });
     }
 
@@ -69,7 +75,7 @@ async function main() {
       continue;
     }
 
-    return finish(failure(classify(response.status), errorFor(response.status), proof, attempts, response.status));
+    return finish({ ...failure(classify(response.status), errorFor(response.status), proof, attempts, response.status), ...notes });
   }
 }
 
@@ -111,39 +117,44 @@ function validate(args, env) {
   const parsedRoute = route === undefined ? undefined : parseRoute(route);
   if (parsedRoute?.error) return { ok: false, error: parsedRoute.error };
 
-  // A REST post from Kimaki's own application is a self-message its ingress
-  // drops, so the session that owns this run never sees its own completion.
-  // Delivering the owning thread through Kimaki's CLI makes the notification a
-  // real turn instead of a message the agent cannot read.
+  const deprecations = [];
+
+  // A chat bridge typically drops messages its own bot authored, so a REST post
+  // to the thread that owns this run never reaches that session. When the host
+  // configures a session sender, a thread route is delivered through it so the
+  // notification becomes a real turn the agent can act on.
+  //
+  // The route names the owning thread: resolve-route.mjs derives it from the
+  // launching session. Ownership is not re-derived from the *delivering*
+  // process's environment. A long-lived daemon, an outbox retry, or a
+  // continuation started elsewhere carries some other session's thread (or a
+  // stale one), and the sender can deliver to any thread its bot owns.
   //
   // Only a state the session might act on is worth a turn. A run that merely
   // started reports no outcome and no decision, so it is posted for the human
   // to read without interrupting the agent.
-  //
-  // The route names the owning thread: resolve-route.mjs only ever derives a
-  // thread route from the launching session's KIMAKI_THREAD_ID. Ownership must
-  // not be re-derived from the *delivering* process's environment. A
-  // long-lived daemon, an outbox retry, or a continuation started elsewhere
-  // carries some other session's thread id (or a stale one), and requiring a
-  // match there silently fell back to REST — invisible to the owning session,
-  // and a hard failure on hosts with no bot token. Any Kimaki host can deliver
-  // to any thread its bot owns.
-  if (
-    parsedRoute?.kind === 'thread' &&
-    isKimakiHost(env) &&
-    !isProgressOnlyStatus(args.status)
-  ) {
-    return {
-      ok: true,
-      mode: 'kimaki_session',
-      route_kind: 'thread',
-      destination: 'session_thread',
-      command: value(env.KIMAKI_CLI) || 'kimaki',
-      threadId: parsedRoute.id,
-    };
+  if (parsedRoute?.kind === 'thread' && !isProgressOnlyStatus(args.status)) {
+    const configured = sessionSender(env);
+    if (configured.error) return { ok: false, error: configured.error };
+    deprecations.push(...configured.deprecations);
+    if (configured.sender) {
+      return {
+        ok: true,
+        mode: 'session',
+        route_kind: 'thread',
+        destination: 'session_thread',
+        sender: configured.sender,
+        threadId: parsedRoute.id,
+        deprecations,
+      };
+    }
   }
 
-  const botToken = value(env.DISCORD_BOT_TOKEN) || value(env.KIMAKI_BOT_TOKEN);
+  let botToken = value(env.DISCORD_BOT_TOKEN);
+  if (botToken === undefined && deprecatedBotToken(env) !== undefined) {
+    botToken = deprecatedBotToken(env);
+    deprecations.push(deprecation('botToken'));
+  }
   const webhookUrl = value(env.DISCORD_WEBHOOK_URL);
   if (Boolean(botToken) === Boolean(webhookUrl)) {
     return { ok: false, error: 'Configure exactly one auth mode: DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL.' };
@@ -161,7 +172,7 @@ function validate(args, env) {
       return { ok: false, error: 'DISCORD_API_BASE_URL must be a valid HTTP(S) URL.' };
     }
     if (!isHttp(url)) return { ok: false, error: 'DISCORD_API_BASE_URL must be an HTTP(S) URL.' };
-    return { ok: true, mode: 'bot', ...resolved, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' } };
+    return { ok: true, mode: 'bot', ...resolved, url, headers: { authorization: `Bot ${botToken}`, 'content-type': 'application/json' }, deprecations };
   }
 
   if (operationsChannelId) return { ok: false, error: 'Webhook mode does not use DISCORD_OPERATIONS_CHANNEL_ID.' };
@@ -182,6 +193,7 @@ function validate(args, env) {
     destination: parsedRoute ? 'dynamic_thread' : 'webhook_default',
     url,
     headers: { 'content-type': 'application/json' },
+    deprecations,
   };
 }
 
@@ -193,8 +205,8 @@ function resolveBotDestination(route, operationsChannelId) {
 }
 
 function parseRoute(route) {
-  // Canonical guild-less form emitted by the kimaki notification bridge
-  // (wp-coding-agents #261): discord:v1:<channel|thread>:<destination-id>.
+  // Canonical guild-less form emitted by the session route resolver and the
+  // chat bridge (wp-coding-agents #261): discord:v1:<channel|thread>:<destination-id>.
   const canonical = /^discord:v1:(channel|thread):(\d{17,20})$/.exec(route);
   if (canonical) return { kind: canonical[1], id: canonical[2] };
   // Legacy 4-segment form with a guild id. The guild is not used for delivery
@@ -256,36 +268,71 @@ function finish(result) {
 // these when a run begins, before any result exists to act on.
 const PROGRESS_ONLY_STATUSES = new Set(['started', 'running', 'queued']);
 
-// A delivering process runs on a Kimaki host when it was started from a Kimaki
-// session (KIMAKI_THREAD_ID) or the operator configured the CLI explicitly.
-function isKimakiHost(env) {
-  return value(env.KIMAKI_THREAD_ID) !== undefined || value(env.KIMAKI_CLI) !== undefined;
-}
-
 function isProgressOnlyStatus(status) {
   return PROGRESS_ONLY_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
-function sendThroughKimaki(validation, content) {
+function sendToSession(validation, content) {
+  return validation.sender.kind === 'http'
+    ? sendToSessionOverHttp(validation, content)
+    : sendToSessionCommand(validation, content);
+}
+
+function sendToSessionCommand(validation, content) {
+  const [command, ...prefix] = validation.sender.argv;
   return new Promise((resolve) => {
-    const child = spawn(
-      validation.command,
-      ['send', '--thread', validation.threadId, '--prompt', content],
-      { stdio: ['ignore', 'ignore', 'pipe'] },
-    );
+    const child = spawn(command, [...prefix, '--thread', validation.threadId, '--prompt', content], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
     let stderr = '';
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
     });
-    child.once('error', () => resolve({ ok: false, error: 'Kimaki session delivery could not be started.' }));
+    child.once('error', () => resolve({ ok: false, error: 'Session delivery command could not be started.' }));
     child.once('close', (code) =>
       resolve(
         code === 0
           ? { ok: true }
-          : { ok: false, error: `Kimaki session delivery exited with status ${code}: ${compact(stderr).slice(0, 200)}` },
+          : { ok: false, error: `Session delivery command exited with status ${code}: ${compact(stderr).slice(0, 200)}` },
       ),
     );
   });
+}
+
+async function sendToSessionOverHttp(validation, content) {
+  let response;
+  try {
+    response = await fetch(validation.sender.url, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${validation.sender.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ options: { thread: validation.threadId, prompt: content } }),
+    });
+  } catch {
+    return { ok: false, error: 'Session delivery endpoint could not be reached.' };
+  }
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {}
+  if (!response.ok) {
+    const kind = response.status === 401 || response.status === 403 ? 'auth_error' : 'delivery_error';
+    const detail = kind === 'auth_error' ? 'rejected the configured token' : `returned status ${response.status}`;
+    return { ok: false, kind, httpStatus: response.status, error: `Session delivery endpoint ${detail}.` };
+  }
+  // The endpoint may stream NDJSON progress ending in {"exit":<code>}; the last
+  // exit reported decides the outcome. A plain 2xx body means delivered.
+  let exit;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event && typeof event === 'object' && Number.isInteger(event.exit)) exit = event.exit;
+    } catch {}
+  }
+  if (exit !== undefined && exit !== 0) {
+    return { ok: false, error: `Session delivery endpoint reported exit status ${exit}.` };
+  }
+  return { ok: true };
 }
 
 function ensureApiBase(base) {
@@ -294,10 +341,6 @@ function ensureApiBase(base) {
 
 function compact(text) {
   return String(text).replace(/\s+/g, ' ').trim();
-}
-
-function value(input) {
-  return typeof input === 'string' && input.trim() ? input.trim() : undefined;
 }
 
 function nonEmpty(input) {
