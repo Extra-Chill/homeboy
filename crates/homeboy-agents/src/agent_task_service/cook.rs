@@ -9400,11 +9400,17 @@ fn validate_cook_workspace_with_adopted_candidate(
         &target,
         &options.workspace.to_worktree,
     )?;
+    let tracked_candidate = continuation.is_some();
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
     }
-    preflight_cook_workspace_base_ancestry_with_provider(&target, options, adopted_dirty_candidate)
-        .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
+    preflight_cook_workspace_base_ancestry_with_provider(
+        &target,
+        options,
+        adopted_dirty_candidate,
+        tracked_candidate,
+    )
+    .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
 }
 
 /// Snapshot authority is passed to the scheduler, while convergence evidence is
@@ -9657,6 +9663,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     target: &Path,
     options: &CookRequest,
     adopted_dirty_candidate: bool,
+    tracked_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
     // Explicit CWDs are caller-owned and must remain untouched. Resolve their
     // declared ref into an isolated scheduler snapshot instead of treating the
@@ -9702,7 +9709,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         Ok(snapshot) => Ok(snapshot.map(CookWorkspaceBaseValidation::Snapshot)),
         Err(error)
             if error.details["workspace_base_ancestry"]["direction"] == "behind"
-                && options.workspace.task_base_sha.is_some() =>
+                && options.workspace.task_base_sha.is_some()
+                && !tracked_candidate =>
         {
             if let Some(native) =
                 homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
@@ -9734,6 +9742,19 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 }));
             }
             Err(error)
+        }
+        // A continuation that already holds a promoted candidate was verified
+        // on the destination's recorded HEAD. Fast-forwarding that worktree to
+        // the Cook's original base pin moves the candidate onto a commit its
+        // gates never ran on, and finalization then refuses with "candidate
+        // changed after promotion". The tracked promotion is the authority for
+        // the destination, so leave it where the candidate was verified;
+        // finalization's candidate fingerprint check still guards drift.
+        Err(error)
+            if error.details["workspace_base_ancestry"]["direction"] == "behind"
+                && tracked_candidate =>
+        {
+            Ok(None)
         }
         Err(error) => Err(error),
     }
