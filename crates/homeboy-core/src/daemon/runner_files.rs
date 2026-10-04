@@ -1049,6 +1049,83 @@ mod tests {
     }
 
     #[test]
+    fn private_chunk_upload_round_trip_publishes_verified_bytes() {
+        use sha2::Digest;
+
+        for payload in [
+            Vec::new(),
+            b"opaque\0evidence\xff".to_vec(),
+            (0..MAX_CHUNK_BYTES + 17)
+                .map(|index| (index % 251) as u8)
+                .collect(),
+        ] {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let runner = format!("chunk-round-trip-{}", uuid::Uuid::new_v4());
+            let id = uuid::Uuid::new_v4();
+            let destination = workspace.path().join("evidence.bin");
+            fs::write(&destination, b"previous generation").expect("previous evidence");
+            let digest = format!("{:x}", sha2::Sha256::digest(&payload));
+            let chunks = if payload.is_empty() {
+                vec![&[][..]]
+            } else {
+                payload.chunks(MAX_CHUNK_BYTES).collect::<Vec<_>>()
+            };
+            let mut offset = 0;
+            for (index, chunk) in chunks.iter().enumerate() {
+                let final_chunk = index + 1 == chunks.len();
+                let mut body = request(workspace.path(), &runner, id);
+                body["offset"] = json!(offset);
+                body["content_base64"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(chunk));
+                body["size_bytes"] = json!(payload.len());
+                body["final"] = json!(final_chunk);
+                if final_chunk {
+                    body["sha256"] = json!(digest);
+                }
+                let result = upload_runner_file_chunk(Some(body), &trusted())
+                    .expect("valid evidence chunk must be accepted");
+                offset += chunk.len();
+                assert_eq!(result["size_bytes"], json!(offset));
+                if !final_chunk {
+                    assert_eq!(fs::read(&destination).unwrap(), b"previous generation");
+                }
+            }
+            assert_eq!(fs::read(&destination).expect("published bytes"), payload);
+            let staging = upload_staging_root().expect("staging");
+            assert!(!staging.join(format!("{id}.payload")).exists());
+            assert!(!staging.join(format!("{id}.json")).exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn private_chunk_upload_wrong_digest_preserves_previous_evidence() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runner = format!("chunk-wrong-digest-{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v4();
+        let destination = workspace.path().join("evidence.bin");
+        fs::write(&destination, b"previous generation").expect("previous evidence");
+        let mut body = request(workspace.path(), &runner, id);
+        body["content_base64"] = json!(base64::engine::general_purpose::STANDARD.encode(b"x"));
+        body["final"] = json!(true);
+        body["sha256"] = json!("0".repeat(64));
+        let error = upload_runner_file_chunk(Some(body), &trusted())
+            .expect_err("wrong digest must reject publication");
+        assert!(error.message.contains("declared digest or size"));
+        assert_eq!(fs::read(&destination).unwrap(), b"previous generation");
+        let staging = upload_staging_root().expect("staging");
+        assert!(!staging.join(format!("{id}.payload")).exists());
+        assert!(!staging.join(format!("{id}.json")).exists());
+    }
+
+    #[test]
     fn chunk_upload_rejects_oversized_declarations_and_encoded_or_decoded_chunks() {
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-limits-{}", uuid::Uuid::new_v4());
