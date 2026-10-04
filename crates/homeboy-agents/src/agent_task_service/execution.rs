@@ -1216,9 +1216,26 @@ fn terminal_run_result_for_record(
         Err(error) => return Err(error),
     };
     Ok(Some(AgentTaskRunResult {
-        exit_code: aggregate_exit_code(&aggregate),
+        exit_code: terminal_record_exit_code(&record.state, &aggregate),
         value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     }))
+}
+
+/// Exit code for a run that is already terminal. The run record's own state
+/// is authoritative: every terminal state other than Succeeded is
+/// unsuccessful by contract (see `RunExecutionState`), including the
+/// recoverable ones that still hold a candidate or resumable work, even when
+/// the stored aggregate tallies no failed outcome. Without this,
+/// `agent-task resume` on a CandidateRecoverable run exited 0 and reported
+/// success while nothing had been promoted (Extra-Chill/homeboy#15393).
+fn terminal_record_exit_code(
+    state: &agent_task_lifecycle::AgentTaskRunState,
+    aggregate: &AgentTaskAggregate,
+) -> i32 {
+    match state {
+        agent_task_lifecycle::AgentTaskRunState::Succeeded => aggregate_exit_code(aggregate),
+        _ => 1,
+    }
 }
 
 pub fn retry(
@@ -3140,6 +3157,60 @@ fn materialization_string(materialization: &Value, key: &str) -> Option<String> 
         .get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod terminal_exit_code_tests {
+    use super::*;
+    use crate::agent_task_scheduler::{AgentTaskAggregateStatus, AgentTaskAggregateTotals};
+
+    /// The aggregate a finished run that promoted nothing can carry: no
+    /// failed, cancelled or timed-out outcome, one recoverable candidate.
+    fn clean_tally_aggregate() -> AgentTaskAggregate {
+        AgentTaskAggregate {
+            schema: String::new(),
+            plan_id: "plan".to_string(),
+            status: AgentTaskAggregateStatus::Succeeded,
+            totals: AgentTaskAggregateTotals {
+                succeeded: 1,
+                candidate_recoverable: 1,
+                ..Default::default()
+            },
+            outcomes: Vec::new(),
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        }
+    }
+
+    /// Extra-Chill/homeboy#15393: resuming a terminal run must not report
+    /// success unless the run itself succeeded.
+    #[test]
+    fn terminal_exit_code_follows_the_run_state_not_a_clean_tally() {
+        use agent_task_lifecycle::AgentTaskRunState as State;
+        let aggregate = clean_tally_aggregate();
+        assert_eq!(
+            aggregate_exit_code(&aggregate),
+            0,
+            "the tally alone looks clean"
+        );
+        assert_eq!(terminal_record_exit_code(&State::Succeeded, &aggregate), 0);
+        for state in [
+            State::CandidateRecoverable,
+            State::PartialRecoverable,
+            State::PartialFailure,
+            State::Failed,
+            State::Cancelled,
+        ] {
+            assert_eq!(
+                terminal_record_exit_code(&state, &aggregate),
+                1,
+                "{state:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
