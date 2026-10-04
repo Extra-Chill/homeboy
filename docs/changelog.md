@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.29] - 2026-10-04
+
+### Fixed
+- flatten multi-line review_form prose so promotion accepts it
+
 ## [0.399.28] - 2026-10-04
 
 ### Fixed
