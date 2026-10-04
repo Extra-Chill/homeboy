@@ -1,7 +1,7 @@
 {
   "name": "SSH Checkout Deploy",
   "id": "ssh-checkout-deploy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "icon": "server",
   "description": "Deploy an exact commit through a remote checkout's own deploy command",
   "author": "Extra Chill",
