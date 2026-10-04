@@ -29,33 +29,69 @@ pub fn loop_work_status(
     context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
 ) -> Value {
     let Some(job_id) = metadata.pointer("/work_job/job_id").and_then(Value::as_str) else {
-        return Value::Null;
+        return if metadata.get("work_job").is_some_and(|work| !work.is_null()) {
+            serde_json::json!({"status":"unavailable", "outcome":"unknown", "error":{"code":"work_job_identity_unavailable"}})
+        } else {
+            Value::Null
+        };
     };
     let status = match context.daemon.as_ref() {
         Some(service) => service.status(job_id),
-        None => homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
-            .and_then(|client| client.status(job_id)),
+        None => match homeboy_core::daemon::retained_controller_job(job_id) {
+            Ok(Some(job)) => Ok(job),
+            Ok(None) => {
+                homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)
+                    .and_then(|client| client.status(job_id))
+            }
+            Err(error) => Err(error),
+        },
     };
     match status {
-        Ok(job) => serde_json::json!({
+        Ok(job) if job.id.to_string() == job_id => serde_json::json!({
             "job_id": job_id,
             "status": job.status,
             "event_count": job.event_count,
             "updated_at_ms": job.updated_at_ms,
         }),
-        Err(_)
-            if metadata["work_job"]["recovery_receipt"]["schema"]
-                == "homeboy/loop-command-terminal-recovery/v1"
-                && metadata["work_job"]["recovery_receipt"]["job_id"] == job_id =>
-        {
+        Err(_) if loop_command_terminal_recovery_is_valid(metadata, job_id) => {
             metadata["work_job"]["recovery_receipt"].clone()
         }
         Err(error) => serde_json::json!({
             "job_id": job_id,
             "status": "unavailable",
+            "outcome": "unknown",
+            "recovery": {
+                "state": "terminal_custody_unavailable",
+                "requirements": [
+                    "restore exact original JobStore terminal row or replay tombstone",
+                    "or reconcile the original retained job through native daemon terminal recovery using generation-bound ownership evidence",
+                    "missing receipts, absent PIDs and current job counts do not prove prior work quiescent"
+                ]
+            },
             "error": { "code": format!("{:?}", error.code) },
         }),
+        Ok(_) => {
+            serde_json::json!({"job_id": job_id, "status": "unavailable", "outcome": "unknown", "error": {"code": "job_identity_mismatch"}})
+        }
     }
+}
+
+fn loop_command_terminal_recovery_is_valid(metadata: &Value, job_id: &str) -> bool {
+    let receipt = &metadata["work_job"]["recovery_receipt"];
+    receipt["schema"] == "homeboy/loop-command-terminal-recovery/v1"
+        && receipt["job_id"] == job_id
+        && receipt["status"] == "failed"
+        && receipt["outcome"] == "unknown"
+        && metadata["command_recovery"]["state"] == "owner_lost_unknown_outcome"
+        && receipt["ownership"]["action_id"] == metadata["command_recovery"]["action_id"]
+        && crate::agent_task_service::guarded_command_execution_owner(&receipt["ownership"])
+            .is_some_and(|owner| {
+                matches!(
+                    owner.inspect(),
+                    homeboy_core::process::ProcessIdentityState::Dead
+                        | homeboy_core::process::ProcessIdentityState::IdentityMismatch
+                )
+            })
 }
 
 pub const LOOP_CONTROL_PLANE_RESOURCE_TYPE: &str = "agent_task_loop";
@@ -105,9 +141,30 @@ pub fn loop_status_read_with(
         homeboy_control_plane_contract::ControlPlaneError,
     >,
 ) -> Result<LoopStatusRead> {
-    let report = controller_status_report(loop_id)?;
+    let mut report = controller_status_report(loop_id)?;
     let run_id = control_plane_run_id(&report.controller.loop_id)?;
     let work = loop_work_status(&report.controller.metadata, context);
+    if runtime_is_off(&report.controller.metadata) {
+        if let Some(blocker) = loop_resume_custody_blocker(&report.controller, &work) {
+            report.diagnostics.controller_state.actionable = false;
+            report.diagnostics.controller_state.reason = blocker.to_string();
+            report.diagnostics.next_commands = vec![format!(
+                "homeboy agent-task loop status {}  # inspect prior work recovery requirements",
+                shell_arg(&report.controller.loop_id)
+            )];
+        } else if let Some(effect) = failed_resume_effect(&report.controller)? {
+            let key = content_hash::sha256_hex(
+                format!("{}\0{}", effect, report.controller.updated_at).as_bytes(),
+            );
+            report.diagnostics.next_commands = vec![format!(
+                "homeboy agent-task loop resume {} --rearm-after {} --idempotency-key rearm-{} --expected-updated-at {}",
+                shell_arg(&report.controller.loop_id), shell_arg(&effect), &key[..16], shell_arg(&report.controller.updated_at),
+            )];
+            report.diagnostics.controller_state.reason =
+                "prior resume acknowledgement failed; deliberate new fenced intent is required"
+                    .to_string();
+        }
+    }
     let stored = match stored_run(&run_id) {
         Ok(resource) => resource,
         Err(error)
@@ -117,13 +174,68 @@ pub fn loop_status_read_with(
         }
         Err(error) => return Err(Error::internal_unexpected(error.message)),
     };
+    let mut resource = project_loop_read(&report.controller, stored);
+    if !loop_runtime_metadata(&report.controller.metadata)["on"]
+        .as_bool()
+        .unwrap_or(true)
+    {
+        if let Some(eligibility) = resource.action_eligibility.as_mut().and_then(|report| {
+            report
+                .actions
+                .iter_mut()
+                .find(|action| action.action == ControlPlaneAction::Resume)
+        }) {
+            let blocker = loop_resume_custody_blocker(&report.controller, &work);
+            let quiescent = blocker.is_none();
+            eligibility.availability = if quiescent {
+                homeboy_control_plane_contract::ControlPlaneActionAvailability::Available
+            } else {
+                homeboy_control_plane_contract::ControlPlaneActionAvailability::Unavailable
+            };
+            eligibility.reason = blocker
+                .unwrap_or("explicit resume revalidates prior work and command custody")
+                .to_string();
+        }
+    }
     Ok(LoopStatusRead {
         schema: AGENT_TASK_LOOP_CONTROLLER_STATUS_SCHEMA.to_string(),
-        resource: project_loop_read(&report.controller, stored),
+        resource,
         controller: report.controller,
         diagnostics: report.diagnostics,
         work,
     })
+}
+
+fn failed_resume_effect(record: &AgentTaskLoopControllerRecord) -> Result<Option<String>> {
+    let run = control_plane_run_id(&record.loop_id)?;
+    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if !store.observation_db_path().exists() {
+        return Ok(None);
+    }
+    let observation = store.open_observation_readonly()?;
+    let mut effects = vec![format!("loop-resume:{}:{}", run, record.updated_at)];
+    if let Some(effect) = record
+        .metadata
+        .pointer("/resume_operation/effect_id")
+        .and_then(Value::as_str)
+    {
+        effects.push(effect.to_string());
+    }
+    for effect in effects {
+        if let Some(acknowledgement) = observation
+            .control_plane_effect_status(&homeboy_control_plane_contract::EffectId(effect.clone()))?
+            .and_then(|status| status.terminal)
+            .map(|terminal| terminal.acknowledgement)
+        {
+            if acknowledgement.run == run
+                && acknowledgement.action == ControlPlaneAction::Resume
+                && acknowledgement.outcome == ControlPlaneActionOutcome::Failed
+            {
+                return Ok(Some(effect));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn controller_file_exists(loop_id: &str) -> Result<bool> {
@@ -178,7 +290,11 @@ fn legacy_loop_resource(
         .finished_at
         .clone()
         .or_else(|| Some(record.created_at.clone()));
-    let actions = serde_json::from_value(loop_control_plane_actions(status)).map_err(|error| {
+    let actions = serde_json::from_value(loop_control_plane_actions(
+        status,
+        runtime_is_off(&record.metadata),
+    ))
+    .map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some("loop control-plane action eligibility".to_string()),
@@ -223,7 +339,7 @@ fn loop_resource_state(status: &str) -> ControlPlaneRunState {
     }
 }
 
-fn loop_control_plane_actions(status: &str) -> Value {
+fn loop_control_plane_actions(status: &str, stopped: bool) -> Value {
     let running = status == "running";
     serde_json::json!([{
         "action": "cancel",
@@ -235,8 +351,8 @@ fn loop_control_plane_actions(status: &str) -> Value {
         "result_resource_type": "agent_task_loop"
     }, {
         "action": "resume",
-        "availability": if running { "available" } else { "unavailable" },
-        "reason": if running { "loop can be resumed" } else { "loop is terminal" },
+        "availability": if running || stopped { "available" } else { "unavailable" },
+        "reason": if running || stopped { "explicit resume revalidates prior work and command custody" } else { "loop is terminal" },
         "confirmation": "required",
         "idempotent": true,
         "requires_revalidation": true,
@@ -308,25 +424,67 @@ pub fn resume_loop(
     revolution_limit: Option<u32>,
     dispatch_defaults: Value,
 ) -> Result<ControlPlaneActionAcknowledgement> {
+    resume_loop_with_rearm(loop_id, revolution_limit, dispatch_defaults, None)
+}
+
+/// A deliberate new intent, linked to an immutable failed resume effect. The
+/// caller retains both the key and generation when retrying this exact request.
+pub struct LoopResumeRearmIntent {
+    pub after_effect: String,
+    pub idempotency_key: String,
+    pub expected_updated_at: String,
+}
+
+pub fn resume_loop_with_rearm(
+    loop_id: &str,
+    revolution_limit: Option<u32>,
+    dispatch_defaults: Value,
+    rearm: Option<LoopResumeRearmIntent>,
+) -> Result<ControlPlaneActionAcknowledgement> {
     let record = load_controller(loop_id)?;
     let run = control_plane_run_id(&record.loop_id)?;
     let dispatch_defaults = admitted_dispatch_defaults(dispatch_defaults)?;
+    let mut parameters = serde_json::json!({
+        "revolution_limit": revolution_limit,
+        "dispatch_defaults": dispatch_defaults,
+    });
+    let (identity, generation) = match rearm {
+        Some(rearm) => {
+            for (field, value) in [
+                ("rearm_after", &rearm.after_effect),
+                ("idempotency_key", &rearm.idempotency_key),
+                ("expected_updated_at", &rearm.expected_updated_at),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(Error::validation_invalid_argument(
+                        field,
+                        "rearm intent must be non-empty",
+                        None,
+                        None,
+                    ));
+                }
+            }
+            parameters["rearm_after"] = Value::String(rearm.after_effect);
+            (
+                format!("loop-resume-rearm:{}:{}", run, rearm.idempotency_key),
+                rearm.expected_updated_at,
+            )
+        }
+        None => (
+            format!("loop-resume:{}:{}", run, record.updated_at),
+            record.updated_at.clone(),
+        ),
+    };
     let request = ControlPlaneActionRequest {
         schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-        effect_id: homeboy_control_plane_contract::EffectId(format!(
-            "loop-resume:{}:{}",
-            run, record.updated_at
-        )),
+        effect_id: homeboy_control_plane_contract::EffectId(identity.clone()),
         action: ControlPlaneAction::Resume,
-        idempotency_key: format!("loop-resume:{}:{}", run, record.updated_at),
+        idempotency_key: identity,
         actor: "homeboy-agent-task-loop".to_string(),
-        expected_updated_at: Some(record.updated_at.clone()),
+        expected_updated_at: Some(generation),
         parameters: ControlPlaneActionPayload {
             schema: LOOP_RESUME_PARAMETERS_SCHEMA.to_string(),
-            data: serde_json::json!({
-                "revolution_limit": revolution_limit,
-                "dispatch_defaults": dispatch_defaults,
-            }),
+            data: parameters,
         },
         confirmed: true,
     };
@@ -358,6 +516,14 @@ mod stopped_resume_tests {
                 (
                     "live-resume-command",
                     serde_json::json!({"command_recovery":{"state":"running"}}),
+                ),
+                (
+                    "prepublication-resume-loss",
+                    serde_json::json!({"resume_operation":{"state":"reserved","generation":"original"}}),
+                ),
+                (
+                    "malformed-resume-work",
+                    serde_json::json!({"work_job":{"state":"submitted"}}),
                 ),
             ] {
                 let mut record = create_controller(id, "evaluate", "v1").unwrap();
@@ -421,6 +587,77 @@ mod stopped_resume_tests {
             assert_eq!(
                 load_controller(&record.loop_id).unwrap().metadata["runtime"]["on"],
                 false
+            );
+        });
+    }
+
+    #[test]
+    fn deliberate_rearm_requires_failed_predecessor_and_exact_generation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            crate::orchestration::register();
+            let mut record = create_controller("rearm-fences", "evaluate", "v1").unwrap();
+            stamp_loop_runtime_metadata(&mut record.metadata, false, None, false).unwrap();
+            write_controller(&record).unwrap();
+            let run = control_plane_run_id(&record.loop_id).unwrap();
+            let satisfied = resume_loop(&record.loop_id, Some(0), serde_json::json!({})).unwrap();
+            assert_eq!(
+                satisfied.outcome,
+                ControlPlaneActionOutcome::AlreadySatisfied
+            );
+            let after = format!("loop-resume:{}:{}", run, record.updated_at);
+            let request = |key: &str,
+                           expected: Option<&str>,
+                           after: &str|
+             -> ControlPlaneActionRequest {
+                serde_json::from_value(serde_json::json!({
+                    "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+                    "effect_id": key, "action":"resume", "idempotency_key":key,
+                    "actor":"test", "confirmed":true, "expected_updated_at":expected,
+                    "parameters":{"schema":LOOP_RESUME_PARAMETERS_SCHEMA,"data":{"rearm_after":after,"dispatch_defaults":{}}}
+                })).unwrap()
+            };
+            let context = homeboy_core::control_plane::ControlPlaneInvocationContext::default();
+            let rejected = homeboy_core::control_plane::execute_action(
+                &run,
+                &request("nonfailed-predecessor", Some(&record.updated_at), &after),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(rejected.outcome, ControlPlaneActionOutcome::Failed);
+            assert!(rejected
+                .message
+                .unwrap()
+                .contains("failed resume acknowledgement"));
+            let missing_fence = homeboy_core::control_plane::execute_action(
+                &run,
+                &request("missing-rearm-fence", None, &after),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(missing_fence.outcome, ControlPlaneActionOutcome::Failed);
+            assert!(missing_fence
+                .message
+                .unwrap()
+                .contains("exact expected_updated_at"));
+            assert!(homeboy_core::control_plane::execute_action(
+                &run,
+                &request("stale-rearm-fence", Some("stale-generation"), &after),
+                &context
+            )
+            .is_err());
+            assert_eq!(
+                load_controller(&record.loop_id).unwrap().metadata["runtime"]["on"],
+                false
+            );
+            assert_eq!(
+                homeboy_core::control_plane::effect_status(
+                    &run,
+                    &homeboy_control_plane_contract::EffectId(after)
+                )
+                .unwrap()
+                .acknowledgement
+                .unwrap(),
+                satisfied
             );
         });
     }
@@ -652,6 +889,30 @@ fn work_job_is_terminal(work: &Value) -> bool {
     )
 }
 
+fn loop_resume_custody_blocker(
+    record: &AgentTaskLoopControllerRecord,
+    work: &Value,
+) -> Option<&'static str> {
+    if (work.is_null() && record.metadata["resume_operation"].is_object())
+        || (!work.is_null() && !work_job_is_terminal(work))
+    {
+        return Some("loop resume requires observed quiescent prior owned work");
+    }
+    if let Some(command) = record.metadata.get("command_recovery") {
+        let recovered = record.metadata["work_job"]["job_id"]
+            .as_str()
+            .is_some_and(|job_id| {
+                loop_command_terminal_recovery_is_valid(&record.metadata, job_id)
+            })
+            && !work.is_null()
+            && work_job_is_terminal(work);
+        if command["state"] != "reaped" && !recovered {
+            return Some("loop resume requires quiescent command ownership evidence");
+        }
+    }
+    None
+}
+
 struct LoopActionDelegate;
 
 impl ControlPlaneActionDelegate for LoopActionDelegate {
@@ -819,11 +1080,77 @@ impl LoopActionDelegate {
         })?;
         let runtime = loop_runtime_metadata(&record.metadata);
         let operation_id = request.effect_id.0.clone();
+        if let Some(after) = request.parameters.data.get("rearm_after") {
+            let after = after
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                        "rearm_after requires a failed resume effect id",
+                    )
+                })?;
+            if request
+                .expected_updated_at
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(
+                    homeboy_control_plane_contract::ControlPlaneError::invalid_argument(
+                        "resume rearm requires an exact expected_updated_at generation",
+                    ),
+                );
+            }
+            let run_id = control_plane_run_id(loop_id).map_err(|error| {
+                homeboy_control_plane_contract::ControlPlaneError::invalid_argument(error.message)
+            })?;
+            // The action delegate already runs inside the provider registry.
+            // Read its generic durable receipt without recursively entering it.
+            let predecessor =
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    .and_then(|store| store.open_observation_readonly())
+                    .and_then(|store| {
+                        store.control_plane_effect_status(
+                            &homeboy_control_plane_contract::EffectId(after.to_string()),
+                        )
+                    })
+                    .map_err(|error| {
+                        homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                            error.message,
+                        )
+                    })?
+                    .and_then(|effect| effect.terminal)
+                    .map(|terminal| terminal.acknowledgement)
+                    .ok_or_else(|| {
+                        homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                            "resume rearm predecessor has no terminal acknowledgement",
+                        )
+                    })?;
+            if predecessor.run != run_id
+                || predecessor.action != ControlPlaneAction::Resume
+                || predecessor.outcome != ControlPlaneActionOutcome::Failed
+                || after == operation_id
+                || predecessor.idempotency_key == request.idempotency_key
+            {
+                return Err(homeboy_control_plane_contract::ControlPlaneError::invalid_argument("resume rearm requires a distinct intent after this loop's failed resume acknowledgement"));
+            }
+        }
         let reserved = record
             .metadata
             .get("resume_operation")
             .filter(|operation| operation["effect_id"] == operation_id)
             .cloned();
+        if reserved.is_none()
+            && request
+                .expected_updated_at
+                .as_ref()
+                .is_some_and(|expected| expected != &record.updated_at)
+        {
+            return Err(
+                homeboy_control_plane_contract::ControlPlaneError::unavailable(
+                    "loop generation changed before resume reservation",
+                ),
+            );
+        }
         let limit = request
             .parameters
             .data
@@ -857,28 +1184,10 @@ impl LoopActionDelegate {
             // On-loop continuation retains its existing admission semantics.
             if !runtime["on"].as_bool().unwrap_or(true) {
                 let work = loop_work_status(&record.metadata, context);
-                if !work.is_null() && !work_job_is_terminal(&work) {
+                if let Some(blocker) = loop_resume_custody_blocker(&record, &work) {
                     return Err(
-                        homeboy_control_plane_contract::ControlPlaneError::unavailable(
-                            "loop resume requires observed quiescent prior owned work",
-                        ),
+                        homeboy_control_plane_contract::ControlPlaneError::unavailable(blocker),
                     );
-                }
-                if let Some(command) = record.metadata.get("command_recovery") {
-                    let recovered = command["state"] == "owner_lost_unknown_outcome"
-                        && record.metadata["work_job"]["recovery_receipt"]["schema"]
-                            == "homeboy/loop-command-terminal-recovery/v1"
-                        && record.metadata["work_job"]["recovery_receipt"]["job_id"]
-                            == record.metadata["work_job"]["job_id"]
-                        && !work.is_null()
-                        && work_job_is_terminal(&work);
-                    if command["state"] != "reaped" && !recovered {
-                        return Err(
-                            homeboy_control_plane_contract::ControlPlaneError::unavailable(
-                                "loop resume requires quiescent command ownership evidence",
-                            ),
-                        );
-                    }
                 }
             }
             let dispatch_defaults = request
@@ -893,6 +1202,7 @@ impl LoopActionDelegate {
                         error.to_string(),
                     )
                 })?;
+            let prior_generation = record.updated_at.clone();
             stamp_loop_runtime_metadata(&mut record.metadata, true, limit, true).map_err(
                 |error| {
                     homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
@@ -905,8 +1215,9 @@ impl LoopActionDelegate {
                 "generation": record.updated_at,
                 "state": "reserved",
                 "dispatch_defaults": dispatch_defaults,
+                "rearm_after": request.parameters.data.get("rearm_after"),
             });
-            write_controller(&record).map_err(|error| {
+            write_resume_reservation(&record, &prior_generation).map_err(|error| {
                 homeboy_control_plane_contract::ControlPlaneError::unavailable(error.message)
             })?;
         }
@@ -1180,9 +1491,8 @@ fn controller_state_diagnostic(
             state: "paused_off".to_string(),
             label: "paused/off".to_string(),
             actionable: true,
-            reason:
-                "loop runtime metadata is off; resume only after intentionally turning the loop on"
-                    .to_string(),
+            reason: "loop is off; explicit resume revalidates custody before turning it on"
+                .to_string(),
         };
     }
 
@@ -1896,6 +2206,28 @@ pub fn write_controller(record: &AgentTaskLoopControllerRecord) -> Result<()> {
     publish_control_plane_loop(&merged)
 }
 
+/// Compare-and-reserve under the controller's existing filesystem lock. Two
+/// distinct rearm intents cannot both consume the same generation, and a stop
+/// between the custody read and reservation wins before work admission.
+fn write_resume_reservation(
+    record: &AgentTaskLoopControllerRecord,
+    prior_generation: &str,
+) -> Result<()> {
+    let path = controller_path(&record.loop_id)?;
+    let _lock = lock_controller(&path)?;
+    let current: AgentTaskLoopControllerRecord = read_json(&path)?;
+    if current.updated_at != prior_generation
+        || loop_runtime_stop_epoch(&loop_runtime_metadata(&current.metadata))
+            != loop_runtime_stop_epoch(&loop_runtime_metadata(&record.metadata))
+    {
+        return Err(Error::internal_unexpected(
+            "loop resume reservation superseded by a concurrent lifecycle action",
+        ));
+    }
+    write_json(&path, record)?;
+    publish_control_plane_loop(record)
+}
+
 fn lock_controller(controller: &Path) -> Result<fs::File> {
     let lock_path = controller.with_file_name("controller.lock");
     if let Some(parent) = lock_path.parent() {
@@ -1925,7 +2257,7 @@ fn publish_control_plane_loop(record: &AgentTaskLoopControllerRecord) -> Result<
         "controller": record,
         "control_plane": {
             "phase": record.phase,
-            "actions": loop_control_plane_actions(status)
+            "actions": loop_control_plane_actions(status, runtime_is_off(&record.metadata))
         }
     });
     let run = RunRecord {

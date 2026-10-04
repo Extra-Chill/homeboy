@@ -102,7 +102,9 @@ pub(super) fn open_tombstone_store(path: &Path) -> Result<Connection> {
                  terminal_job TEXT,
                  PRIMARY KEY (kind, key)
               );
-              CREATE TABLE IF NOT EXISTS controller_completions (
+               CREATE INDEX IF NOT EXISTS replay_tombstones_job_identity
+                   ON replay_tombstones (kind, job_id);
+               CREATE TABLE IF NOT EXISTS controller_completions (
                   job_id TEXT PRIMARY KEY NOT NULL,
                   payload TEXT NOT NULL
               );",
@@ -262,6 +264,105 @@ pub(super) fn lookup_tombstone(
     prepare_tombstone_store(path)?;
     let connection = open_tombstone_store(path)?;
     lookup_tombstone_in_connection(&connection, path, kind, key)
+}
+
+/// Read permanent terminal custody by exact identity, without replaying an
+/// admission or interpreting an absent row as proof of workload absence.
+pub(super) fn lookup_terminal_controller_job(path: &Path, job_id: Uuid) -> Result<Option<Job>> {
+    if !tombstone_path(path).exists() {
+        return Ok(None);
+    }
+    let journal = tombstone_path(path);
+    let connection =
+        Connection::open_with_flags(&journal, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| tombstone_error(path, "open terminal custody read-only", error))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| tombstone_error(path, "bound terminal custody read", error))?;
+    let mut statement = connection.prepare(
+        "SELECT terminal_job FROM replay_tombstones WHERE kind = 'controller' AND job_id = ?1 AND terminal_job IS NOT NULL",
+    ).map_err(|error| tombstone_error(path, "lookup terminal controller identity", error))?;
+    let rows = statement
+        .query_map([job_id.to_string()], |row| row.get::<_, String>(0))
+        .map_err(|error| tombstone_error(path, "read terminal controller identity", error))?;
+    let mut winner: Option<Job> = None;
+    for raw in rows {
+        let raw =
+            raw.map_err(|error| tombstone_error(path, "read terminal controller custody", error))?;
+        let job: Job = serde_json::from_str(&raw).map_err(|error| {
+            Error::config_invalid_json(tombstone_path(path).display().to_string(), error)
+        })?;
+        validate_terminal_controller_identity(&job, job_id)?;
+        if winner.as_ref().is_some_and(|prior| {
+            serde_json::to_value(prior).ok() != serde_json::to_value(&job).ok()
+        }) {
+            return Err(Error::internal_unexpected(
+                "conflicting terminal controller custody",
+            ));
+        }
+        winner = Some(job);
+    }
+    Ok(winner)
+}
+
+pub(super) fn validate_terminal_controller_identity(job: &Job, job_id: Uuid) -> Result<()> {
+    if job.id != job_id || !job.status.is_terminal() || !job.operation.starts_with("controller.") {
+        return Err(Error::internal_unexpected(
+            "terminal controller custody has mismatched identity or nonterminal status",
+        ));
+    }
+    Ok(())
+}
+
+/// Transfer existing replay custody before retiring a generation. Stream the
+/// pruned index rather than loading historical request/event payloads in memory.
+pub(super) fn archive_controller_tombstones(
+    source: &Path,
+    target: &Path,
+    resident: impl IntoIterator<Item = ReplayTombstone>,
+) -> Result<()> {
+    prepare_tombstone_store(source)?;
+    let connection = open_tombstone_store(target)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| tombstone_error(target, "begin terminal custody transfer", error))?;
+    for tombstone in resident {
+        if let Some(job) = &tombstone.terminal_job {
+            validate_terminal_controller_identity(job, tombstone.job_id)?;
+            insert_tombstone(&transaction, target, &tombstone)?;
+        }
+    }
+    if tombstone_path(source).exists() {
+        let source_connection = open_tombstone_store(source)?;
+        let mut statement = source_connection.prepare(
+            "SELECT key FROM replay_tombstones WHERE kind = 'controller' AND terminal_job IS NOT NULL",
+        ).map_err(|error| tombstone_error(source, "read retired controller custody", error))?;
+        let keys = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| tombstone_error(source, "read retired controller keys", error))?;
+        for key in keys {
+            let key =
+                key.map_err(|error| tombstone_error(source, "read retired controller key", error))?;
+            let tombstone = lookup_tombstone_in_connection(
+                &source_connection,
+                source,
+                ReplayTombstoneKind::Controller,
+                &key,
+            )?
+            .ok_or_else(|| Error::internal_unexpected("retired controller custody disappeared"))?;
+            validate_terminal_controller_identity(
+                tombstone
+                    .terminal_job
+                    .as_ref()
+                    .expect("selected terminal custody"),
+                tombstone.job_id,
+            )?;
+            insert_tombstone(&transaction, target, &tombstone)?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| tombstone_error(target, "commit terminal custody transfer", error))
 }
 
 pub(super) fn tombstone_store_report(path: &Path) -> Result<(usize, u64)> {

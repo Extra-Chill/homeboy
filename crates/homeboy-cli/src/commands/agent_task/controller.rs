@@ -306,7 +306,14 @@ fn loop_status(args: AgentTaskLoopStatusArgs) -> CmdResult<Value> {
 
 fn loop_resume(args: AgentTaskLoopResumeArgs) -> CmdResult<Value> {
     let defaults = ControllerDispatchDefaults::from_loop_resume_args(&args);
-    submit_loop_resume(args.loop_id, args.revolution_limit, defaults)
+    let rearm = args.rearm_after.map(|after_effect| {
+        homeboy::agents::agent_task_loop_controller::LoopResumeRearmIntent {
+            after_effect,
+            idempotency_key: args.idempotency_key.unwrap_or_default(),
+            expected_updated_at: args.expected_updated_at.unwrap_or_default(),
+        }
+    });
+    submit_loop_resume_with_rearm(args.loop_id, args.revolution_limit, defaults, rearm)
 }
 
 fn submit_loop_resume(
@@ -314,15 +321,25 @@ fn submit_loop_resume(
     revolution_limit: Option<u32>,
     defaults: ControllerDispatchDefaults,
 ) -> CmdResult<Value> {
+    submit_loop_resume_with_rearm(loop_id, revolution_limit, defaults, None)
+}
+
+fn submit_loop_resume_with_rearm(
+    loop_id: String,
+    revolution_limit: Option<u32>,
+    defaults: ControllerDispatchDefaults,
+    rearm: Option<homeboy::agents::agent_task_loop_controller::LoopResumeRearmIntent>,
+) -> CmdResult<Value> {
     let mut parameters = defaults.to_resume_parameters();
     materialize_private_resume_provider_config(&mut parameters)?;
-    let acknowledgement = homeboy::agents::agent_task_loop_controller::resume_loop(
+    let acknowledgement = homeboy::agents::agent_task_loop_controller::resume_loop_with_rearm(
         &loop_id,
         revolution_limit,
         parameters,
+        rearm,
     )?;
     let record = homeboy::agents::agent_task_loop_controller::load_controller(&loop_id)?;
-    let result = acknowledgement.result.data;
+    let result = acknowledgement.result.data.clone();
     let stopped_reason = result.get("stopped_reason").cloned();
     Ok((
         serde_json::json!({
@@ -334,6 +351,7 @@ fn submit_loop_resume(
             "controller": record,
             "resume": result,
             "action_outcome": acknowledgement.outcome,
+            "acknowledgement": acknowledgement,
         }),
         0,
     ))

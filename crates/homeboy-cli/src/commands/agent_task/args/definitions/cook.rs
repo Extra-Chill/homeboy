@@ -1400,6 +1400,15 @@ pub struct AgentTaskLoopStatusArgs {
 pub struct AgentTaskLoopResumeArgs {
     /// Durable loop ID to resume.
     pub loop_id: String,
+    /// Deliberately create a new resume intent after this failed effect ID.
+    #[arg(long = "rearm-after", requires_all = ["idempotency_key", "expected_updated_at"])]
+    pub rearm_after: Option<String>,
+    /// Stable caller key for replaying the exact deliberate rearm request.
+    #[arg(long, requires = "rearm_after")]
+    pub idempotency_key: Option<String>,
+    /// Exact controller generation observed before deliberately rearming.
+    #[arg(long, requires = "rearm_after")]
+    pub expected_updated_at: Option<String>,
     /// New maximum revolutions before the loop stops automatically.
     #[arg(long = "revolution-limit", value_name = "N")]
     pub revolution_limit: Option<u32>,

@@ -229,14 +229,27 @@ impl DaemonControllerJobService {
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        self.job_store.get(Uuid::parse_str(job_id).map_err(|error| {
+        let id = Uuid::parse_str(job_id).map_err(|error| {
             Error::validation_invalid_argument("job_id", error.to_string(), None, None)
-        })?)
+        })?;
+        if let Some(job) = self.job_store.terminal_controller_job(id)? {
+            return Ok(job);
+        }
+        match self.job_store.get(id) {
+            Ok(job) => Ok(job),
+            Err(error) => retained_controller_job(job_id)?.ok_or(error),
+        }
     }
 
     pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
         cancel_controller_job(parse_controller_job_id(job_id)?, reason, &self.job_store)
     }
+}
+
+/// Bounded, non-reconciling access to exact controller terminal custody. Does
+/// not connect, rotate a daemon, recover a driver, or infer absence from a PID.
+pub fn retained_controller_job(job_id: &str) -> Result<Option<crate::api_jobs::Job>> {
+    generation_store::terminal_controller_job(parse_controller_job_id(job_id)?)
 }
 
 /// The durable admission result for a typed controller job submission.
