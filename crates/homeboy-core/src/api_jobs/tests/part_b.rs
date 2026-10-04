@@ -644,6 +644,87 @@ fn unknown_unlinked_live_job_still_blocks_replacement() {
     );
 }
 
+/// #15420: the daemon was killed with its host service while a staging
+/// dispatch it drove in-process was checkpointed and observing a Lab job. No
+/// child identity exists because the daemon itself was the executor. Status
+/// must route this to driver recovery, and dead-lease reconciliation must
+/// preserve the job for the replacement daemon to resume, instead of every
+/// recovery path refusing it as ambiguous.
+#[test]
+fn checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_lease() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-15420-observing-{}", Uuid::new_v4());
+    fixtures.active_run(&run_id);
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job_id = admitted_staging_dispatch(&store, Some(&run_id));
+    store
+        .start_controller_execution(job_id)
+        .expect("claim execution");
+    store
+        .record_controller_prepared(
+            job_id,
+            json!({ "phase": "observe_runner", "final_runner_job_id": "runner-job-1" }),
+        )
+        .expect("publish checkpoint");
+
+    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"), |_| false);
+    let item = evidence
+        .iter()
+        .find(|evidence| evidence.job_id == job_id)
+        .expect("staging dispatch evidence");
+    assert_eq!(item.child_pid, None);
+    assert!(item.controller_owned);
+    assert_eq!(
+        item.disposition,
+        DaemonActiveJobRecoveryDisposition::DriverRecovery,
+        "checkpointed in-daemon driver work is resumed, not attested"
+    );
+
+    let diagnostics = store
+        .reconcile_dead_daemon_lease_jobs("lease-dead")
+        .expect("dead-lease reconciliation must not refuse resumable driver work");
+    assert_eq!(diagnostics.preserved_controller_job_ids, vec![job_id]);
+    assert_eq!(diagnostics.terminalized_count(), 0);
+    assert!(diagnostics.protected_job_ids.is_empty());
+    let job = store.get(job_id).expect("preserved staging dispatch");
+    assert_eq!(
+        job.status,
+        JobStatus::Running,
+        "the replacement daemon's controller recovery owns the outcome"
+    );
+}
+
+/// The fence #15420 must not loosen: without a published checkpoint, an
+/// in-daemon staging dispatch keeps its fail-closed classification.
+#[test]
+fn uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-15420-unchecked-{}", Uuid::new_v4());
+    fixtures.active_run(&run_id);
+    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
+    let job_id = admitted_staging_dispatch(&store, Some(&run_id));
+    store
+        .start_controller_execution(job_id)
+        .expect("claim execution");
+
+    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"), |_| false);
+    let item = evidence
+        .iter()
+        .find(|evidence| evidence.job_id == job_id)
+        .expect("staging dispatch evidence");
+    assert_ne!(
+        item.disposition,
+        DaemonActiveJobRecoveryDisposition::DriverRecovery
+    );
+    assert!(store
+        .reconcile_dead_daemon_lease_jobs("lease-dead")
+        .is_err());
+    assert_eq!(
+        store.get(job_id).expect("still running").status,
+        JobStatus::Running
+    );
+}
+
 #[test]
 fn reused_pid_with_a_different_start_identity_is_terminalized() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());

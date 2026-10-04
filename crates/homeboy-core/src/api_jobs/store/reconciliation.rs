@@ -115,6 +115,12 @@ impl JobStore {
                             DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
                         }
                     }
+                } else if resumable_in_daemon_controller_work(stored) {
+                    // The daemon is this job's only executor and the driver
+                    // published a checkpoint. If that daemon is gone, the
+                    // replacement's controller recovery resumes the driver
+                    // from it, so nothing needs attesting (#15420).
+                    DaemonActiveJobRecoveryDisposition::DriverRecovery
                 } else if current_lease_id
                     .is_some_and(|lease| job.daemon_lease_id.as_deref() == Some(lease))
                 {
@@ -789,6 +795,13 @@ impl JobStore {
                             DeadLeaseJobDisposition::ProtectedUnsupported(evidence)
                         }
                     }
+                } else if resumable_in_daemon_controller_work(stored) {
+                    // The lease owner is proven dead and was this job's only
+                    // executor. Preserve the checkpointed driver work for the
+                    // replacement daemon's controller recovery to resume
+                    // (#15420).
+                    diagnostics.preserved_controller_job_ids.push(*job_id);
+                    DeadLeaseJobDisposition::PreservedController
                 } else {
                     if stored.job.status == JobStatus::Queued {
                         DeadLeaseJobDisposition::TerminalizeDead

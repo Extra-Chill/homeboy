@@ -3237,6 +3237,39 @@ struct JobExecutionLiveness {
     driver_owned: bool,
 }
 
+/// Whether a controller job is checkpointed work whose only executor was the
+/// daemon itself: its driver declares no external execution owner
+/// (`execution_owner` is `None`), no local child was recorded, and a durable
+/// checkpoint (or a driver-derived recovery checkpoint) exists.
+///
+/// Such work cannot outlive the daemon process, yet it may not be finished:
+/// a driver can hand work to another machine and stay checkpointed while it
+/// observes it. The daemon's controller recovery resumes it from that
+/// checkpoint, so a dead lease owner is resolved by resuming, not by an
+/// operator attesting absence or by failing the job (#15420).
+///
+/// Uncheckpointed work keeps its existing fail-closed interpretation.
+fn resumable_in_daemon_controller_work(stored: &StoredJob) -> bool {
+    use crate::daemon::controller_job_driver;
+    let Some(controller) = stored.controller_job.as_ref() else {
+        return false;
+    };
+    if stored.local_child.is_some() {
+        return false;
+    }
+    let Ok(driver) = controller_job_driver::driver(&controller.job_type, controller.version) else {
+        return false;
+    };
+    if !matches!(
+        driver.execution_owner(&controller.request, controller.checkpoint.as_ref()),
+        Ok(None)
+    ) {
+        return false;
+    }
+    controller.checkpoint.is_some()
+        || matches!(driver.recovery_checkpoint(&controller.request), Ok(Some(_)))
+}
+
 /// One ownership interpretation shared by read-only status and lease recovery.
 /// Opaque controller state is interpreted exclusively by its registered driver.
 fn stored_job_execution_liveness(
