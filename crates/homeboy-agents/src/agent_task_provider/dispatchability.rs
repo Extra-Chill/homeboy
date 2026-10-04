@@ -1572,6 +1572,13 @@ pub fn preflight_plan_provider_dispatchability_without_runtime_with_providers(
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> homeboy_core::Result<()> {
     for task in &plan.tasks {
+        // The in-tree test double has no catalog manifest; plan admission
+        // selects it through the `is_fixture_backend` gate
+        // [`selected_plan_provider_dispatchability_with_providers`] applies, so
+        // the runner-owned static preflight must not reject it first.
+        if super::is_fixture_backend(&task.executor.backend) {
+            continue;
+        }
         preflight_provider_dispatchability_without_runtime_with_config(
             catalog,
             &task.executor.backend,
