@@ -607,6 +607,16 @@ A gate that did not hold is **not** an evidence-contract violation. Producers
 can check a candidate contract before attaching it with
 `homeboy contract validate homeboy/fuzz-evidence-contract/v1 --file <path>`.
 
+Fuzz producers persist this current structured contract as the evidence authority.
+The schema is required on the contract and each violation, `complete` must agree
+with the violation list, and each violation carries a non-empty message. The
+producer, normal `fuzz inspect` diagnosis, `runs proof`, and `contract validate`
+use the same validation. Missing, unsupported, or contradictory evidence is a
+validation error; retired `results_error` and `missing_artifact_refs` metadata is not
+reconstructed. `fuzz inspect <run-id> --raw` retrieves bytes without deriving a
+diagnosis or evidence verdict. Retained raw artifacts also remain available through
+`homeboy runs artifact get <run-id> <artifact-id> -o <path>`.
+
 ## Reviewer Proof
 
 `homeboy runs proof <run-id>` projects a bounded reviewer view for a fuzz run

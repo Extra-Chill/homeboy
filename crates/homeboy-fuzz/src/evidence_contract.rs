@@ -28,10 +28,6 @@ use serde_json::Value;
 
 use super::schemas::FUZZ_EVIDENCE_CONTRACT_SCHEMA;
 
-fn fuzz_evidence_contract_schema() -> String {
-    FUZZ_EVIDENCE_CONTRACT_SCHEMA.to_string()
-}
-
 /// Which family a failed fuzz run belongs to.
 ///
 /// These are not severities and they are not ordered by badness. They are
@@ -171,7 +167,6 @@ impl FuzzEvidenceViolationCode {
 /// it to the producer that owes the evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuzzEvidenceViolation {
-    #[serde(default = "fuzz_evidence_contract_schema")]
     pub schema: String,
     pub code: FuzzEvidenceViolationCode,
     /// Statement of what was promised and not delivered.
@@ -190,7 +185,7 @@ pub struct FuzzEvidenceViolation {
 impl FuzzEvidenceViolation {
     pub fn new(code: FuzzEvidenceViolationCode, message: impl Into<String>) -> Self {
         Self {
-            schema: fuzz_evidence_contract_schema(),
+            schema: FUZZ_EVIDENCE_CONTRACT_SCHEMA.to_string(),
             code,
             message: message.into(),
             declared_ref: None,
@@ -237,7 +232,6 @@ impl FuzzEvidenceViolation {
 /// Campaign-level evidence completeness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FuzzEvidenceContract {
-    #[serde(default = "fuzz_evidence_contract_schema")]
     pub schema: String,
     /// Every declared piece of evidence was delivered.
     pub complete: bool,
@@ -255,7 +249,7 @@ impl FuzzEvidenceContract {
     /// A contract with nothing outstanding.
     pub fn satisfied() -> Self {
         Self {
-            schema: fuzz_evidence_contract_schema(),
+            schema: FUZZ_EVIDENCE_CONTRACT_SCHEMA.to_string(),
             complete: true,
             violations: Vec::new(),
         }
@@ -263,7 +257,7 @@ impl FuzzEvidenceContract {
 
     pub fn from_violations(violations: Vec<FuzzEvidenceViolation>) -> Self {
         Self {
-            schema: fuzz_evidence_contract_schema(),
+            schema: FUZZ_EVIDENCE_CONTRACT_SCHEMA.to_string(),
             complete: violations.is_empty(),
             violations,
         }
@@ -306,81 +300,57 @@ impl FuzzEvidenceContract {
         })
     }
 
-    /// Read a contract back off persisted run metadata.
-    ///
-    /// Prefers the structured `evidence_contract` member written by the
-    /// producer. Runs recorded before that member existed only carry
-    /// `missing_artifact_refs` and a collapsed `results_error` string, so
-    /// those are reconstructed into the same vocabulary rather than reported
-    /// as absent. The `schema` member is always restamped by this reader, so a
-    /// payload cannot claim a schema it does not satisfy.
-    pub fn from_run_metadata(metadata: &Value) -> Self {
-        if let Some(value) = metadata.get("evidence_contract") {
-            if let Ok(mut contract) = serde_json::from_value::<Self>(value.clone()) {
-                contract.schema = fuzz_evidence_contract_schema();
-                contract.complete = contract.violations.is_empty();
-                return contract;
-            }
+    /// Validate the producer's current structured contract before storage or use.
+    pub fn validate(&self) -> homeboy_core::Result<()> {
+        let error = if self.schema != FUZZ_EVIDENCE_CONTRACT_SCHEMA {
+            Some("unsupported fuzz evidence contract schema")
+        } else if self.complete && !self.violations.is_empty() {
+            Some("complete is true but violations were declared")
+        } else if !self.complete && self.violations.is_empty() {
+            Some("complete is false but no violation was declared")
+        } else if self.violations.iter().any(|violation| {
+            violation.schema != FUZZ_EVIDENCE_CONTRACT_SCHEMA || violation.message.trim().is_empty()
+        }) {
+            Some("every violation must use the supported schema and carry a non-empty message")
+        } else {
+            None
+        };
+        match error {
+            None => Ok(()),
+            Some(error) => Err(homeboy_core::Error::new(
+                homeboy_core::ErrorCode::ValidationInvalidArgument,
+                "Contract validation failed",
+                serde_json::json!({
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                    "valid": false,
+                    "error": error,
+                }),
+            )),
         }
-        Self::from_legacy_run_metadata(metadata)
     }
 
-    /// Reconstruct the vocabulary from the pre-taxonomy metadata members.
-    fn from_legacy_run_metadata(metadata: &Value) -> Self {
-        let mut violations = Vec::new();
-        if let Some(refs) = metadata
-            .get("missing_artifact_refs")
-            .and_then(Value::as_array)
-        {
-            for declared_ref in refs.iter().filter_map(Value::as_str) {
-                violations.push(
-                    FuzzEvidenceViolation::new(
-                        FuzzEvidenceViolationCode::ArtifactRefMissing,
-                        format!(
-                            "declared artifact `{declared_ref}` was absent from the fuzz artifact root"
-                        ),
-                    )
-                    .with_declared_ref(declared_ref)
-                    .with_producer_contract(FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT),
-                );
-            }
-        }
-        // The legacy `results_error` collapsed five distinct channels into one
-        // string. Promote it only when it is not already represented by the
-        // missing-ref list and is not a gate failure wearing the same field.
-        // Classify what is left as `Unknown` rather than guessing a code from
-        // substring sniffing.
-        if violations.is_empty() {
-            if let Some(error) = metadata
-                .get("results_error")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|error| !error.is_empty())
-                .filter(|error| !is_legacy_gate_failure_message(error))
-            {
-                violations.push(FuzzEvidenceViolation::new(
-                    FuzzEvidenceViolationCode::Unknown,
-                    error,
-                ));
-            }
-        }
-        Self::from_violations(violations)
+    /// Read the current structured contract; unsupported or malformed evidence
+    /// is an explicit error, never a reconstructed or implicitly satisfied proof.
+    pub fn from_run_metadata(metadata: &Value) -> homeboy_core::Result<Self> {
+        let value = metadata.get("evidence_contract").ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "evidence_contract",
+                "fuzz run has no structured evidence contract",
+                None,
+                None,
+            )
+        })?;
+        let contract: Self = serde_json::from_value(value.clone()).map_err(|error| {
+            homeboy_core::Error::validation_invalid_argument(
+                "evidence_contract",
+                format!("invalid structured fuzz evidence contract: {error}"),
+                None,
+                None,
+            )
+        })?;
+        contract.validate()?;
+        Ok(contract)
     }
-}
-
-/// The exact prefix Homeboy itself writes into the legacy collapsed
-/// `results_error` member for an expected-metric gate failure.
-///
-/// Matching it is matching our own emitted format, not sniffing arbitrary
-/// runner text. A gate that did not hold is a statement about declared pass
-/// criteria, so reconstructing it as an evidence-contract violation would
-/// blame the producer for the very collapse this taxonomy removes. New runs
-/// never reach this path: they carry a structured `evidence_contract` that
-/// excludes gate failures at production time.
-const LEGACY_GATE_FAILURE_PREFIX: &str = "fuzz expected metric gate(s) failed";
-
-fn is_legacy_gate_failure_message(error: &str) -> bool {
-    error.starts_with(LEGACY_GATE_FAILURE_PREFIX)
 }
 
 /// The producer channel that owes artifacts declared by a campaign.
@@ -617,6 +587,7 @@ mod tests {
     #[test]
     fn violations_tolerate_unknown_members_from_a_newer_producer() {
         let violation: FuzzEvidenceViolation = serde_json::from_value(serde_json::json!({
+            "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
             "code": "artifact_ref_missing",
             "message": "absent",
             "declared_ref": "results.json",
@@ -633,20 +604,21 @@ mod tests {
     }
 
     #[test]
-    fn run_metadata_prefers_the_structured_contract() {
+    fn run_metadata_reads_the_current_structured_contract() {
         let metadata = serde_json::json!({
             "evidence_contract": {
+                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                 "complete": false,
                 "violations": [{
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                     "code": "artifact_ref_unresolvable",
                     "message": "escapes the artifact root",
                     "declared_ref": "../outside.json"
                 }]
-            },
-            "missing_artifact_refs": ["ignored.json"]
+            }
         });
 
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
+        let contract = FuzzEvidenceContract::from_run_metadata(&metadata).expect("valid contract");
 
         assert!(!contract.complete);
         assert_eq!(contract.violations.len(), 1);
@@ -657,68 +629,16 @@ mod tests {
     }
 
     #[test]
-    fn run_metadata_reconstructs_legacy_missing_artifact_refs() {
-        let metadata = serde_json::json!({
-            "missing_artifact_refs": ["results.json"],
-            "results_error": "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: results.json"
-        });
-
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
-
-        assert!(!contract.complete);
-        assert_eq!(contract.violations.len(), 1);
-        assert_eq!(
-            contract.violations[0].code,
-            FuzzEvidenceViolationCode::ArtifactRefMissing
-        );
-        assert_eq!(
-            contract.violations[0].declared_ref.as_deref(),
-            Some("results.json")
-        );
-    }
-
-    #[test]
-    fn a_legacy_results_error_alone_is_not_guessed_into_a_specific_code() {
-        let metadata = serde_json::json!({ "results_error": "runner exploded" });
-
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
-
-        assert!(!contract.complete);
-        assert_eq!(
-            contract.violations[0].code,
-            FuzzEvidenceViolationCode::Unknown
-        );
-        assert_eq!(contract.violations[0].message, "runner exploded");
-    }
-
-    /// A legacy run whose only failure was a gate must not be reconstructed as
-    /// an evidence-contract violation. `results_error` collapsed both, so the
-    /// reader has to un-collapse it or it re-creates the reported bug in the
-    /// opposite direction.
-    #[test]
-    fn a_legacy_gate_failure_in_results_error_is_not_an_evidence_violation() {
-        let metadata = serde_json::json!({
-            "results_error": "fuzz expected metric gate(s) failed: p95_ms expected 500 observed 900"
-        });
-
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
-
-        assert!(contract.complete);
-        assert!(contract.violations.is_empty());
-    }
-
-    #[test]
-    fn run_metadata_without_evidence_members_is_satisfied() {
-        let contract = FuzzEvidenceContract::from_run_metadata(&serde_json::json!({
+    fn missing_evidence_cannot_be_claimed_satisfied() {
+        let error = FuzzEvidenceContract::from_run_metadata(&serde_json::json!({
             "success": true
-        }));
-
-        assert!(contract.complete);
-        assert!(contract.violations.is_empty());
+        }))
+        .expect_err("missing canonical evidence must fail");
+        assert_eq!(error.details["field"], "evidence_contract");
     }
 
     #[test]
-    fn the_reader_restamps_the_schema_a_payload_claims() {
+    fn unsupported_evidence_schema_is_rejected() {
         let metadata = serde_json::json!({
             "evidence_contract": {
                 "schema": "attacker/not-the-contract/v9",
@@ -727,25 +647,27 @@ mod tests {
             }
         });
 
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
-
-        assert_eq!(contract.schema, FUZZ_EVIDENCE_CONTRACT_SCHEMA);
+        let error =
+            FuzzEvidenceContract::from_run_metadata(&metadata).expect_err("unsupported schema");
+        assert_eq!(error.details["valid"], false);
     }
 
     #[test]
-    fn a_payload_claiming_completeness_with_violations_is_corrected() {
+    fn a_payload_claiming_completeness_with_violations_is_rejected() {
         let metadata = serde_json::json!({
             "evidence_contract": {
+                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                 "complete": true,
                 "violations": [{
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
                     "code": "artifact_ref_missing",
                     "message": "absent"
                 }]
             }
         });
 
-        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
-
-        assert!(!contract.complete);
+        let error =
+            FuzzEvidenceContract::from_run_metadata(&metadata).expect_err("contradictory proof");
+        assert_eq!(error.details["valid"], false);
     }
 }
