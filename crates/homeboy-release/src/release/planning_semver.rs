@@ -6,7 +6,7 @@ use super::scope::ReleaseScope;
 use super::types::{ReleaseSemverCommit, ReleaseSemverRecommendation};
 
 pub(super) fn build_semver_recommendation(
-    _component: &Component,
+    component: &Component,
     requested_bump: &str,
     scope: &ReleaseScope,
 ) -> Result<Option<ReleaseSemverRecommendation>> {
@@ -21,7 +21,16 @@ pub(super) fn build_semver_recommendation(
     let is_explicit_version =
         requested_bump.contains('.') && requested_bump.split('.').all(|p| p.parse::<u32>().is_ok());
 
-    let recommended = git::recommended_bump_from_commits(&commits);
+    let recommended = git::recommended_bump_from_commits(&commits).map(|bump| {
+        let is_pre_1_0 = super::version::read_component_version(component)
+            .ok()
+            .is_some_and(|version| version.version.starts_with("0."));
+        if is_pre_1_0 && bump == git::SemverBump::Major {
+            git::SemverBump::Minor
+        } else {
+            bump
+        }
+    });
 
     if requested_bump == "none" && recommended.is_none() {
         return Ok(None);
@@ -609,6 +618,52 @@ mod tests {
 
         assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
         assert_eq!(recommendation.requested_bump, "minor");
+    }
+
+    fn breaking_recommendation(
+        current_version: &str,
+        requested_bump: &str,
+    ) -> crate::release::types::ReleaseSemverRecommendation {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "VERSION", current_version, "chore: initial");
+        commit_file(dir, "breaking.txt", "breaking", "feat!: break API");
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            version_targets: Some(vec![homeboy_core::component::VersionTarget {
+                file: "VERSION".to_string(),
+                pattern: Some(r"([0-9]+\.[0-9]+\.[0-9]+)".to_string()),
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+        let scope = ReleaseScope::resolve(&component, "fixture").expect("release scope");
+        build_semver_recommendation(&component, requested_bump, &scope)
+            .expect("recommendation should build")
+            .expect("breaking commit should recommend a release")
+    }
+
+    #[test]
+    fn pre_1_0_breaking_auto_bump_is_not_an_underbump() {
+        let recommendation = breaking_recommendation("0.31.0", "none");
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
+        assert_eq!(recommendation.requested_bump, "minor");
+        assert!(!recommendation.is_underbump);
+    }
+
+    #[test]
+    fn pre_1_0_explicit_patch_remains_underbump_for_breaking_change() {
+        let recommendation = breaking_recommendation("0.31.0", "patch");
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("minor"));
+        assert!(recommendation.is_underbump);
+    }
+
+    #[test]
+    fn post_1_0_breaking_recommendation_remains_major() {
+        let recommendation = breaking_recommendation("1.0.0", "none");
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("major"));
+        assert_eq!(recommendation.requested_bump, "major");
+        assert!(!recommendation.is_underbump);
     }
 
     #[test]
