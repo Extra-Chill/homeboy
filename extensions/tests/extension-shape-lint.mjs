@@ -13,6 +13,7 @@ const extensionIds = new Set([
   'managed-preview',
   'nodejs',
   'rust',
+  'ssh-checkout-deploy',
   'swift',
   'wordpress',
 ]);
@@ -30,6 +31,8 @@ const rootManifest = readJson(path.join(rootDir, 'homeboy-extension-root.json'))
 const allowedTopLevelDirs = new Set([
   '.git',
   '.github',
+  // Self-checks CI checks out Homeboy core here (HOMEBOY_CORE_DIR).
+  '.ci',
   '.claude',
   '.datamachine',
   'agent-runtimes',

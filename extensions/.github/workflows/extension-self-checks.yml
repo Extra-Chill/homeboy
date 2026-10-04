@@ -30,9 +30,11 @@ jobs:
       fail-fast: false
       matrix:
         component:
+          - discord
           - go
           - nodejs
           - rust
+          - ssh-checkout-deploy
           - swift
           - wordpress
           # The repo-root component owns the shared tests/ directory. The runner
