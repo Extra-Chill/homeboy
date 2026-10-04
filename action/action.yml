@@ -782,6 +782,9 @@ runs:
         RELEASE_SKIP_GITHUB_RELEASE: ${{ inputs.release-skip-github-release }}
         RELEASE_HEAD: ${{ inputs.release-head }}
         RELEASE_FROM_ARTIFACTS: ${{ inputs.release-from-artifacts }}
+        # Consumer-supplied release flags (e.g. `--bump minor --force-lower-bump`),
+        # passed to both the dry-run check and the real release so they agree.
+        EXTRA_ARGS: ${{ inputs.args }}
         HOMEBOY_VERIFY_GITHUB_RELEASE: ${{ inputs.release-verify-github-release }}
         COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}

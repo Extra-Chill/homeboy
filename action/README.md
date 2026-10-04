@@ -187,6 +187,9 @@ Available inputs: `dry-run`, `args`, `extension`, `extension-ref`, `component`,
 `php-version`, `node-version`, `release-skip-publish`,
 `release-skip-github-release`, `release-branch`, `execution-timeout-seconds`,
 `publisher-known-hosts`, `dispatch-repo`, `dispatch-event`.
+`args` is appended to both the dry-run check and the real `homeboy release`
+invocation, so they agree. For example, a manual dispatch with
+`args: --bump minor --force-lower-bump` overrides a blocked bump policy.
 Workflow outputs mirror the composite action (`released`, `release-version`,
 `release-tag`, `release-bump-type`, `skipped-reason`, `tooling-identity`) so a
 post-release job can chain on the result. The workflow also exposes

@@ -233,6 +233,13 @@ if [ -n "${RELEASE_FROM_ARTIFACTS}" ]; then
   RELEASE_ARGS+=(--from-artifacts "${RELEASE_FROM_ARTIFACTS}")
 fi
 
+# Consumer-supplied flags from the workflow's `args` input, word-split like a
+# command line. Empty leaves the invocation unchanged.
+if [ -n "${EXTRA_ARGS:-}" ]; then
+  read -r -a extra_release_args <<< "${EXTRA_ARGS}"
+  RELEASE_ARGS+=("${extra_release_args[@]}")
+fi
+
 if [ "${DRY_RUN}" = "true" ]; then
   RELEASE_ARGS+=(--dry-run)
 else

@@ -221,6 +221,7 @@ run_wrapper() {
   RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
   RELEASE_HEAD="${RELEASE_HEAD:-false}" \
   RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  EXTRA_ARGS="${EXTRA_ARGS:-}" \
   RELEASE_BRANCH="${RELEASE_BRANCH:-main}" \
   MOCK_BRANCH="${MOCK_BRANCH:-main}" \
   MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
@@ -249,6 +250,7 @@ run_liveness_wrapper() {
   RELEASE_SKIP_GITHUB_RELEASE="${RELEASE_SKIP_GITHUB_RELEASE:-false}" \
   RELEASE_HEAD="${RELEASE_HEAD:-false}" \
   RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
+  EXTRA_ARGS="${EXTRA_ARGS:-}" \
   RELEASE_BRANCH="${RELEASE_BRANCH:-main}" \
   MOCK_BRANCH="${MOCK_BRANCH:-main}" \
   MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
@@ -290,6 +292,8 @@ assert_not_contains '--no-github-release' "${ARGS}" "release creates GitHub Rele
 assert_contains '--git-identity bot' "${ARGS}" "release delegates bot identity to homeboy"
 assert_not_contains '--dry-run' "${ARGS}" "normal release uses one non-dry-run homeboy invocation"
 assert_contains '--apply' "${ARGS}" "real release pairs --skip-checks with the required --apply opt-in"
+assert_not_contains '--bump' "${ARGS}" "empty args adds nothing to the release invocation"
+
 assert_output_line 'x-access-token' "${HOMEBOY_AUTH_FILE}" "release exposes GitHub token username through askpass"
 assert_output_line 'secret123' "${HOMEBOY_AUTH_FILE}" "release exposes GitHub token password through askpass"
 assert_output_line '0' "${HOMEBOY_AUTH_FILE}" "release disables interactive git prompts"
@@ -299,6 +303,24 @@ assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is 
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "release bump type output is translated"
 assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "legacy step bump type output is preserved"
 assert_no_git_pull "wrapper does not run its own git pull (core owns tip-sync)"
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+GH_TOKEN="secret123"
+EXTRA_ARGS="--bump minor --force-lower-bump"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains '--bump minor --force-lower-bump' "${ARGS}" "args input reaches the real release"
+assert_contains '--apply' "${ARGS}" "args keep the --apply opt-in on a real release"
+
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_DRY_RUN="true"
+run_wrapper
+ARGS="$(cat "${HOMEBOY_ARGS_FILE}")"
+assert_contains '--bump minor --force-lower-bump' "${ARGS}" "args input reaches the dry-run check"
+assert_contains '--dry-run' "${ARGS}" "dry-run check still passes --dry-run with args"
+unset EXTRA_ARGS RELEASE_DRY_RUN
 
 setup_fixture
 mkdir -p "${WORKSPACE}/packages/gutenberg"
