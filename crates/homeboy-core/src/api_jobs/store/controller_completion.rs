@@ -186,6 +186,128 @@ mod tests {
             "unresolved custody stays inspectable"
         );
     }
+
+    #[test]
+    fn terminal_identity_custody_survives_configured_pruning_and_archive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json");
+        let archive = directory.path().join("retained-jobs.json");
+        let store = JobStore::open_without_reconciliation_with_retention(&path, 2, 1).unwrap();
+        let mut winners = Vec::new();
+        for status in [
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ] {
+            let id = running(&store);
+            let job = match status {
+                JobStatus::Succeeded => {
+                    store.complete_controller_success(id, serde_json::json!({"capture":"original"}))
+                }
+                JobStatus::Failed => store.fail_controller_error(
+                    id,
+                    "consumer failed".to_string(),
+                    serde_json::json!({}),
+                ),
+                JobStatus::Cancelled => {
+                    store
+                        .request_controller_cancellation(id, "stop".to_string())
+                        .unwrap();
+                    store.complete_controller_cancellation(id)
+                }
+                _ => unreachable!(),
+            }
+            .unwrap();
+            winners.push(job);
+        }
+        assert_eq!(store.list().len(), 1, "configured pruning actually ran");
+        let active = running(&store);
+        assert!(store.terminal_controller_job(active).unwrap().is_none());
+        assert!(store
+            .terminal_controller_job(Uuid::new_v4())
+            .unwrap()
+            .is_none());
+        store.archive_terminal_controller_jobs(&archive).unwrap();
+        // Archive custody is independent of the retired source store and index.
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(super::super::super::persistence::tombstone_path(&path)).unwrap();
+        let retained = JobStore::open_without_reconciliation(&archive).unwrap();
+        assert!(retained.list().is_empty());
+        for winner in winners {
+            assert_eq!(
+                serde_json::to_value(
+                    retained
+                        .terminal_controller_job(winner.id)
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                serde_json::to_value(&winner).unwrap()
+            );
+        }
+        assert!(retained.terminal_controller_job(active).unwrap().is_none());
+    }
+
+    #[test]
+    fn terminal_identity_lookup_rejects_corrupt_identity_and_nonterminal_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation(&path).unwrap();
+        let id = running(&store);
+        store
+            .complete_controller_success(id, serde_json::json!({}))
+            .unwrap();
+        store
+            .prune_terminal_controller_jobs("test.completion-custody", 1, &[id])
+            .unwrap();
+        let connection = super::super::super::persistence::open_tombstone_store(&path).unwrap();
+        let winner = store.terminal_controller_job(id).unwrap().unwrap();
+        let mut mismatched = winner.clone();
+        mismatched.id = Uuid::new_v4();
+        let mut nonterminal = winner;
+        nonterminal.status = JobStatus::Running;
+        for invalid in [mismatched, nonterminal] {
+            connection
+                .execute(
+                    "UPDATE replay_tombstones SET terminal_job = ?1 WHERE job_id = ?2",
+                    params![serde_json::to_string(&invalid).unwrap(), id.to_string()],
+                )
+                .unwrap();
+            assert!(store.terminal_controller_job(id).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_identity_status_read_does_not_create_or_migrate_missing_stores() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("retired/missing-jobs.json");
+        assert!(
+            JobStore::terminal_controller_job_at(&missing, Uuid::new_v4())
+                .unwrap()
+                .is_none()
+        );
+        assert!(!directory.path().join("retired").exists());
+        let path = directory.path().join("jobs.json");
+        let store = JobStore::open_without_reconciliation_with_retention(&path, 2, 1).unwrap();
+        let id = running(&store);
+        store
+            .complete_controller_success(id, serde_json::json!({"original": true}))
+            .unwrap();
+        let another = running(&store);
+        store
+            .complete_controller_success(another, serde_json::json!({}))
+            .unwrap();
+        let json_before = fs::read(&path).unwrap();
+        let tombstones = super::super::super::persistence::tombstone_path(&path);
+        let index_before = fs::read(&tombstones).unwrap();
+        assert!(JobStore::terminal_controller_job_at(&path, id)
+            .unwrap()
+            .unwrap()
+            .status
+            .is_terminal());
+        assert_eq!(fs::read(&path).unwrap(), json_before);
+        assert_eq!(fs::read(&tombstones).unwrap(), index_before);
+    }
 }
 
 fn index_error(error: rusqlite::Error) -> Error {

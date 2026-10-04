@@ -319,6 +319,7 @@ pub(super) fn retire_exact_dead_generation(lease_id: &str, state_dir: &str) -> R
         if !matched {
             return Ok(false);
         }
+        archive_generation_terminal_custody(state_dir)?;
         registry.generations.generations.remove(lease_id);
         registry
             .generations
@@ -511,6 +512,7 @@ pub(super) fn reconcile_drained_generations(
                                 && generation.active_jobs == 0
                         });
                 if can_retire {
+                    archive_generation_terminal_custody(&endpoint.state_dir)?;
                     registry.generations.generations.remove(&lease_id);
                     registry
                         .generations
@@ -530,6 +532,31 @@ pub(super) fn reconcile_drained_generations(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn retained_jobs_path() -> Result<PathBuf> {
+    Ok(router_dir()?.join("retained-controller-jobs.json"))
+}
+
+fn archive_generation_terminal_custody(state_dir: &str) -> Result<()> {
+    crate::api_jobs::JobStore::open_without_reconciliation(Path::new(state_dir).join("jobs.json"))?
+        .archive_terminal_controller_jobs(&retained_jobs_path()?)
+}
+
+/// Read original terminal custody even after the generation endpoint retires.
+/// A missing legacy store or receipt returns unknown, not fabricated completion.
+pub(super) fn terminal_controller_job(job_id: uuid::Uuid) -> Result<Option<crate::api_jobs::Job>> {
+    let mut paths = vec![retained_jobs_path()?, crate::paths::daemon_jobs_file()?];
+    if let Some(endpoint) = endpoint_for_job(&job_id.to_string())? {
+        paths.insert(0, Path::new(&endpoint.state_dir).join("jobs.json"));
+    }
+    paths.dedup();
+    for path in paths {
+        if let Some(job) = crate::api_jobs::JobStore::terminal_controller_job_at(&path, job_id)? {
+            return Ok(Some(job));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn generation_state_dir() -> Result<PathBuf> {
@@ -685,6 +712,74 @@ mod tests {
             );
             assert!(endpoint_for_lease("missing")
                 .expect("look up missing")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn retired_generation_preserves_exact_pruned_controller_terminal_custody() {
+        with_isolated_home(|home| {
+            use crate::api_jobs::{
+                ControllerJobState, ControllerJobSubmissionOutcome, JobStatus, JobStore,
+            };
+            let source_dir = home.path().join("old-generation");
+            let mut old = state("retained-old", "127.0.0.1:1001");
+            old.state_path = source_dir.join("state.json").display().to_string();
+            seed(&old).unwrap();
+            let store =
+                JobStore::open_without_reconciliation(source_dir.join("jobs.json")).unwrap();
+            let ControllerJobSubmissionOutcome::Submitted(id) = store
+                .admit_controller_job(
+                    "controller.retained-loop".to_string(),
+                    "retained-loop:exact-generation".to_string(),
+                    ControllerJobState {
+                        job_type: "retained-loop".to_string(),
+                        version: 1,
+                        request: serde_json::json!({}),
+                        public_request: serde_json::json!({}),
+                        request_digest: "original".to_string(),
+                        active_idempotency_key: None,
+                        linked_durable_run_id: None,
+                        checkpoint: None,
+                        cancellation_requested: false,
+                        cancellation_reason: None,
+                        execution_claim_id: None,
+                        recovery_attempted: false,
+                    },
+                )
+                .unwrap()
+            else {
+                panic!("new job")
+            };
+            record_job(&id.to_string(), &old.lease_id).unwrap();
+            store.start_controller_execution(id).unwrap();
+            store
+                .fail_controller_error(
+                    id,
+                    "original consumer failure".to_string(),
+                    serde_json::json!({}),
+                )
+                .unwrap();
+            store
+                .prune_terminal_controller_jobs("retained-loop", 1, &[id])
+                .unwrap();
+            mark_job_terminal(&id.to_string()).unwrap();
+            activate(&state("retained-new", "127.0.0.1:1002")).unwrap();
+            reconcile_drained_generations("retained-new", |_| Ok(())).unwrap();
+            assert!(endpoint_for_job(&id.to_string()).unwrap().is_none());
+            std::fs::remove_dir_all(&source_dir).unwrap();
+            assert_eq!(
+                terminal_controller_job(id).unwrap().unwrap().status,
+                JobStatus::Failed
+            );
+            let serving = super::super::DaemonControllerJobService::new(JobStore::default());
+            assert_eq!(
+                serving.status(&id.to_string()).unwrap().status,
+                JobStatus::Failed,
+                "HTTP/control-plane actions in a successor daemon retain original terminal custody"
+            );
+            assert!(terminal_controller_job(uuid::Uuid::new_v4())
+                .unwrap()
                 .is_none());
         });
     }

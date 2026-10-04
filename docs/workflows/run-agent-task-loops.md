@@ -80,6 +80,30 @@ honors the revolution limit, and fences a concurrent newer stop. A failed action
 is recovered explicitly with `controller run <loop-id> --action-id <action-id>`;
 resuming the loop does not silently replay failed or completed effects.
 
+A failed resume acknowledgement is immutable. After recovering the prior work,
+deliberately submit a new intent linked to that failed effect:
+
+```bash
+homeboy agent-task loop resume <loop-id> \
+  --rearm-after <failed-resume-effect-id> \
+  --idempotency-key <new-stable-intent-key> \
+  --expected-updated-at <controller-updated-at-from-status>
+```
+
+Retain all three values for exact retries. The same request replays its original
+acknowledgement, including after a newer stop; it cannot turn the loop back on.
+The control-plane resume action accepts the same `rearm_after` parameter with a
+new effect/idempotency identity and exact `expected_updated_at` fence. The
+predecessor must be this loop's terminal failed resume acknowledgement.
+
+Terminal supervisor custody is read by exact job ID from the original JobStore
+or its replay tombstones. Before generation retirement, that custody is archived
+in the router's existing replay-index format. If legacy custody is genuinely
+lost, status reports `terminal_custody_unavailable` with unknown outcome. Restore
+the original terminal row/tombstone, or use native terminal recovery on the
+original retained job with generation-bound ownership evidence. Missing receipts,
+missing PIDs, and a current zero-job inventory cannot satisfy resume admission.
+
 ## 4. Run A Controller From A Spec
 
 Use `controller run-from-spec` for bounded headless loop execution. This is the stable primitive for callers that have a complete controller spec and want Homeboy to execute a limited number of pending actions:
