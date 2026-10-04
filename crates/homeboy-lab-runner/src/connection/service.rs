@@ -21,9 +21,16 @@ const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVICE_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SERVICE_SSH_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The PATH the daemon ran with when the controller started it over SSH. The
-/// unit keeps it so jobs see the same tools after the move to systemd.
+/// System directories every service PATH ends with. They are also the whole
+/// PATH when the runner user's login shell cannot report one.
 const SERVICE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin";
+
+/// Placeholder in the rendered unit that the install script replaces with the
+/// runner user's login-shell PATH. systemd user units do not read shell
+/// profiles, so without this, toolchains installed per user (node/npm in
+/// `~/.local/bin`, cargo in `~/.cargo/bin`) are invisible to every job and
+/// dependency builds fail before a gate runs (Extra-Chill/homeboy#15391).
+const SERVICE_PATH_PLACEHOLDER: &str = "@HOMEBOY_SERVICE_PATH@";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerServiceReport {
@@ -105,7 +112,7 @@ WantedBy=default.target
 "#,
         state_dir = service_state_dir_for(runner_id, controller_id),
         token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
-        path = SERVICE_PATH,
+        path = SERVICE_PATH_PLACEHOLDER,
         link = service_binary_link_for(runner_id, controller_id),
     )
 }
@@ -142,9 +149,28 @@ fn write_unit_script_for(runner_id: &str, controller_id: &str, startup_token: &s
 mkdir -p "$unit_dir"
 cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 {unit_text}HOMEBOY_UNIT
+{resolve_path}
+sed -i "s|{placeholder}|$service_path|" "$unit_dir/{unit}.tmp"
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
 systemctl --user daemon-reload"#,
         unit_text = render_service_unit_for(runner_id, controller_id, startup_token),
+        resolve_path = resolve_service_path_script(),
+        placeholder = SERVICE_PATH_PLACEHOLDER,
+    )
+}
+
+/// Shell that sets `$service_path` to the runner user's login-shell PATH
+/// followed by the system directories. A login PATH that is empty or carries
+/// characters unsafe in a systemd `Environment=` line (whitespace, quotes,
+/// `%`, `|`) falls back to the system directories alone.
+fn resolve_service_path_script() -> String {
+    format!(
+        r#"login_path=$("${{SHELL:-/bin/sh}}" -lc 'printf %s "$PATH"' 2>/dev/null </dev/null || true)
+case "$login_path" in
+  ""|*[!A-Za-z0-9_./:+@=,~-]*) service_path='{system}' ;;
+  *) service_path="$login_path:{system}" ;;
+esac"#,
+        system = SERVICE_PATH,
     )
 }
 
@@ -903,10 +929,55 @@ mod tests {
     }
 
     #[test]
+    fn unit_path_is_resolved_from_the_runner_login_shell() {
+        let unit = render_service_unit("homeboy-lab", "t");
+        assert!(unit.contains(&format!("Environment=PATH={SERVICE_PATH_PLACEHOLDER}")));
+        let write_unit = write_unit_script("homeboy-lab", "t");
+        assert!(write_unit.contains("-lc 'printf %s \"$PATH\"'"));
+        assert!(write_unit.contains(&format!(
+            "sed -i \"s|{SERVICE_PATH_PLACEHOLDER}|$service_path|\""
+        )));
+        let sed_at = write_unit.find("sed -i").unwrap();
+        assert!(
+            sed_at < write_unit.find("mv -f").unwrap(),
+            "PATH is resolved before the unit is moved into place"
+        );
+    }
+
+    /// Executes the resolver: a login PATH with per-user toolchains is kept
+    /// ahead of the system dirs; an unsafe one falls back to the system dirs.
+    #[test]
+    fn service_path_resolver_keeps_login_toolchains_and_rejects_unsafe_paths() {
+        let scratch = tempfile::tempdir().unwrap();
+        let shell = scratch.path().join("fake-login-shell");
+        let run = |login_path: &str| -> String {
+            std::fs::write(&shell, format!("#!/bin/sh\nprintf %s '{login_path}'\n")).unwrap();
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "{}\nprintf %s \"$service_path\"",
+                    resolve_service_path_script()
+                ))
+                .env("SHELL", &shell)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(
+            run("/home/u/.local/bin:/home/u/.cargo/bin:/usr/bin"),
+            format!("/home/u/.local/bin:/home/u/.cargo/bin:/usr/bin:{SERVICE_PATH}")
+        );
+        assert_eq!(run(""), SERVICE_PATH);
+        assert_eq!(run("/home/u/my dir/bin:/usr/bin"), SERVICE_PATH);
+        assert_eq!(run("/x|y:/usr/bin"), SERVICE_PATH);
+    }
+
+    #[test]
     fn install_script_writes_the_rendered_unit_verbatim() {
         let script = install_script("homeboy-lab", "/opt/homeboy", "install-token");
         let start = script.find("<<'HOMEBOY_UNIT'\n").unwrap() + "<<'HOMEBOY_UNIT'\n".len();
-        let end = script.find("HOMEBOY_UNIT\nmv").unwrap();
+        let end = script.find("HOMEBOY_UNIT\nlogin_path=").unwrap();
         assert_eq!(
             &script[start..end],
             render_service_unit("homeboy-lab", "install-token")
