@@ -522,7 +522,7 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
         );
         assert_eq!(
             source_snapshot.workspace_snapshot_identity.as_deref(),
-            Some(updated.snapshot_identity.as_str())
+            Some(updated.resulting_snapshot_identity.as_str())
         );
 
         // Localhost SSH exercises the emitted shell read as well as local I/O.
