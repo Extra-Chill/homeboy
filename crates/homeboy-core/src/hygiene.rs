@@ -351,6 +351,18 @@ fn collect_validation_dependency_ids(value: &serde_json::Value, ids: &mut Vec<St
 pub fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) -> Result<PathBuf> {
     let expanded = shellexpand::tilde(dependency).to_string();
     let explicit = Path::new(&expanded);
+
+    // A relative path declared in a component's homeboy.json (e.g.
+    // `../wp-native-auth`) is relative to that component's checkout, not to
+    // whatever directory the process happens to run in. Review CI only worked
+    // because it runs from the checkout; Cook runs elsewhere (#15394).
+    if explicit.is_relative() && is_path_like_dependency(dependency) {
+        let relative_to_source = source_path.join(explicit);
+        if relative_to_source.is_dir() {
+            return canonical_existing_dir(&relative_to_source, dependency);
+        }
+    }
+
     if explicit.is_dir() {
         return canonical_existing_dir(explicit, dependency);
     }
@@ -362,20 +374,40 @@ pub fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) 
         }
     }
 
-    let component = component::resolve_effective(Some(dependency), None, None).map_err(|err| {
-        Error::validation_invalid_argument(
-            "validation_dependencies",
-            format!(
-                "Cannot resolve validation dependency `{dependency}` to a local checkout: {}",
-                err.message
-            ),
-            Some(dependency.to_string()),
-            Some(vec![format!(
+    // A path-like declaration that is not materialized next to this checkout
+    // (a Cook attempt workspace, a Lab staging root) still names a component:
+    // its final segment. Resolve that registered component instead of
+    // rejecting the path as an invalid component ID.
+    let component_id = if is_path_like_dependency(dependency) {
+        Path::new(&expanded)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(dependency)
+    } else {
+        dependency
+    };
+    let component =
+        component::resolve_effective(Some(component_id), None, None).map_err(|err| {
+            Error::validation_invalid_argument(
+                "validation_dependencies",
+                format!(
+                    "Cannot resolve validation dependency `{dependency}` to a local checkout: {}",
+                    err.message
+                ),
+                Some(dependency.to_string()),
+                Some(vec![format!(
                 "Clone/register `{dependency}` locally before running expensive evidence workflows."
             )]),
-        )
-    })?;
+            )
+        })?;
     canonical_existing_dir(Path::new(&component.local_path), dependency)
+}
+
+fn is_path_like_dependency(dependency: &str) -> bool {
+    dependency.contains('/')
+        || dependency.contains('\\')
+        || dependency.starts_with('.')
+        || dependency.starts_with('~')
 }
 
 fn canonical_existing_dir(path: &Path, dependency: &str) -> Result<PathBuf> {
@@ -954,6 +986,57 @@ mod tests {
     const PORTABLE_CONFIG_FILE: &str = "homeboy.json";
 
     use crate::test_support::run_git_command as git;
+
+    /// A relative validation dependency is resolved against the declaring
+    /// checkout, independent of the process working directory (#15394).
+    #[test]
+    fn relative_validation_dependency_resolves_against_the_checkout_not_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("workspace").join("component");
+        let dep = root.path().join("workspace").join("wp-native-auth");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::create_dir_all(&dep).unwrap();
+
+        let resolved = resolve_validation_dependency_path(&checkout, "../wp-native-auth").unwrap();
+        assert_eq!(resolved, dep.canonicalize().unwrap());
+
+        // Bare sibling names keep working.
+        let resolved = resolve_validation_dependency_path(&checkout, "wp-native-auth").unwrap();
+        assert_eq!(resolved, dep.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn path_like_dependency_detection() {
+        assert!(is_path_like_dependency("../wp-native-auth"));
+        assert!(is_path_like_dependency("./x"));
+        assert!(is_path_like_dependency("~/x"));
+        assert!(is_path_like_dependency("vendor/x"));
+        assert!(!is_path_like_dependency("wp-native-auth"));
+    }
+
+    /// When a relative declaration is not materialized next to the checkout
+    /// (a Cook or Lab staging root), its final segment names the component.
+    #[test]
+    fn unmaterialized_relative_dependency_falls_back_to_its_component_id() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            let checkout = root.path().join("attempt").join("component");
+            fs::create_dir_all(&checkout).unwrap();
+            let err =
+                resolve_validation_dependency_path(&checkout, "../definitely-unregistered-dep")
+                    .unwrap_err();
+            assert!(
+                !err.message.contains("invalid characters"),
+                "path-like dependency must be looked up by its component id, got: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("definitely-unregistered-dep"),
+                "{}",
+                err.message
+            );
+        });
+    }
 
     fn init_repo(path: &Path) {
         git(path, &["init", "-b", "main"]);
