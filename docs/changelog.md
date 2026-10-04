@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.38] - 2026-10-04
+
+### Fixed
+- find rustup in CARGO_HOME or ~/.cargo/bin for Rust gate caches
+- never fail an upgrade on an idle externally supervised daemon
+
 ## [0.399.37] - 2026-10-04
 
 ### Fixed
