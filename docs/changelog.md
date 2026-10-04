@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.37] - 2026-10-04
+
+### Fixed
+- let a daemon on a replaced binary stop itself
+
 ## [0.399.36] - 2026-10-04
 
 ### Fixed
