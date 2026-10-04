@@ -3494,3 +3494,81 @@ fn controller_events_command_applies_generic_event() {
         assert_eq!(value["controller"]["history"][0]["payload"]["status"], "ok");
     });
 }
+
+/// Regression for #15408: once an issue's derived destination is removed, a
+/// follow-up cook on the same issue derives the next generation instead of
+/// failing on the retired record. An explicitly named retired handle still
+/// fails (see the inactive-destination test above).
+#[test]
+fn derived_destination_advances_past_a_retired_issue_worktree() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let derive = || {
+            super::super::run::resolve_cook_destination(cook_args_from_cli(vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "phase two".to_string(),
+                "--repo".to_string(),
+                "fixture".to_string(),
+                "--task-url".to_string(),
+                "https://github.com/example/fixture/issues/77".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
+                "--no-finalize".to_string(),
+            ]))
+            .expect("resolve derived destination")
+        };
+
+        let first = derive();
+        assert_eq!(first.head.as_deref(), Some("fix/issue-77-fixture"));
+        assert_eq!(
+            first.to_worktree.as_deref(),
+            Some("fixture@fix-issue-77-fixture")
+        );
+
+        let created =
+            homeboy::core::worktree::create(homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: "fixture".to_string(),
+                branch: "fix/issue-77-fixture".to_string(),
+                from: None,
+                task_url: Some("https://github.com/example/fixture/issues/77".to_string()),
+                run_id: None,
+                cleanup_policy: None,
+                require_handoff_freshness: false,
+                source_path: None,
+            })
+            .expect("create the first derived destination");
+        assert_eq!(created.record.id, "fixture@fix-issue-77-fixture");
+
+        // An active destination is reused unchanged.
+        assert_eq!(
+            derive().to_worktree.as_deref(),
+            Some("fixture@fix-issue-77-fixture")
+        );
+
+        homeboy::core::worktree::remove(homeboy::core::worktree::WorktreeRemoveOptions {
+            id: created.record.id.clone(),
+            force: true,
+            cleanup_branch: false,
+            allow_unmerged_branch: false,
+            reason: None,
+            reaper: None,
+        })
+        .expect("retire the first destination");
+
+        let second = derive();
+        assert_eq!(second.head.as_deref(), Some("fix/issue-77-fixture-2"));
+        assert_eq!(
+            second.to_worktree.as_deref(),
+            Some("fixture@fix-issue-77-fixture-2")
+        );
+    });
+}
