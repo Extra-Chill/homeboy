@@ -787,6 +787,16 @@ fn failure_diagnostics_for_data(
             "/failure_context/diagnostic",
         ));
     }
+    if let Some(failure) = recovery_blocked_failure(data) {
+        return Some(declared_failure_diagnostics(
+            exit_code,
+            failure,
+            "/blocked_on",
+        ));
+    }
+    if let Some(failure) = control_plane_action_failure(data) {
+        return Some(declared_failure_diagnostics(exit_code, failure, "/message"));
+    }
 
     let failure_digest = failure_digest_for_data(data).or_else(|| {
         run.as_ref()
@@ -1222,6 +1232,61 @@ struct DeclaredFailure {
 /// data and must not be attributed to this command invocation.
 fn declared_failure(data: &Value) -> Option<DeclaredFailure> {
     declared_failure_object(data.get("failure")?.as_object()?)
+}
+
+/// `daemon recover` reports a refusal as `blocked_on` plus the command that can
+/// make progress. Lift it so the refusal is the failure cause rather than the
+/// generic "exited 1 without reporting a failure cause" (#15420).
+fn recovery_blocked_failure(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("command").and_then(Value::as_str) != Some("daemon.recover") {
+        return None;
+    }
+    let blocked_on = data.get("blocked_on").and_then(Value::as_str)?.trim();
+    if blocked_on.is_empty() {
+        return None;
+    }
+    let mut object = Map::new();
+    object.insert(
+        "code".to_string(),
+        Value::String("daemon.recovery_blocked".to_string()),
+    );
+    object.insert("message".to_string(), Value::String(blocked_on.to_string()));
+    let mut details = Map::new();
+    if let Some(next) = data
+        .get("next_command")
+        .and_then(Value::as_str)
+        .filter(|next| !next.trim().is_empty())
+    {
+        details.insert("next_command".to_string(), Value::String(next.to_string()));
+    }
+    object.insert("details".to_string(), Value::Object(details));
+    declared_failure_object(&object)
+}
+
+/// A failed control-plane action (for example `agent-task cancel`) carries its
+/// cause in the acknowledgement `message`; surface it instead of a bare exit.
+fn control_plane_action_failure(data: &Value) -> Option<DeclaredFailure> {
+    if data.get("schema").and_then(Value::as_str)
+        != Some(homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA)
+        || data.get("outcome").and_then(Value::as_str) != Some("failed")
+    {
+        return None;
+    }
+    let message = data.get("message").and_then(Value::as_str)?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    let mut object = Map::new();
+    let action = data
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("action");
+    object.insert(
+        "code".to_string(),
+        Value::String(format!("control_plane.{action}_failed")),
+    );
+    object.insert("message".to_string(), Value::String(message.to_string()));
+    declared_failure_object(&object)
 }
 
 /// The bounded refresh projection keeps a typed command error under `error`.
