@@ -2986,7 +2986,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             "promotion_candidates": promotion_candidates,
             "diagnostic_summary": failure_reasons.as_ref().and_then(|reasons| reasons.first()).cloned(),
             "failure_reasons": failure_reasons,
-            "execution_states": review_execution_states(aggregate.as_ref(), &durable_read.record, &resource),
+            "execution_states": review_execution_states(aggregate.as_ref(), aggregate_review.as_ref(), &canonical_candidate, &durable_read.record, &resource),
             "canonical_candidate": canonical_candidate,
             "next_actions": review_next_actions(&durable_read.record, aggregate_review.as_ref(), request.to_worktree.is_some()),
             "cleanup_evidence": cleanup_evidence,
@@ -4484,18 +4484,15 @@ fn collect_nested_diagnostics(value: &Value, task_id: &str, diagnostics: &mut Ve
 
 fn review_execution_states(
     aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
+    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    canonical_candidate: &Value,
     record: &AgentTaskRunRecord,
     resource: &ControlPlaneRun,
 ) -> Value {
-    let review = aggregate.map(|aggregate| {
-        crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
-    });
-    let canonical_candidate = review_canonical_candidate(record, review.as_ref(), resource);
     let candidate_state = canonical_candidate["state"]
         .as_str()
         .unwrap_or("not_available");
     let candidate_tasks = review
-        .as_ref()
         .map(|review| {
             review
                 .tasks
@@ -4543,12 +4540,15 @@ fn review_execution_states(
                 gate.get("status").and_then(Value::as_str) == Some("accepted_inherited_failure")
             })
         });
-    let finalization_state = record
-        .metadata
-        .pointer("/cook_finalization/status")
+    let finalization = record.metadata.get("cook_finalization");
+    let finalized =
+        finalization.is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt);
+    let finalization_state = finalization
+        .and_then(|receipt| receipt.get("status"))
         .and_then(Value::as_str)
         .map(|status| match status {
-            "review_ready" | "draft_published" => "completed",
+            _ if finalized => "completed",
+            "review_ready" | "draft_published" | "completed" => "unknown",
             "failed" | "finalization_failed" => "finalization_failed",
             "pending" | "finalization_pending" => "finalization_pending",
             other => other,
@@ -4563,7 +4563,7 @@ fn review_execution_states(
         "candidate": { "state": candidate_state, "tasks": candidate_tasks },
         "gate": { "state": if accepted_inherited_failure { "accepted_inherited_failure" } else if !target_applied { "not_run" } else if matches!(promotion_state, "gate_failed" | "no_changes_gate_failed") { "failed" } else if promotion_state == "verification_pending" { "pending" } else if matches!(promotion_state, "applied" | "verified_no_changes") { "passed" } else { "not_run" } },
         "promotion": { "state": promotion_state, "patch_promoted": target_applied, "verified": target_applied && promotion_state == "applied", "verification_phase": if promotion_state == "verification_pending" && target_applied { "post_apply" } else if promotion_state == "verification_pending" { "pre_apply" } else { "not_pending" }, "target": { "state": if target_applied { "applied" } else if promotion.is_some() { "not_applied" } else { "not_declared" }, "worktree": promotion.and_then(|promotion| promotion.pointer("/target/worktree").or_else(|| promotion.get("to_worktree"))), "candidate_fingerprint_matches": target_applied && promotion.is_some_and(|promotion| promotion.pointer("/provenance/candidate").is_some_and(|candidate| !candidate.is_null())) } },
-        "finalization": { "state": finalization_state, "finalized": finalization_state == "completed" },
+        "finalization": { "state": finalization_state, "finalized": finalized },
         "publication": resource.publication,
     })
 }
@@ -4581,16 +4581,7 @@ fn review_canonical_candidate(
     let finalized = record
         .metadata
         .get("cook_finalization")
-        .is_some_and(|finalization| {
-            matches!(
-                finalization.get("status").and_then(Value::as_str),
-                Some("review_ready" | "draft_published")
-            ) && finalization
-                .get("pr_url")
-                .or_else(|| finalization.get("pull_request_url"))
-                .and_then(Value::as_str)
-                .is_some_and(|url| !url.trim().is_empty())
-        });
+        .is_some_and(crate::agent_task_service::cook_finalization_is_pr_receipt);
     let retained = promotion.is_some_and(|promotion| {
         promotion_status.is_some_and(|status| {
             matches!(status, "applied" | "gate_failed" | "verification_pending")
@@ -6242,15 +6233,7 @@ fn publication(record: &AgentTaskRunRecord) -> Option<ControlPlaneStateSummary> 
         .get("status")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())?;
-    let id = ["pr_number", "pr_url", "pull_request_url"]
-        .into_iter()
-        .find_map(|key| finalization.get(key))
-        .and_then(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| value.as_u64().map(|number| number.to_string()))
-        })
+    let id = crate::agent_task_service::cook_finalization_pr_identity(finalization)
         .and_then(|value| nonempty_redacted_bounded(&value, MESSAGE_BOUND));
     Some(ControlPlaneStateSummary {
         id,
@@ -9400,6 +9383,155 @@ mod tests {
                 review.evidence["read"]["unavailable_sources"][0]["reason_code"],
                 "durable_read.authoritative_aggregate_absent"
             );
+        });
+    }
+
+    #[test]
+    fn review_pr_receipts_share_completion_identity_without_mutating_records() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let cases = [
+                (
+                    json!({ "status": "review_ready", "pr_number": 42 }),
+                    true,
+                    Some("42"),
+                ),
+                (
+                    json!({ "status": "draft_published", "pr": { "number": 42 } }),
+                    true,
+                    Some("42"),
+                ),
+                (
+                    json!({ "status": "review_ready", "pr_url": "https://example.invalid/pr/42" }),
+                    true,
+                    Some("https://example.invalid/pr/42"),
+                ),
+                (
+                    json!({ "status": "draft_published", "pr": { "url": "https://example.invalid/pr/42" } }),
+                    true,
+                    Some("https://example.invalid/pr/42"),
+                ),
+                (
+                    json!({ "status": "review_ready", "pull_request_url": "https://example.invalid/pr/42" }),
+                    true,
+                    Some("https://example.invalid/pr/42"),
+                ),
+                (
+                    json!({ "status": "review_ready", "pr_number": null, "pr_url": "", "pr": { "number": 42 } }),
+                    true,
+                    Some("42"),
+                ),
+                (
+                    json!({ "status": "draft_published", "pr_url": "", "pull_request_url": "https://example.invalid/pr/42" }),
+                    true,
+                    Some("https://example.invalid/pr/42"),
+                ),
+                (json!({ "status": "review_ready" }), false, None),
+                (
+                    json!({ "status": "draft_published", "pr_url": " \t", "pr_number": 0 }),
+                    false,
+                    None,
+                ),
+                (
+                    json!({ "status": "review_ready", "pr_number": "42", "pr_url": 42 }),
+                    false,
+                    None,
+                ),
+                (
+                    json!({ "status": "completed", "pr_number": 42 }),
+                    false,
+                    Some("42"),
+                ),
+                (
+                    json!({ "status": "failed", "pr_number": 42 }),
+                    false,
+                    Some("42"),
+                ),
+                (
+                    json!({ "status": "pending", "pr_number": 42 }),
+                    false,
+                    Some("42"),
+                ),
+                (Value::Null, false, None),
+            ];
+            for (index, (receipt, finalized, identity)) in cases.into_iter().enumerate() {
+                let run_id = format!("receipt-{index}");
+                let mut persisted = record(&run_id);
+                persisted.metadata["cook_finalization"] = receipt.clone();
+                // A publication receipt cannot prove pending gates completed.
+                persisted.metadata["latest_promotion"]["status"] = json!("verification_pending");
+                store.write_record(&persisted).expect("persist receipt");
+                let run = RunId::new(&run_id).expect("run");
+                let rows_before = store.read_record_page(None, 100).expect("rows before");
+                let events_before = service.events(&run, None).expect("events before");
+                let review = service
+                    .review(&run, &ControlPlaneRunReviewRequest::default())
+                    .expect("review durable receipt");
+                let detail = service.run(&run).expect("detail");
+                let listed = service
+                    .runs(&ControlPlaneRunListRequest {
+                        limit: 100,
+                        ..Default::default()
+                    })
+                    .expect("list")
+                    .runs
+                    .into_iter()
+                    .find(|resource| resource.run == run)
+                    .expect("listed exact row");
+                let completion = crate::agent_task_service::cook_completion(
+                    None,
+                    true,
+                    Some(&receipt),
+                    Some(&run_id),
+                );
+                assert_eq!(
+                    completion.is_some_and(|completion| completion.pr_finalized),
+                    finalized,
+                    "{receipt}"
+                );
+                assert_eq!(
+                    review.evidence["canonical_candidate"]["finalized"], finalized,
+                    "{receipt}"
+                );
+                assert_eq!(
+                    review.evidence["execution_states"]["finalization"]["finalized"], finalized,
+                    "{receipt}"
+                );
+                if finalized {
+                    assert_eq!(
+                        review.evidence["execution_states"]["finalization"]["state"],
+                        "completed"
+                    );
+                } else {
+                    assert_ne!(
+                        review.evidence["execution_states"]["finalization"]["state"],
+                        "completed"
+                    );
+                }
+                assert_eq!(
+                    detail
+                        .publication
+                        .as_ref()
+                        .and_then(|publication| publication.id.as_deref()),
+                    identity
+                );
+                assert_eq!(listed.publication, detail.publication);
+                assert_eq!(review.resource.publication, detail.publication);
+                assert_eq!(detail.state, ControlPlaneRunState::CandidateRecoverable);
+                assert_eq!(
+                    review.evidence["execution_states"]["gate"]["state"],
+                    "not_run"
+                );
+                assert_eq!(
+                    store.read_record_page(None, 100).expect("rows after"),
+                    rows_before
+                );
+                assert_eq!(
+                    service.events(&run, None).expect("events after"),
+                    events_before
+                );
+            }
         });
     }
 
