@@ -635,3 +635,21 @@ mod batch_concurrency_tests {
         assert_eq!(resource_budget_slots(&bounded, 999), Some(0));
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn batch_concurrency_source_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                BatchConcurrencySource::Flag,
+                BatchConcurrencySource::Config,
+                BatchConcurrencySource::ResourceBudget,
+                BatchConcurrencySource::ChildCount,
+            ]
+        );
+    }
+}

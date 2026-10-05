@@ -69,10 +69,6 @@ pub(super) fn deterministic_remote_path(
     snapshot: &str,
     run_isolation_token: Option<&str>,
 ) -> String {
-    let name = local_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("workspace");
     let mut hasher = Sha256::new();
     hasher.update(local_path.display().to_string().as_bytes());
     hasher.update(snapshot.as_bytes());
@@ -88,8 +84,17 @@ pub(super) fn deterministic_remote_path(
     format!(
         "{}/_lab_workspaces/{}-{}",
         workspace_root.trim_end_matches('/'),
-        sanitize_path_segment(name),
+        snapshot_directory_prefix(local_path),
         digest
+    )
+}
+
+pub(super) fn snapshot_directory_prefix(local_path: &Path) -> String {
+    sanitize_path_segment(
+        local_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace"),
     )
 }
 

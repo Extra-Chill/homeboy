@@ -29,6 +29,7 @@ sha2 = "0.10.9"
 fs4 = "0.13"
 
 [dev-dependencies]
+homeboy-serde-pin = { version = "0.1.0", path = "../homeboy-serde-pin" }
 tempfile = "3.14"
 
 [target.'cfg(windows)'.dependencies]

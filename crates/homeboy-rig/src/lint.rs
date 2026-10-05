@@ -1877,7 +1877,7 @@ mod tests {
             r#"{
                 "id": "bad",
                 "components": {},
-                "lifecycle": { "cleanup": "dry_run" },
+                "lifecycle": { "cleanup": { "intent": "dry_run" } },
                 "trace": { "default_component": "app" },
                 "x-owner": { "team": "fixtures" },
                 "typoed_field": true
@@ -1972,7 +1972,7 @@ mod tests {
 
     #[test]
     fn duplicate_json_keys_reports_both_declaration_lines() {
-        let content = "{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n";
+        let content = "{\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\" }\n  },\n  \"id\": \"x\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n";
 
         let duplicates = duplicate_json_keys(content);
 
@@ -2030,7 +2030,7 @@ mod tests {
         fs::create_dir_all(&rig_dir).expect("rig dir");
         fs::write(
             rig_dir.join("rig.json"),
-            "{\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": \"dry_run\"\n  }\n}\n",
+            "{\n  \"id\": \"duplicate\",\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"external\", \"reason\": \"sandbox owns teardown\" }\n  },\n  \"lifecycle\": {\n    \"cleanup\": { \"intent\": \"dry_run\" }\n  }\n}\n",
         )
         .expect("write rig");
 

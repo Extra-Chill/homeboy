@@ -923,7 +923,7 @@ pub enum DependencyInstallInvocation {
 /// Detect dependency providers for a source path and return the install command
 /// each would run, without executing any of them.
 ///
-/// Reuses [`provider::resolve_dependency_providers_optional`] (the detection
+/// Reuses [`provider::resolve_dependency_providers_optional_with_control`] (the detection
 /// behind `homeboy deps install`) so a manifest detected by an existing provider
 /// surfaces its install command here. A linked extension set that does not
 /// provide dependency support is equivalent to no provider for this optional

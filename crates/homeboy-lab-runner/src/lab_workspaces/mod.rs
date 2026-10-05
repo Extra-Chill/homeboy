@@ -22,7 +22,6 @@ use super::{
 use crate::rig_materialization::LabStackComponentMaterialization;
 use crate::workspace::git_output;
 
-pub(super) const LAB_EXTRA_WORKSPACES_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES";
 pub(super) const LAB_EXTRA_WORKSPACES_JSON_ENV: &str = "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON";
 pub(super) const LAB_WORKSPACE_MAPPING_SCHEMA: &str = "homeboy/workspace-map/v1";
 

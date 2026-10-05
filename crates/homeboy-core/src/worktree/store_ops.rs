@@ -231,6 +231,7 @@ pub(super) fn import_with_store(
     })
 }
 
+#[cfg(test)]
 pub(super) fn cleanup_with_store(
     options: WorktreeCleanupOptions,
     store: &Path,

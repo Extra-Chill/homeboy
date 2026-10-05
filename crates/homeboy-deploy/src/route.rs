@@ -226,3 +226,16 @@ mod tests {
         assert!(server_route_disclosure(&component, &project(None), &config(None)).is_none());
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn deploy_target_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [DeployTarget::Server, DeployTarget::Provider]
+        );
+    }
+}

@@ -241,3 +241,21 @@ mod tests {
         assert!(serde_json::from_value::<ArtifactCleanupConfig>(raw).is_err());
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn artifact_cleanup_category_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                ArtifactCleanupCategory::Dependencies,
+                ArtifactCleanupCategory::BuildOutput,
+                ArtifactCleanupCategory::BuildCache,
+                ArtifactCleanupCategory::ReleaseAsset,
+            ]
+        );
+    }
+}
