@@ -262,6 +262,39 @@ fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_own
         format!("export PATH='{}:/usr/bin:/bin'\n", tools.display()),
     )
     .expect("write login shell PATH override");
+
+    let baseline_worktree = root.path().join("login-baseline-wt");
+    let baseline = Command::new("/bin/bash")
+        .args([
+            "-lc",
+            "exec homeboy \"$1\" \"$2\"",
+            "homeboy",
+            baseline_worktree.to_str().unwrap(),
+            "login-baseline-proof",
+        ])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", tools.display()))
+        .output()
+        .expect("run unpinned baseline login shell");
+    assert_eq!(
+        baseline.status.code(),
+        Some(0),
+        "baseline shell should run the PATH decoy: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline_common = git(&[
+        "-C",
+        baseline_worktree.to_str().unwrap(),
+        "rev-parse",
+        "--git-common-dir",
+    ]);
+    assert_eq!(
+        std::fs::canonicalize(baseline_worktree.join(baseline_common)).expect("baseline store"),
+        decoy_repo.join(".git"),
+        "without the runner runtime environment, login PATH selects the decoy"
+    );
+
     std::fs::write(
         &script_file,
         "#!/bin/bash\nexec \"$HOMEBOY_COMMAND\" \"$1\" \"$2\"\n",
@@ -420,8 +453,8 @@ fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_own
         .lines()
         .filter(|line| line.starts_with("worktree "))
         .count(),
-        2,
-        "decoy repository contains only its primary and explicitly selected worktree"
+        3,
+        "decoy repository contains the baseline failure and explicitly selected worktree only"
     );
 }
 
