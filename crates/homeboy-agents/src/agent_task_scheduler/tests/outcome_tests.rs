@@ -631,7 +631,10 @@ fn other_missing_outputs_stay_provider_failures() {
         let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
         outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
         outcome.summary = Some(summary.to_string());
-        AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(&mut outcome, &form_request);
+        AgentTaskScheduleSupport::defer_missing_review_form_to_cook_loop(
+            &mut outcome,
+            &form_request,
+        );
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed, "{summary}");
     }
 
