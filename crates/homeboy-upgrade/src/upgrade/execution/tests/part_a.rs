@@ -83,6 +83,76 @@ fn parses_homeboy_version_output() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn candidate_admission_cause_survives_process_exit_and_durable_status() {
+    use crate::upgrade::operation::{load_upgrade_operation_status, UpgradeOperation};
+    use std::os::unix::fs::PermissionsExt;
+
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let candidate = home.path().join("candidate");
+        std::fs::write(
+            &candidate,
+            concat!(
+            "#!/bin/sh\n",
+            "printf 'candidate diagnostic notice\\n' >&2\n",
+            "printf '%s\\n' '{\"schema\":\"homeboy/command-result/v3\",\"success\":false,",
+            "\"diagnostics\":{\"message\":\"replacement blocked by unresolved runner ownership\",",
+            "\"details\":{\"tried\":[\"homeboy runner reconcile fixture\"]}}}'\n",
+            "exit 2\n"
+        ),
+        )
+        .expect("write candidate executable");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))
+            .expect("make executable");
+        let error = run_verified_target_admission(&candidate, "1.0.0", "old", "fixture")
+            .expect_err("candidate must refuse replacement");
+        assert_eq!(
+            error.message,
+            "replacement blocked by unresolved runner ownership"
+        );
+        assert!(error.details["error"]
+            .as_str()
+            .unwrap()
+            .contains("candidate diagnostic notice"));
+        assert!(error.details["error"]
+            .as_str()
+            .unwrap()
+            .contains("homeboy runner reconcile fixture"));
+
+        let mut operation = UpgradeOperation::start("homeboy upgrade");
+        let id = operation.id().expect("durable operation").to_string();
+        operation
+            .finish_failed_durable(&error)
+            .expect("terminalize refusal");
+        drop(operation);
+        let status = load_upgrade_operation_status(Some(&id)).expect("read after exit");
+        let failure = status.failure.expect("actionable failure");
+        assert_eq!(failure.predicate, "candidate_admission_refused");
+        assert_eq!(failure.phase, "running_candidate_admission");
+        assert_eq!(
+            failure.cause.as_deref(),
+            Some("replacement blocked by unresolved runner ownership")
+        );
+        assert_eq!(
+            failure.diagnostic_references,
+            vec!["homeboy runner reconcile fixture"]
+        );
+    });
+}
+
+#[test]
+fn unstructured_upgrade_cause_is_bounded_without_losing_full_evidence() {
+    let detail = format!("installer failed: {}", "é".repeat(1200));
+    let error = upgrade_failure_error(InstallMethod::Binary, &detail, None);
+    assert!(error
+        .message
+        .starts_with("binary upgrade failed: installer failed:"));
+    assert!(error.message.contains("cause truncated"));
+    assert!(error.details["error"].as_str().unwrap().contains(&detail));
+    assert_eq!(error.details["kind"], "upgrade_command_failed");
+}
+
 #[test]
 fn command_output_with_timeout_captures_child_output() {
     let mut command = Command::new("sh");
