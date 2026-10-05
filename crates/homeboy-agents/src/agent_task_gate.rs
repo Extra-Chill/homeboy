@@ -2451,6 +2451,20 @@ impl SelectedGateEnvironment {
                 state = "hydrated";
                 wait_ms = (waited > 0).then_some(waited);
                 toolchain_cargo_relative = relative;
+                // A new identity just landed; bound the cache to the most
+                // recent ones (Extra-Chill/homeboy#15447). Best effort: an
+                // eviction failure never fails the gate.
+                if let Err(error) = evict_stale_rust_cache_identities(
+                    &root,
+                    &identity,
+                    RUST_CACHE_RETAINED_IDENTITIES,
+                ) {
+                    homeboy_core::log_status!(
+                        "gate",
+                        "Rust gate cache eviction skipped: {}",
+                        error.message
+                    );
+                }
             }
         }
         let home = self.values.get("HOME").map(PathBuf::from).ok_or_else(|| {
@@ -3050,6 +3064,72 @@ fn unsafe_rust_cache_root_message(
         expected_uid,
         rust_cache_repair_command()
     )
+}
+
+/// How many Rust gate cache identities to keep. Each is a full Cargo and
+/// rustup home (~2 GB for Homeboy itself) keyed by `Cargo.lock` and
+/// `rust-toolchain.toml`, and a lockfile changes on nearly every release, so
+/// an unbounded cache gained gigabytes a day (Extra-Chill/homeboy#15447).
+const RUST_CACHE_RETAINED_IDENTITIES: usize = 2;
+
+/// Remove all but the `keep` most recently used identity directories under
+/// `root`, never `current`. Recency is the mtime of the identity's
+/// `ready.json` marker, written once when it is hydrated; the directory's own
+/// mtime is unusable because opening `hydrate.lock` creates or touches an
+/// entry in it. An identity without a marker (never finished hydrating) sorts
+/// oldest. An identity is removed only while this
+/// process holds its `hydrate.lock`, so a concurrent hydration is never cut
+/// short; a gate reading a hydrated identity copies it into its own overlay
+/// first, so removing it afterwards is safe. Returns the removed identities.
+fn evict_stale_rust_cache_identities(
+    root: &Path,
+    current: &str,
+    keep: usize,
+) -> Result<Vec<String>> {
+    let entries = fs::read_dir(root).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("list {}", root.display())))
+    })?;
+    let mut identities: Vec<(std::time::SystemTime, String, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let metadata = entry.path().symlink_metadata().ok()?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return None;
+            }
+            let name = entry.file_name().into_string().ok()?;
+            let used = fs::metadata(entry.path().join("ready.json"))
+                .and_then(|marker| marker.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            Some((used, name, entry.path()))
+        })
+        .collect();
+    identities.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut kept = usize::from(identities.iter().any(|(_, name, _)| name == current));
+    let mut removed = Vec::new();
+    for (_, name, path) in identities {
+        if name == current {
+            continue;
+        }
+        if kept < keep {
+            kept += 1;
+            continue;
+        }
+        let Ok(lock) = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path.join("hydrate.lock"))
+        else {
+            continue;
+        };
+        if !matches!(lock.try_lock_exclusive(), Ok(true)) {
+            continue;
+        }
+        if fs::remove_dir_all(&path).is_ok() {
+            removed.push(name);
+        }
+    }
+    Ok(removed)
 }
 
 fn ensure_safe_rust_cache_root(path: &Path) -> Result<()> {
@@ -8127,6 +8207,56 @@ mod tests {
                 message.contains(expected),
                 "{expected} missing from: {message}"
             );
+        }
+    }
+
+    /// Extra-Chill/homeboy#15447: the cache kept one ~2 GB identity per
+    /// lockfile forever. Eviction keeps the newest ones and the current one,
+    /// and never removes an identity whose hydration lock is held.
+    #[test]
+    fn rust_cache_eviction_keeps_recent_current_and_locked_identities() {
+        use std::time::{Duration, SystemTime};
+        let root = tempfile::tempdir().expect("cache root");
+        let make = |name: &str, age_secs: u64| {
+            let dir = root.path().join(name);
+            fs::create_dir_all(dir.join("cargo")).expect("identity");
+            let marker = dir.join("ready.json");
+            fs::write(&marker, "{}").expect("ready marker");
+            let mtime = SystemTime::now() - Duration::from_secs(age_secs);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&marker)
+                .and_then(|file| file.set_modified(mtime))
+                .expect("set marker mtime");
+        };
+        make("current", 0);
+        make("recent", 100);
+        make("old", 200);
+        make("older", 300);
+        make("locked", 400);
+        // Unhydrated: no marker, so it sorts oldest and is evicted.
+        fs::create_dir_all(root.path().join("abandoned/cargo")).expect("abandoned");
+        let held = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(root.path().join("locked/hydrate.lock"))
+            .expect("lock file");
+        assert!(held.try_lock_exclusive().expect("hold lock"));
+
+        let mut removed =
+            evict_stale_rust_cache_identities(root.path(), "current", 2).expect("evict");
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec![
+                "abandoned".to_string(),
+                "old".to_string(),
+                "older".to_string()
+            ]
+        );
+        for kept in ["current", "recent", "locked"] {
+            assert!(root.path().join(kept).is_dir(), "{kept} was removed");
         }
     }
 }
