@@ -230,8 +230,8 @@ impl ControllerFallbackProjectionStore {
     /// [`open_default`](Self::open_default) against an explicitly injected data
     /// root.
     ///
-    /// The store owns exactly one file below the data root and every later
-    /// operation derives from `self.path` (including the sibling `.lock`), so
+    /// The ledger and scheduling cursor share one owner below the data root;
+    /// every operation derives from `self.path` (including `.cursor` and `.lock`), so
     /// nothing on this type can reach back into ambient state once it is
     /// constructed. The reconciliation *callbacks* are a separate matter: they
     /// are supplied by the caller and are ambient in the production wiring —
@@ -330,14 +330,7 @@ impl ControllerFallbackProjectionStore {
             + 'static,
         Finalize: Fn(&str, &homeboy_core::api_jobs::RunnerJobLogSnapshot) -> Result<bool>,
     {
-        let state = self.load()?;
-        let receipts = state
-            .receipts
-            .iter()
-            .filter(|(run_id, _)| !state.projections.contains_key(*run_id))
-            .take(limit)
-            .map(|(run_id, receipt)| (run_id.clone(), receipt.clone()))
-            .collect::<Vec<_>>();
+        let receipts = self.reserve_reconciliation_batch(limit)?;
         let snapshot = Arc::new(snapshot);
         let mut projections = Vec::new();
 
@@ -395,6 +388,64 @@ impl ControllerFallbackProjectionStore {
             projections.push(projection);
         }
         Ok(projections)
+    }
+
+    /// Reserve a fair bounded pass under the existing ledger lock. Advance
+    /// before probing, so a timed-out process or overlapping startup cannot
+    /// repeatedly pin reconciliation to the first unreachable receipts.
+    fn reserve_reconciliation_batch(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, DeferredControllerReceipt)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let _lock = self.lock()?;
+        let state = self.load()?;
+        let pending = state
+            .receipts
+            .iter()
+            .filter(|(run_id, _)| !state.projections.contains_key(*run_id))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cursor = self.reconciliation_cursor()?;
+        let start = cursor
+            .as_ref()
+            .and_then(|cursor| pending.iter().position(|(run_id, _)| *run_id > cursor))
+            .unwrap_or(0);
+        let batch = pending
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(limit.min(pending.len()))
+            .map(|(run_id, receipt)| ((*run_id).clone(), (*receipt).clone()))
+            .collect::<Vec<_>>();
+        // Scheduling metadata shares the ledger's lock and atomic writer, but
+        // leaves receipt bytes readable by active pinned controller versions.
+        self.persist_at(
+            &self.path.with_extension("cursor"),
+            &batch.last().expect("nonempty batch").0,
+        )?;
+        Ok(batch)
+    }
+
+    fn reconciliation_cursor(&self) -> Result<Option<String>> {
+        let path = self.path.with_extension("cursor");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", path.display())),
+                ));
+            }
+        };
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {}", path.display())))
+        })
     }
 
     /// Projects explicit runner terminal evidence for the exact handoff run
@@ -515,7 +566,11 @@ impl ControllerFallbackProjectionStore {
     }
 
     fn persist(&self, state: &State) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
+        self.persist_at(&self.path, state)
+    }
+
+    fn persist_at<T: Serialize>(&self, path: &Path, value: &T) -> Result<()> {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -523,13 +578,13 @@ impl ControllerFallbackProjectionStore {
                 )
             })?;
         }
-        let bytes = serde_json::to_vec(state).map_err(|error| {
+        let bytes = serde_json::to_vec(value).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
                 Some("serialize controller fallback projection".to_string()),
             )
         })?;
-        let parent = self.path.parent().expect("ledger path has parent");
+        let parent = path.parent().expect("ledger path has parent");
         let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -548,10 +603,10 @@ impl ControllerFallbackProjectionStore {
                 Some("sync controller fallback projection".to_string()),
             )
         })?;
-        temporary.persist(&self.path).map_err(|error| {
+        temporary.persist(path).map_err(|error| {
             Error::internal_io(
                 error.error.to_string(),
-                Some(format!("publish {}", self.path.display())),
+                Some(format!("publish {}", path.display())),
             )
         })?;
         File::open(parent)
@@ -597,7 +652,8 @@ impl ControllerFallbackProjectionStore {
 }
 
 /// Production startup reconciliation for deferred runner staging. It reads at
-/// most eight runner jobs so ordinary CLI startup remains bounded by work count.
+/// most eight runner jobs per pass, rotating durably through pending receipts so
+/// unavailable historical jobs cannot monopolize the bounded recovery budget.
 ///
 /// Deliberately has no injected sibling. Both reconciliation callbacks below
 /// are bare ambient function references — `crate::runner_job_log_snapshot`
@@ -859,6 +915,132 @@ mod tests {
             assert_eq!(projected[0].terminal_outcome, outcome);
             assert_eq!(projected[0].artifacts, receipt.runner_receipt.artifacts);
         }
+    }
+
+    #[test]
+    fn bounded_batches_reach_terminal_receipts_after_unreachable_jobs_across_restart() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("controller.json");
+        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let mut runner = Transport::compatible();
+        let mut receipts = Vec::new();
+        for index in 0..17 {
+            receipts.push(
+                store
+                    .submit_detached(&mut runner, &envelope_for_run(&format!("fair-{index:02}")))
+                    .expect("admit exact run"),
+            );
+        }
+        let finalized = Mutex::new(Vec::new());
+        let mut projected = Vec::new();
+        for _ in 0..4 {
+            let queried = Arc::new(AtomicUsize::new(0));
+            let query_count = Arc::clone(&queried);
+            projected.extend(
+                ControllerFallbackProjectionStore::open(&path)
+                    .expect("restart ledger")
+                    .reconcile_after_controller_restart_with(
+                        8,
+                        move |_, job_id| {
+                            query_count.fetch_add(1, Ordering::SeqCst);
+                            let index = job_id
+                                .strip_prefix("runner-job-")
+                                .expect("runner identity")
+                                .parse::<usize>()
+                                .expect("job index");
+                            match index {
+                                1..=8 => Err(Error::internal_unexpected("retained job not found")),
+                                16 => Ok(snapshot(JobStatus::Succeeded)),
+                                17 => Ok(snapshot(JobStatus::Failed)),
+                                _ => Ok(snapshot(JobStatus::Running)),
+                            }
+                        },
+                        |run_id, _| {
+                            finalized
+                                .lock()
+                                .expect("finalized runs")
+                                .push(run_id.to_string());
+                            Ok(true)
+                        },
+                    )
+                    .expect("bounded reconciliation"),
+            );
+            assert_eq!(
+                queried.load(Ordering::SeqCst),
+                8,
+                "each startup remains bounded"
+            );
+        }
+        assert_eq!(
+            *finalized.lock().expect("finalized runs"),
+            vec!["fair-15", "fair-16"],
+            "missing and running receipts cannot starve later terminal runs or duplicate finalization",
+        );
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].terminal_outcome, "succeeded");
+        assert_eq!(
+            projected[0].artifacts,
+            receipts[15].runner_receipt.artifacts
+        );
+        assert_eq!(projected[1].terminal_outcome, "failed");
+        assert_eq!(
+            projected[1].artifacts,
+            receipts[16].runner_receipt.artifacts
+        );
+        assert_eq!(
+            runner.calls(),
+            17,
+            "reconciliation never redispatches providers"
+        );
+    }
+
+    #[test]
+    fn concurrent_startups_reserve_distinct_bounded_batches() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("controller.json");
+        let store = ControllerFallbackProjectionStore::open(&path).expect("store");
+        let mut runner = Transport::compatible();
+        for index in 0..17 {
+            store
+                .submit_detached(
+                    &mut runner,
+                    &envelope_for_run(&format!("concurrent-{index:02}")),
+                )
+                .expect("admit run");
+        }
+        let original_receipts = fs::read(&path).expect("receipt ledger");
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                ControllerFallbackProjectionStore::open(path)
+                    .expect("concurrent ledger")
+                    .reserve_reconciliation_batch(8)
+                    .expect("reserve batch")
+                    .into_iter()
+                    .map(|(run_id, _)| run_id)
+                    .collect::<Vec<_>>()
+            }));
+        }
+        let batches = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("worker"))
+            .collect::<Vec<_>>();
+        assert_eq!(batches[0].len(), 8);
+        assert_eq!(batches[1].len(), 8);
+        assert!(batches[0].iter().all(|run_id| !batches[1].contains(run_id)));
+        assert_eq!(fs::read(&path).expect("receipt ledger"), original_receipts);
+        let restarted = ControllerFallbackProjectionStore::open(path).expect("restart ledger");
+        assert_eq!(
+            restarted
+                .reserve_reconciliation_batch(1)
+                .expect("next batch")[0]
+                .0,
+            "concurrent-16"
+        );
     }
 
     #[test]
