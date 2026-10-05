@@ -12,6 +12,7 @@ use homeboy::core::agent_runtime_manifest::{
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
+use homeboy::core::EntityRows;
 use homeboy::runner::runners;
 use homeboy_core::error::ExecutableAction;
 use homeboy_core::extension::catalog::{
@@ -383,7 +384,10 @@ pub enum ExtensionOutput {
     List {
         #[serde(skip_serializing_if = "Option::is_none")]
         project_id: Option<String>,
-        extensions: Vec<ExtensionInventoryEntry>,
+        /// Rows under `entities`, mirrored under the deprecated `extensions`
+        /// key (#14876).
+        #[serde(flatten)]
+        extensions: EntityRows<ExtensionInventoryEntry>,
     },
     #[serde(rename = "extension.diff_installed")]
     DiffInstalled {
@@ -994,13 +998,14 @@ fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
     let summaries = extension_inventory(project_config.as_ref(), readiness);
 
-    Ok((
-        ExtensionOutput::List {
-            project_id: project,
-            extensions: summaries,
-        },
-        0,
-    ))
+    Ok((list_output(project, summaries), 0))
+}
+
+fn list_output(project_id: Option<String>, rows: Vec<ExtensionInventoryEntry>) -> ExtensionOutput {
+    ExtensionOutput::List {
+        project_id,
+        extensions: EntityRows::with_legacy_key(rows, "extensions"),
+    }
 }
 
 fn diff_installed(
@@ -1967,6 +1972,37 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn extension_list_mirrors_rows_under_entities_and_legacy_extensions_key() {
+        with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/listed");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("listed.json"),
+                r#"{ "name": "Listed", "version": "1.0.0" }"#,
+            )
+            .expect("extension manifest");
+
+            let (output, _) = list(None, ExtensionReadinessMode::Cached).expect("list extensions");
+            let value = serde_json::to_value(&output).expect("serialize extension list");
+
+            assert_eq!(value["command"], "extension.list");
+            assert_eq!(value["entities"][0]["id"], "listed");
+            assert_eq!(value["entities"], value["extensions"]);
+        });
+    }
+
+    #[test]
+    fn empty_extension_list_emits_entities_array() {
+        let value =
+            serde_json::to_value(list_output(None, Vec::new())).expect("serialize extension list");
+
+        assert_eq!(value["command"], "extension.list");
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(value["extensions"], serde_json::json!([]));
+        assert!(value.get("project_id").is_none());
+    }
 
     #[test]
     fn convergence_restarts_only_extensions_with_changed_source_revisions() {
