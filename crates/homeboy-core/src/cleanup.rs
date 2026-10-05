@@ -493,7 +493,17 @@ fn reconstructable_admission_error(
         apply_action
         .requiring_confirmation("approve scoped rebuildable artifact removal"),
     )
+    // Shared Cargo targets live outside every worktree, so the artifact
+    // inventory above cannot see them (Extra-Chill/homeboy#15474).
+    .with_action(ExecutableAction::new(
+        "capacity.reserve.inspect_shared_cargo_targets",
+        "inspect reclaimable shared Cargo target stores",
+        "homeboy",
+        ["cleanup", "--include", "shared-cargo-targets"],
+        ActionSafety::ReadOnly,
+    ))
     .with_hint("Inspect scoped rebuildable artifacts, then explicitly approve their removal if appropriate.")
+    .with_hint("Shared Cargo targets are not worktree artifacts; inspect them with `homeboy cleanup --include shared-cargo-targets`.")
 }
 
 fn run_automatic_artifact_retention_in(
@@ -4083,6 +4093,17 @@ mod tests {
                 error.details["_homeboy_actions"][1]["args"][5],
                 "--merged-only"
             );
+            // Extra-Chill/homeboy#15474: shared Cargo targets are outside
+            // every worktree, so recovery names their own inventory too.
+            assert_eq!(
+                error.details["_homeboy_actions"][2]["id"],
+                "capacity.reserve.inspect_shared_cargo_targets"
+            );
+            assert_eq!(error.details["_homeboy_actions"][2]["safety"], "read_only");
+            assert_eq!(
+                error.details["_homeboy_actions"][2]["args"],
+                json!(["cleanup", "--include", "shared-cargo-targets"])
+            );
             assert!(repo.path().join("target/debug/app").exists());
         });
     }
@@ -4108,6 +4129,10 @@ mod tests {
             assert_eq!(
                 error.details["_homeboy_actions"][0]["args"],
                 json!(["cleanup", "--include", "repo-artifacts"])
+            );
+            assert_eq!(
+                error.details["_homeboy_actions"][2]["args"],
+                json!(["cleanup", "--include", "shared-cargo-targets"])
             );
         });
     }
