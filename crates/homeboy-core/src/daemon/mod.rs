@@ -79,6 +79,7 @@ use runner_files::{
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
 const HEARTBEAT_ONLY_STALL_POLL: Duration = Duration::from_secs(1);
+const HELPER_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Separates transport liveness from child work. A wrapper heartbeat is useful
 /// evidence that the supervisor is alive, but it cannot extend a child's lease.
@@ -1911,11 +1912,16 @@ where
     let _ = schedule_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = upload_shutdown_tx.send(());
-    let _ = local_child_reconciler.join();
-    let _ = completion_notifier.join();
-    let _ = schedule_ticker.join();
-    let _ = orchestration_reconciler.join();
-    let _ = upload_reaper.join();
+    join_helpers_with_deadline(
+        vec![
+            ("local-child-reservation-reconciler", local_child_reconciler),
+            ("completion-notifier", completion_notifier),
+            ("schedule-ticker", schedule_ticker),
+            ("orchestration-reconciler", orchestration_reconciler),
+            ("upload-reaper", upload_reaper),
+        ],
+        HELPER_DRAIN_DEADLINE,
+    );
     if shutdown
         .as_ref()
         .is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -1955,6 +1961,56 @@ where
         }
     }
     serve_result.map(|()| state)
+}
+
+fn join_helpers_with_deadline(
+    helpers: Vec<(&'static str, std::thread::JoinHandle<()>)>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut helpers = helpers.into_iter();
+    while let Some((name, handle)) = helpers.next() {
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            eprintln!("Warning: daemon helper `{name}` did not stop before the drain deadline");
+            drop(handle);
+            for (name, handle) in helpers {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    eprintln!(
+                        "Warning: daemon helper `{name}` did not stop before the drain deadline"
+                    );
+                    drop(handle);
+                }
+            }
+            break;
+        }
+    }
+}
+
+#[cfg(test)]
+mod helper_drain_tests {
+    use super::*;
+
+    #[test]
+    fn helper_that_never_returns_does_not_block_drain() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let helper = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        let started = Instant::now();
+        join_helpers_with_deadline(
+            vec![("stuck-test-helper", helper)],
+            Duration::from_millis(40),
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = release_tx.send(());
+    }
 }
 
 fn rebuild_generation_job_ownership(job_store: &JobStore) -> Result<()> {
@@ -2275,7 +2331,16 @@ fn completion_notify_loop_for_lease(
     let mut tracker = completion_tracker::CompletionTracker::default();
     loop {
         if lease_id.is_none_or(lifetime::owns_global_work) {
-            isolated_tick(|| completion_notify_pass(&mut tracker));
+            let mut shutdown_requested = false;
+            isolated_tick(|| {
+                completion_notify_pass(&mut tracker, || {
+                    shutdown_requested = shutdown.try_recv() != Err(mpsc::TryRecvError::Empty);
+                    shutdown_requested
+                })
+            });
+            if shutdown_requested {
+                return;
+            }
             isolated_tick(|| {
                 let _ = crate::notify_outbox::drain(chrono::Utc::now());
             });
@@ -2287,13 +2352,18 @@ fn completion_notify_loop_for_lease(
 }
 
 /// One completion-notification pass.
-fn completion_notify_pass(tracker: &mut completion_tracker::CompletionTracker) {
+fn completion_notify_pass(
+    tracker: &mut completion_tracker::CompletionTracker,
+    shutdown: impl FnMut() -> bool,
+) {
     use crate::observation::ObservationStore;
 
     let Ok(store) = ObservationStore::open_initialized() else {
         return;
     };
-    crate::observation::runs_service::refresh_running_mirrored_daemon_evidence_best_effort(&store);
+    crate::observation::runs_service::refresh_running_mirrored_daemon_evidence_best_effort_until(
+        &store, shutdown,
+    );
     let running_after = list_running_run_ids(&store);
     // Departure from the running set is only a *candidate* completion.
     // Confirm terminality against the record itself before reporting:

@@ -374,6 +374,13 @@ pub fn refresh_selected_mirrored_daemon_evidence(run: &RunRecord) -> Option<Erro
 /// observation store converge on the daemon's terminal state without requiring
 /// operators to know and run `runs show <mirror-run-id>` first.
 pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationStore) {
+    refresh_running_mirrored_daemon_evidence_best_effort_until(store, || false);
+}
+
+pub(crate) fn refresh_running_mirrored_daemon_evidence_best_effort_until(
+    store: &ObservationStore,
+    shutdown: impl FnMut() -> bool,
+) {
     // This runs on every daemon completion pass, so it must stay cheap: no
     // full generation-ledger reconcile (`statuses()` can take minutes), only
     // one refresh per running mirrored run (#15438).
@@ -385,21 +392,21 @@ pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationS
         })
         .unwrap_or_default();
 
-    for run in runs {
+    visit_until_shutdown(runs, shutdown, |run| {
         let Some((runner_id, job_id)) =
             runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(&run))
         else {
-            continue;
+            return;
         };
         // Labels such as `runner-exec:<runner>:daemon` or `…-lab-hydration-N`
         // are not daemon job IDs; refreshing them can never succeed.
         if !is_daemon_job_id(&job_id) {
-            continue;
+            return;
         }
         let Err(err) =
             runner_evidence::with_runner_evidence(|p| p.refresh_mirrored_daemon_evidence(&run.id))
         else {
-            continue;
+            return;
         };
         match unrecoverable_refresh_reason(&err) {
             // The owning runner no longer has this job: the mirror can never
@@ -423,6 +430,19 @@ pub fn refresh_running_mirrored_daemon_evidence_best_effort(store: &ObservationS
                 }
             }
         }
+    });
+}
+
+fn visit_until_shutdown<T>(
+    items: Vec<T>,
+    mut shutdown: impl FnMut() -> bool,
+    mut visit: impl FnMut(T),
+) {
+    for item in items {
+        if shutdown() {
+            break;
+        }
+        visit(item);
     }
 }
 
@@ -460,6 +480,21 @@ fn first_sweep_warning(run_id: &str) -> bool {
 #[cfg(test)]
 mod completion_sweep_tests {
     use super::*;
+
+    #[test]
+    fn sweep_stops_between_items_after_shutdown() {
+        let mut visited = Vec::new();
+        let shutdown = std::cell::Cell::new(false);
+        visit_until_shutdown(
+            vec![1, 2, 3],
+            || shutdown.get(),
+            |item| {
+                visited.push(item);
+                shutdown.set(true);
+            },
+        );
+        assert_eq!(visited, vec![1]);
+    }
 
     #[test]
     fn non_daemon_job_labels_are_not_refreshed() {
