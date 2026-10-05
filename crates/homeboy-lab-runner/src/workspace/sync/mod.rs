@@ -17,7 +17,7 @@ use homeboy_core::resource_lifecycle_index::{
     ResourceLifecycle, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
 
-use self::snapshots::workspace_snapshots_for_runner;
+use self::snapshots::workspace_snapshots_for_source;
 use super::super::validation_dependencies::{
     sync_validation_dependency_workspaces, RunnerValidationDependencySyncOutput,
 };
@@ -293,6 +293,7 @@ fn sync_workspace_in_roots_controlled(
                     &local_path,
                     &excludes,
                     &content_manifest,
+                    control,
                 )?;
                 materialization_plan.snapshot_transfer = Some(match seed {
                     Some((seed, delta)) => {
@@ -1569,16 +1570,11 @@ fn compatible_incremental_snapshot(
     local_path: &Path,
     excludes: &[String],
     controller_manifest: &super::snapshot::WorkspaceContentManifest,
+    control: &WorkspaceControl,
 ) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    let (snapshots, _) = workspace_snapshots_for_runner(
-        runner,
-        RunnerWorkspaceSnapshotFilters {
-            limit: usize::MAX,
-            ..Default::default()
-        },
-    )?;
+    let snapshots = workspace_snapshots_for_source(runner, local_path, control)?;
     let local_path = local_path.display().to_string();
-    Ok(snapshots.snapshots.into_iter().find_map(|snapshot| {
+    Ok(snapshots.into_iter().find_map(|snapshot| {
         (snapshot.sync_mode == RunnerWorkspaceSyncMode::Snapshot.as_str()
             && snapshot.local_path == local_path
             && snapshot.snapshot_excludes == excludes)
