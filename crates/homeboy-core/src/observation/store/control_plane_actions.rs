@@ -303,7 +303,7 @@ impl ObservationStore {
         ) -> Result<ControlPlaneActionFence>,
     ) -> Result<ControlPlaneEffectAdmission> {
         self.ensure_control_plane_resource_authority()?;
-        begin_control_plane_write(
+        let transaction = begin_control_plane_write(
             &self.connection,
             "begin control-plane action intent admission",
         )?;
@@ -406,15 +406,12 @@ impl ObservationStore {
         })();
         match result {
             Ok(value) => {
-                self.connection
-                    .execute_batch("COMMIT")
+                transaction
+                    .commit()
                     .map_err(sqlite_error("commit control-plane action intent admission"))?;
                 Ok(value)
             }
-            Err(error) => {
-                let _ = self.connection.execute_batch("ROLLBACK");
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1489,6 +1486,111 @@ mod tests {
                 .unwrap(),
             ControlPlaneEffectAdmission::Duplicate(_)
         ));
+    }
+
+    #[test]
+    fn initialized_store_admits_intent_after_a_writer_holds_past_five_seconds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        seed_agent_task_resource(&store, "run-1", "now");
+
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5500));
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let intent = action_intent(
+            "run-1",
+            "effect-normal-timeout",
+            ControlPlaneAction::Resume,
+            None,
+            &"c".repeat(64),
+        );
+        let started = std::time::Instant::now();
+        let admission = store.enqueue_control_plane_action_intent(
+            &intent,
+            "agent_task_run",
+            &"d".repeat(64),
+            admit_eligible,
+        );
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(5300),
+            "elapsed {elapsed:?}"
+        );
+        assert!(matches!(
+            admission.unwrap(),
+            ControlPlaneEffectAdmission::Enqueued(_)
+        ));
+    }
+
+    #[test]
+    fn intent_admission_exhaustion_has_no_effect_and_leaves_no_transaction_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let initialized = ObservationStore::open_initialized_at(&path).unwrap();
+        initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'deploy', 'now', 'running')", []).unwrap();
+        seed_agent_task_resource(&initialized, "run-1", "now");
+        drop(initialized);
+
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(
+                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+            );
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
+        let store = ObservationStore {
+            connection,
+            path,
+            readonly: false,
+            roots: None,
+        };
+        let intent = action_intent(
+            "run-1",
+            "effect-exhausted",
+            ControlPlaneAction::Resume,
+            None,
+            &"c".repeat(64),
+        );
+        let started = std::time::Instant::now();
+        let error = store
+            .enqueue_control_plane_action_intent(
+                &intent,
+                "agent_task_run",
+                &"d".repeat(64),
+                admit_eligible,
+            )
+            .expect_err("held writer must exhaust action admission");
+        let elapsed = started.elapsed();
+        println!(
+            "action admission exhaustion elapsed_ms={} diagnostic={}",
+            elapsed.as_millis(),
+            error.message
+        );
+        release.join().unwrap();
+        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
+        assert!(error
+            .message
+            .contains("begin control-plane action intent admission"));
+        assert!(error.message.contains("10000ms budget"));
+        assert!(store.connection.is_autocommit());
+        assert!(store
+            .control_plane_effect_status(&intent.effect_id)
+            .unwrap()
+            .is_none());
+        let count: i64 = store.connection.query_row(
+            "SELECT COUNT(*) FROM control_plane_action_claims WHERE effect_id = 'effect-exhausted'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

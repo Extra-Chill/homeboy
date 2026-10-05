@@ -55,7 +55,8 @@ impl ObservationStore {
         idempotency_digest: &str,
         request_digest: &str,
     ) -> Result<ControlPlaneEvent> {
-        begin_control_plane_write(&self.connection, "begin control-plane event append")?;
+        let transaction =
+            begin_control_plane_write(&self.connection, "begin control-plane event append")?;
         match append_control_plane_event_on(
             &self.connection,
             run,
@@ -64,15 +65,12 @@ impl ObservationStore {
             request_digest,
         ) {
             Ok(event) => {
-                self.connection
-                    .execute_batch("COMMIT")
+                transaction
+                    .commit()
                     .map_err(sqlite_error("commit control-plane event append"))?;
                 Ok(event)
             }
-            Err(error) => {
-                let _ = self.connection.execute_batch("ROLLBACK");
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -391,6 +389,96 @@ mod tests {
             event,
             "successful admission still preserves exact event idempotency"
         );
+    }
+
+    #[test]
+    fn initialized_store_appends_after_a_writer_holds_past_five_seconds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        let store = ObservationStore::open_initialized_at(&path).unwrap();
+        store.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'test', 'now', 'running')", []).unwrap();
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(5500));
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let run = RunId::new("run-1").unwrap();
+        let started = std::time::Instant::now();
+        let event = store
+            .append_control_plane_event(
+                &run,
+                &request("normal-timeout", "state"),
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .unwrap();
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(5300),
+            "elapsed {elapsed:?}"
+        );
+        assert_eq!(event.sequence, 1);
+    }
+
+    #[test]
+    fn event_append_exhaustion_has_no_receipt_and_leaves_no_transaction_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        let initialized = ObservationStore::open_initialized_at(&path).unwrap();
+        initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'test', 'now', 'running')", []).unwrap();
+        drop(initialized);
+
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(
+                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+            );
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
+        let store = ObservationStore {
+            connection,
+            path,
+            readonly: false,
+            roots: None,
+        };
+        let run = RunId::new("run-1").unwrap();
+        let started = std::time::Instant::now();
+        let error = store
+            .append_control_plane_event(
+                &run,
+                &request("exhausted", "state"),
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .expect_err("held writer must exhaust event admission");
+        let elapsed = started.elapsed();
+        println!(
+            "event append exhaustion elapsed_ms={} diagnostic={}",
+            elapsed.as_millis(),
+            error.message
+        );
+        release.join().unwrap();
+        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
+        assert!(error.message.contains("begin control-plane event append"));
+        assert!(error.message.contains("10000ms budget"));
+        assert!(store.connection.is_autocommit());
+        assert!(!store
+            .control_plane_event_receipt_exists(&run, &"a".repeat(64))
+            .unwrap());
+        let count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

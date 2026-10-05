@@ -473,19 +473,18 @@ pub(crate) const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
 pub(crate) const SQLITE_CONTROL_PLANE_WRITE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
 /// Begin a control-plane write using the connection's canonical bounded
-/// SQLite busy handler. `BEGIN IMMEDIATE` acquires the single-writer slot
-/// before any reads, so SQLite never promotes a stale read snapshot into a
-/// write transaction. Keep admission as one operation: retries after BEGIN
-/// succeeds could replay a non-idempotent decision callback.
-pub(crate) fn begin_control_plane_write(
-    connection: &rusqlite::Connection,
+/// SQLite busy handler and RAII transaction ownership. `BEGIN IMMEDIATE`
+/// acquires the single-writer slot before any reads, so SQLite never promotes
+/// a stale read snapshot into a write transaction. The returned transaction
+/// rolls back on drop, including when a later decision or commit fails.
+pub(crate) fn begin_control_plane_write<'conn>(
+    connection: &'conn rusqlite::Connection,
     operation: &str,
-) -> Result<()> {
+) -> Result<rusqlite::Transaction<'conn>> {
     use std::time::Instant;
 
     let started = Instant::now();
-    connection
-        .execute_batch("BEGIN IMMEDIATE")
+    rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| {
             if is_transient_lock_error(&error) {
                 sqlite_error(format!(
