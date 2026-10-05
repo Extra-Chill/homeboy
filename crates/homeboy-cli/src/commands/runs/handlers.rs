@@ -23,6 +23,7 @@ use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners as runner;
+use homeboy_engine_primitives::shell::shell_arg;
 
 use super::bench::run_contains_scenario;
 use super::common::{run_summaries_with_artifact_indexes, RunSummary};
@@ -1038,17 +1039,6 @@ fn token_is_unique(token: &str, artifacts: &[homeboy::core::observation::Artifac
         })
         .count()
         == 1
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn directory_publication_guidance_for_artifacts(

@@ -77,16 +77,27 @@ fn split_respecting_quotes(input: &str) -> Vec<String> {
 /// Quote a shell argument, leaving conservatively safe words bare.
 ///
 /// Unlike [`quote_arg`], which quotes anything containing a shell metacharacter,
-/// this keeps unquoted only an explicit allowlist. Command builders that render
+/// this keeps unquoted only an explicit allowlist: ASCII alphanumerics and
+/// `-` `_` `.` `/` `:` `=` `@`. (`=` and `@` are inert in argument position, so
+/// `user@host` and `key=value` stay bare.) Everything else is single-quoted, with
+/// embedded single quotes escaped as `'\''`. Command builders that render
 /// readable remote commands use it so a plain path or flag stays legible.
+///
+/// An empty value renders as `''` so it survives as a distinct (empty) argument
+/// instead of silently vanishing from the rendered command line. Callers that
+/// want an absent option omitted must skip it themselves.
 pub fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.chars().all(is_shell_arg_safe_char) {
         return value.to_string();
     }
-    format!("'{}'", value.replace('\'', "'\\''"))
+    format!("'{}'", escape_single_quote_content(value))
+}
+
+fn is_shell_arg_safe_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '=' | '@')
 }
 
 pub fn quote_path(path: &str) -> String {
@@ -200,6 +211,39 @@ mod error_crate_duplicate_parity_tests {
                 "shell::quote_arg and homeboy_error::posix_quote_arg diverged on ASCII {byte:#04x}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shell_arg_tests {
+    use super::shell_arg;
+
+    #[test]
+    fn safe_set_is_left_bare() {
+        assert_eq!(shell_arg("abc-DEF_1.2/x:y"), "abc-DEF_1.2/x:y");
+        assert_eq!(shell_arg("user@host"), "user@host");
+        assert_eq!(shell_arg("key=value"), "key=value");
+        assert_eq!(shell_arg("a@b=c/d:e"), "a@b=c/d:e");
+    }
+
+    #[test]
+    fn unsafe_values_are_single_quoted() {
+        assert_eq!(shell_arg("a b"), "'a b'");
+        assert_eq!(shell_arg("$HOME"), "'$HOME'");
+        assert_eq!(shell_arg("a;b"), "'a;b'");
+        assert_eq!(shell_arg("{\"k\":1}"), "'{\"k\":1}'");
+        assert_eq!(shell_arg("~/x"), "'~/x'");
+    }
+
+    #[test]
+    fn embedded_single_quote_is_escaped() {
+        assert_eq!(shell_arg("a'b"), "'a'\\''b'");
+        assert_eq!(shell_arg("'"), "''\\'''");
+    }
+
+    #[test]
+    fn empty_value_is_quoted_not_dropped() {
+        assert_eq!(shell_arg(""), "''");
     }
 }
 

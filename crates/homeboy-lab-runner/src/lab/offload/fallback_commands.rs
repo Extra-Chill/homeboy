@@ -81,17 +81,7 @@ pub(crate) fn fallback_command(command: &str, args: &[String]) -> String {
     format!("`homeboy {command}{suffix}`")
 }
 
-pub(crate) fn shell_arg(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '@'))
-    {
-        return value.to_string();
-    }
-
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(crate) use homeboy_engine_primitives::shell::shell_arg;
 
 pub(crate) fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
     normalized_args.windows(3).find_map(|window| {

@@ -6,6 +6,7 @@ use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::server::{RunnerPolicy, RunnerSettings};
 use homeboy::core::MergeOutput;
 use homeboy::runner::runners::{self as runner, ReverseRunnerConnectOptions, Runner};
+use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::{
     RunnerApiListRequest, RunnerApiListResponse, RunnerKind, RUNNER_API_LIST_REQUEST_SCHEMA,
     RUNNER_API_V1,
@@ -289,18 +290,6 @@ fn bounded_list_text(value: &str) -> String {
         format!("{bounded}...")
     } else {
         bounded
-    }
-}
-
-fn shell_arg(value: &str) -> String {
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 

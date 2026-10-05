@@ -4,6 +4,7 @@ use serde_json::Value;
 use homeboy::core::observation::evidence_report;
 use homeboy::core::observation::{runs_service, ObservationStore, RunEvidenceCommands, RunRecord};
 use homeboy::core::validation_progress::ValidationProgressLedger;
+use homeboy_engine_primitives::shell::shell_arg;
 
 use super::common::RunSummary;
 use super::{reconcile, run_summary, CmdResult, RunsOutput};
@@ -392,15 +393,4 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
         current = current.get(*segment)?;
     }
     current.as_str().map(str::to_string)
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }

@@ -1,6 +1,7 @@
 use super::reaping;
 use super::*;
 use base64::Engine;
+use homeboy_engine_primitives::shell::shell_arg;
 use serde::{Deserialize, Serialize};
 
 const WORKTREE_LIST_CURSOR_SCHEMA: &str = "homeboy/worktree-list-cursor/v1";
@@ -2410,17 +2411,6 @@ fn branch_cleanup_base_ref(record: &TaskWorktreeRecord) -> String {
         .strip_prefix("origin/")
         .unwrap_or(trimmed)
         .to_string()
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | '@' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 pub(super) fn safety_report(record: &TaskWorktreeRecord) -> Result<WorktreeSafetyReport> {

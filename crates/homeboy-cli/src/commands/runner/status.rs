@@ -12,6 +12,7 @@ use homeboy::runner::runners::{
     self as runner, Runner, RunnerActiveJobState, RunnerSession, RunnerStatusReport,
     RunnerTunnelMode, RuntimeMaterializationStatus,
 };
+use homeboy_engine_primitives::shell::shell_arg;
 use homeboy_runner_contract::RunnerKind;
 
 use super::super::CmdResult;
@@ -1825,16 +1826,6 @@ fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFol
         command: declaration.command_script.clone(),
         purpose: declaration.purpose.clone(),
     }
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
