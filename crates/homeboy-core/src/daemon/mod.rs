@@ -1265,6 +1265,8 @@ pub(super) struct FilePathRequest {
     path: String,
     #[serde(default)]
     workspace_root: Option<String>,
+    #[serde(default)]
+    private: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

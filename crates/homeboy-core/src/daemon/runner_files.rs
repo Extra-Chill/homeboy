@@ -184,7 +184,7 @@ fn valid_upload_destination(record: &UploadRecord) -> bool {
 pub(super) fn upload_capabilities() -> serde_json::Value {
     json!({
         "protocol_version": CHUNK_UPLOAD_PROTOCOL_VERSION,
-        "capabilities": ["private_file_chunk_upload"],
+        "capabilities": ["private_file_chunk_upload", "private_file_directory"],
         "max_upload_bytes": MAX_UPLOAD_BYTES,
         "max_chunk_bytes": MAX_CHUNK_BYTES,
     })
@@ -207,9 +207,40 @@ pub(super) fn create_runner_file_directory(
         &request.path,
         request.workspace_root.as_deref(),
     )?;
-    fs::create_dir_all(&path).map_err(|err| {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    if request.private {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&path).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("create {}", path.display())))
     })?;
+    if request.private {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+                return Err(Error::validation_invalid_argument(
+                    "path",
+                    "private evidence directory must be daemon-owned with private permissions",
+                    Some(path.display().to_string()),
+                    None,
+                ));
+            }
+        }
+        if !metadata.file_type().is_dir() {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                "private evidence path must be a directory",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+    }
     Ok(json!({
         "runner_id": request.runner_id,
         "path": path.display().to_string(),
@@ -1053,6 +1084,28 @@ mod tests {
     fn private_chunk_upload_round_trip_publishes_verified_bytes() {
         use sha2::Digest;
 
+        // Umask is process-global: exercise the endpoint chain in a subprocess
+        // without changing the environment of other test threads.
+        #[cfg(unix)]
+        if std::env::var_os("HOMEBOY_PRIVATE_MKDIR_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "daemon::runner_files::tests::private_chunk_upload_round_trip_publishes_verified_bytes", "--nocapture"])
+                .env("HOMEBOY_PRIVATE_MKDIR_CHILD", "1")
+                .output()
+                .expect("run group-writable umask fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::umask(0o002);
+        }
+
         for payload in [
             Vec::new(),
             b"opaque\0evidence\xff".to_vec(),
@@ -1061,15 +1114,18 @@ mod tests {
                 .collect(),
         ] {
             let workspace = tempfile::tempdir().expect("workspace");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(workspace.path(), fs::Permissions::from_mode(0o700))
-                    .expect("private upload parent");
-            }
+            let private_parent = workspace.path().join("private-evidence/nested");
             let runner = format!("chunk-round-trip-{}", uuid::Uuid::new_v4());
+            create_runner_file_directory(
+                Some(json!({
+                    "runner_id": runner, "workspace_root": workspace.path().display().to_string(),
+                    "path": private_parent.display().to_string(), "private": true,
+                })),
+                &trusted(),
+            )
+            .expect("create private upload parent through protocol");
             let id = uuid::Uuid::new_v4();
-            let destination = workspace.path().join("evidence.bin");
+            let destination = private_parent.join("evidence.bin");
             fs::write(&destination, b"previous generation").expect("previous evidence");
             let digest = format!("{:x}", sha2::Sha256::digest(&payload));
             let chunks = if payload.is_empty() {
@@ -1081,6 +1137,7 @@ mod tests {
             for (index, chunk) in chunks.iter().enumerate() {
                 let final_chunk = index + 1 == chunks.len();
                 let mut body = request(workspace.path(), &runner, id);
+                body["path"] = json!(destination.display().to_string());
                 body["offset"] = json!(offset);
                 body["content_base64"] =
                     json!(base64::engine::general_purpose::STANDARD.encode(chunk));
@@ -1105,11 +1162,33 @@ mod tests {
             {
                 use std::os::unix::fs::PermissionsExt;
                 assert_eq!(
+                    fs::metadata(&private_parent).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+                assert_eq!(
                     fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
                     0o600
                 );
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_mkdir_refuses_existing_shared_directory_without_changing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = tempfile::tempdir().expect("workspace");
+        let shared = workspace.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+        let request = json!({"runner_id": "mkdir-private", "workspace_root": workspace.path().display().to_string(), "path": "shared", "private": true});
+        create_runner_file_directory(Some(request), &trusted())
+            .expect_err("shared directory is refused");
+        assert_eq!(
+            fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o775
+        );
+        create_runner_file_directory(Some(json!({"runner_id": "mkdir-private", "workspace_root": workspace.path().display().to_string(), "path": "shared"})), &trusted()).expect("ordinary mkdir remains supported");
     }
 
     #[test]

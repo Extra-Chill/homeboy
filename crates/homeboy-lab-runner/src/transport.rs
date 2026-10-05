@@ -204,6 +204,10 @@ impl RunnerFileTransfer {
     }
 
     fn ensure_chunk_upload_protocol(&self) -> Result<()> {
+        self.ensure_file_protocol("private_file_chunk_upload")
+    }
+
+    fn ensure_file_protocol(&self, capability: &str) -> Result<()> {
         let (RunnerFileChannel::DaemonHttp {
             client,
             endpoint_url,
@@ -243,12 +247,12 @@ impl RunnerFileTransfer {
             .is_some_and(|values| {
                 values
                     .iter()
-                    .any(|value| value.as_str() == Some("private_file_chunk_upload"))
+                    .any(|value| value.as_str() == Some(capability))
             });
         if version != Some(CHUNK_UPLOAD_PROTOCOL_VERSION) || !enabled {
             return Err(unsupported_chunk_upload_error(
                 &self.runner_id,
-                "daemon did not advertise private_file_chunk_upload protocol version 1",
+                format!("daemon did not advertise {capability} protocol version 1"),
             ));
         }
         Ok(())
@@ -275,6 +279,34 @@ impl RunnerFileTransfer {
                     "mkdir",
                     remote_dir,
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_private_directory(&self, remote_dir: &str) -> Result<()> {
+        self.ensure_file_protocol("private_file_directory")?;
+        match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let command = format!(
+                    "umask 077; dir={}; mkdir -p -- \"$dir\" && test ! -L \"$dir\" && test -O \"$dir\" && mode=$(stat -c %a -- \"$dir\" 2>/dev/null || stat -f %Lp \"$dir\") && test \"$mode\" = 700",
+                    shell::quote_arg(remote_dir),
+                );
+                let result = client.execute(&command);
+                if !result.success {
+                    return Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "private mkdir",
+                        remote_dir,
+                        result.stderr,
+                        "direct_ssh",
+                    ));
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
+                let mut body = self.file_path_body(remote_dir);
+                body["private"] = json!(true);
+                self.http_post_json("/files/mkdir", body, "private mkdir", remote_dir)?;
             }
         }
         Ok(())
