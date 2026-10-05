@@ -868,13 +868,13 @@ fn materialize_agent_task_evidence_inputs_on_runner(
             == homeboy_engine_primitives::content_hash::PROVIDER_EVIDENCE_DIRECTORY_TRANSPORT
         {
             let uploads = plan_lab_directory_evidence(&canonical, &remote, &declared)?;
-            transfer.ensure_directory(&remote)?;
+            transfer.ensure_private_directory(&remote)?;
             for upload in &uploads {
                 let parent = upload
                     .remote_path
                     .rsplit_once('/')
                     .map_or("/", |(parent, _)| parent);
-                transfer.ensure_directory(parent)?;
+                transfer.ensure_private_directory(parent)?;
                 transfer.upload_private_evidence_atomic(
                     &upload.local_path.display().to_string(),
                     &upload.remote_path,
@@ -893,7 +893,7 @@ fn materialize_agent_task_evidence_inputs_on_runner(
             continue;
         }
         let parent = remote.rsplit_once('/').map_or("/", |(parent, _)| parent);
-        transfer.ensure_directory(parent)?;
+        transfer.ensure_private_directory(parent)?;
         transfer.upload_private_evidence_atomic(
             &canonical.display().to_string(),
             &remote,
