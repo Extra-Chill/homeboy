@@ -110,6 +110,56 @@ fn runner_child_environment_keeps_daemon_state_with_redirected_home() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn bare_homeboy_argv_uses_configured_runner_executable_in_real_subprocess() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let tools = tempfile::tempdir().expect("tools");
+    let configured = tools.path().join("homeboy-managed");
+    let decoy = tools.path().join("homeboy");
+    for (path, output) in [(&configured, "configured"), (&decoy, "decoy")] {
+        std::fs::write(path, format!("#!/bin/sh\nprintf '%s' '{output}'\n"))
+            .expect("write executable fixture");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+    }
+
+    let mut runner = local_runner(workspace.path().display().to_string());
+    runner.settings.homeboy_path = Some(configured.display().to_string());
+    let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        runner_id: "local".to_string(),
+        runner: Some(runner),
+        cwd: Some(workspace.path().display().to_string()),
+        project_id: None,
+        command: vec!["homeboy".to_string(), "status".to_string()],
+        env: HashMap::from([("PATH".to_string(), tools.path().display().to_string())]),
+        secret_env_names: Vec::new(),
+        secret_env_plan: None,
+        capture_patch: false,
+        raw_exec: false,
+        source_snapshot: None,
+        require_paths: Vec::new(),
+        validate_require_paths_on_host: false,
+    })
+    .expect("prepare runner child");
+
+    let output = execute_runner_process(&plan).expect("spawn configured executable");
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, "configured");
+    assert_eq!(plan.command[0], configured.display().to_string());
+
+    assert_eq!(
+        super::super::resolve_configured_homeboy_argv(
+            vec!["/caller/homeboy".to_string(), "status".to_string()],
+            &plan.env,
+        )[0],
+        "/caller/homeboy",
+        "explicit caller executable paths remain authoritative"
+    );
+}
+
 #[test]
 fn explicit_job_data_directory_remains_authoritative() {
     let job_env = HashMap::from([

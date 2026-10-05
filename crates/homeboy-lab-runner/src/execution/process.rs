@@ -310,10 +310,12 @@ pub(crate) fn prepare_runner_process(
         request.validate_require_paths_on_host,
     )?;
 
+    let command = resolve_configured_homeboy_argv(request.command, &env);
+
     Ok(PreparedRunnerProcess {
         runner,
         cwd,
-        command: request.command,
+        command,
         env,
         resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
@@ -432,13 +434,28 @@ pub(crate) fn prepare_daemon_local_process(
     Ok(PreparedRunnerProcess {
         runner,
         cwd,
-        command: request.command,
+        command: resolve_configured_homeboy_argv(request.command, &env),
         env,
         resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
     })
+}
+
+pub(super) fn resolve_configured_homeboy_argv(
+    mut command: Vec<String>,
+    env: &HashMap<String, String>,
+) -> Vec<String> {
+    if command
+        .first()
+        .is_some_and(|executable| executable == "homeboy")
+    {
+        if let Some(configured) = env.get("HOMEBOY_COMMAND") {
+            command[0] = configured.clone();
+        }
+    }
+    command
 }
 
 pub(crate) fn controller_proxy_projection_names(
