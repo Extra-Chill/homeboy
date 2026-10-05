@@ -2818,6 +2818,165 @@ fn cook_selection_required_metadata_uses_supplied_lifecycle_store() {
     assert_eq!(ambient_record.updated_at, ambient_before.updated_at);
 }
 
+/// Run a verification-pending Cook resume whose promotion claim is held by
+/// `owner` (a separate process). `live_owner` keeps it running; otherwise it is
+/// reaped first, so the claim records a dead owner.
+#[cfg(unix)]
+fn resume_cook_behind_foreign_promotion_claim(
+    live_owner: bool,
+) -> (
+    AgentTaskRunResult<AgentTaskCookReport>,
+    agent_task_lifecycle::AgentTaskRunRecord,
+) {
+    let recipe_store = CookRecipeStore::from_current_data_root().expect("recipe store");
+    let lifecycle_store = test_lifecycle_store();
+    let temp = tempfile::tempdir().expect("candidate artifacts");
+    let cook_id = if live_owner {
+        "cook-15472-live-promotion-owner"
+    } else {
+        "cook-15472-dead-promotion-owner"
+    };
+    let run_id = format!("{cook_id}-attempt-1");
+    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+    options.identity.initial_run_id = run_id.clone();
+
+    recipe_store
+        .persist_initial_recipe(&options)
+        .expect("persist recipe");
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&options.identity.initial_plan, &run_id, |_| {
+            Ok(serde_json::json!({}))
+        })
+        .expect("seed lifecycle record");
+    lifecycle_store
+        .record_cook_attempt(cook_id, 1, &run_id)
+        .expect("record Cook attempt");
+    seed_patch_alias_aggregate_in_store(
+        &lifecycle_store,
+        &run_id,
+        &options.identity.initial_plan,
+        &[(
+            "patch",
+            &temp.path().join("patch"),
+            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+one\n",
+        )],
+    );
+    lifecycle_store
+        .record_metadata_value(
+            &run_id,
+            "latest_promotion",
+            serde_json::json!({ "status": "verification_pending" }),
+        )
+        .expect("seed verification-pending continuation");
+
+    // The original Cook process owns the promotion claim and is running gates.
+    let mut owner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn promotion owner fixture");
+    let owner_identity = homeboy_core::process::process_start_identity(owner.id())
+        .expect("inspect promotion owner")
+        .expect("kernel identity");
+    let owner_pid = owner.id();
+    lifecycle_store
+        .mutate_record(&run_id, |record| {
+            record.metadata["cook_operation_claims"] = serde_json::json!([{
+                "operation_key": promotion_operation_key(&run_id),
+                "state": "running",
+                "leased_at": "2026-01-01T00:00:00+00:00",
+                // Owner identity, not this deadline, decides liveness.
+                "lease_deadline": "2026-01-01T00:30:00+00:00",
+                "owner_pid": owner_pid,
+                "owner_process_start_identity": owner_identity,
+            }]);
+            true
+        })
+        .expect("seed foreign promotion claim");
+    if !live_owner {
+        owner.kill().expect("stop promotion owner fixture");
+        owner.wait().expect("reap promotion owner fixture");
+    }
+
+    let in_progress_run_id = run_id.clone();
+    let mut side_effects = if live_owner {
+        // The real claim path observes the live owner's lease.
+        CookSideEffects::for_test(
+            |store, options, run_id| promote_with_operation_claim_in_store(store, options, run_id),
+            |_, _, _| unreachable!("a held promotion claim must not recover a moving base"),
+            |_, _, _, _| unreachable!("a held promotion claim must not finalize"),
+        )
+    } else {
+        // The owner died between the lease observation and classification.
+        CookSideEffects::for_test(
+            move |_, _, _| {
+                Err(homeboy_core::Error::validation_invalid_argument(
+                    "promotion_operation",
+                    "operation_in_progress",
+                    Some(promotion_operation_key(&in_progress_run_id)),
+                    None,
+                ))
+            },
+            |_, _, _| unreachable!("a held promotion claim must not recover a moving base"),
+            |_, _, _, _| unreachable!("a held promotion claim must not finalize"),
+        )
+    };
+    let result = run_cook_spine(
+        &recipe_store,
+        &lifecycle_store,
+        options,
+        Arc::new(UnusedExecutor),
+        &mut side_effects,
+        None,
+        CookMode::Resume,
+    )
+    .expect("Cook reports the held promotion claim");
+    if live_owner {
+        owner.kill().expect("stop promotion owner fixture");
+        owner.wait().expect("reap promotion owner fixture");
+    }
+    let record = lifecycle_store.read_record(&run_id).expect("read Cook run");
+    (result, record)
+}
+
+/// Regression (#15472): a resume that meets the Cook's own live promotion
+/// claim (`operation_in_progress`) while the owner is still running gates is
+/// progress. It must not report `durable_failure`, record a controller failure,
+/// or declare a terminal disposition (which is what fires the "needs attention"
+/// notification).
+#[cfg(unix)]
+#[test]
+fn live_promotion_owner_claim_is_in_flight_not_durable_failure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (result, record) = resume_cook_behind_foreign_promotion_claim(true);
+
+        assert_eq!(result.value.status, "in_flight");
+        assert_eq!(result.value.disposition, CookDisposition::InFlight);
+        assert!(!result.value.disposition.is_terminal());
+        assert_eq!(result.exit_code, 0);
+        assert!(result.value.failure_context.is_none());
+        assert!(record.metadata.get("cook_controller_failure").is_none());
+        assert_eq!(
+            record.metadata["cook_operation_claims"][0]["state"], "running",
+            "the live owner's claim is left for its owner to complete"
+        );
+    });
+}
+
+/// The dead-owner counterpart keeps today's durable failure (#10236 owns its
+/// recovery semantics).
+#[cfg(unix)]
+#[test]
+fn dead_promotion_owner_claim_remains_durable_failure() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (result, record) = resume_cook_behind_foreign_promotion_claim(false);
+
+        assert_eq!(result.value.status, "durable_failure");
+        assert_eq!(result.value.disposition, CookDisposition::Terminal);
+        assert_eq!(result.exit_code, 1);
+        assert!(record.metadata.get("cook_controller_failure").is_some());
+    });
+}
+
 #[test]
 fn post_apply_promotion_failure_keeps_cause_and_bounded_resume_action() {
     let context = homeboy_core::test_support::HermeticTestContext::new();

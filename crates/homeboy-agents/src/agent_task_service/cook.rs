@@ -959,6 +959,42 @@ fn gate_setup_retry_delay(retry: u32) -> std::time::Duration {
     }
 }
 
+/// Whether a promotion error is another live owner's exactly-once promotion
+/// claim (`operation_in_progress`) rather than a verdict on the candidate.
+///
+/// A pass that observes `LeaseHeld` did not attempt promotion; the claim's
+/// owner is still running the gates and will record its own outcome. That is
+/// progress, not a durable failure, so it must not terminalize the Cook or
+/// announce "needs attention" (#15472). The decision reuses the claim
+/// ledger's own liveness predicate, so a dead or expired owner still falls
+/// through to the existing failure path (#10236). A claim owned by this very
+/// process cannot be progressing behind us, so it is never treated as live.
+fn promotion_claim_held_by_live_owner(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    error: &Error,
+) -> bool {
+    if error.details["field"] != "promotion_operation"
+        || error.details["problem"] != "operation_in_progress"
+    {
+        return false;
+    }
+    let operation_key = promotion_operation_key(run_id);
+    let owned_by_this_process = lifecycle_store
+        .operation_claim(run_id, &operation_key)
+        .ok()
+        .flatten()
+        .and_then(|claim| claim.owner_pid)
+        .is_some_and(|pid| pid == std::process::id());
+    !owned_by_this_process
+        && agent_task_lifecycle::operation_lease_is_active_in_store(
+            lifecycle_store,
+            run_id,
+            &operation_key,
+        )
+        .unwrap_or(false)
+}
+
 fn promote_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -8597,6 +8633,32 @@ fn run_cook_spine(
             },
         ) {
             Ok(report) => report,
+            Err(error) if promotion_claim_held_by_live_owner(lifecycle_store, &run_id, &error) => {
+                // Another live owner holds the exactly-once promotion claim and
+                // is still running the gates. It owns the outcome and its
+                // terminal notification; this pass must not record a
+                // controller failure or declare the Cook terminal (#15472).
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path,
+                    promotion: None,
+                    feedback: None,
+                });
+                return Ok(cook_report(CookReportInput {
+                    cook_id,
+                    status: CookStatus::InFlight.as_str(),
+                    disposition: CookDisposition::InFlight,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(format!(
+                        "promotion is in progress under its live owner; watch with `homeboy agent-task status {run_id}`"
+                    )),
+                    exit_code: 0,
+                    invocation_latest_run_id: Some(&run_id),
+                }));
+            }
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
