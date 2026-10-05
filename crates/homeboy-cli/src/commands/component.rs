@@ -827,7 +827,7 @@ fn list(full: bool) -> CmdResult<ComponentOutput> {
     Ok((
         ComponentOutput {
             command: "component.list".to_string(),
-            entities: components,
+            entities: Some(components),
             hint: (!full).then(|| {
                 "Registry rows are shown without checkout enrichment; run `homeboy component list --full` for portable and Git metadata."
                     .to_string()
@@ -1062,6 +1062,17 @@ mod tests {
             cli.component.command,
             ComponentCommand::List { full: true }
         ));
+    }
+
+    #[test]
+    fn empty_component_list_emits_entities_array() {
+        crate::test_support::with_isolated_home(|_| {
+            let (output, _) = list(false).expect("component list");
+            let value = serde_json::to_value(&output).expect("serialize component list");
+
+            assert_eq!(value["command"], "component.list");
+            assert_eq!(value["entities"], serde_json::json!([]));
+        });
     }
 
     #[test]

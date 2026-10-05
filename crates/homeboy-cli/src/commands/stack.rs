@@ -11,6 +11,8 @@ use homeboy_stack::stack::{
     PushOutput, RebaseOutput, StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
+use homeboy::core::EntityRows;
+
 use super::{CmdResult, CommandReport};
 use std::path::Path;
 
@@ -183,7 +185,9 @@ pub enum StackCommandOutput {
 #[derive(Serialize)]
 pub struct StackListOutput {
     pub command: &'static str,
-    pub stacks: Vec<StackSummary>,
+    /// Rows under `entities`, mirrored under the deprecated `stacks` key (#14876).
+    #[serde(flatten)]
+    pub stacks: EntityRows<StackSummary>,
 }
 
 #[derive(Serialize)]
@@ -327,13 +331,14 @@ fn list(config_root: &Path) -> CmdResult<StackCommandOutput> {
             pr_count: s.prs.len(),
         })
         .collect();
-    Ok((
-        StackCommandOutput::List(StackListOutput {
-            command: "stack.list",
-            stacks: summaries,
-        }),
-        0,
-    ))
+    Ok((list_output(summaries), 0))
+}
+
+fn list_output(summaries: Vec<StackSummary>) -> StackCommandOutput {
+    StackCommandOutput::List(StackListOutput {
+        command: "stack.list",
+        stacks: EntityRows::with_legacy_key(summaries, "stacks"),
+    })
 }
 
 fn show(config_root: &Path, stack_id: &str) -> CmdResult<StackCommandOutput> {
@@ -596,4 +601,36 @@ fn inspect(
         }),
         exit_code,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_output_mirrors_rows_under_entities_and_legacy_stacks_key() {
+        let value = serde_json::to_value(list_output(vec![StackSummary {
+            id: "combined-fixes".to_string(),
+            description: "Combined fixes".to_string(),
+            component: "homeboy".to_string(),
+            component_path: "/src/homeboy".to_string(),
+            base: "origin/main".to_string(),
+            target: "fork/dev/combined-fixes".to_string(),
+            pr_count: 2,
+        }]))
+        .expect("serialize stack list");
+
+        assert_eq!(value["command"], "stack.list");
+        assert_eq!(value["entities"][0]["id"], "combined-fixes");
+        assert_eq!(value["entities"][0]["pr_count"], 2);
+        assert_eq!(value["entities"], value["stacks"]);
+    }
+
+    #[test]
+    fn empty_stack_list_emits_entities_array() {
+        let value = serde_json::to_value(list_output(Vec::new())).expect("serialize stack list");
+
+        assert_eq!(value["entities"], serde_json::json!([]));
+        assert_eq!(value["stacks"], serde_json::json!([]));
+    }
 }

@@ -882,3 +882,22 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn worktree_terminal_disposition_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                WorktreeTerminalDisposition::Succeeded,
+                WorktreeTerminalDisposition::Failed,
+                WorktreeTerminalDisposition::Cancelled,
+                WorktreeTerminalDisposition::TimedOut,
+                WorktreeTerminalDisposition::Interrupted,
+            ]
+        );
+    }
+}

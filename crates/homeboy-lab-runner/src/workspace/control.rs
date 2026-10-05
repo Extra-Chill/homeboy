@@ -11,24 +11,41 @@ use homeboy_engine_primitives::command::{self, ExecutionOwner};
 /// Invocation-owned control. No ambient cancellation state is consulted by
 /// filesystem traversal; ordinary reusable workspace callers remain unbounded.
 #[derive(Clone, Default)]
-pub(crate) struct WorkspaceControl(Option<CooperativeControl>);
+pub(crate) struct WorkspaceControl {
+    control: Option<CooperativeControl>,
+    on_checkpoint: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
+}
 
 impl WorkspaceControl {
     pub(crate) fn new(control: CooperativeControl) -> Self {
-        Self(Some(control))
+        Self {
+            control: Some(control),
+            on_checkpoint: None,
+        }
     }
 
     pub(crate) fn before(deadline: Option<Instant>) -> Self {
-        Self(deadline.map(|deadline| CooperativeControl::new(deadline, Arc::new(|| false))))
+        Self {
+            control: deadline.map(|deadline| CooperativeControl::new(deadline, Arc::new(|| false))),
+            on_checkpoint: None,
+        }
+    }
+
+    pub(crate) fn with_checkpoint_observer(
+        mut self,
+        observer: Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    ) -> Self {
+        self.on_checkpoint = Some(observer);
+        self
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.0.as_ref().map(CooperativeControl::deadline)
+        self.control.as_ref().map(CooperativeControl::deadline)
     }
 
     pub(crate) fn checkpoint(&self) -> Result<()> {
         if self
-            .0
+            .control
             .as_ref()
             .is_some_and(CooperativeControl::cancellation_requested)
         {
@@ -44,6 +61,9 @@ impl WorkspaceControl {
                 "workspace snapshot staging",
                 Duration::ZERO,
             ));
+        }
+        if let Some(observer) = &self.on_checkpoint {
+            observer()?;
         }
         Ok(())
     }
@@ -139,8 +159,14 @@ impl WorkspaceControl {
 
     fn wait_output(&self, process: &mut Command, action: &str) -> Result<std::process::Output> {
         self.checkpoint()?;
-        let mut owner = ExecutionOwner::spawn(process)
-            .map_err(|error| Error::internal_io(error.to_string(), Some(action.to_string())))?;
+        let mut owner = ExecutionOwner::spawn(process).map_err(|error| {
+            let mut result = Error::internal_io(error.to_string(), Some(action.to_string()));
+            result.details["workspace_sync"] = serde_json::json!({
+                "command_started": false,
+                "program_missing": error.kind() == std::io::ErrorKind::NotFound,
+            });
+            result
+        })?;
         let mut stopped = None;
         let output = command::wait_with_bounded_output_until_cancelled_owned(
             &mut owner,

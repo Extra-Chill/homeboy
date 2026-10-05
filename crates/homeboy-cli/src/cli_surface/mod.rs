@@ -1660,6 +1660,9 @@ mod tests {
 #[cfg(test)]
 mod global_flag_surface_tests;
 
+#[cfg(test)]
+mod list_payload_contract_tests;
+
 pub mod reference_docs;
 /// Reject `--runner` combined with an explicit `--placement`.
 ///

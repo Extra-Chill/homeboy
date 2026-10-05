@@ -459,6 +459,11 @@ pub struct NoExtra;
 ///
 /// Field naming is generic (`id`, `entity`, `entities`) rather than
 /// entity-specific. Consumers use the `command` field to determine context.
+///
+/// `entities` is `Some` exactly for row-shaped `list` operations and is then
+/// always serialized, including as `[]` for an empty registry, so a reader of
+/// `data.entities` never confuses "no rows" with "wrong key" (#14876).
+/// Non-list operations leave it `None` and omit the key.
 #[derive(Debug, Serialize)]
 pub struct EntityCrudOutput<T: Serialize, E: Serialize + Default = NoExtra> {
     pub command: String,
@@ -466,8 +471,8 @@ pub struct EntityCrudOutput<T: Serialize, E: Serialize + Default = NoExtra> {
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entity: Option<T>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub entities: Vec<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<T>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub updated_fields: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -488,7 +493,7 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
             command: String::new(),
             id: None,
             entity: None,
-            entities: Vec::new(),
+            entities: None,
             updated_fields: Vec::new(),
             deleted: Vec::new(),
             import: None,
@@ -496,6 +501,86 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
             hint: None,
             extra: E::default(),
         }
+    }
+}
+
+// ============================================================================
+// Row-shaped list payloads
+// ============================================================================
+
+/// Rows of a `* list` command, serialized under the canonical `entities` key.
+///
+/// Every row-shaped list command returns its rows under `data.entities` so one
+/// reader works across all of them (#14876). Commands that historically used a
+/// command-specific key (`projects`, `stacks`, `rigs`, ...) also mirror the
+/// same rows under that legacy key.
+///
+/// **The legacy key is deprecated** and kept only for a deprecation window;
+/// consumers must read `entities`. Removing the mirror is a one-line change
+/// here (or dropping `legacy_key` at the call site).
+///
+/// Embed with `#[serde(flatten)]`. `entities` is always emitted, including as
+/// `[]` when the list is empty, so absence is never a valid "no rows" answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityRows<T> {
+    rows: Vec<T>,
+    legacy_key: Option<&'static str>,
+}
+
+impl<T> EntityRows<T> {
+    /// Rows under `entities` only.
+    pub fn new(rows: Vec<T>) -> Self {
+        Self {
+            rows,
+            legacy_key: None,
+        }
+    }
+
+    /// Rows under `entities`, mirrored under the deprecated `legacy_key`.
+    pub fn with_legacy_key(rows: Vec<T>, legacy_key: &'static str) -> Self {
+        debug_assert_ne!(legacy_key, "entities");
+        Self {
+            rows,
+            legacy_key: Some(legacy_key),
+        }
+    }
+
+    pub fn rows(&self) -> &[T] {
+        &self.rows
+    }
+
+    pub fn into_rows(self) -> Vec<T> {
+        self.rows
+    }
+
+    pub fn legacy_key(&self) -> Option<&'static str> {
+        self.legacy_key
+    }
+}
+
+/// Read access to the rows as a slice, so callers that used to hold a
+/// `Vec<T>` keep `.iter()`, `.len()`, and indexing unchanged.
+impl<T> std::ops::Deref for EntityRows<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.rows
+    }
+}
+
+impl<T: Serialize> Serialize for EntityRows<T> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(1 + usize::from(self.legacy_key.is_some())))?;
+        map.serialize_entry("entities", &self.rows)?;
+        if let Some(legacy_key) = self.legacy_key {
+            map.serialize_entry(legacy_key, &self.rows)?;
+        }
+        map.end()
     }
 }
 
@@ -711,5 +796,75 @@ mod tests {
         assert_eq!(output.summary.succeeded, 0);
         assert_eq!(output.summary.failed, 0);
         assert!(output.results.is_empty());
+    }
+
+    #[derive(Serialize)]
+    struct FlattenedRows {
+        command: &'static str,
+        #[serde(flatten)]
+        rows: EntityRows<serde_json::Value>,
+    }
+
+    #[test]
+    fn entity_rows_mirror_rows_under_entities_and_legacy_key() {
+        let output = FlattenedRows {
+            command: "example.list",
+            rows: EntityRows::with_legacy_key(
+                vec![json!({ "id": "a" }), json!({ "id": "b" })],
+                "examples",
+            ),
+        };
+
+        let value = serde_json::to_value(&output).expect("serialize");
+
+        assert_eq!(value["command"], "example.list");
+        assert_eq!(value["entities"], json!([{ "id": "a" }, { "id": "b" }]));
+        assert_eq!(value["entities"], value["examples"]);
+    }
+
+    #[test]
+    fn entity_rows_always_emit_entities_when_empty() {
+        let mirrored = serde_json::to_value(FlattenedRows {
+            command: "example.list",
+            rows: EntityRows::with_legacy_key(Vec::new(), "examples"),
+        })
+        .expect("serialize");
+        assert_eq!(mirrored["entities"], json!([]));
+        assert_eq!(mirrored["examples"], json!([]));
+
+        let canonical_only = serde_json::to_value(FlattenedRows {
+            command: "example.list",
+            rows: EntityRows::new(Vec::new()),
+        })
+        .expect("serialize");
+        assert_eq!(canonical_only["entities"], json!([]));
+        assert_eq!(
+            canonical_only.as_object().expect("object").len(),
+            2,
+            "only command + entities: {canonical_only}"
+        );
+    }
+
+    #[test]
+    fn entity_crud_output_emits_entities_only_for_list_operations() {
+        let list = EntityCrudOutput::<serde_json::Value> {
+            command: "example.list".to_string(),
+            entities: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&list).expect("serialize")["entities"],
+            json!([])
+        );
+
+        let show = EntityCrudOutput::<serde_json::Value> {
+            command: "example.show".to_string(),
+            entity: Some(json!({ "id": "a" })),
+            ..Default::default()
+        };
+        assert!(serde_json::to_value(&show)
+            .expect("serialize")
+            .get("entities")
+            .is_none());
     }
 }
