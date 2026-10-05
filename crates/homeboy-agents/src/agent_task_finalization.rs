@@ -72,6 +72,78 @@ pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, false, None)
 }
 
+/// The quarantine transition for this publication, refusing a PR mutation
+/// that has no guaranteed safe transition.
+fn safe_quarantine_capability<B: AgentTaskPrFinalizationBackend>(
+    backend: &mut B,
+    newly_created: bool,
+    draft: bool,
+) -> Result<AgentTaskPrQuarantineCapability> {
+    let capability = backend.quarantine_capability(newly_created, draft)?;
+    if !quarantine_capability_is_safe(capability, newly_created, draft) {
+        return Err(Error::validation_invalid_argument(
+            "publication_quarantine",
+            format!(
+                "refusing PR mutation without a guaranteed safe quarantine transition; cleanup_capability={}",
+                quarantine_capability_name(capability)
+            ),
+            None,
+            None,
+        ));
+    }
+    Ok(capability)
+}
+
+/// Update an open PR for this candidate, marking a draft ready when the
+/// publication is not itself a draft.
+fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
+    backend: &mut B,
+    options: &AgentTaskPrFinalizationOptions,
+    body: &str,
+    existing: &AgentTaskPrRef,
+    ready_transitioned: &mut bool,
+) -> Result<(&'static str, AgentTaskPrRef)> {
+    let updated = backend.update_pr(
+        options.component_id.as_deref(),
+        &options.path,
+        existing.number,
+        &options.title,
+        body,
+    )?;
+    if existing.is_draft && !options.draft_pr {
+        *ready_transitioned = true;
+        Ok(("ready", backend.mark_pr_ready(&options.path, &updated)?))
+    } else {
+        Ok(("updated", updated))
+    }
+}
+
+/// `gh pr create` refused because an open PR already exists for this head.
+fn is_existing_pr_conflict(message: &str) -> bool {
+    message.contains("a pull request for branch") && message.contains("already exists")
+}
+
+/// Look the PR up again after a create conflict, giving GitHub's PR list a
+/// moment to catch up with a PR created seconds ago.
+fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
+    backend: &mut B,
+    component_id: Option<&str>,
+    path: &str,
+    base: &str,
+    head: &str,
+) -> Result<Option<AgentTaskPrRef>> {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 0..ATTEMPTS {
+        if let Some(pr) = backend.find_open_pr(component_id, path, base, head)? {
+            return Ok(Some(pr));
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    Ok(None)
+}
+
 fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
@@ -581,49 +653,48 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             "no PR mutation performed",
         ));
     }
-    let newly_created = existing.is_none();
-    let draft = existing.as_ref().is_some_and(|pr| pr.is_draft);
-    let quarantine_capability = backend.quarantine_capability(newly_created, draft)?;
-    if !quarantine_capability_is_safe(quarantine_capability, newly_created, draft) {
-        return Err(Error::validation_invalid_argument(
-            "publication_quarantine",
-            format!(
-                "refusing PR mutation without a guaranteed safe quarantine transition; cleanup_capability={}",
-                quarantine_capability_name(quarantine_capability)
-            ),
-            None,
-            None,
-        ));
-    }
+    let mut newly_created = existing.is_none();
+    let mut draft = existing.as_ref().is_some_and(|pr| pr.is_draft);
+    let mut quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
         Some(existing) => {
-            let updated = backend.update_pr(
-                options.component_id.as_deref(),
-                &options.path,
-                existing.number,
-                &options.title,
-                &body,
-            )?;
-            if existing.is_draft && !options.draft_pr {
-                ready_transitioned = true;
-                ("ready", backend.mark_pr_ready(&options.path, &updated)?)
-            } else {
-                ("updated", updated)
-            }
+            update_existing_pr(backend, &options, &body, &existing, &mut ready_transitioned)?
         }
-        None => (
-            "created",
-            backend.create_pr(
-                options.component_id.as_deref(),
-                &options.path,
-                &options.base,
-                &head,
-                &options.title,
-                &body,
-                options.draft_pr,
-            )?,
-        ),
+        None => match backend.create_pr(
+            options.component_id.as_deref(),
+            &options.path,
+            &options.base,
+            &head,
+            &options.title,
+            &body,
+            options.draft_pr,
+        ) {
+            Ok(created) => ("created", created),
+            // A concurrent publication of this same Cook can open the PR
+            // between our lookup and our create: GitHub's PR list is briefly
+            // eventually consistent, so the lookup misses a seconds-old PR
+            // (#15482). Adopt it as an existing PR. It is classified as
+            // existing (never closed on drift), and the publication binding
+            // below still requires its head to be this candidate commit.
+            Err(error) if is_existing_pr_conflict(&error.message) => {
+                let Some(adopted) = find_open_pr_after_create_conflict(
+                    backend,
+                    options.component_id.as_deref(),
+                    &options.path,
+                    &options.base,
+                    &head,
+                )?
+                else {
+                    return Err(error);
+                };
+                newly_created = false;
+                draft = adopted.is_draft;
+                quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
+                update_existing_pr(backend, &options, &body, &adopted, &mut ready_transitioned)?
+            }
+            Err(error) => return Err(error),
+        },
     };
     let published_draft = if ready_transitioned {
         false
