@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.404.1] - 2026-10-05
+
+### Changed
+- consolidate notification wire fixtures and assert exact metadata
+
 ## [0.404.0] - 2026-10-05
 
 ### Changed
