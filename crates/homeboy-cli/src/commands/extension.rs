@@ -1420,24 +1420,33 @@ fn install_extension(
     replace: bool,
 ) -> CmdResult<ExtensionOutput> {
     if replace {
-        let result = homeboy_core::extension::lifecycle::replace_with_revision(
+        match homeboy_core::extension::lifecycle::replace_with_revision(
             source,
             id.as_deref(),
             revision.as_deref(),
             ExtensionLifecycleValidation::with_executor_discovery(&AgentTaskExecutorDiscovery),
-        )?;
-        return Ok((
-            ExtensionOutput::Replace {
-                extension_id: result.extension_id,
-                old_path: result.old_path.to_string_lossy().to_string(),
-                new_path: result.new_path.to_string_lossy().to_string(),
-                manifest_path: result.manifest_path.to_string_lossy().to_string(),
-                source: result.source,
-                linked: result.linked,
-                source_revision: result.source_revision,
-            },
-            0,
-        ));
+        ) {
+            Ok(result) => {
+                return Ok((
+                    ExtensionOutput::Replace {
+                        extension_id: result.extension_id,
+                        old_path: result.old_path.to_string_lossy().to_string(),
+                        new_path: result.new_path.to_string_lossy().to_string(),
+                        manifest_path: result.manifest_path.to_string_lossy().to_string(),
+                        source: result.source,
+                        linked: result.linked,
+                        source_revision: result.source_revision,
+                    },
+                    0,
+                ));
+            }
+            // `--replace` means "install or replace". With nothing installed
+            // there is nothing to replace, so install. Upgrade recovery emits
+            // `install --replace` for extensions a runner never had; failing
+            // with "Extension not found" made that recovery unrunnable.
+            Err(error) if error.code == homeboy_core::error::ErrorCode::ExtensionNotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     let result = homeboy_core::extension::lifecycle::install_with_revision(
@@ -1985,6 +1994,44 @@ mod tests {
 
         assert!(changed_extension_ids(&entries).is_empty());
         assert_eq!(revision_evidence(&entries)[0].status, "unknown");
+    }
+
+    #[test]
+    fn install_replace_installs_an_extension_that_is_not_installed() {
+        // Upgrade recovery emits `extension install --replace` for an extension
+        // a runner never had; it must install rather than fail "not found".
+        with_isolated_home(|home| {
+            let source = home.path().join("source").join("demo");
+            fs::create_dir_all(&source).expect("fixture dir");
+            fs::write(
+                source.join("demo.json"),
+                r#"{"name":"Demo","version":"1.0.0"}"#,
+            )
+            .expect("manifest");
+
+            let (output, exit_code) = install_extension(
+                &source.to_string_lossy(),
+                Some("demo".to_string()),
+                None,
+                true,
+            )
+            .expect("install --replace with nothing installed");
+            assert_eq!(exit_code, 0);
+            assert!(matches!(output, ExtensionOutput::Install { .. }));
+            assert!(homeboy_core::paths::extension("demo")
+                .expect("extension path")
+                .exists());
+
+            // Installed now, so the same command replaces.
+            let (output, _) = install_extension(
+                &source.to_string_lossy(),
+                Some("demo".to_string()),
+                None,
+                true,
+            )
+            .expect("install --replace with demo installed");
+            assert!(matches!(output, ExtensionOutput::Replace { .. }));
+        });
     }
 
     #[test]
