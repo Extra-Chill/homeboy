@@ -74,8 +74,11 @@ fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
             )),
             Err(err) => Err(err),
         }),
-        Commands::Runner(args) if runner::is_compact_exec_stdout(&args) => {
-            runner_compact_exec(args)
+        Commands::Runner(args)
+            if runner::is_compact_exec_stdout(&args)
+                || runner::is_compact_job_list_stdout(&args) =>
+        {
+            runner_compact_raw_output(args)
         }
         Commands::Ssh(args) => ssh_raw(args, retain_raw_evidence),
         Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
@@ -106,7 +109,7 @@ fn ssh_raw(args: ssh::SshArgs, retain_raw_evidence: bool) -> CommandRun {
     }
 }
 
-fn runner_compact_exec(args: crate::commands::runner::RunnerArgs) -> CommandRun {
+fn runner_compact_raw_output(args: crate::commands::runner::RunnerArgs) -> CommandRun {
     runner::run_plain_text_raw(args)
 }
 
@@ -146,6 +149,8 @@ fn unsupported_output(mode: &str) -> homeboy::core::Result<(String, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
 
     #[test]
     fn interactive_passthrough_has_no_raw_text_result() {
@@ -160,5 +165,64 @@ mod tests {
         );
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn runner_job_list_plain_text_dispatches_to_job_list_execution() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let cli = Cli::try_parse_from([
+                "homeboy",
+                "runner",
+                "job",
+                "list",
+                "homeboy-lab",
+                "--active",
+            ])
+            .expect("runner job list invocation parses");
+            let descriptor = cli.command.output_descriptor(
+                crate::command_contract::COMMAND_SPECS
+                    .iter()
+                    .find(|spec| spec.name == "runner")
+                    .expect("runner command contract"),
+                false,
+            );
+            assert_eq!(
+                descriptor.response_mode,
+                CommandResponseMode::Raw(CommandRawOutputMode::PlainText)
+            );
+
+            let CommandRunPreparation::Raw(run) =
+                prepare_command_run(cli.command, descriptor.response_mode, false)
+            else {
+                panic!("job list should execute in raw mode")
+            };
+            let error = run
+                .stdout_result
+                .expect_err("the isolated fixture runner should report its missing configuration");
+            assert_ne!(error.details["field"], "output_mode");
+            assert!(!error.message.contains("does not support plain text output"));
+        });
+    }
+
+    #[test]
+    fn runner_job_list_json_keeps_structured_response_routing() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "runner",
+            "job",
+            "list",
+            "homeboy-lab",
+            "--active",
+            "--json",
+        ])
+        .expect("runner job list JSON invocation parses");
+        let descriptor = cli.command.output_descriptor(
+            crate::command_contract::COMMAND_SPECS
+                .iter()
+                .find(|spec| spec.name == "runner")
+                .expect("runner command contract"),
+            false,
+        );
+        assert_eq!(descriptor.response_mode, CommandResponseMode::Json);
     }
 }
