@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy_agents::agent_task_provider::discovery::AgentTaskExecutorDiscovery;
 use homeboy_core::extension;
 use homeboy_core::extension::registry::ExtensionLifecycleValidation;
+use homeboy_engine_primitives::shell::shell_arg;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
@@ -1894,17 +1895,6 @@ fn runtime_diagnostic_env<'a>(
         .into_iter()
         .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
         .collect()
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '='))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn run_action(

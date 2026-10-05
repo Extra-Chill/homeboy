@@ -4,6 +4,7 @@ use serde::Serialize;
 use homeboy::core::observation::{
     ArtifactRecord, ObservationStore, RunEvidenceCommands, RunListFilter, RunRecord,
 };
+use homeboy_engine_primitives::shell::shell_arg;
 
 use super::common::since_threshold;
 use super::{CmdResult, RunsOutput};
@@ -238,17 +239,6 @@ fn contains_aggregate_token(value: &str) -> bool {
     value
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .any(|part| part.eq_ignore_ascii_case("aggregate"))
-}
-
-fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 #[cfg(test)]

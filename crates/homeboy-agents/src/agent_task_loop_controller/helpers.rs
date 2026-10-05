@@ -259,16 +259,7 @@ pub(crate) fn first_executor_string_at_keys(value: &Value, keys: &[&str]) -> Opt
     }
 }
 
-pub(crate) fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
+pub(crate) use homeboy_engine_primitives::shell::shell_arg;
 
 pub(crate) fn refresh_subcontroller_statuses(
     record: &mut AgentTaskLoopControllerRecord,

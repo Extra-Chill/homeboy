@@ -310,18 +310,7 @@ pub fn runner_exec_recovery_commands(runner: &Runner, command: &[String]) -> Vec
         .join(" ")]
 }
 
-pub fn shell_arg(arg: &str) -> String {
-    if !arg.is_empty()
-        && arg.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'/' | b'.' | b'_' | b'-' | b':' | b'@' | b'=')
-        })
-    {
-        return arg.to_string();
-    }
-
-    format!("'{}'", arg.replace('\'', "'\\''"))
-}
+pub use homeboy_engine_primitives::shell::shell_arg;
 
 pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecOptions {
     RunnerExecOptions {
