@@ -1067,6 +1067,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
     )))
 }
 
+#[cfg(test)]
 pub(super) fn lab_offload_rig_component_dependencies(
     args: &[String],
     primary_workspace: Option<(&str, &str)>,

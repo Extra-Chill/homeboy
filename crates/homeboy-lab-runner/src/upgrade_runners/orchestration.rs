@@ -698,6 +698,7 @@ pub(crate) fn runner_upgrade_targets(runner_targets: &[String]) -> Result<Vec<Ru
         .collect())
 }
 
+#[cfg(test)]
 pub fn upgrade_runners_with_executor(
     runners: &[Runner],
     force: bool,
@@ -719,6 +720,7 @@ pub fn upgrade_runners_with_executor(
     )
 }
 
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "Compatibility entry point exposes separately injectable upgrade operations for focused tests."

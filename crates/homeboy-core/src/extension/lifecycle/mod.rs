@@ -2600,7 +2600,6 @@ impl homeboy_core::component_install_provider::ComponentInstallRunner
         )?;
         Ok(
             homeboy_core::component_install_provider::ComponentInstallResult {
-                component_id: result.component_id,
                 source: result.source,
                 installed: result
                     .installed
@@ -2608,9 +2607,7 @@ impl homeboy_core::component_install_provider::ComponentInstallRunner
                     .map(
                         |e| homeboy_core::component_install_provider::InstalledExtensionResult {
                             extension_id: e.extension_id,
-                            url: e.url,
                             path: e.path,
-                            manifest_path: e.manifest_path,
                             source_revision: e.source_revision,
                         },
                     )

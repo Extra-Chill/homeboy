@@ -2486,6 +2486,7 @@ enum RefreshHistoryRelation {
     Diverged,
 }
 
+#[cfg(test)]
 fn ancestry_comparison_error(plan: &HomeboyBinaryRefreshPlan) -> Error {
     Error::validation_invalid_argument(
         "allow_downgrade",

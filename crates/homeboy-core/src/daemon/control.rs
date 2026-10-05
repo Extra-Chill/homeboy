@@ -3216,6 +3216,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn terminate_token_owned_startup_process_with_operations<Owns, Signal, Wait>(
     pid: u32,
     startup_token: &str,
