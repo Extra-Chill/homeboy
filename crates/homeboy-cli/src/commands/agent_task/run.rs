@@ -10980,6 +10980,7 @@ where
     ) {
         return Err(error);
     }
+    homeboy::agents::agent_task_service::validate_retry_runtime_compatibility(&args.run_id)?;
     let route_override = cook_provider_route_override(
         args.backend.clone(),
         args.selector.clone(),

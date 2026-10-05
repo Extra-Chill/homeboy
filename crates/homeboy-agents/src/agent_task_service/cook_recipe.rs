@@ -2888,6 +2888,23 @@ fn reconstruct_recipe_options(
     })
 }
 
+/// Check a Cook retry's immutable runtime pin before the control-plane action
+/// identity is admitted. This uses the same reconstruction guard as dispatch,
+/// but does not claim an action or reserve a successor.
+pub fn validate_retry_runtime_compatibility(run_id: &str) -> Result<()> {
+    let lifecycle_store =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let canonical_run_id =
+        resolve_cook_continuation_run_id_in_store(&default_store()?, &lifecycle_store, run_id)?;
+    let record = lifecycle_store.read_record(&canonical_run_id)?;
+    let Some(cook_id) = record.metadata["cook_id"].as_str() else {
+        return Ok(());
+    };
+    let recipe_store = CookRecipeStore::from_data_root(lifecycle_store.data_root());
+    let recipe = recipe_store.load_recipe(cook_id)?;
+    reconstruct_recipe_options(&recipe, None, true, false).map(|_| ())
+}
+
 pub fn consume_claimed_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
