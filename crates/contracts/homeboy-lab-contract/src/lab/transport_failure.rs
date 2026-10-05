@@ -124,12 +124,21 @@ impl LabTransportAttemptReceipt {
         let kind = typed_error_kind(error);
         let retryable = error.retryable == Some(true)
             && acceptance == LabJobAcceptanceDisposition::NoJobAccepted;
-        let message = error
+        let context = error
             .details
             .get("context")
-            .and_then(serde_json::Value::as_str)
-            .map(|context| format!("Lab transport operation failed: {context}"))
-            .unwrap_or_else(|| error.message.clone());
+            .and_then(serde_json::Value::as_str);
+        let original_error = error
+            .details
+            .get("error")
+            .and_then(serde_json::Value::as_str);
+        let message = match (context, original_error) {
+            (Some(context), Some(original_error)) => {
+                format!("Lab transport operation failed: {context}: {original_error}")
+            }
+            (Some(context), None) => format!("Lab transport operation failed: {context}"),
+            (None, _) => error.message.clone(),
+        };
         let run_id = bounded_redacted(run_id, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT);
         Self {
             schema: LAB_TRANSPORT_ATTEMPT_RECEIPT_SCHEMA.to_string(),
@@ -205,6 +214,24 @@ fn bounded_cause_chain(error: &Error) -> (Vec<LabTransportCause>, bool) {
         kind: None,
         message: bounded_redacted(&error.message, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT),
     }];
+    // HTTP/file-transfer adapters retain remote rejection details under
+    // `details.source`; they are structured response facts, not necessarily
+    // `std::error::Error::source()` nodes. Lift a bounded textual cause into the
+    // durable chain before wrapping discards that detail object.
+    if let Some(message) = error
+        .details
+        .pointer("/source/cause")
+        .and_then(serde_json::Value::as_str)
+    {
+        if causes.len() == LAB_TRANSPORT_CAUSE_LIMIT {
+            return (causes, true);
+        }
+        causes.push(LabTransportCause {
+            code: None,
+            kind: None,
+            message: bounded_redacted(message, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT),
+        });
+    }
     let mut source = error.source();
     while let Some(cause) = source {
         if causes.len() == LAB_TRANSPORT_CAUSE_LIMIT {

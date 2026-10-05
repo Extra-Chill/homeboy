@@ -481,13 +481,16 @@ impl RunnerFileTransfer {
         const CHUNK_BYTES: usize = 64 * 1024;
         let upload_id = uuid::Uuid::new_v4().to_string();
         let mut input = fs::File::open(path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            provider_evidence_io_error(error, format!("open evidence snapshot {}", path.display()))
         })?;
         let mut offset = 0u64;
         let mut buffer = [0u8; CHUNK_BYTES];
         loop {
             let read = input.read(&mut buffer).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                provider_evidence_io_error(
+                    error,
+                    format!("read evidence snapshot {}", path.display()),
+                )
             })?;
             let final_chunk = read == 0 || offset + read as u64 == size;
             if read == 0 && offset != size {
@@ -678,16 +681,11 @@ fn private_evidence_snapshot(
         options.custom_flags(libc::O_NOFOLLOW);
     }
     let mut input = options.open(local_path).map_err(|error| {
-        Error::validation_invalid_argument(
-            "provider_evidence",
-            "declared evidence could not be safely opened",
-            Some(format!("{local_path}: {error}")),
-            None,
-        )
+        provider_evidence_io_error(error, format!("open provider evidence {local_path}"))
     })?;
-    let metadata = input
-        .metadata()
-        .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+    let metadata = input.metadata().map_err(|error| {
+        provider_evidence_io_error(error, format!("inspect provider evidence {local_path}"))
+    })?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err(Error::validation_invalid_argument(
             "provider_evidence",
@@ -697,18 +695,15 @@ fn private_evidence_snapshot(
         ));
     }
     let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create evidence snapshot".to_string()),
-        )
+        provider_evidence_io_error(error, "create evidence snapshot".to_string())
     })?;
     let mut digest = sha2::Sha256::new();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|error| Error::internal_io(error.to_string(), Some(local_path.to_string())))?;
+        let read = input.read(&mut buffer).map_err(|error| {
+            provider_evidence_io_error(error, format!("read provider evidence {local_path}"))
+        })?;
         if read == 0 {
             break;
         }
@@ -722,10 +717,7 @@ fn private_evidence_snapshot(
             ));
         }
         snapshot.write_all(&buffer[..read]).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("write evidence snapshot".to_string()),
-            )
+            provider_evidence_io_error(error, "write evidence snapshot".to_string())
         })?;
         sha2::Digest::update(&mut digest, &buffer[..read]);
     }
@@ -738,13 +730,29 @@ fn private_evidence_snapshot(
             None,
         ));
     }
-    snapshot.as_file().sync_all().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("sync evidence snapshot".to_string()),
-        )
-    })?;
+    snapshot
+        .as_file()
+        .sync_all()
+        .map_err(|error| provider_evidence_io_error(error, "sync evidence snapshot".to_string()))?;
     Ok(snapshot)
+}
+
+fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error {
+    const DIAGNOSTIC_LIMIT: usize = 512;
+    let redact_and_bound = |value: &str| {
+        homeboy_core::redaction::redact_string(value)
+            .chars()
+            .take(DIAGNOSTIC_LIMIT)
+            .collect::<String>()
+    };
+    let operation = redact_and_bound(&operation);
+    let cause = redact_and_bound(&error.to_string());
+    Error::new(
+        ErrorCode::InternalIoError,
+        format!("{operation}: {cause}"),
+        json!({"context": operation, "error": cause}),
+    )
+    .with_source(error)
 }
 
 fn private_file_bytes_with_expected_digest(
@@ -1015,6 +1023,8 @@ fn file_transfer_operation_error(
     stderr: String,
     transport: &str,
 ) -> Error {
+    let stderr = bounded_redacted_text(stderr.trim(), 2 * 1024);
+    let remote_path = bounded_redacted_text(remote_path, 512);
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
@@ -1039,21 +1049,57 @@ fn http_file_transfer_error(
     source: Error,
     transport: &str,
 ) -> Error {
+    let remote_path = bounded_redacted_text(remote_path, 512);
+    let source_cause = ["cause", "reason", "error"]
+        .iter()
+        .find_map(|key| source.details.get(*key).and_then(Value::as_str))
+        .filter(|cause| !cause.is_empty() && !source.message.contains(cause))
+        .map(|cause| bounded_redacted_text(cause, 512));
+    let cause_suffix = source_cause
+        .as_ref()
+        .map(|cause| format!("; cause: {cause}"))
+        .unwrap_or_default();
+    let source_message = bounded_redacted_text(&source.message, 512);
+    let source_details = bounded_transport_error_details(&source.details, source_cause.as_deref());
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
-            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}",
-            source.message
+            "Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {}{cause_suffix}",
+            source_message,
         ),
         json!({
             "runner_id": runner_id,
             "operation": operation,
             "remote_path": remote_path,
             "transport": transport,
-            "source": source.details,
+            "source": source_details,
         }),
     )
     .with_retryable(true)
+    .with_source(source)
+}
+
+fn bounded_redacted_text(value: &str, limit: usize) -> String {
+    homeboy_core::redaction::redact_string(value)
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn bounded_transport_error_details(details: &Value, cause: Option<&str>) -> Value {
+    const DETAIL_BYTE_LIMIT: usize = 4 * 1024;
+    let details = homeboy_core::redaction::RedactionPolicy::default().redact_json(details);
+    let original_bytes =
+        serde_json::to_vec(&details).map_or(DETAIL_BYTE_LIMIT + 1, |bytes| bytes.len());
+    if original_bytes <= DETAIL_BYTE_LIMIT {
+        details
+    } else {
+        json!({
+            "truncated": true,
+            "original_bytes": original_bytes,
+            "cause": cause.map(|cause| bounded_redacted_text(cause, 512)),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1323,5 +1369,111 @@ mod tests {
             "private_file_chunk_upload"
         );
         assert_eq!(refusal.details["required_protocol_version"], 1);
+    }
+
+    #[test]
+    fn denied_private_upload_keeps_the_daemon_response_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).expect("read request");
+            let body = r#"{"success":false,"error":{"error":"runner.lab_transport_failure","message":"private upload parent rejected: group/world writable","details":{"operation":"private evidence upload","cause":"upload parent must be daemon-owned and not group/world writable"}}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write refusal");
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let source = daemon_file_post_json(
+            &client,
+            &format!("http://{address}"),
+            "/files/upload-chunk",
+            json!({ "path": "/private/evidence.json" }),
+            None,
+        )
+        .expect_err("daemon refuses group-writable evidence parent");
+        server.join().expect("server");
+
+        let error = http_file_transfer_error(
+            "test-runner",
+            "private evidence upload",
+            "/private/evidence.json",
+            source,
+            "daemon_http",
+        );
+
+        assert!(error.message.contains("group/world writable"));
+        assert_eq!(error.details["operation"], "private evidence upload");
+        assert_eq!(
+            error.details["source"]["cause"],
+            "upload parent must be daemon-owned and not group/world writable"
+        );
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<Error>())
+            .expect("daemon response error remains in the source chain");
+        assert_eq!(
+            source.message,
+            "private upload parent rejected: group/world writable"
+        );
+        assert_eq!(
+            source.details["cause"],
+            "upload parent must be daemon-owned and not group/world writable"
+        );
+        let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
+            "attempt-denied-private-upload",
+            "test-runner",
+            homeboy_lab_contract::lab::transport_failure::LabTransportOperation::DispatchCookAttempt,
+            homeboy_lab_contract::lab::transport_failure::LabJobAcceptanceDisposition::NoJobAccepted,
+            error,
+        );
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("group/world writable"))
+        );
+        assert!(
+            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["causes"]
+                .as_array()
+                .is_some_and(|causes| causes.iter().any(|cause| {
+                    cause["message"].as_str().is_some_and(|message| {
+                        message.contains("upload parent must be daemon-owned")
+                    })
+                }))
+        );
+    }
+
+    #[test]
+    fn missing_provider_evidence_retains_the_original_filesystem_cause() {
+        let home = tempfile::tempdir().expect("temporary directory");
+        let missing = home.path().join("missing-evidence.json");
+
+        let error =
+            private_evidence_snapshot(missing.to_str().unwrap(), "0".repeat(64).as_str(), 0)
+                .expect_err("missing evidence is an actual filesystem error");
+
+        assert_eq!(error.code, ErrorCode::InternalIoError);
+        assert_eq!(
+            error.details["context"],
+            format!("open provider evidence {}", missing.display())
+        );
+        assert!(error.message.contains("open provider evidence"));
+        assert!(error.message.contains("No such file") || error.message.contains("not found"));
+        let source = std::error::Error::source(&error).expect("original I/O source");
+        let source = source
+            .downcast_ref::<std::io::Error>()
+            .expect("source remains an io::Error");
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            source.to_string().contains("No such file") || source.to_string().contains("not found")
+        );
     }
 }
