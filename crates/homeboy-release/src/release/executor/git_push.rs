@@ -898,6 +898,117 @@ mod tests {
     }
 
     #[test]
+    fn run_git_push_adds_changelog_entries_for_auto_included_commits() {
+        // Issue #15448: a commit that lands on the remote during the release is
+        // shipped by the rebased release commit and must appear in its section.
+        let remote = tempfile::tempdir().expect("remote tempdir");
+        let other = tempfile::tempdir().expect("other clone tempdir");
+        let local = tempfile::tempdir().expect("local tempdir");
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        let setup_identity = |dir: &std::path::Path| {
+            git(dir, &["config", "user.name", "Homeboy Test"]);
+            git(dir, &["config", "user.email", "homeboy@example.test"]);
+            git(dir, &["config", "commit.gpgsign", "false"]);
+        };
+
+        git(
+            other.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        setup_identity(other.path());
+        std::fs::write(
+            other.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [0.9.0] - 2026-09-01\n\n### Fixed\n\n- older fix\n",
+        )
+        .unwrap();
+        git(other.path(), &["add", "."]);
+        git(other.path(), &["commit", "-m", "chore: base"]);
+        git(other.path(), &["push", "origin", "main"]);
+
+        git(
+            local.path(),
+            &["clone", remote.path().to_str().unwrap(), "."],
+        );
+        setup_identity(local.path());
+
+        // Squash-merged PR lands while the release is being prepared.
+        std::fs::write(other.path().join("branding.txt"), "ico").unwrap();
+        git(other.path(), &["add", "."]);
+        git(
+            other.path(),
+            &[
+                "commit",
+                "-m",
+                "feat(identity): hand off ICO branding (#1959)",
+            ],
+        );
+        std::fs::write(other.path().join("notes.md"), "docs").unwrap();
+        git(other.path(), &["add", "."]);
+        git(other.path(), &["commit", "-m", "docs: describe branding"]);
+        git(other.path(), &["push", "origin", "main"]);
+
+        // Release commit generated from the older prepared source.
+        std::fs::write(
+            local.path().join("CHANGELOG.md"),
+            "# Changelog\n\n## [1.0.0] - 2026-10-02\n\n### Fixed\n\n- prepared fix\n\n## [0.9.0] - 2026-09-01\n\n### Fixed\n\n- older fix\n",
+        )
+        .unwrap();
+        git(local.path(), &["add", "."]);
+        git(local.path(), &["commit", "-m", "release: v1.0.0"]);
+        git(
+            local.path(),
+            &["tag", "-a", "v1.0.0", "-m", "Release v1.0.0"],
+        );
+
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: local.path().to_string_lossy().to_string(),
+            changelog_target: Some("CHANGELOG.md".to_string()),
+            ..Component::default()
+        };
+        let result = run_git_push(&component, "fixture", Some("v1.0.0"), None)
+            .expect("push step returns a result");
+        assert_eq!(
+            result.status,
+            ReleaseStepStatus::Success,
+            "{:?}",
+            result.error
+        );
+
+        let tagged = Command::new("git")
+            .args(["show", "v1.0.0:CHANGELOG.md"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git show");
+        let tagged = String::from_utf8_lossy(&tagged.stdout);
+        let section = &tagged[..tagged.find("## [0.9.0]").expect("older section kept")];
+        assert!(section.contains("## [1.0.0] - 2026-10-02"), "{tagged}");
+        assert!(section.contains("- prepared fix"), "{tagged}");
+        assert!(section.contains("### Added"), "{tagged}");
+        assert!(section.contains("- hand off ICO branding"), "{tagged}");
+        assert!(
+            !tagged.contains("describe branding"),
+            "docs commits stay out: {tagged}"
+        );
+
+        // Still exactly one release commit, and the tag is on the branch head.
+        let log = Command::new("git")
+            .args(["log", "--format=%s", "main"])
+            .current_dir(remote.path())
+            .output()
+            .expect("git log");
+        let subjects = String::from_utf8_lossy(&log.stdout);
+        assert_eq!(
+            subjects.lines().filter(|s| *s == "release: v1.0.0").count(),
+            1
+        );
+        assert_eq!(
+            rev(remote.path(), "v1.0.0^{commit}"),
+            rev(remote.path(), "main")
+        );
+    }
+
+    #[test]
     fn run_git_push_fails_when_recovery_repush_is_rejected_after_second_advance() {
         let remote = tempfile::tempdir().expect("remote tempdir");
         let other = tempfile::tempdir().expect("other clone tempdir");

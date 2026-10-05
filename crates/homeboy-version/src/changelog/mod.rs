@@ -14,7 +14,9 @@ pub use io::{
     ChangelogSnapshotData, FinalizedReleaseSnapshot, CHANGELOG_CANDIDATES,
     INITIAL_CHANGELOG_CONTENT,
 };
-pub use sections::{count_unreleased_entries, get_latest_finalized_version};
+pub use sections::{
+    append_to_finalized_section, count_unreleased_entries, get_latest_finalized_version,
+};
 // Reached only by this crate's own `version` module (the bump/finalize path).
 // Kept at `pub(crate)` so `changelog::…` call sites still resolve while the
 // functions stay subject to rustc's dead-code analysis.
