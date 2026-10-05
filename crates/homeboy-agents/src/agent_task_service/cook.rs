@@ -5467,7 +5467,30 @@ pub fn preflight_cook_continuation_admission_for_observation(
 pub fn live_owner_continuation_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<Error> {
-    if !record.owner_process_is_running() {
+    let child_owner_is_running = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|execution| execution["state"] == "running")
+        .any(|execution| {
+            execution["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(|pid| {
+                    homeboy_core::process::process_identity_state(
+                        pid,
+                        execution["owner_linux_starttime_ticks"].as_u64(),
+                    ) == homeboy_core::process::ProcessIdentityState::Live
+                })
+        })
+        || record.metadata["promotion_progress"]["active"] == true
+            && record.metadata["promotion_progress"]["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(homeboy_core::process::pid_is_running);
+    if !record.owner_process_is_running() || record.state.is_terminal() && !child_owner_is_running {
         return None;
     }
     let phase = record
@@ -11391,6 +11414,68 @@ mod cook_deadline_tests {
             }))
             .expect("record");
         assert!(live_owner_continuation_denial(&record).is_none());
+    }
+
+    #[test]
+    fn terminal_child_ignores_live_batch_coordinator_but_fences_its_own_provider() {
+        let mut record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-child",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": { "runner_pid": std::process::id() }
+            }))
+            .expect("record");
+
+        assert!(live_owner_continuation_denial(&record).is_none());
+
+        record.metadata["provider_executions"] = serde_json::json!([{
+            "state": "running",
+            "owner_pid": std::process::id()
+        }]);
+        let error =
+            live_owner_continuation_denial(&record).expect("live child provider remains fenced");
+        assert_eq!(
+            error.details["continuation_admission"]["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert_eq!(
+            error.details["continuation_admission"]["phase"],
+            "provider_execution"
+        );
+    }
+
+    #[test]
+    fn terminal_child_fences_its_live_gate_or_promotion_owner() {
+        let record: agent_task_lifecycle::AgentTaskRunRecord =
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-run/v1",
+                "run_id": "run-terminal-gate",
+                "plan_id": "plan",
+                "state": "partial_recoverable",
+                "submitted_at": "2026-01-01T00:00:00Z",
+                "plan_path": "/plan",
+                "metadata": {
+                    "runner_pid": std::process::id(),
+                    "promotion_progress": {
+                        "active": true,
+                        "phase": "gate",
+                        "owner_pid": std::process::id()
+                    }
+                }
+            }))
+            .expect("record");
+
+        let error =
+            live_owner_continuation_denial(&record).expect("live child gate remains fenced");
+        assert_eq!(
+            error.details["continuation_admission"]["first_authoritative_denial"],
+            "live_owner_in_progress"
+        );
+        assert_eq!(error.details["continuation_admission"]["phase"], "gate");
     }
 
     /// Expiry must terminalize cleanly and inspectably: a known status, a
