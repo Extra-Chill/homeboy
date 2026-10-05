@@ -60,29 +60,42 @@ fn strip_test_modules(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let mut stripped = String::new();
     let mut index = 0;
+    let module_header = regex::Regex::new(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*(?:\{|$)")
+        .expect("test module declaration regex");
 
     while index < lines.len() {
         if lines[index].trim() == "#[cfg(test)]" {
-            let mut skip_until = index + 1;
-            while skip_until < lines.len() && !lines[skip_until].contains('{') {
-                skip_until += 1;
-            }
-            if skip_until < lines.len() {
+            let declaration = (index + 1..lines.len()).find(|line| {
+                let text = lines[*line].trim();
+                !text.is_empty() && !text.starts_with("#[")
+            });
+            if let Some(declaration) =
+                declaration.filter(|line| module_header.is_match(lines[*line].trim()))
+            {
+                let open = if lines[declaration].contains('{') {
+                    Some(declaration)
+                } else {
+                    (declaration + 1..lines.len())
+                        .find(|line| !lines[*line].trim().is_empty())
+                        .filter(|line| lines[*line].trim().starts_with('{'))
+                };
                 let mut depth = 0_i32;
-                for (offset, line) in lines[skip_until..].iter().enumerate() {
-                    for ch in line.chars() {
+                let mut end = None;
+                for line in open.into_iter().flat_map(|start| start..lines.len()) {
+                    for ch in lines[line].chars() {
                         match ch {
                             '{' => depth += 1,
                             '}' => depth -= 1,
                             _ => {}
                         }
                     }
-                    if depth <= 0 && offset > 0 {
-                        index = skip_until + offset + 1;
+                    if depth == 0 {
+                        end = Some(line + 1);
                         break;
                     }
                 }
-                if index > skip_until {
+                if let Some(end) = end {
+                    index = end;
                     continue;
                 }
             }
@@ -426,5 +439,23 @@ fn capture(child: Child) {
 "###,
         );
         assert_eq!(run(&[&file]).len(), 1);
+    }
+
+    #[test]
+    fn inline_test_module_does_not_hide_following_production_capture() {
+        let file = fp("src/capture.rs", "#[cfg(test)]\nmod tests { fn fixture() {} }\nfn capture(child: Child) {\nlet stdout = child.wait_with_output();\n}\n");
+        assert_eq!(run(&[&file]).len(), 1, "production capture remains visible");
+    }
+
+    #[test]
+    fn test_only_unbraced_item_does_not_hide_following_production_capture() {
+        let file = fp("src/capture.rs", "#[cfg(test)]\nuse test_support::Fixture;\nfn capture(child: Child) {\nlet stdout = child.wait_with_output();\n}\n");
+        assert_eq!(run(&[&file]).len(), 1, "cfg(test) import is not a module");
+    }
+
+    #[test]
+    fn attributed_test_module_with_separate_opening_brace_is_excluded() {
+        let file = fp("src/capture.rs", "#[cfg(test)]\n#[allow(dead_code)]\nmod tests\n{\nfn capture(child: Child) { let stdout = child.wait_with_output(); }\n}\nfn production() {}\n");
+        assert!(run(&[&file]).is_empty());
     }
 }
