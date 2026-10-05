@@ -3391,11 +3391,29 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     ) {
                         Ok(cancelled) => {
                             let (observed, result) = self.converge_cancellation(&cancelled);
+                            let pending = !result.terminal;
+                            let outcome = if pending {
+                                ControlPlaneActionOutcome::Failed
+                            } else if result.disposition
+                                == ControlPlaneCancelDisposition::TerminalWithoutCancellation
+                            {
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            } else {
+                                ControlPlaneActionOutcome::Succeeded
+                            };
+                            let message = pending.then(|| {
+                                result.observation_error.clone().unwrap_or_else(|| {
+                                    format!(
+                                        "cancellation is pending for run '{}'; retry with `homeboy agent-task cancel {}`",
+                                        observed.run_id, observed.run_id
+                                    )
+                                })
+                            });
                             (
-                                ControlPlaneActionOutcome::Succeeded,
+                                outcome,
                                 project_record(&observed, None)?,
                                 cancel_result_payload(result),
-                                None,
+                                message,
                             )
                         }
                         Err(error)
@@ -4903,6 +4921,72 @@ fn cancel_result_for_record(
     } else {
         ControlPlaneCancelDisposition::Requested
     };
+    let observation_error = observation_error.or_else(|| {
+        let (blocker, recovery_action) = if record
+            .metadata
+            .pointer("/controller_job_cancellation/phase")
+            .and_then(Value::as_str)
+            == Some("requested")
+        {
+            (
+                record
+                    .metadata
+                    .pointer("/controller_job_cancellation/controller_job_id")
+                    .and_then(Value::as_str)
+                    .map(|id| format!("controller staging job {id} is still cancelling")),
+                record
+                    .metadata
+                    .pointer("/controller_job_cancellation/recovery_action")
+                    .and_then(Value::as_str),
+            )
+        } else if record
+            .metadata
+            .pointer("/runner_cancellation_pending/state")
+            .and_then(Value::as_str)
+            == Some("requested")
+        {
+            (
+                record
+                    .metadata
+                    .pointer("/runner_cancellation_pending/runner_job_id")
+                    .and_then(Value::as_str)
+                    .map(|id| format!("runner job {id} is still cancelling")),
+                record
+                    .metadata
+                    .pointer("/runner_cancellation_pending/recovery_action")
+                    .and_then(Value::as_str),
+            )
+        } else if record
+            .metadata
+            .pointer("/runner_submission_intent/last_lookup_error")
+            .is_some()
+        {
+            (
+                Some("runner submission acceptance could not be resolved".to_string()),
+                record
+                    .metadata
+                    .pointer("/runner_submission_cancellation/recovery_action")
+                    .and_then(Value::as_str),
+            )
+        } else if record
+            .metadata
+            .get("cancellation_deferred_for_terminal_provider")
+            .is_some()
+        {
+            (
+                Some("provider success is awaiting terminal aggregate import".to_string()),
+                Some("homeboy agent-task status <run-id>"),
+            )
+        } else {
+            (None, None)
+        };
+        blocker.map(|blocker| {
+            format!(
+                "{blocker}; recovery action: {}",
+                recovery_action.unwrap_or("inspect the exact run with homeboy agent-task status")
+            )
+        })
+    });
     ControlPlaneCancelResult {
         schema: CONTROL_PLANE_CANCEL_RESULT_SCHEMA.to_string(),
         disposition,
@@ -10027,6 +10111,99 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 first
             );
+        });
+    }
+
+    #[test]
+    fn pending_runner_cancel_effect_never_reports_success_or_terminal_cancellation() {
+        with_isolated_home(|_| {
+            crate::agent_task_lifecycle::tests::ensure_runner_continuation_provider_reset_hook();
+            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let run_id = AGENT_TASK_RUN;
+            let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+            crate::agent_task_lifecycle::record_lab_offload_planned(
+                crate::agent_task_lifecycle::LabOffloadProxyPlan {
+                    run_id,
+                    runner_id: "homeboy-lab",
+                    remote_workspace: "/runner/workspace/repo",
+                    remote_command: &command,
+                    durable_plan: None,
+                },
+            )
+            .expect("pending runner proxy");
+            crate::agent_task_lifecycle::record_lab_offload_submission_intent_in_store(
+                &store,
+                run_id,
+                "homeboy-lab",
+                "/runner/workspace/repo",
+                &command,
+                &[],
+            )
+            .expect("submission intent");
+            let replay = crate::agent_task_lifecycle::tests::replay_request(run_id, &command);
+            store
+                .mutate_record(run_id, |record| {
+                    record.metadata["runner_submission_intent"]["state"] = json!("pending");
+                    record.metadata["runner_submission_intent"]["replay_request"] = json!(replay);
+                    true
+                })
+                .expect("pending request");
+            let _provider = crate::agent_task_lifecycle::RunnerContinuationTestGuard::install(
+                Box::new(crate::agent_task_lifecycle::tests::ConnectedRunnerProvider),
+            );
+            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let run = RunId::new(run_id).expect("run");
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:cancel-pending-runner-effect".to_string()),
+                action: ControlPlaneAction::Cancel,
+                idempotency_key: "cancel-pending-runner-effect".to_string(),
+                actor: "test".to_string(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA.to_string(),
+                    data: json!({ "reason": "test pending cancellation" }),
+                },
+                confirmed: true,
+            };
+
+            let acknowledgement = service
+                .execute_action(&run, &request)
+                .expect("cancel action");
+            assert_eq!(
+                acknowledgement.result.schema,
+                homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+                "action acknowledgement: {acknowledgement:?}"
+            );
+            let result: ControlPlaneCancelResult =
+                serde_json::from_value(acknowledgement.result.data.clone())
+                    .expect("typed pending cancellation result");
+            assert_eq!(acknowledgement.outcome, ControlPlaneActionOutcome::Failed);
+            assert_eq!(acknowledgement.resource.state, ControlPlaneRunState::Queued);
+            assert_eq!(result.disposition, ControlPlaneCancelDisposition::Requested);
+            assert!(!result.terminal);
+            assert!(result
+                .observation_error
+                .as_deref()
+                .is_some_and(|detail| detail.contains("recovery action")));
+            assert_eq!(
+                service
+                    .execute_action(&run, &request)
+                    .expect("idempotent effect replay"),
+                acknowledgement,
+                "retrying the same effect must not repeat transport work"
+            );
+            let event_kinds = store
+                .open_observation_readonly()
+                .expect("event store")
+                .control_plane_event_stream(&run)
+                .expect("action events")
+                .expect("ledger")
+                .into_iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>();
+            assert!(event_kinds.iter().any(|kind| kind == "action.failed"));
+            assert!(!event_kinds.iter().any(|kind| kind == "action.succeeded"));
         });
     }
 

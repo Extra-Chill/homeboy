@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, Once};
 /// hook exactly once. Every `with_isolated_home` setup then clears any provider a
 /// previous test left registered, so the process-global slot cannot leak across
 /// tests and make results order-dependent (#8964).
-pub(super) fn ensure_runner_continuation_provider_reset_hook() {
+pub(crate) fn ensure_runner_continuation_provider_reset_hook() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         homeboy_core::test_support::register_test_cache_reset_hook(
@@ -128,7 +128,7 @@ impl RunnerContinuationProvider for IntentReplayProvider {
     }
 }
 
-pub(super) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJobRequest {
+pub(crate) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJobRequest {
     RemoteRunnerJobRequest {
         runner_id: "homeboy-lab".to_string(),
         project_id: None,
@@ -161,7 +161,7 @@ pub(super) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJo
 /// no-op default (which reports every runner disconnected and flags the record
 /// `stale_running`), independent of any real runner subsystem (#8964).
 #[derive(Clone)]
-pub(super) struct ConnectedRunnerProvider;
+pub(crate) struct ConnectedRunnerProvider;
 
 impl RunnerContinuationProvider for ConnectedRunnerProvider {
     fn runner_job_log_snapshot(

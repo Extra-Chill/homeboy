@@ -601,6 +601,19 @@ pub(crate) fn record_detached_lab_run_with_submission_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(input.run_id);
     let _lock = LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?;
+    record_detached_lab_run_with_submission_locked_in_store(lifecycle_store, input, submit)
+}
+
+/// Acceptance body for callers that already own this run's handoff lock.
+/// Pending-submission recovery holds the same lock across transport lookup and
+/// acceptance persistence so cancellation cannot terminalize between POST and
+/// recording the accepted runner job.
+pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: DetachedLabRunRecord<'_>,
+    submit: LabOffloadSubmission<'_>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(input.run_id);
     let plan = detached_lab_plan(&run_id, &input);
     let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
@@ -820,6 +833,17 @@ pub(crate) fn record_detached_lab_run_with_submission_in_store(
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     lifecycle_store.write_record(&record)?;
     Ok(record)
+}
+
+pub(crate) fn record_detached_lab_run_locked_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    input: DetachedLabRunRecord<'_>,
+) -> Result<AgentTaskRunRecord> {
+    record_detached_lab_run_with_submission_locked_in_store(
+        lifecycle_store,
+        input,
+        &admitted_lab_offload_submission,
+    )
 }
 
 /// The runner daemon is the authority that accepts a detached dispatch. Bind a

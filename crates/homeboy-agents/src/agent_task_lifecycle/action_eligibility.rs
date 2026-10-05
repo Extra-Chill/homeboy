@@ -636,4 +636,31 @@ mod tests {
             ControlPlaneActionAvailability::Available
         );
     }
+
+    #[test]
+    fn cancel_eligibility_accepts_rooted_controller_staging_and_pending_runner_transport() {
+        let mut staging = record(AgentTaskRunState::Queued, false);
+        staging.metadata["lab_staging_controller_job_id"] = serde_json::json!("controller-job");
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&staging, None),
+                ControlPlaneAction::Cancel
+            ),
+            ControlPlaneActionAvailability::Available
+        );
+
+        let mut submission = record(AgentTaskRunState::Queued, false);
+        submission.metadata["runner_submission_intent"] = serde_json::json!({
+            "state": "pending",
+            "runner_id": "homeboy-lab",
+            "submission_key": "agent-task:v1:homeboy-lab:run",
+        });
+        assert_eq!(
+            decision(
+                &lifecycle_action_eligibility(&submission, None),
+                ControlPlaneAction::Cancel
+            ),
+            ControlPlaneActionAvailability::Available
+        );
+    }
 }

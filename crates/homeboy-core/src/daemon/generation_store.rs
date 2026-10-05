@@ -72,6 +72,10 @@ pub(super) fn router_dir() -> Result<PathBuf> {
 
 fn read_registry() -> Result<Option<LocalDaemonGenerationRegistry>> {
     let path = registry_path()?;
+    read_registry_at(&path)
+}
+
+fn read_registry_at(path: &Path) -> Result<Option<LocalDaemonGenerationRegistry>> {
     match fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
             Error::internal_json(error.to_string(), Some(format!("parse {}", path.display())))
@@ -261,7 +265,18 @@ pub(super) fn endpoint_for_lease(lease_id: &str) -> Result<Option<LocalDaemonEnd
 }
 
 pub(super) fn endpoint_for_job(job_id: &str) -> Result<Option<LocalDaemonEndpoint>> {
-    Ok(read_registry()?.and_then(|registry| {
+    endpoint_for_job_in_router_dir(job_id, &router_dir()?)
+}
+
+/// Resolve a job owner from a specific installation's daemon-generation
+/// registry. Lifecycle operations use this form so an injected data root never
+/// consults the invoking process's ambient router registry.
+pub(super) fn endpoint_for_job_in_router_dir(
+    job_id: &str,
+    router_dir: &Path,
+) -> Result<Option<LocalDaemonEndpoint>> {
+    let registry = read_registry_at(&router_dir.join("generations.json"))?;
+    Ok(registry.and_then(|registry| {
         registry.generations.job_owner(job_id).and_then(|owner| {
             registry
                 .generations
@@ -719,6 +734,155 @@ mod tests {
 
             // Idempotent once the serving daemon owns admission.
             assert!(!claim_admission_from_dead_owner(&restarted, |_| true).expect("again"));
+        });
+    }
+
+    #[test]
+    fn explicit_router_roots_keep_identical_controller_job_ids_separate() {
+        with_isolated_home(|_| {
+            let parent = tempfile::tempdir().expect("router roots");
+            let left_root = parent.path().join("left");
+            let right_root = parent.path().join("right");
+            fs::create_dir_all(&left_root).expect("left router");
+            fs::create_dir_all(&right_root).expect("right router");
+
+            {
+                let _left = EnvVarGuard::set(DAEMON_ROUTER_DIR_ENV, &left_root);
+                let left = state("left-generation", "127.0.0.1:19401");
+                seed(&left).expect("seed left router");
+                record_job("same-controller-job", "left-generation").expect("left job owner");
+            }
+            {
+                let _right = EnvVarGuard::set(DAEMON_ROUTER_DIR_ENV, &right_root);
+                let right = state("right-generation", "127.0.0.1:19402");
+                seed(&right).expect("seed right router");
+                record_job("same-controller-job", "right-generation").expect("right job owner");
+
+                assert_eq!(
+                    endpoint_for_job("same-controller-job")
+                        .expect("ambient right route")
+                        .expect("right route")
+                        .address,
+                    "127.0.0.1:19402"
+                );
+                assert_eq!(
+                    endpoint_for_job_in_router_dir("same-controller-job", &left_root)
+                        .expect("explicit left route")
+                        .expect("left route")
+                        .address,
+                    "127.0.0.1:19401"
+                );
+                assert_eq!(
+                    endpoint_for_job_in_router_dir("same-controller-job", &right_root)
+                        .expect("explicit right route")
+                        .expect("right route")
+                        .address,
+                    "127.0.0.1:19402"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn rooted_controller_job_client_cancels_through_the_selected_router() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        with_isolated_home(|_| {
+            let left_listener = TcpListener::bind("127.0.0.1:0").expect("left endpoint");
+            let right_listener = TcpListener::bind("127.0.0.1:0").expect("right endpoint");
+            let left_address = left_listener.local_addr().unwrap();
+            let right_address = right_listener.local_addr().unwrap();
+            let job_id = uuid::Uuid::new_v4();
+            let serve = |listener: TcpListener| {
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking test endpoint");
+                std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    let (mut stream, _) = loop {
+                        match listener.accept() {
+                            Ok(connection) => break connection,
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::WouldBlock
+                                    && std::time::Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                return String::new();
+                            }
+                            Err(error) => panic!("accept controller request: {error}"),
+                        }
+                    };
+                    let mut request = [0_u8; 4096];
+                    let count = stream.read(&mut request).expect("read controller request");
+                    let response = serde_json::json!({
+                        "success": true,
+                        "data": {
+                            "body": {
+                                "success": true,
+                                "job": {
+                                "id": job_id,
+                                "operation": "agent_task",
+                                "status": "queued",
+                                "created_at_ms": 1,
+                                "updated_at_ms": 2,
+                                "event_count": 1
+                                }
+                            }
+                        }
+                    })
+                    .to_string();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.len(),
+                        response
+                    )
+                    .expect("write controller response");
+                    String::from_utf8_lossy(&request[..count]).into_owned()
+                })
+            };
+            let left_server = serve(left_listener);
+            let right_server = serve(right_listener);
+
+            let parent = tempfile::tempdir().expect("router roots");
+            let left_config = parent.path().join("left-config");
+            let right_config = parent.path().join("right-config");
+            let left_root = left_config.join("daemon");
+            let right_root = right_config.join("daemon");
+            fs::create_dir_all(&left_root).expect("left router");
+            fs::create_dir_all(&right_root).expect("right router");
+            {
+                let _left = EnvVarGuard::set(DAEMON_ROUTER_DIR_ENV, &left_root);
+                let left = state("left-controller", &left_address.to_string());
+                seed(&left).expect("seed left generation");
+                record_job(&job_id.to_string(), "left-controller").expect("left job owner");
+            }
+            {
+                let _right = EnvVarGuard::set(DAEMON_ROUTER_DIR_ENV, &right_root);
+                let right = state("right-controller", &right_address.to_string());
+                seed(&right).expect("seed ambient right generation");
+                record_job(&job_id.to_string(), "right-controller").expect("right job owner");
+
+                let client = super::super::LocalControllerJobClient::connect_existing_job_in_root(
+                    &job_id.to_string(),
+                    left_config.as_path(),
+                )
+                .expect("connect using left lifecycle root");
+                let job = client
+                    .cancel(&job_id.to_string(), "rooted test cancellation")
+                    .expect("cancel through left root");
+                assert_eq!(job.status, crate::api_jobs::JobStatus::Queued);
+            }
+
+            let left_request = left_server.join().expect("left server");
+            assert!(left_request.starts_with(&format!("POST /controller/jobs/{job_id}/cancel ")));
+            assert!(
+                right_server.join().expect("right server").is_empty(),
+                "ambient same-ID route must not receive rooted cancellation"
+            );
         });
     }
 
