@@ -86,8 +86,7 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap each marker-targeted tracker query used for migration and dedup
-        /// analysis.
+        /// Cap the canonical component-marker tracker query.
         #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 
@@ -137,8 +136,7 @@ pub(crate) enum IssuesCommand {
         #[arg(long)]
         no_refresh_closed: bool,
 
-        /// Cap each marker-targeted tracker query used for migration and dedup
-        /// analysis per command.
+        /// Cap the canonical component-marker tracker query per command.
         #[arg(long, default_value_t = 1000)]
         list_limit: usize,
 

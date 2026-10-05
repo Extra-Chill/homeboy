@@ -7,8 +7,7 @@ use super::plan::{
     TrackedIssueState,
 };
 
-const ISSUE_KEY_PREFIX: &str = "<!-- homeboy:issues-reconcile-key=findings:";
-const LEGACY_KEY_PREFIX: &str = "<!-- homeboy:issues-reconcile-key=";
+pub(crate) const FINDINGS_KEY_PREFIX: &str = "homeboy:issues-reconcile-key=findings:";
 const SECTION_PREFIX: &str = "<!-- homeboy:findings-section=";
 const ISSUE_LABEL: &str = "homeboy-findings";
 
@@ -25,21 +24,15 @@ pub fn reconcile_measured(
     component_id: &str,
     complete_measurement: bool,
 ) -> ReconcilePlan {
-    let mut related: Vec<&TrackedIssue> = existing
+    let mut canonical: Vec<&TrackedIssue> = existing
         .iter()
-        .filter(|issue| issue_component(issue).as_deref() == Some(component_id))
-        .collect();
-    related.sort_by_key(|issue| issue.number);
-
-    let canonical: Vec<&TrackedIssue> = related
-        .iter()
-        .copied()
         .filter(|issue| parse_canonical_component(&issue.body).as_deref() == Some(component_id))
         .collect();
-    let mut sections = collect_sections(&canonical, &related, component_id);
+    canonical.sort_by_key(|issue| issue.number);
+    let mut sections = collect_sections(&canonical);
     merge_measurement(&mut sections, groups, command, complete_measurement);
 
-    let open: Vec<&TrackedIssue> = related
+    let open: Vec<&TrackedIssue> = canonical
         .iter()
         .copied()
         .filter(|issue| issue.state.is_open())
@@ -87,18 +80,13 @@ pub fn reconcile_measured(
         return ReconcilePlan::new(component_id, actions);
     }
 
-    if let Some(keep) = preferred_open(&open) {
+    if let Some((keep, duplicates)) = open.split_first() {
         actions.push(ReconcileAction::Update {
             number: keep.number,
             title,
             body,
         });
-        let duplicates: Vec<&TrackedIssue> = open
-            .iter()
-            .copied()
-            .filter(|issue| issue.number != keep.number)
-            .collect();
-        close_duplicates(&mut actions, &duplicates, keep.number);
+        close_duplicates(&mut actions, duplicates, keep.number);
     } else {
         actions.push(ReconcileAction::FileNew {
             component_id: component_id.to_string(),
@@ -109,15 +97,6 @@ pub fn reconcile_measured(
     }
 
     ReconcilePlan::new(component_id, actions)
-}
-
-fn preferred_open<'a>(open: &[&'a TrackedIssue]) -> Option<&'a TrackedIssue> {
-    open.iter().copied().min_by_key(|issue| {
-        (
-            parse_canonical_component(&issue.body).is_none(),
-            issue.number,
-        )
-    })
 }
 
 fn close_duplicates(actions: &mut Vec<ReconcileAction>, duplicates: &[&TrackedIssue], keep: u64) {
@@ -135,37 +114,12 @@ fn close_duplicates(actions: &mut Vec<ReconcileAction>, duplicates: &[&TrackedIs
     }
 }
 
-fn collect_sections(
-    canonical: &[&TrackedIssue],
-    related: &[&TrackedIssue],
-    component_id: &str,
-) -> BTreeMap<String, String> {
+fn collect_sections(canonical: &[&TrackedIssue]) -> BTreeMap<String, String> {
     let mut sections = BTreeMap::new();
 
     for issue in canonical {
         if issue.state.is_open() || issue.state == TrackedIssueState::ClosedNotPlanned {
             sections.extend(parse_sections(&issue.body));
-        }
-    }
-
-    // Migrate open category-level issues into the rolling document. The next
-    // plan deterministically keeps one issue and closes the rest as duplicates.
-    for issue in related
-        .iter()
-        .copied()
-        .filter(|issue| issue.state.is_open())
-    {
-        if parse_canonical_component(&issue.body).is_some() {
-            continue;
-        }
-        if let Some((command, component, category)) =
-            parse_legacy_key(&issue.body).or_else(|| parse_legacy_title(&issue.title))
-        {
-            if component == component_id {
-                sections
-                    .entry(section_key(&command, &category))
-                    .or_insert_with(|| strip_legacy_key(&issue.body));
-            }
         }
     }
 
@@ -204,7 +158,7 @@ fn render_group(group: &IssueGroup) -> String {
     } else {
         group.label.clone()
     };
-    let mut body = strip_legacy_key(&group.body);
+    let mut body = group.body.trim().to_string();
     if body
         .lines()
         .next()
@@ -224,8 +178,8 @@ fn render_group(group: &IssueGroup) -> String {
 
 fn render_body(component_id: &str, sections: &BTreeMap<String, String>) -> String {
     let mut body = format!(
-        "{}{} -->\n\n# Homeboy findings for `{}`\n\nThis issue is updated automatically from lint, audit, and test runs.\n",
-        ISSUE_KEY_PREFIX, component_id, component_id
+        "<!-- {}{} -->\n\n# Homeboy findings for `{}`\n\nThis issue is updated automatically from lint, audit, and test runs.\n",
+        FINDINGS_KEY_PREFIX, component_id, component_id
     );
     for (key, section) in sections {
         body.push_str(&format!(
@@ -262,61 +216,16 @@ fn parse_sections(body: &str) -> BTreeMap<String, String> {
     sections
 }
 
-fn issue_component(issue: &TrackedIssue) -> Option<String> {
-    parse_canonical_component(&issue.body)
-        .or_else(|| parse_legacy_key(&issue.body).map(|(_, component, _)| component))
-        .or_else(|| parse_legacy_title(&issue.title).map(|(_, component, _)| component))
-}
-
 fn parse_canonical_component(body: &str) -> Option<String> {
-    let start = body.find(ISSUE_KEY_PREFIX)? + ISSUE_KEY_PREFIX.len();
-    let component = body[start..].split_once(" -->")?.0.trim();
+    let component = body
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("<!-- ")?
+                .strip_prefix(FINDINGS_KEY_PREFIX)?
+                .strip_suffix(" -->")
+        })?
+        .trim();
     (!component.is_empty()).then(|| component.to_string())
-}
-
-fn parse_legacy_key(body: &str) -> Option<(String, String, String)> {
-    let start = body.find(LEGACY_KEY_PREFIX)? + LEGACY_KEY_PREFIX.len();
-    let key = body[start..].split_once(" -->")?.0;
-    if key.starts_with("findings:") {
-        return None;
-    }
-    let mut parts = key.splitn(3, ':');
-    let command = parts.next()?.trim();
-    let component = parts.next()?.trim();
-    let category = parts.next()?.trim();
-    if command.is_empty() || component.is_empty() || category.is_empty() {
-        return None;
-    }
-    Some((command.into(), component.into(), category.into()))
-}
-
-fn parse_legacy_title(title: &str) -> Option<(String, String, String)> {
-    let (command, rest) = title.split_once(':')?;
-    let rest = rest.trim();
-    let rest = match rest.rfind(" (") {
-        Some(index) if rest.ends_with(')') => &rest[..index],
-        _ => rest,
-    };
-    let index = rest.rfind(" in ")?;
-    let label = rest[..index].trim();
-    let component = rest[index + 4..].trim();
-    if command.is_empty() || label.is_empty() || component.is_empty() {
-        return None;
-    }
-    Some((
-        command.trim().to_string(),
-        component.to_string(),
-        label.replace(' ', "_"),
-    ))
-}
-
-fn strip_legacy_key(body: &str) -> String {
-    body.lines()
-        .filter(|line| !line.starts_with(LEGACY_KEY_PREFIX))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
 }
 
 fn section_key(command: &str, category: &str) -> String {
@@ -555,47 +464,108 @@ mod tests {
     }
 
     #[test]
-    fn migrates_legacy_category_issues_and_dedupes_them() {
-        let lint = tracked(
-            30,
-            "lint: formatting in sample-plugin (9)",
-            "<!-- homeboy:issues-reconcile-key=lint:sample-plugin:formatting -->\n\nold lint",
-            TrackedIssueState::Open,
-        );
-        let audit = tracked(
-            20,
-            "audit: structural in sample-plugin (2)",
-            "<!-- homeboy:issues-reconcile-key=audit:sample-plugin:structural -->\n\nold audit",
-            TrackedIssueState::Open,
-        );
+    fn reconciliation_identity_comes_from_canonical_markers_not_titles() {
+        let issues = vec![
+            tracked(
+                30,
+                "lint: formatting in sample-plugin (9)",
+                "human-owned lint discussion",
+                TrackedIssueState::Open,
+            ),
+            tracked(
+                20,
+                "Homeboy findings in sample-plugin",
+                &render_body(
+                    "another-component",
+                    &BTreeMap::from([("audit:structural".into(), "other audit".into())]),
+                ),
+                TrackedIssueState::Open,
+            ),
+        ];
 
         let plan = reconcile_measured(
             &[group("lint", "formatting", 1)],
-            &[lint, audit],
+            &issues,
             &config(),
             "lint",
             "sample-plugin",
             true,
         );
 
+        assert_eq!(plan.actions.len(), 1);
+        let body = match &plan.actions[0] {
+            ReconcileAction::FileNew { body, .. } => body,
+            action => panic!("foreign issues must not be mutated: {action:?}"),
+        };
+        assert!(!body.contains("other audit"));
+        assert!(!body.contains("human-owned"));
+        assert!(body.contains("1 finding(s)"));
+        let empty = reconcile_measured(&[], &issues, &config(), "lint", "sample-plugin", true);
         assert!(matches!(
-            plan.actions[0],
-            ReconcileAction::Update { number: 20, .. }
+            empty.actions.as_slice(),
+            [ReconcileAction::Skip { .. }]
         ));
+    }
+
+    #[test]
+    fn canonical_not_planned_issue_remains_closed_and_controls_duplicates() {
+        let body = render_body(
+            "sample-plugin",
+            &BTreeMap::from([("audit:structural".into(), "retained audit".into())]),
+        );
+        let existing = [
+            tracked(
+                8,
+                "renamed by human",
+                &body,
+                TrackedIssueState::ClosedNotPlanned,
+            ),
+            tracked(10, "duplicate", &body, TrackedIssueState::Open),
+        ];
+        let refreshed = reconcile_measured(
+            &[group("lint", "formatting", 2)],
+            &existing,
+            &config(),
+            "lint",
+            "sample-plugin",
+            true,
+        );
+        assert!(
+            matches!(&refreshed.actions[0], ReconcileAction::UpdateClosed { number: 8, body }
+            if body.contains("retained audit") && body.contains("2 finding(s)"))
+        );
         assert!(matches!(
-            plan.actions[1],
+            refreshed.actions[1],
             ReconcileAction::CloseDuplicate {
-                number: 30,
-                keep: 20,
+                number: 10,
+                keep: 8,
                 ..
             }
         ));
-        let body = match &plan.actions[0] {
-            ReconcileAction::Update { body, .. } => body,
-            _ => unreachable!(),
-        };
-        assert!(body.contains("old audit"));
-        assert!(body.contains("1 finding(s)"));
+        let skipped = reconcile_measured(
+            &[group("lint", "formatting", 2)],
+            &existing,
+            &ReconcileConfig {
+                refresh_closed_not_planned: false,
+            },
+            "lint",
+            "sample-plugin",
+            true,
+        );
+        assert!(matches!(
+            skipped.actions.as_slice(),
+            [
+                ReconcileAction::CloseDuplicate {
+                    number: 10,
+                    keep: 8,
+                    ..
+                },
+                ReconcileAction::Skip {
+                    reason: ReconcileSkipReason::ClosedNotPlannedNoRefresh,
+                    ..
+                }
+            ]
+        ));
     }
 
     #[test]

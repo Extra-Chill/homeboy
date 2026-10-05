@@ -163,6 +163,13 @@ and `build` subcommands normalize finding streams and reconcile them against an
 issue tracker from the evidence pillar. They default to dry-run planning; pass
 `--apply` on reconcile commands to mutate tracker state.
 
+Reconciliation owns one rolling findings issue per component, identified by the
+standalone body marker `<!-- homeboy:issues-reconcile-key=findings:<component> -->`.
+Discovery uses that component marker, independently of titles and optional labels.
+Lint, audit, and test retain independently keyed sections; narrowed measurements
+preserve unmeasured sections. Old category issues and markerless titles are not
+migrated or matched, and remain outside the canonical reconciliation contract.
+
 `homeboy runs query` projects JSONPath expressions over imported run artifact
 rows. It can return raw JSON rows, grouped counts, Markdown-friendly tables, or
 CSV without baking domain-specific artifact schemas into Homeboy core. `query`
