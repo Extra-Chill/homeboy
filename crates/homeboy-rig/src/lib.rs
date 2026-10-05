@@ -49,7 +49,6 @@ mod rig_test_support;
 
 pub use app::AppLauncherAction;
 pub use app::{AppLauncherOptions, AppLauncherReport};
-pub use capabilities::runner_capability_preflight;
 // Reachable through `RigRunArtifactIndex`'s public fields.
 pub use artifact_index::{
     for_run_with_artifacts as artifact_index_for_run_with_artifacts, RigRunArtifactIndex,
@@ -117,11 +116,11 @@ pub use spec::{
     LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus,
     LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadKind, LifecycleWorkloadRef,
     NewerThanSpec, NormalizedDependencyMaterializationStep, PatchOp, RigRequirementsSpec,
-    RigResourceRetentionSpec, RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp,
-    SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig, TraceExperimentArtifactSpec,
-    TraceExperimentCommandSpec, TracePhaseTemplateSpec, TracePublicPreviewMode, WorkloadSpec,
-    RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE, RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS,
-    RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS, RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+    RigResourceRetentionSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
+    SymlinkSpec, TimeSource, TraceConfig, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
+    TracePublicPreviewMode, WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
+    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
+    RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
 pub use spec::{
     ArtifactPostprocessSpec, BenchSpec, ComponentSpec, LabStackPrSpec, LabStackRef, LabStackSpec,
@@ -380,7 +379,7 @@ fn read_config(config_root: &Path, id: &str) -> Result<(RigSpec, Option<String>)
             Some(content.chars().take(200).collect()),
         )
     })?;
-    apply_trace_workload_defaults(&mut spec)?;
+    apply_trace_workload_defaults(&mut spec);
     let declared_id = (!spec.id.is_empty() && spec.id != id).then(|| spec.id.clone());
     spec.id = id.to_string();
     validate_rig_spec(&spec)?;
@@ -402,7 +401,7 @@ fn read_spec_from_path(
     }
     spec.id = homeboy_core::extension::lifecycle::slugify_id(&spec.id)?;
     remember_local_package_root(&spec.id, package_root);
-    apply_trace_workload_defaults(&mut spec)?;
+    apply_trace_workload_defaults(&mut spec);
     validate_rig_spec(&spec)?;
     Ok(spec)
 }
@@ -441,7 +440,7 @@ fn absolute_path(path: &str) -> Result<PathBuf> {
         .join(path))
 }
 
-fn apply_trace_workload_defaults(spec: &mut RigSpec) -> Result<()> {
+fn apply_trace_workload_defaults(spec: &mut RigSpec) {
     for (extension_id, defaults) in spec.trace_workload_defaults.clone() {
         let Some(workloads) = spec.trace_workloads.get_mut(&extension_id) else {
             continue;
@@ -450,29 +449,6 @@ fn apply_trace_workload_defaults(spec: &mut RigSpec) -> Result<()> {
             workload.apply_defaults(&defaults);
         }
     }
-
-    for (extension_id, workloads) in spec.trace_workloads.iter_mut() {
-        for workload in workloads {
-            let Some(template_name) = workload.trace_phase_template.as_deref() else {
-                continue;
-            };
-            let template = spec.trace_phase_templates.get(template_name).ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "trace_phase_template",
-                    format!(
-                        "trace workload '{}' for extension '{}' references unknown trace phase template '{}'",
-                        workload.path(),
-                        extension_id,
-                        template_name
-                    ),
-                    Some(template_name.to_string()),
-                    Some(spec.trace_phase_templates.keys().cloned().collect()),
-                )
-            })?;
-            workload.apply_phase_template(template);
-        }
-    }
-    Ok(())
 }
 
 fn stale_source_error(config_root: &Path, id: &str, config_path: &Path) -> Option<Error> {
@@ -542,15 +518,7 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
             .parent()
             .and_then(Path::file_name)
             .and_then(|name| name.to_str());
-        let discovered = DiscoveredRig {
-            id: id.or(id_hint).unwrap_or_default().to_string(),
-            description: String::new(),
-            rig_path: path.clone(),
-        };
-        let source_root = install::local_package_source_root_for_dependencies(
-            &package_root,
-            std::slice::from_ref(&discovered),
-        )?;
+        let source_root = install::canonical_package_path(&package_root, "path")?;
         return read_spec_from_path(&path, id.or(id_hint), &package_root, &source_root);
     }
     if !path.is_dir() {
@@ -591,8 +559,7 @@ pub fn load_local_source(source: &str, id: Option<&str>) -> Result<RigSpec> {
     }
 
     let rig = rigs.remove(0);
-    let source_root =
-        install::local_package_source_root_for_dependencies(&path, std::slice::from_ref(&rig))?;
+    let source_root = install::canonical_package_path(&path, "path")?;
     read_spec_from_path(&rig.rig_path, Some(&rig.id), &path, &source_root)
 }
 

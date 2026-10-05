@@ -256,14 +256,6 @@ fn discovered_from_path(
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_string();
-    let discovered = DiscoveredRig {
-        id: fallback_id.clone(),
-        description: String::new(),
-        rig_path: path.to_path_buf(),
-    };
-    // Validate dependency declarations for runner materialization, but keep
-    // template inheritance bounded to the selected package root.
-    super::install::local_package_source_root_for_dependencies(source_root, &[discovered])?;
     let mut spec = parse_discovered_rig_spec(path, source_root)?;
     if spec.id.is_empty() {
         spec.id = if fallback_id.is_empty() {

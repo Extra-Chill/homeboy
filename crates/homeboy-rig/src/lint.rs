@@ -132,18 +132,15 @@ const KNOWN_RIG_TOP_LEVEL_FIELDS: &[&str] = &[
     "fuzz_workloads",
     "id",
     "lifecycle",
-    "package_dependencies",
     "pipeline",
     "requirements",
     "resources",
     "services",
-    "shared_templates",
     "shared_paths",
     "symlinks",
     "trace",
     "trace_experiments",
     "trace_guardrails",
-    "trace_phase_templates",
     "trace_profiles",
     "trace_variants",
     "trace_workload_defaults",
@@ -205,7 +202,7 @@ fn collect_materialized_rigs(root: &Path, files: &[PathBuf]) -> Result<Materiali
         };
         let declares_extends = content.contains("\"extends\"");
 
-        let materialized = template_source_root(root, file)
+        let materialized = template_source_root(root)
             .and_then(|source_root| super::install::materialize_rig_spec(file, &source_root));
         let value = match materialized {
             Ok(value) => value,
@@ -862,19 +859,7 @@ fn display_pointer(pointer: &str) -> &str {
     }
 }
 
-fn template_source_root(root: &Path, file: &Path) -> Result<PathBuf> {
-    let id = file
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(OsStr::to_str)
-        .unwrap_or_default()
-        .to_string();
-    let rig = super::DiscoveredRig {
-        id,
-        description: String::new(),
-        rig_path: file.to_path_buf(),
-    };
-    super::install::local_package_source_root_for_dependencies(root, &[rig])?;
+fn template_source_root(root: &Path) -> Result<PathBuf> {
     root.canonicalize().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1898,68 +1883,6 @@ mod tests {
         assert!(!error.contains("x-owner"));
         assert!(!error.contains("lifecycle"));
         assert!(!error.contains("trace"));
-    }
-
-    #[test]
-    fn package_lint_materializes_extends_from_declared_repo_shared_root() {
-        let temp = tempfile::TempDir::new().expect("temp repo");
-        git(temp.path(), &["init", "--quiet"]);
-        let package = temp.path().join("Product").join("plugin");
-        let rig_dir = package.join("rigs").join("browser-coverage");
-        let shared = temp.path().join("shared").join("wordpress-plugin");
-        fs::create_dir_all(&rig_dir).expect("rig dir");
-        fs::create_dir_all(&shared).expect("shared dir");
-        fs::write(
-            shared.join("browser-coverage.base.json"),
-            r#"{
-                "components": {
-                    "plugin": { "path": "${env.PLUGIN_PATH}" }
-                },
-                "trace": { "default_component": "plugin" },
-                "trace_workloads": {
-                    "nodejs": [
-                        { "path": "${package.root}/bench/browser-coverage.trace.mjs" }
-                    ]
-                }
-            }"#,
-        )
-        .expect("write shared base");
-        fs::write(
-            rig_dir.join("rig.json"),
-            r#"{
-                "id": "browser-coverage",
-                "shared_templates": ["../../../../shared/wordpress-plugin"],
-                "extends": "../../../../shared/wordpress-plugin/browser-coverage.base.json",
-                "trace_profiles": { "smoke": { "scenario": "browser-coverage" } }
-            }"#,
-        )
-        .expect("write rig");
-        fs::create_dir_all(package.join("bench")).expect("bench dir");
-        fs::write(
-            package.join("bench/browser-coverage.trace.mjs"),
-            "// fixture\n",
-        )
-        .expect("workload");
-        git(temp.path(), &["add", "."]);
-
-        let outcome = run_package_lint_at(&package).expect("lint package");
-        let template_step = outcome
-            .steps
-            .iter()
-            .find(|step| step.label.contains("template specs materialize"))
-            .expect("template step");
-        let contract_step = outcome
-            .steps
-            .iter()
-            .find(|step| step.label.contains("Homeboy rig contract"))
-            .expect("contract step");
-
-        assert_eq!(template_step.status, "pass");
-        assert_eq!(
-            contract_step.status, "pass",
-            "contract error: {:?}",
-            contract_step.error
-        );
     }
 
     fn json_step(outcome: &PipelineOutcome) -> &PipelineStepOutcome {
