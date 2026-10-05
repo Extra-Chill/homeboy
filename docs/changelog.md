@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.400.0] - 2026-10-05
+
+### Changed
+- share output-capture lexical scanning
+- retain authoritative isolated-test retry evidence
+- retire legacy evidence reconstruction
+
 ## [0.399.45] - 2026-10-05
 
 ### Fixed
