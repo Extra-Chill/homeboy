@@ -1352,7 +1352,7 @@ fn runtime_identity_plan(runtime_path: &str) -> String {
 }
 
 #[test]
-fn run_plan_resolved_runtime_root_is_synced_as_its_own_snapshot() {
+fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source = temp.path().join("source");
     std::fs::create_dir_all(&source).expect("source");
@@ -1367,6 +1367,11 @@ fn run_plan_resolved_runtime_root_is_synced_as_its_own_snapshot() {
     )
     .expect("runtime script");
     std::fs::write(extensions.join("unrelated.txt"), "big checkout\n").expect("unrelated");
+    std::fs::write(
+        extensions.join("homeboy-extension-root.json"),
+        r#"{"shared_assets":["agent-runtimes","runtime-agent-ci","agent-task-contracts"]}"#,
+    )
+    .expect("extension manifest");
     git(&extensions, &["init", "-b", "main"]);
     git(&extensions, &["config", "user.email", "test@example.com"]);
     git(&extensions, &["config", "user.name", "Homeboy Test"]);
@@ -1393,9 +1398,59 @@ fn run_plan_resolved_runtime_root_is_synced_as_its_own_snapshot() {
     assert_eq!(runtime_workspaces.len(), 1, "{workspaces:?}");
     assert_eq!(
         runtime_workspaces[0].path,
-        runtime.canonicalize().unwrap(),
-        "the runtime directory itself, not its containing checkout"
+        extensions.canonicalize().unwrap(),
+        "the declaring extension root is the snapshot source"
     );
+    assert_eq!(
+        runtime_workspaces[0].snapshot_includes,
+        vec![
+            "agent-runtimes".to_string(),
+            "runtime-agent-ci".to_string(),
+            "agent-task-contracts".to_string()
+        ]
+    );
+
+    let standalone = temp.path().join("standalone-runtime");
+    std::fs::create_dir_all(&standalone).expect("standalone runtime");
+    let standalone_workspaces = agent_task_plan_extra_workspaces(
+        &[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            runtime_identity_plan(&standalone.display().to_string()),
+        ],
+        &source,
+    )
+    .expect("standalone workspaces");
+    let standalone_snapshot = standalone_workspaces
+        .iter()
+        .find(|workspace| workspace.role == "agent_task_plan_runtime")
+        .expect("standalone runtime snapshot");
+    assert_eq!(standalone_snapshot.path, standalone.canonicalize().unwrap());
+    assert!(standalone_snapshot.snapshot_includes.is_empty());
+
+    // A declaring root whose shared assets do not contain the runtime does not
+    // claim it: the runtime stays a standalone snapshot.
+    let undeclared = extensions.join("other-runtimes").join("solo");
+    std::fs::create_dir_all(&undeclared).expect("undeclared runtime");
+    let undeclared_workspaces = agent_task_plan_extra_workspaces(
+        &[
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            runtime_identity_plan(&undeclared.display().to_string()),
+        ],
+        &source,
+    )
+    .expect("undeclared workspaces");
+    let undeclared_snapshot = undeclared_workspaces
+        .iter()
+        .find(|workspace| workspace.role == "agent_task_plan_runtime")
+        .expect("undeclared runtime snapshot");
+    assert_eq!(undeclared_snapshot.path, undeclared.canonicalize().unwrap());
+    assert!(undeclared_snapshot.snapshot_includes.is_empty());
 }
 
 #[test]
