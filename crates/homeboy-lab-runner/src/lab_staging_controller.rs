@@ -4920,7 +4920,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[ignore = "homeboy#14984: the first run_reverse_worker call fails at finish with runner_job_execution_context::rejected(\"runner execution receipt has not been consumed for this claim\") (ensure_remote_runner_execution_receipt in api_jobs/remote_runner.rs, added by c7ce85a4c3 'require consumed execution receipts'). The worker's own consume_execution call lives inside exec_worker_local_until_cancelled_with_progress's pre-exec closure in worker/run.rs, gated behind verify_staged_workspace_before_execution and resolve_runner_execution_context; whichever of those is failing for this reverse-broker E2E fixture swallows its real error before the generic finish-time message surfaces, so root-causing this needs its own investigation rather than a guess."]
     fn detached_staging_falls_back_through_authenticated_reverse_broker_and_projects_terminal_result_once(
     ) {
         use homeboy_core::api_jobs::{JobEventKind, JobStatus};
@@ -4945,7 +4944,7 @@ mod tests {
                     "policy": RunnerPolicy {
                         allow_raw_exec: Some(true),
                         workspace_roots: vec!["/tmp".to_string()],
-                        allowed_commands: vec!["sh".to_string()],
+                        allowed_commands: vec!["homeboy".to_string()],
                         ..Default::default()
                     }
                 })
@@ -5041,10 +5040,23 @@ mod tests {
                 .expect("set origin")
                 .success());
             let output = home.path().join("worker-output.txt");
+            // Lab staging accepts normalized Homeboy argv and rewrites its
+            // executable prefix. Own that executable in the fixture rather
+            // than passing raw `sh -c` as if it were a Homeboy invocation or
+            // resolving the operator's installed binary from PATH.
+            let bin = home.path().join("fixture-bin");
+            std::fs::create_dir(&bin).expect("fixture executable directory");
+            let executable = bin.join("homeboy");
+            std::fs::write(&executable,
+                "#!/bin/sh\nset -eu\ntest \"$#\" -eq 2\ntest \"$1\" = fixture-read-source\ngrep -o staged-source input.txt | tee \"$2\"\n")
+                .expect("write fixture command");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                .expect("make fixture executable");
             let args = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("grep -o staged-source input.txt | tee {}", output.display()),
+                "homeboy".to_string(),
+                "fixture-read-source".to_string(),
+                output.display().to_string(),
             ];
             let plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
                 "authenticated-reverse-staging",
@@ -5052,7 +5064,19 @@ mod tests {
             );
             let run_id = "authenticated-reverse-staging-run";
             submit_recipe_run(run_id);
-            let mut request = recipe_request(Some(recipe_command()), &args, HashMap::new());
+            let mut request = recipe_request(
+                Some(LabOffloadCommand {
+                    command: LabCommandContract::portable("fixture-read-source", None, false, &[]),
+                    required_extensions: Vec::new(),
+                    required_capabilities: Vec::new(),
+                    workload: None,
+                }),
+                &args,
+                HashMap::from([(
+                    "PATH".to_string(),
+                    format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+                )]),
+            );
             request.placement_decision =
                 homeboy_core::lab_routing::compatibility_placement_decision(
                     homeboy_lab_runner_contract::Placement::Lab,
@@ -5061,6 +5085,10 @@ mod tests {
                 );
             request.source_path = Some(&source);
             request.durable_agent_task_plan = Some(&plan);
+            // This shell-only workload has no provider credential requirement.
+            // The shared recipe fixture's AGENT_TOKEN belongs to its secret
+            // transport cases, not this authenticated broker staging proof.
+            request.job_overrides.secret_env_names.clear();
             request.job_overrides.workspace_root =
                 Some(home.path().join("runner-workspaces").display().to_string());
             let receipt = submit_detached_staging_with_daemon_ensure(
@@ -5106,7 +5134,15 @@ mod tests {
                     broker_retry_limit: 1,
                 })
                 .expect("execute staged reverse job");
-            assert_eq!(worker_code, 0, "worker={worker:#?}");
+            assert_eq!(
+                worker_code,
+                0,
+                "worker={worker:#?}; events={:#?}",
+                broker
+                    .store
+                    .events(uuid::Uuid::parse_str(&job_id).expect("job id"))
+                    .expect("worker evidence")
+            );
             assert!(worker.claimed);
             assert_eq!(
                 std::fs::read_to_string(&output).expect("worker side effect"),
@@ -5139,6 +5175,16 @@ mod tests {
                 "over-bound Git source must not cross the bounded artifact channel"
             );
             let results = broker.store.events(job.id).expect("terminal evidence");
+            assert_eq!(
+                results
+                    .iter()
+                    .filter(|event| {
+                        event.message.as_deref() == Some("remote runner execution receipt consumed")
+                    })
+                    .count(),
+                1,
+                "one-time receipt is consumed before execution"
+            );
             assert_eq!(
                 results
                     .iter()
@@ -5222,6 +5268,15 @@ mod tests {
             assert_eq!(
                 error.code,
                 homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+            assert!(
+                error.message.contains("Git baseline"),
+                "original rejection survives reporting failure: {error:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&output).expect("first execution output"),
+                "staged-source\n",
+                "tampered job must not run the fixture command"
             );
         });
     }
