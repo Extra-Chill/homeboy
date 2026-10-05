@@ -69,6 +69,20 @@ fn upload_registry() -> &'static Mutex<UploadRegistry> {
     REGISTRY.get_or_init(|| Mutex::new(UploadRegistry::default()))
 }
 
+/// Lock the upload registry, recovering it if a previous holder panicked.
+///
+/// The registry only indexes partial uploads whose durable records and bytes
+/// live on disk, so a panic mid-update cannot leave it in a state worse than
+/// "an entry may be stale", which expiry already reaps. Propagating the poison
+/// instead turned one panicking request into a failure of every later upload,
+/// download, and route that reaps expired uploads for the life of the daemon
+/// (#15470).
+fn lock_upload_registry() -> std::sync::MutexGuard<'static, UploadRegistry> {
+    upload_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn reap_expired_uploads_locked(registry: &mut UploadRegistry) {
     registry.uploads.retain(|_, upload| {
         if upload.updated_at.elapsed() < UPLOAD_EXPIRY {
@@ -82,7 +96,7 @@ fn reap_expired_uploads_locked(registry: &mut UploadRegistry) {
 
 pub(super) fn reap_expired_uploads() {
     recover_expired_uploads(SystemTime::now());
-    let mut registry = upload_registry().lock().expect("upload registry lock");
+    let mut registry = lock_upload_registry();
     reap_expired_uploads_locked(&mut registry);
 }
 
@@ -426,7 +440,7 @@ pub(super) fn upload_runner_file_chunk(
         workspace_root: request.workspace_root.clone(),
         upload_id,
     };
-    let mut registry = upload_registry().lock().expect("upload registry lock");
+    let mut registry = lock_upload_registry();
     reap_expired_uploads_locked(&mut registry);
     if let Some(upload) = registry.uploads.get(&key) {
         if upload.destination != path {
@@ -922,7 +936,7 @@ pub(super) fn abort_runner_file_chunk_upload(
         workspace_root: request.workspace_root,
         upload_id,
     };
-    let mut registry = upload_registry().lock().expect("upload registry lock");
+    let mut registry = lock_upload_registry();
     reap_expired_uploads_locked(&mut registry);
     if let Some(upload) = registry.uploads.remove(&key) {
         fs::remove_file(&upload.temp).map_err(|error| {
@@ -1082,6 +1096,7 @@ mod tests {
 
     #[test]
     fn private_chunk_upload_round_trip_publishes_verified_bytes() {
+        let _home = crate::test_support::HomeGuard::new();
         use sha2::Digest;
 
         // Umask is process-global: exercise the endpoint chain in a subprocess
@@ -1176,6 +1191,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn private_mkdir_refuses_existing_shared_directory_without_changing_it() {
+        let _home = crate::test_support::HomeGuard::new();
         use std::os::unix::fs::PermissionsExt;
         let workspace = tempfile::tempdir().expect("workspace");
         let shared = workspace.path().join("shared");
@@ -1193,6 +1209,7 @@ mod tests {
 
     #[test]
     fn private_chunk_upload_wrong_digest_preserves_previous_evidence() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-wrong-digest-{}", uuid::Uuid::new_v4());
         let id = uuid::Uuid::new_v4();
@@ -1213,6 +1230,7 @@ mod tests {
 
     #[test]
     fn chunk_upload_rejects_oversized_declarations_and_encoded_or_decoded_chunks() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-limits-{}", uuid::Uuid::new_v4());
         let mut oversized = request(workspace.path(), &runner, uuid::Uuid::new_v4());
@@ -1232,6 +1250,7 @@ mod tests {
 
     #[test]
     fn chunk_upload_requires_private_protocol() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-private-{}", uuid::Uuid::new_v4());
         let mut body = request(workspace.path(), &runner, uuid::Uuid::new_v4());
@@ -1245,6 +1264,7 @@ mod tests {
 
     #[test]
     fn final_chunk_requires_digest_before_writing() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-digest-{}", uuid::Uuid::new_v4());
         let id = uuid::Uuid::new_v4();
@@ -1261,6 +1281,7 @@ mod tests {
 
     #[test]
     fn unfinished_uploads_reserve_runner_workspace_quota_across_ids() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-quota-{}", uuid::Uuid::new_v4());
         for _ in 0..MAX_UNFINISHED_UPLOADS_PER_SCOPE {
@@ -1289,8 +1310,35 @@ mod tests {
         .expect("release byte quota");
     }
 
+    /// #15470: a panic while holding the registry used to poison it for every
+    /// later upload and every route that reaps expired uploads.
+    #[test]
+    fn a_panic_while_holding_the_registry_does_not_break_later_uploads() {
+        let _home = crate::test_support::HomeGuard::new();
+        let poisoned = std::thread::spawn(|| {
+            let _guard = upload_registry().lock();
+            panic!("simulated failure while holding the upload registry");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(upload_registry().is_poisoned());
+
+        reap_expired_uploads();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runner = format!("chunk-poison-{}", uuid::Uuid::new_v4());
+        let id = uuid::Uuid::new_v4();
+        upload_runner_file_chunk(Some(request(workspace.path(), &runner, id)), &trusted())
+            .expect("upload after a poisoned registry");
+        abort_runner_file_chunk_upload(
+            Some(json!({"runner_id": runner, "workspace_root": workspace.path().display().to_string(), "upload_id": id})),
+            &trusted(),
+        )
+        .expect("abort after a poisoned registry");
+    }
+
     #[test]
     fn abort_and_expiry_remove_partial_uploads() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-cleanup-{}", uuid::Uuid::new_v4());
         let id = uuid::Uuid::new_v4();
@@ -1316,14 +1364,17 @@ mod tests {
         let temp = upload_staging_root()
             .expect("staging")
             .join(format!("{id}.payload"));
-        upload_registry()
-            .lock()
-            .expect("registry")
-            .uploads
-            .values_mut()
-            .find(|upload| upload.temp == temp)
-            .expect("expiry candidate")
-            .updated_at = Instant::now() - UPLOAD_EXPIRY;
+        {
+            let mut registry = lock_upload_registry();
+            let found = registry
+                .uploads
+                .values_mut()
+                .find(|upload| upload.temp == temp)
+                .map(|upload| upload.updated_at = Instant::now() - UPLOAD_EXPIRY)
+                .is_some();
+            drop(registry);
+            assert!(found, "expiry candidate");
+        }
         upload_runner_file_chunk(
             Some(request(
                 workspace.path(),
@@ -1339,6 +1390,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn chunk_upload_refuses_a_predictable_temp_symlink() {
+        let _home = crate::test_support::HomeGuard::new();
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().expect("workspace");
@@ -1363,6 +1415,7 @@ mod tests {
 
     #[test]
     fn chunk_upload_binds_its_destination_and_cleans_only_its_recorded_file() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let runner = format!("chunk-binding-{}", uuid::Uuid::new_v4());
         let id = uuid::Uuid::new_v4();
@@ -1390,6 +1443,7 @@ mod tests {
 
     #[test]
     fn restart_recovery_reaps_only_private_recorded_uploads() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let upload_id = uuid::Uuid::new_v4();
         let (upload, record, _file) = create_upload_file(
@@ -1414,6 +1468,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn publish_refuses_a_temp_path_swapped_after_descriptor_validation_begins() {
+        let _home = crate::test_support::HomeGuard::new();
         let workspace = tempfile::tempdir().expect("workspace");
         let temp = workspace.path().join(".evidence.bin.upload");
         let destination = workspace.path().join("evidence.bin");
