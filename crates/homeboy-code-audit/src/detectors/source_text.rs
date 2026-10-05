@@ -6,8 +6,8 @@
 //! is a boundary leak. #6857 named this for the whole detector family; the
 //! `core-agnostic-source` policy reported ~80% false positives because of it.
 //!
-//! [`SourceMasks`] scans a file once and returns two same-shaped projections of
-//! every line, with the excluded regions blanked to spaces so byte offsets, line
+//! [`SourceMasks`] scans a file once and returns three same-shaped projections of
+//! every line, with the excluded regions blanked to spaces so line
 //! numbers, and token boundaries all survive:
 //!
 //! - [`SourceMasks::code`] — comments removed, everything else kept. What the
@@ -17,6 +17,8 @@
 //!   names, filenames, error substrings — so a term whose bare word is ordinary
 //!   vocabulary (`node`, `playground`) can be scoped to this projection and stop
 //!   matching local variables without losing the leaks that matter.
+//! - [`SourceMasks::syntax`] — comments and literals removed. Structural code
+//!   for detectors that count delimiters or discover attributes and functions.
 //!
 //! This is a lexer, not a parser: it tracks comments, strings, and escapes, and
 //! deliberately does not resolve macros, heredocs, or preprocessor conditionals.
@@ -27,11 +29,12 @@ use super::conventions::Language;
 /// (`"car", "go"`) still see the join between two adjacent literals.
 const SEAM_PUNCTUATION: [char; 2] = [',', '+'];
 
-/// Comment-stripped and string-only projections of one file, line by line.
+/// Comment-stripped, string-only, and structural projections of one file.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SourceMasks {
     code: Vec<String>,
     strings: Vec<String>,
+    syntax: Vec<String>,
 }
 
 impl SourceMasks {
@@ -48,6 +51,14 @@ impl SourceMasks {
     /// Line with everything but string-literal spans blanked. Index is 0-based.
     pub(crate) fn strings(&self, line_index: usize) -> &str {
         self.strings
+            .get(line_index)
+            .map(String::as_str)
+            .unwrap_or("")
+    }
+
+    /// Line with comments and literals blanked, retaining structural code.
+    pub(crate) fn syntax(&self, line_index: usize) -> &str {
+        self.syntax
             .get(line_index)
             .map(String::as_str)
             .unwrap_or("")
@@ -102,6 +113,7 @@ impl<'a> Scanner<'a> {
     fn run(self) -> SourceMasks {
         let mut code_line = String::new();
         let mut string_line = String::new();
+        let mut syntax_line = String::new();
         let mut masks = SourceMasks::default();
         let mut state = State::Code;
         let mut index = 0usize;
@@ -112,6 +124,7 @@ impl<'a> Scanner<'a> {
             if ch == '\n' {
                 masks.code.push(std::mem::take(&mut code_line));
                 masks.strings.push(std::mem::take(&mut string_line));
+                masks.syntax.push(std::mem::take(&mut syntax_line));
                 // A line comment ends at the newline; every other state spans it.
                 if state == State::LineComment {
                     state = State::Code;
@@ -132,6 +145,10 @@ impl<'a> Scanner<'a> {
                     _ if SEAM_PUNCTUATION.contains(&ch) => ch,
                     _ => blank(ch),
                 });
+                syntax_line.push(match class {
+                    Class::Code => ch,
+                    _ => blank(ch),
+                });
             }
             state = next_state;
             index += consumed;
@@ -139,6 +156,7 @@ impl<'a> Scanner<'a> {
 
         masks.code.push(code_line);
         masks.strings.push(string_line);
+        masks.syntax.push(syntax_line);
         masks
     }
 

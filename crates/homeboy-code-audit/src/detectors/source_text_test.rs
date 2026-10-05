@@ -104,6 +104,18 @@ fn rust_char_literals_are_string_spans() {
 }
 
 #[test]
+fn syntax_projection_keeps_only_structural_code() {
+    let source = "fn f<'a>() { let c = '{'; let s = r#\"}\"#; /* { */ } // }\n";
+    let masks = masks(source);
+    let syntax = masks.syntax(0);
+    assert_eq!(syntax.chars().filter(|ch| *ch == '{').count(), 1);
+    assert_eq!(syntax.chars().filter(|ch| *ch == '}').count(), 1);
+    assert!(syntax.contains("<'a>"));
+    assert_eq!(syntax.chars().count(), source.trim_end().chars().count());
+    assert!(masks.syntax(99).is_empty());
+}
+
+#[test]
 fn string_projection_keeps_only_literals() {
     let masks = masks("run_tool(\"florp-run\", node);\n");
 
