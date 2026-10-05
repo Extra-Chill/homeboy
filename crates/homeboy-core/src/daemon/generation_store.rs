@@ -195,6 +195,49 @@ pub(super) fn seed(state: &DaemonState) -> Result<()> {
     })
 }
 
+/// Move admission to the serving daemon when the registered admission owner is
+/// proven dead (#15456).
+///
+/// `seed` only creates a registry; it never touches an existing one. A daemon
+/// restarted in place (a service-managed runner after a crash or upgrade) used
+/// to leave `admission_owner` pointing at the dead generation, so every status
+/// probe followed that dead lease and reported the live daemon as not ready.
+///
+/// Only a dead owner is replaced: a live owner (the blue-green case, where the
+/// previous generation still serves its admitted work) keeps admission. The
+/// dead generation's entry, job routing, and active-job count are preserved,
+/// so its work stays attributable for recovery. Returns whether admission moved.
+pub(super) fn claim_admission_from_dead_owner(
+    serving: &DaemonState,
+    owner_is_dead: impl Fn(&LocalDaemonEndpoint) -> bool,
+) -> Result<bool> {
+    mutate_registry(|registry| {
+        let Some(registry) = registry.as_mut() else {
+            return Ok(false);
+        };
+        let serving_lease = serving.lease_id.as_str();
+        let owner = registry.generations.admission_owner.clone();
+        if owner == serving_lease {
+            return Ok(false);
+        }
+        let owner_dead = registry
+            .generations
+            .generations
+            .get(&owner)
+            .is_none_or(|entry| owner_is_dead(&entry.endpoint));
+        if !owner_dead {
+            return Ok(false);
+        }
+        registry.generations.begin(
+            serving_lease.to_string(),
+            LocalDaemonEndpoint::from_state(serving),
+        );
+        Ok(registry
+            .generations
+            .activate_preserving_drained(serving_lease))
+    })
+}
+
 pub(super) fn admitting() -> Result<Option<LocalDaemonEndpoint>> {
     Ok(read_registry()?.and_then(|registry| {
         registry
@@ -640,6 +683,67 @@ mod tests {
                 paths: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn restarted_daemon_claims_admission_from_a_dead_owner() {
+        with_isolated_home(|_| {
+            // A generation that died while still owning admission and one job.
+            let dead = state("DEAD", "127.0.0.1:1001");
+            seed(&dead).expect("seed dead owner");
+            record_job("job-dead", "DEAD").expect("record dead owner job");
+
+            let restarted = state("LIVE", "127.0.0.1:1002");
+            seed(&restarted).expect("seed is a no-op on an existing registry");
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "DEAD"
+            );
+
+            let moved =
+                claim_admission_from_dead_owner(&restarted, |endpoint| endpoint.lease_id == "DEAD")
+                    .expect("claim");
+            assert!(moved);
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "LIVE"
+            );
+            // The dead generation keeps its job routing for recovery.
+            assert_eq!(
+                endpoint_for_job("job-dead")
+                    .expect("route")
+                    .expect("dead")
+                    .lease_id,
+                "DEAD"
+            );
+
+            // Idempotent once the serving daemon owns admission.
+            assert!(!claim_admission_from_dead_owner(&restarted, |_| true).expect("again"));
+        });
+    }
+
+    #[test]
+    fn live_admission_owner_is_never_displaced() {
+        with_isolated_home(|_| {
+            let live = state("A", "127.0.0.1:1001");
+            seed(&live).expect("seed A");
+            let candidate = state("B", "127.0.0.1:1002");
+            let moved = claim_admission_from_dead_owner(&candidate, |_| false).expect("claim");
+            assert!(!moved);
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "A"
+            );
+            assert!(endpoint_for_lease("B").expect("lookup").is_none());
+        });
+    }
+
+    #[test]
+    fn no_registry_means_nothing_to_claim() {
+        with_isolated_home(|_| {
+            let serving = state("ONLY", "127.0.0.1:1001");
+            assert!(!claim_admission_from_dead_owner(&serving, |_| true).expect("claim"));
+        });
     }
 
     #[test]
