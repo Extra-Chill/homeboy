@@ -1628,10 +1628,32 @@ pub fn serve_with_analysis_runner<R>(addr: SocketAddr, analysis_runner: R) -> Re
 where
     R: AnalysisJobRunner,
 {
+    // The supervised path keeps the blocking accept loop and its existing
+    // lifecycle; only a foreground serve opts into the shutdown flag.
     let owner_lock = acquire_daemon_owner_lock()?;
     let listener = TcpListener::bind(addr)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
     serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None, None)
+}
+
+pub fn serve_with_analysis_runner_and_shutdown<R>(
+    addr: SocketAddr,
+    analysis_runner: R,
+    shutdown: Arc<AtomicBool>,
+) -> Result<DaemonState>
+where
+    R: AnalysisJobRunner,
+{
+    let owner_lock = acquire_daemon_owner_lock()?;
+    let listener = TcpListener::bind(addr)
+        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
+    serve_listener_with_analysis_runner_locked(
+        listener,
+        analysis_runner,
+        owner_lock,
+        None,
+        Some(shutdown),
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1678,6 +1700,37 @@ pub fn serve_listener_until_shutdown(
     )
 }
 
+/// The shutdown flag of the daemon served by this process, if any. A foreground
+/// `daemon serve` records no startup token, so no other process may signal it
+/// by PID; a lease-bound lifecycle stop instead asks the daemon to stop itself
+/// through this flag (#15436).
+static SERVING_SHUTDOWN: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
+/// Request a graceful self-stop when `lease_id` is this process's own live,
+/// tokenless lease. Returns `true` when the stop was requested.
+fn request_own_foreground_stop(lease_id: &str) -> bool {
+    let Some(flag) = SERVING_SHUTDOWN.get() else {
+        return false;
+    };
+    let Ok(path) = paths::daemon_state_file() else {
+        return false;
+    };
+    let Ok(validation) = validate_lease_file(&path) else {
+        return false;
+    };
+    let Some(state) = validation.state else {
+        return false;
+    };
+    if state.lease_id != lease_id
+        || state.pid != std::process::id()
+        || !state.startup_token.is_empty()
+    {
+        return false;
+    }
+    flag.store(true, Ordering::SeqCst);
+    true
+}
+
 fn serve_listener_with_analysis_runner_locked<R>(
     listener: TcpListener,
     analysis_runner: R,
@@ -1688,6 +1741,15 @@ fn serve_listener_with_analysis_runner_locked<R>(
 where
     R: AnalysisJobRunner,
 {
+    if let Some(flag) = shutdown.as_ref() {
+        let _ = SERVING_SHUTDOWN.set(Arc::clone(flag));
+        listener.set_nonblocking(true).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("configure daemon listener".to_string()),
+            )
+        })?;
+    }
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
@@ -1764,7 +1826,23 @@ where
     }
     let mut accepted = 0;
     let mut serve_result = Ok(());
-    for stream in listener.incoming() {
+    loop {
+        if shutdown
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            break;
+        }
+        let stream = match listener.accept() {
+            // The listener polls non-blocking so shutdown is observed; served
+            // connections stay blocking (BSD sockets inherit O_NONBLOCK).
+            Ok((stream, _)) => stream.set_nonblocking(false).map(|()| stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            Err(error) => Err(error),
+        };
         match stream {
             Ok(stream) => {
                 if shutdown
@@ -1823,6 +1901,44 @@ where
     let _ = schedule_ticker.join();
     let _ = orchestration_reconciler.join();
     let _ = upload_reaper.join();
+    if shutdown
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        // Only a drained daemon is a clean stop. Controller work runs on
+        // detached threads that end with this process; with jobs still active
+        // keep the lease so dead-lease recovery resumes or reconciles them.
+        let active_jobs = JobStore::active_count_at_path(paths::daemon_jobs_file()?)?;
+        let clean = active_jobs == 0;
+        write_termination_evidence(&DaemonTerminationEvidence {
+            classification: if clean {
+                DaemonTerminationClassification::CleanStop
+            } else {
+                DaemonTerminationClassification::UnexpectedExit
+            },
+            observed_at: chrono::Utc::now().to_rfc3339(),
+            lease_id: Some(state.lease_id.clone()),
+            pid: Some(state.pid),
+            binary_identity: Some(state.build_identity.display.clone()),
+            active_jobs,
+            resource_evidence:
+                "unavailable: foreground shutdown does not collect OS resource snapshots"
+                    .to_string(),
+            os_evidence: "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
+            exit_code: Some(0),
+            signal: None,
+            supervisor_signal: None,
+            stdout: None,
+            stderr: None,
+            stop_requested: clean,
+        })?;
+        if clean {
+            remove_lease_if_identity_matches(
+                &paths::daemon_state_file()?,
+                &DaemonLeaseIdentity::from_state(&state),
+            )?;
+        }
+    }
     serve_result.map(|()| state)
 }
 
@@ -8342,10 +8458,15 @@ where
     );
     write_http_response(stream, &response)?;
     if let Some(request) = lifecycle_stop {
-        // The accepted response reaches the controller before the daemon signals
-        // itself. The exact lease and durable-job gate are rechecked under the
-        // daemon lifecycle lock immediately before that signal.
-        let _ = stop_with_force_for_lease(&request.lease_id, request.force);
+        // A foreground daemon has no startup token to signal by; it stops
+        // itself through its serve loop, which drains and releases the lease.
+        // The idle gate was validated before the accepted response (#15436).
+        if !request_own_foreground_stop(&request.lease_id) {
+            // The accepted response reaches the controller before the daemon
+            // signals itself. The exact lease and durable-job gate are
+            // rechecked under the daemon lifecycle lock before that signal.
+            let _ = stop_with_force_for_lease(&request.lease_id, request.force);
+        }
     }
     Ok(())
 }

@@ -2288,7 +2288,18 @@ fn warn_pending_daemon_restart(reason: &str) {
 }
 
 fn converge_invoking_daemon() -> Result<bool> {
-    homeboy_core::daemon::converge_current_build_idle_daemon().map_err(upgrade_daemon_startup_error)
+    match homeboy_core::daemon::converge_current_build_idle_daemon() {
+        // The binary swap already succeeded. A resident daemon Homeboy may not
+        // restart (externally supervised, or busy) is a pending restart, not a
+        // failed upgrade (#15436).
+        Err(error)
+            if error.details.get("restart_required") == Some(&serde_json::Value::Bool(true)) =>
+        {
+            warn_pending_daemon_restart(&error.message);
+            Ok(false)
+        }
+        result => result.map_err(upgrade_daemon_startup_error),
+    }
 }
 
 fn upgrade_daemon_startup_error(error: Error) -> Error {
@@ -2323,8 +2334,15 @@ fn upgrade_daemon_start_required(cause: &str) -> Error {
 
 fn start_installed_daemon(installed_identity: &str, stop_lease_id: Option<&str>) -> Result<bool> {
     if let Some(lease_id) = stop_lease_id {
-        homeboy_core::daemon::stop_for_lease(lease_id)
-            .map_err(|error| upgrade_daemon_start_required(&error.message))?;
+        // A refused stop leaves the old daemon serving; starting a second one
+        // would only contend for its owner lock. Report it pending (#15436).
+        if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {
+            warn_pending_daemon_restart(&format!(
+                "the stale daemon could not be stopped: {}",
+                error.message
+            ));
+            return Ok(false);
+        }
     }
     let binary = active_binary_path()?;
     let mut command = Command::new(&binary);

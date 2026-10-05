@@ -182,8 +182,15 @@ pub(crate) fn freshness_report_from_validation(
     active_jobs: usize,
 ) -> DaemonFreshnessReport {
     let state = validation.state.as_ref();
+    // A live daemon started outside Homeboy's launcher (`daemon serve` under
+    // systemd) records no startup token, and the lease-bound stop refuses to
+    // signal it, so advertising a stop/start repair would be a plan that can
+    // never apply. Its supervisor owns its restart (#15436).
+    let externally_supervised =
+        validation.running && state.is_some_and(|state| state.startup_token.is_empty());
     let restartable = !validation.fresh
         && active_jobs == 0
+        && !externally_supervised
         && !matches!(
             validation.stale_reason_code,
             Some(DaemonStaleReasonCode::LeaseCorrupt | DaemonStaleReasonCode::TransportUnreachable)

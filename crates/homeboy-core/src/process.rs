@@ -866,6 +866,51 @@ fn linux_process_state_from_stat(stat: &str) -> Option<char> {
 /// signal, giving long-running loops a cooperative shutdown flag. The `context`
 /// label is woven into the error message so callers (reverse runner worker,
 /// preview client, ...) surface a distinct diagnostic on failure (#5092).
+/// Set by the async-signal-safe SIGTERM handler installed by
+/// [`install_terminate_handler`].
+static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn record_terminate(_signal: libc::c_int) {
+    TERMINATE_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+/// Route SIGTERM to a graceful-stop flag instead of the default immediate
+/// exit, and forward it into `stop`. Supervisors (systemd, launchd,
+/// containers) stop a foreground server with SIGTERM and expect it to drain
+/// and exit; the default disposition killed it mid-write instead. Scoped to
+/// callers that poll `stop` promptly; other `install_shutdown_handler` users
+/// keep the default SIGTERM behavior.
+pub fn install_terminate_handler(stop: Arc<AtomicBool>) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let handler = record_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        // SAFETY: the handler only performs an atomic store.
+        if unsafe { libc::signal(libc::SIGTERM, handler) } == libc::SIG_ERR {
+            return Err(Error::internal_unexpected(
+                "install SIGTERM handler: signal(2) failed".to_string(),
+            ));
+        }
+        std::thread::Builder::new()
+            .name("homeboy-sigterm".to_string())
+            .spawn(move || loop {
+                if TERMINATE_REQUESTED.load(Ordering::SeqCst) {
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            })
+            .map_err(|error| {
+                Error::internal_unexpected(format!("spawn SIGTERM watcher: {error}"))
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = stop;
+    }
+    Ok(())
+}
+
 pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<()> {
     let context = context.to_string();
     ctrlc::set_handler(move || {

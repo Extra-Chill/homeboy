@@ -21,8 +21,11 @@ fn stopped_command_cannot_mutate_or_resurrect_controller() {
                 .expect("CLI output");
             assert!(
                 output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+                "`homeboy {}` exited {:?}\nstderr: {}\nstdout: {}",
+                args.join(" "),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
             );
             serde_json::from_slice::<Value>(&output.stdout).expect("CLI JSON")["data"].clone()
         };
