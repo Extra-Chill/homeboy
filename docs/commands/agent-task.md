@@ -587,6 +587,12 @@ single `fanout_id`. The durable parent retains a sanitized per-cell manifest;
 private gate commands, provider configuration, and evidence file paths remain
 only in the child Cook recipes.
 
+A cell with `repo`, `task_url`, `base`, `head`, and an absent native
+`to_worktree` declares creation intent. Cook creates that exact destination
+after durable child admission and binds its path and base revision before
+provider execution. Preview leaves it absent; an explicit `cwd` or `workspace`
+continues to select an existing source checkout.
+
 #### Multi-Issue Cook Batch
 
 Use `agent-task fanout cook-batch` when an operator has a set of GitHub issues
