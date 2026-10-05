@@ -894,26 +894,53 @@ fn run_verified_target_admission(
     if output.status.success() {
         return Ok(());
     }
-    let (stderr, _) = bound_captured_stream(&output.stderr, UPGRADE_CAPTURE_LIMIT_BYTES);
-    let (stdout, _) = bound_captured_stream(&output.stdout, UPGRADE_CAPTURE_LIMIT_BYTES);
-    let detail = if stderr.trim().is_empty() {
-        stdout.trim()
-    } else {
-        stderr.trim()
-    };
-    Err(Error::validation_invalid_argument(
+    let detail = upgrade_failure_detail(&output.stderr, &output.stdout).unwrap_or_default();
+    let mut error = Error::validation_invalid_argument(
         "controller_upgrade",
         format!(
             "verified source candidate refused controller replacement{}",
             if detail.is_empty() {
                 String::new()
             } else {
-                format!(": {detail}")
+                format!(": {}", bounded_upgrade_cause(&detail))
             }
         ),
         None,
         None,
-    ))
+    );
+    error.details["kind"] = serde_json::json!("candidate_admission_refused");
+    error.details["phase"] = serde_json::json!("running_candidate_admission");
+    error.details["error"] = serde_json::json!(detail);
+    error.details["cause"] = serde_json::json!(bounded_upgrade_cause(&detail));
+    if let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+        if envelope["schema"] == "homeboy/command-result/v3" && envelope["success"] == false {
+            if let Some(message) = envelope["diagnostics"]["message"].as_str() {
+                error.message = bounded_upgrade_cause(message);
+                error.details["cause"] = serde_json::json!(error.message);
+            }
+            error.details["candidate_diagnostics"] = envelope["diagnostics"].clone();
+            let recovery = envelope["diagnostics"]["details"]["tried"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .take(8)
+                .map(bounded_upgrade_cause)
+                .collect::<Vec<_>>();
+            error.details["diagnostic_references"] = serde_json::json!(recovery);
+        }
+    }
+    Err(error)
+}
+
+pub(super) fn bounded_upgrade_cause(detail: &str) -> String {
+    const MAX_CHARS: usize = 1000;
+    let mut chars = detail.chars();
+    let mut result: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        result.push_str(" [cause truncated; full evidence retained with upgrade operation]");
+    }
+    result
 }
 
 fn binary_swap_failure(
@@ -1799,6 +1826,14 @@ fn upgrade_failure_error(
         format!("{} upgrade failed: {}", method.as_str(), error_detail),
         Some("execute upgrade".to_string()),
     );
+    error.message = format!(
+        "{} upgrade failed: {}",
+        method.as_str(),
+        bounded_upgrade_cause(error_detail)
+    );
+    error.details["kind"] = serde_json::json!("upgrade_command_failed");
+    error.details["phase"] = serde_json::json!("candidate_execution");
+    error.details["cause"] = serde_json::json!(error.message);
 
     if matches!(method, InstallMethod::Binary | InstallMethod::Secondary)
         && error_detail.contains("404")
