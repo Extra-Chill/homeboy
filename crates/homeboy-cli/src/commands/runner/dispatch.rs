@@ -783,7 +783,7 @@ impl RefreshProgress {
             let mut progress = refresh_progress_payload(&heartbeat_mode, true, started);
             progress["run_id"] = serde_json::Value::String(heartbeat_run_id.clone());
             eprintln!("HOMEBOY_REFRESH_PROGRESS {progress}");
-            let _ = store.update_running_run_metadata(
+            let _ = store.patch_running_run_metadata(
                 &heartbeat_run_id,
                 serde_json::json!({
                     "dry_run": heartbeat_dry_run,
@@ -1094,6 +1094,13 @@ mod tests {
                 },
             )
             .expect("admit refresh progress");
+            let admission_metadata = progress
+                .admission
+                .store
+                .get_run(&progress.admission.run_id)
+                .expect("read admitted run")
+                .expect("admitted run")
+                .metadata_json;
             thread::sleep(Duration::from_millis(1200));
             let store = ObservationStore::open_initialized().expect("observation store");
             let run = store
@@ -1115,6 +1122,14 @@ mod tests {
                 "{heartbeat}"
             );
             assert!(heartbeat["elapsed_seconds"].is_number(), "{heartbeat}");
+            assert_eq!(
+                run.metadata_json["homeboy_run_owner"],
+                admission_metadata["homeboy_run_owner"]
+            );
+            assert_eq!(
+                run.metadata_json["homeboy_run_owner"]["pid"],
+                std::process::id()
+            );
             drop(progress);
         });
     }

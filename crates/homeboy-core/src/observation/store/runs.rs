@@ -1055,6 +1055,36 @@ impl ObservationStore {
         self.get_run(run_id)
     }
 
+    /// Apply a JSON merge patch while a run is active. Progress writers use
+    /// this instead of replacing the admission owner and other durable context.
+    /// The merge and active-state fence happen in the same SQLite statement.
+    pub fn patch_running_run_metadata(
+        &self,
+        run_id: &str,
+        patch: serde_json::Value,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        if !patch.is_object() {
+            return Err(Error::validation_invalid_argument(
+                "metadata_patch",
+                "running run metadata patch must be an object",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        let serialized = serialize_metadata(&patch)?;
+        let rows = execute_with_retry("patch running run metadata", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_patch(metadata_json, ?1) WHERE id = ?2 AND status = ?3",
+                params![serialized, run_id, RunStatus::Running.as_str()],
+            )
+        })?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        self.get_run(run_id)
+    }
+
     /// Start a durable detached-owner handoff. A watcher treats `transferring`
     /// as live only until its recorded deadline, preventing an exited launcher
     /// from being mistaken for the worker before that worker acknowledges.
@@ -2089,6 +2119,79 @@ impl ObservationStore {
 mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
+
+    #[test]
+    fn progress_patch_preserves_owner_and_context_for_interrupted_run_detection() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("runner_refresh_homeboy")
+                        .metadata(serde_json::json!({
+                            "progress": { "phase": "refresh" },
+                            "evidence": { "job_id": "runner-job" }
+                        }))
+                        .build(),
+                )
+                .expect("admit run");
+            let mut metadata = run.metadata_json;
+            // Persist an exited owner, as an interrupted foreground refresh leaves.
+            metadata["homeboy_run_owner"]["pid"] = serde_json::json!(u32::MAX);
+            store
+                .update_run_metadata(&run.id, metadata.clone())
+                .expect("record interrupted owner");
+            let updated = store
+                .patch_running_run_metadata(
+                    &run.id,
+                    serde_json::json!({ "progress": { "heartbeat": true } }),
+                )
+                .expect("heartbeat patch")
+                .expect("active run");
+            assert_eq!(
+                updated.metadata_json["homeboy_run_owner"],
+                metadata["homeboy_run_owner"]
+            );
+            assert_eq!(updated.metadata_json["evidence"], metadata["evidence"]);
+            assert_eq!(updated.metadata_json["progress"]["phase"], "refresh");
+            assert_eq!(updated.metadata_json["progress"]["heartbeat"], true);
+            assert_eq!(
+                crate::observation::running_status_note(&updated).as_deref(),
+                Some(
+                    "owner process is not running; run may be stale; run `homeboy runs reconcile`"
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn progress_patch_cannot_overwrite_a_terminal_winner() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner_refresh_homeboy").build())
+                .expect("admit run");
+            let terminal = store
+                .finish_running_run(
+                    &run.id,
+                    RunStatus::Error,
+                    Some(serde_json::json!({
+                        "error": "fetch deadline exceeded"
+                    })),
+                )
+                .expect("finish run")
+                .expect("terminal winner");
+            assert!(store
+                .patch_running_run_metadata(
+                    &run.id,
+                    serde_json::json!({
+                        "progress": { "state": "running" }
+                    })
+                )
+                .expect("late heartbeat")
+                .is_none());
+            assert_eq!(store.get_run(&run.id).unwrap().unwrap(), terminal);
+        });
+    }
 
     fn imported_run(id: &str, status: &str) -> RunRecord {
         RunRecord {
