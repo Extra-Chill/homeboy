@@ -1087,12 +1087,12 @@ pub struct DaemonStateLossRecoveryResult {
     pub replacement: DaemonStartResult,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStopResult {
     pub stopped: bool,
     /// The exact requested lease was already absent after an idle-work check.
     /// This is a successful idempotent lease-bound stop, not a failed stop.
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub already_absent: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
