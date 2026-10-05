@@ -695,17 +695,25 @@ mod tests {
 
             let restarted = state("LIVE", "127.0.0.1:1002");
             seed(&restarted).expect("seed is a no-op on an existing registry");
-            assert_eq!(admitting().expect("admitting").expect("owner").lease_id, "DEAD");
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "DEAD"
+            );
 
-            let moved = claim_admission_from_dead_owner(&restarted, |endpoint| {
-                endpoint.lease_id == "DEAD"
-            })
-            .expect("claim");
+            let moved =
+                claim_admission_from_dead_owner(&restarted, |endpoint| endpoint.lease_id == "DEAD")
+                    .expect("claim");
             assert!(moved);
-            assert_eq!(admitting().expect("admitting").expect("owner").lease_id, "LIVE");
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "LIVE"
+            );
             // The dead generation keeps its job routing for recovery.
             assert_eq!(
-                endpoint_for_job("job-dead").expect("route").expect("dead").lease_id,
+                endpoint_for_job("job-dead")
+                    .expect("route")
+                    .expect("dead")
+                    .lease_id,
                 "DEAD"
             );
 
@@ -720,10 +728,12 @@ mod tests {
             let live = state("A", "127.0.0.1:1001");
             seed(&live).expect("seed A");
             let candidate = state("B", "127.0.0.1:1002");
-            let moved =
-                claim_admission_from_dead_owner(&candidate, |_| false).expect("claim");
+            let moved = claim_admission_from_dead_owner(&candidate, |_| false).expect("claim");
             assert!(!moved);
-            assert_eq!(admitting().expect("admitting").expect("owner").lease_id, "A");
+            assert_eq!(
+                admitting().expect("admitting").expect("owner").lease_id,
+                "A"
+            );
             assert!(endpoint_for_lease("B").expect("lookup").is_none());
         });
     }

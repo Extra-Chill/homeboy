@@ -7159,15 +7159,18 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
             let address = listener.local_addr().expect("listener address");
             let server = std::thread::spawn(move || serve_listener_for_requests(listener, 1));
-            let response = reqwest::blocking::get(format!("http://{address}/health"))
-                .expect("health request");
+            let response =
+                reqwest::blocking::get(format!("http://{address}/health")).expect("health request");
             assert!(response.status().is_success());
             let served = server.join().expect("join daemon").expect("daemon served");
 
             let owner = generation_store::admitting()
                 .expect("admitting")
                 .expect("owner");
-            assert_eq!(owner.lease_id, served.lease_id, "the serving daemon owns admission");
+            assert_eq!(
+                owner.lease_id, served.lease_id,
+                "the serving daemon owns admission"
+            );
             assert!(
                 generation_store::endpoint_for_lease("dead-lease")
                     .expect("lookup")
