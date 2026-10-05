@@ -1770,6 +1770,19 @@ where
     };
     let state = write_state(local_addr)?;
     generation_store::seed(&state)?;
+    // A daemon restarted in place must not leave admission with a dead
+    // generation, or every status probe reports this live daemon as not
+    // ready (#15456). A live previous owner (blue-green) keeps admission.
+    if !generation_store::bypassed() {
+        generation_store::claim_admission_from_dead_owner(&state, |endpoint| {
+            validate_lease_file(&Path::new(&endpoint.state_dir).join("state.json"))
+                .map(|validation| {
+                    !validation.running
+                        && validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+                })
+                .unwrap_or(false)
+        })?;
+    }
     let job_store = JobStore::open_without_reconciliation(paths::daemon_jobs_file()?)
         .map(|store| store.with_daemon_lease(state.lease_id.clone()))?;
     // If this process died after the durable job-store admission but before its
@@ -7094,6 +7107,73 @@ mod tests {
                     .status
                     .is_terminal()
             }));
+        });
+    }
+
+    #[test]
+    fn restarted_daemon_takes_admission_from_a_dead_generation() {
+        // #15456: a service-restarted daemon left admission with a dead
+        // generation, so status followed the dead lease and the live daemon
+        // was reported as not ready.
+        with_isolated_home(|home| {
+            let dead_pid = {
+                let mut child = std::process::Command::new("true")
+                    .spawn()
+                    .expect("spawn short-lived process");
+                let pid = child.id();
+                child.wait().expect("reap short-lived process");
+                pid
+            };
+            let dead_dir = home.path().join("dead-generation");
+            std::fs::create_dir_all(&dead_dir).expect("dead generation dir");
+            let dead = DaemonState {
+                schema: DAEMON_LEASE_SCHEMA.to_string(),
+                lease_id: "dead-lease".to_string(),
+                startup_token: "dead".to_string(),
+                address: "127.0.0.1:1".to_string(),
+                pid: dead_pid,
+                state_path: dead_dir.join("state.json").display().to_string(),
+                started_at: "then".to_string(),
+                last_seen_at: "then".to_string(),
+                build_identity: crate::build_identity::current(),
+                binary_sha256: None,
+                runtime_paths: DaemonRuntimeSnapshot {
+                    loaded_at: "then".to_string(),
+                    paths: Vec::new(),
+                },
+            };
+            std::fs::write(
+                dead_dir.join("state.json"),
+                serde_json::to_vec(&dead).expect("serialize dead lease"),
+            )
+            .expect("write dead lease");
+            generation_store::seed(&dead).expect("seed dead admission owner");
+            assert_eq!(
+                generation_store::admitting()
+                    .expect("admitting")
+                    .expect("owner")
+                    .lease_id,
+                "dead-lease"
+            );
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let server = std::thread::spawn(move || serve_listener_for_requests(listener, 1));
+            let response = reqwest::blocking::get(format!("http://{address}/health"))
+                .expect("health request");
+            assert!(response.status().is_success());
+            let served = server.join().expect("join daemon").expect("daemon served");
+
+            let owner = generation_store::admitting()
+                .expect("admitting")
+                .expect("owner");
+            assert_eq!(owner.lease_id, served.lease_id, "the serving daemon owns admission");
+            assert!(
+                generation_store::endpoint_for_lease("dead-lease")
+                    .expect("lookup")
+                    .is_some(),
+                "the dead generation stays registered for recovery"
+            );
         });
     }
 
