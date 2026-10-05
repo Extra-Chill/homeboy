@@ -36,5 +36,7 @@ mod review_dirty_preflight;
 mod review_option_order;
 #[path = "cli_binary/rig_local_artifact_registration.rs"]
 mod rig_local_artifact_registration;
+#[path = "cli_binary/runner_job_list.rs"]
+mod runner_job_list;
 #[path = "cli_binary/runner_refresh_progress.rs"]
 mod runner_refresh_progress;
