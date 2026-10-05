@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.40] - 2026-10-05
+
+### Fixed
+- stop a foreground daemon on SIGTERM and by its lease
+
 ## [0.399.39] - 2026-10-05
 
 ### Fixed
