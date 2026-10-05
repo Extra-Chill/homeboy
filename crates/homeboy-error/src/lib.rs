@@ -68,14 +68,8 @@ impl ExecutableAction {
 
 /// POSIX-quote a single argument for rendering a command back to the user.
 ///
-/// Kept byte-for-byte compatible with
-/// `homeboy_engine_primitives::shell::quote_arg`. `homeboy-error` is *below*
-/// that crate in the dependency graph, so it cannot import the primitive and
-/// this duplicate is a genuine structural constraint rather than drift.
-///
-/// It is `pub` solely so `homeboy-engine-primitives` (which depends on this
-/// crate) can assert the byte-equality this comment claims. Prefer
-/// `shell::quote_arg` in any crate that can reach it.
+/// This is the shared implementation used by error action rendering and
+/// re-exported as `homeboy_engine_primitives::shell::quote_arg`.
 pub fn posix_quote_arg(arg: &str) -> String {
     if arg.is_empty() {
         return "''".to_string();
@@ -2190,7 +2184,18 @@ mod ergonomic_constructor_tests {
 
     #[test]
     fn executable_action_renders_arguments_with_the_shared_posix_quoting_contract() {
-        let values = ["apostrophe: it's", "two words", "$HOME;*[]"];
+        let values = [
+            "",
+            "apostrophe: it's",
+            "two words",
+            "tabs\tand\nnewlines",
+            "$HOME;*[]",
+            "$(exit 99)",
+            "`exit 98`",
+            "double\"quote",
+            "trailing'",
+            "unicode-é中",
+        ];
         let action = ExecutableAction::new(
             "test.argv",
             "test argv",
@@ -2207,13 +2212,9 @@ mod ergonomic_constructor_tests {
             .expect("run rendered command");
 
         assert!(output.status.success());
-        let actual: Vec<_> = output
-            .stdout
-            .split(|byte| *byte == b'\0')
-            .filter(|value| !value.is_empty())
-            .map(|value| std::str::from_utf8(value).expect("utf8 action argument"))
-            .collect();
-        assert_eq!(actual, values);
+        let mut expected = values.join("\0").into_bytes();
+        expected.push(b'\0');
+        assert_eq!(output.stdout, expected);
     }
 
     #[test]

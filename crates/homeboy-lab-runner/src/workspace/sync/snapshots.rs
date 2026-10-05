@@ -24,6 +24,48 @@ use super::super::types::{
 use super::super::util::{ssh_client_for_runner, validate_absolute_path};
 use super::{shell_arg, workspace_repo_from_path, WORKSPACE_METADATA_FILE};
 
+/// Incremental reuse is a source lookup, not a full runner inventory. The
+/// directory prefix comes from the same writer that allocates snapshot paths;
+/// callers still validate exact source identity, policy and content manifests.
+pub(super) fn workspace_snapshots_for_source(
+    runner: &crate::Runner,
+    local_path: &Path,
+    control: &super::super::control::WorkspaceControl,
+) -> Result<Vec<RunnerWorkspaceSnapshotEntry>> {
+    control.checkpoint()?;
+    let root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "snapshot lookup requires workspace_root",
+            None,
+            None,
+        )
+    })?;
+    validate_absolute_path("workspace_root", root)?;
+    let root = format!("{}/_lab_workspaces", root.trim_end_matches('/'));
+    let prefix = super::super::util::snapshot_directory_prefix(local_path);
+    let command = workspace_snapshot_scan_command_for_prefix(&root, Some(&prefix));
+    let command = super::super::util::shell_command_for_runner(runner, &command)?;
+    let output = control.output_exact(
+        std::process::Command::new("bash").args(["-o", "pipefail", "-c", &command]),
+        "read source workspace snapshot candidates",
+    )?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "source workspace snapshot lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let (mut snapshots, _) = decode_workspace_snapshots(&String::from_utf8_lossy(&output.stdout));
+    snapshots.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.remote_path.cmp(&b.remote_path))
+    });
+    control.checkpoint()?;
+    Ok(snapshots)
+}
+
 pub fn list_workspaces(runner_id: &str, limit: usize) -> Result<(RunnerWorkspaceListOutput, i32)> {
     let runner = load(runner_id)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
@@ -329,9 +371,18 @@ fn workspace_snapshots_ssh(
             output.stderr.trim()
         )));
     }
+    Ok(decode_workspace_snapshots(&output.stdout))
+}
+
+fn decode_workspace_snapshots(
+    output: &str,
+) -> (
+    Vec<RunnerWorkspaceSnapshotEntry>,
+    Vec<RunnerWorkspaceSnapshotInvalidMetadata>,
+) {
     let mut snapshots = Vec::new();
     let mut skipped_invalid_metadata = Vec::new();
-    for line in output.stdout.lines() {
+    for line in output.lines() {
         let parts = line.splitn(2, '\t').collect::<Vec<_>>();
         if parts.len() != 2 {
             continue;
@@ -354,7 +405,7 @@ fn workspace_snapshots_ssh(
             snapshots.push(snapshot);
         }
     }
-    Ok((snapshots, skipped_invalid_metadata))
+    (snapshots, skipped_invalid_metadata)
 }
 
 pub(super) fn workspace_metadata_for_lease(
@@ -448,14 +499,122 @@ fn invalid_workspace_metadata(
 }
 
 pub(crate) fn workspace_snapshot_scan_command(root: &str) -> String {
+    workspace_snapshot_scan_command_for_prefix(root, None)
+}
+
+fn workspace_snapshot_scan_command_for_prefix(root: &str, prefix: Option<&str>) -> String {
     // Promotion replaces a temporary child atomically. `find` reports a
     // disappeared child as an error even though the snapshot root remains
     // valid, so read each candidate defensively and verify the root afterwards.
     format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/{pattern}*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        pattern = prefix.map(|prefix| shell::quote_arg(&format!("{prefix}-"))).unwrap_or_default(),
     )
+}
+
+#[cfg(test)]
+mod source_lookup_tests {
+    use super::*;
+    use crate::workspace::control::WorkspaceControl;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn source_lookup_reads_only_its_directory_family_and_orders_newest_first() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Path::new("/controller/source @ branch");
+        let prefix = super::super::super::util::snapshot_directory_prefix(source);
+        let workspaces = root.path().join("_lab_workspaces");
+        for (name, created) in [
+            (format!("{prefix}-old"), "2026-01-01T00:00:00Z"),
+            (format!("{prefix}-new"), "2026-02-01T00:00:00Z"),
+            ("unrelated-source-new".to_string(), "2026-03-01T00:00:00Z"),
+        ] {
+            let path = workspaces.join(name);
+            fs::create_dir_all(path.join(".homeboy")).unwrap();
+            let metadata = serde_json::json!({
+                "schema": "homeboy/runner-workspace/v1", "runner_id": "local",
+                "local_path": source, "remote_path": path, "sync_mode": "snapshot",
+                "snapshot_identity": "fixture", "synced_at": created,
+            });
+            fs::write(path.join(WORKSPACE_METADATA_FILE), metadata.to_string()).unwrap();
+        }
+        let runner = crate::RunnerSpec {
+            workspace_root: Some(root.path().display().to_string()),
+            ..Default::default()
+        }
+        .into_runner("local".to_string(), RunnerKind::Local, None);
+        let candidates =
+            workspace_snapshots_for_source(&runner, source, &WorkspaceControl::default()).unwrap();
+        assert_eq!(
+            candidates.len(),
+            2,
+            "unrelated metadata must never enter seed selection"
+        );
+        assert!(candidates[0].remote_path.ends_with("-new"));
+        assert!(candidates[1].remote_path.ends_with("-old"));
+        let (inventory, _) = workspace_snapshots_for_runner(
+            &runner,
+            RunnerWorkspaceSnapshotFilters {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            inventory.snapshots.len(),
+            3,
+            "full inventory retains its supported scope"
+        );
+    }
+
+    #[test]
+    fn source_lookup_obeys_invocation_deadline_before_spawning_a_scan() {
+        let runner = crate::RunnerSpec {
+            workspace_root: Some("/unavailable".to_string()),
+            ..Default::default()
+        }
+        .into_runner("local".to_string(), RunnerKind::Local, None);
+        let control = WorkspaceControl::before(Some(Instant::now() - Duration::from_secs(1)));
+        let error =
+            workspace_snapshots_for_source(&runner, Path::new("/source"), &control).unwrap_err();
+        assert_eq!(error.details["workspace_sync"]["timed_out"], true);
+    }
+
+    #[test]
+    fn source_lookup_cancels_its_owned_scan_after_process_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let root = tempfile::tempdir().unwrap();
+        let metadata = root
+            .path()
+            .join("_lab_workspaces/source-seed")
+            .join(WORKSPACE_METADATA_FILE);
+        fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        // Keep a real encoder busy long enough to exercise cancellation while
+        // the lookup owns its child, rather than only the pre-spawn checkpoint.
+        fs::write(metadata, vec![b' '; 16 * 1024 * 1024]).unwrap();
+        let runner = crate::RunnerSpec {
+            workspace_root: Some(root.path().display().to_string()),
+            ..Default::default()
+        }
+        .into_runner("local".to_string(), RunnerKind::Local, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let control = WorkspaceControl::default().with_checkpoint_observer(Arc::new(move || {
+            if calls.fetch_add(1, Ordering::SeqCst) >= 3 {
+                let mut error = Error::internal_unexpected("cancel source snapshot lookup");
+                error.details["workspace_sync"]["cancelled"] = serde_json::json!(true);
+                return Err(error);
+            }
+            Ok(())
+        }));
+        let error =
+            workspace_snapshots_for_source(&runner, Path::new("/source"), &control).unwrap_err();
+        assert_eq!(error.details["workspace_sync"]["cancelled"], true);
+        assert_eq!(error.details["workspace_sync"]["command_started"], true);
+    }
 }
 
 fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {

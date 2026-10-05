@@ -2210,7 +2210,6 @@ pub(super) fn write_cook_index_attempt_locked_in_store(
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
     validate_cook_index_attempt_in_store(store, &cook_id, attempt, &run_id)?;
-    let path = store.cook_index_path(&cook_id);
     let mut index = if let Some(index) = projected_cook_index_in_store(store, &cook_id)? {
         index
     } else {

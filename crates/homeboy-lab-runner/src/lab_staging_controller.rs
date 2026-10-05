@@ -1322,6 +1322,8 @@ fn submit_deferred_runner_staging(
         request,
         request.local_output_file.is_some(),
     )?;
+    let lifecycle_store =
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
     let source_path = recipe.source_path.take().ok_or_else(|| {
         Error::validation_invalid_argument(
             "source_path",
@@ -1330,32 +1332,39 @@ fn submit_deferred_runner_staging(
             None,
         )
     })?;
-    let (source_artifact, workspace) = match SourceArtifactTransfer::from_directory(
-        format!("source-{run_id}"),
-        &source_path,
-    ) {
-        Ok(artifact) => (Some(artifact), None),
-        Err(artifact_error) => {
-            if !source_artifact_exceeds_transfer_bounds(&artifact_error) {
-                return Err(artifact_error);
-            }
-            // Large clean Git worktrees are staged through the existing
-            // controller-routed bundle authority. Non-Git sources retain the
-            // bounded sealed-artifact contract and surface their original
-            // containment/filtering failure.
-            let git_status = std::process::Command::new("git")
-                .args(["status", "--porcelain=v1"])
-                .current_dir(&source_path)
-                .output()
-                .ok()
-                .filter(|output| output.status.success());
-            let Some(git_status) = git_status else {
-                return Err(artifact_error);
-            };
-            if !git_status.stdout.is_empty() {
-                return Err(artifact_error);
-            }
-            let stage = crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage(
+    let (source_artifact, workspace) = materialize_deferred_source(
+        &lifecycle_store,
+        run_id,
+        runner_id,
+        plan,
+        |control| {
+            let materialized = match SourceArtifactTransfer::from_directory_controlled(
+                format!("source-{run_id}"),
+                &source_path,
+                control,
+            ) {
+                Ok(artifact) => (Some(artifact), None),
+                Err(artifact_error) => {
+                    if !source_artifact_exceeds_transfer_bounds(&artifact_error) {
+                        return Err(artifact_error);
+                    }
+                    // Large clean Git worktrees are staged through the existing
+                    // controller-routed bundle authority. Non-Git sources retain the
+                    // bounded sealed-artifact contract and surface their original
+                    // containment/filtering failure.
+                    let git_status = control.output_exact(
+                        std::process::Command::new("git")
+                            .args(["status", "--porcelain=v1"])
+                            .current_dir(&source_path),
+                        "inspect deferred source worktree",
+                    )?;
+                    if !git_status.status.success() {
+                        return Err(artifact_error);
+                    }
+                    if !git_status.stdout.is_empty() {
+                        return Err(artifact_error);
+                    }
+                    let stage = crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
                 request,
                 crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
                     &recipe.command,
@@ -1368,9 +1377,10 @@ fn submit_deferred_runner_staging(
                 Some(run_id.to_string()),
                 &recipe.normalized_args,
                 Some(run_id),
+                control,
             )?;
-            bind_recipe_to_materialized_workspace(&mut recipe, &stage.remote_command);
-            (
+                    bind_recipe_to_materialized_workspace(&mut recipe, &stage.remote_command);
+                    (
                     None,
                     Some(ControllerWorkspaceMaterialization::new(
                         stage.remote_cwd.clone(),
@@ -1390,8 +1400,11 @@ fn submit_deferred_runner_staging(
                         canonical_digest(plan)?,
                     )),
                 )
-        }
-    };
+                }
+            };
+            Ok(materialized)
+        },
+    )?;
     // Seal only after the workspace is resolved: a materialized workspace
     // rewrites the recipe argv to its runner-local paths above.
     // The portable recipe is the sealed staging authority. It deliberately
@@ -1461,6 +1474,91 @@ fn submit_deferred_runner_staging(
         },
     )?;
     Ok(deferred_receipt)
+}
+
+fn materialize_deferred_source<T>(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
+    materialize: impl FnOnce(&crate::workspace::WorkspaceControl) -> Result<T>,
+) -> Result<T> {
+    let control = deferred_source_control(store, run_id, runner_id, plan);
+    let result: Result<T> = (|| {
+        control.checkpoint()?;
+        let value = materialize(&control)?;
+        control.checkpoint()?;
+        ensure_deferred_source_active(store, run_id)?;
+        Ok(value)
+    })();
+    result.map_err(|mut error| {
+        error.details["lab_source_materialization"] = json!({
+            "phase": "source_materialization", "runner_job_accepted": false,
+        });
+        let _ = homeboy_agents::agent_task_lifecycle::record_pre_execution_failure_in_store(
+            store,
+            run_id,
+            plan,
+            "source_materialization",
+            &error,
+        );
+        error
+    })
+}
+
+fn ensure_deferred_source_active(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    if store.read_record(run_id)?.state.is_terminal() {
+        let mut error =
+            Error::internal_unexpected("source materialization stopped before runner handoff");
+        error.details["workspace_sync"] = json!({"cancelled": true});
+        return Err(error.with_retryable(false));
+    }
+    Ok(())
+}
+
+fn deferred_source_control(
+    store: &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    plan: &homeboy_agents::agent_task_scheduler::AgentTaskPlan,
+) -> crate::workspace::WorkspaceControl {
+    let cancellation_store = store.clone();
+    let cancellation_run = run_id.to_string();
+    let control = workspace_stage_control(
+        Some(plan),
+        Arc::new(move || {
+            ensure_deferred_source_active(&cancellation_store, &cancellation_run).is_err()
+        }),
+    );
+    let progress_store = store.clone();
+    let progress_run = run_id.to_string();
+    let progress_runner = runner_id.to_string();
+    let last_heartbeat = Mutex::new(None::<Instant>);
+    control.with_checkpoint_observer(Arc::new(move || {
+        let mut last = last_heartbeat
+            .lock()
+            .map_err(|_| Error::internal_unexpected("source progress lock poisoned"))?;
+        if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
+            return Ok(());
+        }
+        homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
+            &progress_store,
+            homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
+                requested_run_id: &progress_run,
+                runner_id: &progress_runner,
+                phase: "source_materialization",
+                remote_workspace: None,
+                source_checkout: None,
+                provider_rotation: None,
+                durable_plan: None,
+            },
+        )?;
+        *last = Some(Instant::now());
+        Ok(())
+    }))
 }
 
 /// A controller-materialized workspace runs the recipe argv on the runner, so
@@ -2611,6 +2709,9 @@ impl LabStagingCancellationToken {
 /// not to second-guess a long build.
 const LAB_STAGING_POLL_FALLBACK_BUDGET: Duration = Duration::from_secs(6 * 60 * 60);
 
+// Source construction is not observation of a long-running provider job.
+const LAB_SOURCE_MATERIALIZATION_FALLBACK_BUDGET: Duration = Duration::from_secs(20 * 60);
+
 /// Floor applied to a plan-derived budget. When the plan deadline has already
 /// expired the remote job is being torn down anyway, and the useful thing to do
 /// is observe its terminal transition rather than abandon a job that is one
@@ -2639,7 +2740,7 @@ pub(crate) fn workspace_stage_control(
                 })
         })
         .map(Duration::from_millis)
-        .unwrap_or(LAB_STAGING_POLL_FALLBACK_BUDGET);
+        .unwrap_or(LAB_SOURCE_MATERIALIZATION_FALLBACK_BUDGET);
     crate::workspace::WorkspaceControl::new(
         homeboy_core::cooperative_control::CooperativeControl::new(
             Instant::now() + remaining,
@@ -4867,6 +4968,113 @@ mod tests {
             Some(run_id),
         )
         .expect("submit durable attempt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deferred_source_cancellation_reaps_a_blocked_git_index_and_fences_handoff() {
+        use std::os::unix::fs::PermissionsExt;
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let run_id = "blocked-source-index";
+            submit_recipe_run(run_id);
+            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let mut plan =
+                homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("source-plan", Vec::new());
+            plan.options.execution_budget.deadline_unix_ms = Some(now_unix_ms() + 5_000);
+            let source = home.path().join("source");
+            let bin = home.path().join("bin");
+            let started = home.path().join("git-started");
+            std::fs::create_dir_all(&source).expect("source directory");
+            std::fs::create_dir_all(&bin).expect("bin directory");
+            std::fs::write(source.join("input.txt"), "source input").expect("source file");
+            let git = bin.join("git");
+            std::fs::write(
+                &git,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$$\" > {}\nexec /bin/sleep 30\n",
+                    homeboy_engine_primitives::shell::quote_arg(&started.to_string_lossy())
+                ),
+            )
+            .expect("blocked Git fixture");
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755))
+                .expect("fixture permissions");
+            let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", &bin);
+            let worker_store = store.clone();
+            let worker_source = source.clone();
+            let worker = std::thread::spawn(move || {
+                materialize_deferred_source(
+                    &worker_store,
+                    run_id,
+                    "lab-fixture",
+                    &plan,
+                    |control| {
+                        SourceArtifactTransfer::from_directory_controlled(
+                            "source",
+                            &worker_source,
+                            control,
+                        )
+                    },
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !started.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(started.exists(), "owned Git process never entered");
+            let child_pid: i32 = std::fs::read_to_string(&started)
+                .expect("child identity")
+                .parse()
+                .expect("child PID");
+            let mut record = store.read_record(run_id).expect("materializing record");
+            assert_eq!(record.metadata["phase"], "source_materialization");
+            assert!(record.runner_job_id().is_none());
+            record.state = homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled;
+            store.write_record(&record).expect("durable cancellation");
+            let error = worker
+                .join()
+                .expect("source worker")
+                .expect_err("cancelled source construction");
+            assert_eq!(error.details["workspace_sync"]["cancelled"], true);
+            assert_eq!(
+                unsafe { libc::kill(child_pid, 0) },
+                -1,
+                "cancelled materialization child was not reaped"
+            );
+            assert!(ensure_deferred_source_active(&store, run_id).is_err());
+            assert_eq!(
+                store.read_record(run_id).expect("terminal record").state,
+                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled
+            );
+            let timeout_run = "source-deadline";
+            submit_recipe_run(timeout_run);
+            let mut timeout_plan = homeboy_agents::agent_task_scheduler::AgentTaskPlan::new(
+                "timeout-plan",
+                Vec::new(),
+            );
+            timeout_plan.options.execution_budget.deadline_unix_ms = Some(now_unix_ms() + 200);
+            let failure = materialize_deferred_source(
+                &store,
+                timeout_run,
+                "lab-fixture",
+                &timeout_plan,
+                |control| {
+                    SourceArtifactTransfer::from_directory_controlled("source", &source, control)
+                },
+            )
+            .expect_err("blocked construction must expire");
+            assert_eq!(failure.details["workspace_sync"]["timed_out"], true);
+            assert_eq!(
+                failure.details["lab_source_materialization"]["runner_job_accepted"],
+                false
+            );
+            assert_eq!(
+                store
+                    .read_record(timeout_run)
+                    .expect("failed source record")
+                    .state,
+                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+        });
     }
 
     #[test]

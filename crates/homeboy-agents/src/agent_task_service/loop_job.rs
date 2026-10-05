@@ -768,7 +768,7 @@ thread_local! {
     static TEST_INTERRUPT_AFTER_LOOP_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn with_test_loop_checkpoint_interrupt<T>(body: impl FnOnce() -> T) -> T {
     TEST_INTERRUPT_AFTER_LOOP_DISPATCH.with(|flag| flag.set(true));
     let result = body();

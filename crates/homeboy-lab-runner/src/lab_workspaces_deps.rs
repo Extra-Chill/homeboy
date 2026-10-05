@@ -12,9 +12,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy_core::{Error, Result};
 
-use super::lab_workspaces::{
-    ExtraLabWorkspace, LAB_EXTRA_WORKSPACES_ENV, LAB_EXTRA_WORKSPACES_JSON_ENV,
-};
+use super::lab_workspaces::{ExtraLabWorkspace, LAB_EXTRA_WORKSPACES_JSON_ENV};
 use super::preflight_remote_argv_path_translation;
 use super::workspace::git_output;
 
@@ -265,30 +263,17 @@ pub(super) fn collect_imports_after_marker(
 }
 
 pub(super) fn accepted_extra_lab_workspaces() -> Result<Vec<ExtraLabWorkspace>> {
-    let mut paths = Vec::new();
-    if let Ok(raw) = std::env::var(LAB_EXTRA_WORKSPACES_JSON_ENV) {
-        if !raw.trim().is_empty() {
-            let parsed: Vec<String> = serde_json::from_str(&raw).map_err(|err| {
-                Error::validation_invalid_argument(
-                    LAB_EXTRA_WORKSPACES_JSON_ENV,
-                    format!("{LAB_EXTRA_WORKSPACES_JSON_ENV} must be a JSON array of paths: {err}"),
-                    Some(raw.clone()),
-                    None,
-                )
-            })?;
-            paths.extend(parsed);
-        }
-    }
-    if let Ok(raw) = std::env::var(LAB_EXTRA_WORKSPACES_ENV) {
-        paths.extend(
-            raw.lines()
-                .flat_map(|line| line.split(','))
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .map(str::to_string),
-        );
-    }
-
+    let paths: Vec<String> = match std::env::var(LAB_EXTRA_WORKSPACES_JSON_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw).map_err(|err| {
+            Error::validation_invalid_argument(
+                LAB_EXTRA_WORKSPACES_JSON_ENV,
+                format!("{LAB_EXTRA_WORKSPACES_JSON_ENV} must be a JSON array of paths: {err}"),
+                Some(raw),
+                None,
+            )
+        })?,
+        _ => Vec::new(),
+    };
     paths
         .into_iter()
         .map(|path| {

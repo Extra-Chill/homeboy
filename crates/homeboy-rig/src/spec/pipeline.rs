@@ -584,3 +584,20 @@ pub enum HostMutationOp {
     /// Revert each mutation using its declared revert plan.
     Revert,
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn lifecycle_workload_kind_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                LifecycleWorkloadKind::Bench,
+                LifecycleWorkloadKind::Fuzz,
+                LifecycleWorkloadKind::Trace,
+            ]
+        );
+    }
+}
