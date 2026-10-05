@@ -952,6 +952,13 @@ plan. Workflow ids become executable stages, and declared artifact flow becomes
 stage dependencies. This is the same compiler used by controller execution, so
 policies, phases, gates, metrics, and fan-out are validated by one implementation.
 
+Repo-style specs use `loop_id` for identity, `runtime_execution` for executable
+workflows, `entity_ids` for explicit fan-out entities, and `from_workflow_id` /
+`to_workflow_id` for artifact graph edges. These contracts reject unknown fields
+instead of silently dropping executable inputs. Keyed and array declarations
+remain supported; domain-specific additional data belongs in declared `metadata`
+or `inputs`. Retired alternate field spellings are not translated.
+
 Repo-style specs may also declare an explicit `artifact_graph` edge list:
 
 ```json

@@ -2,10 +2,10 @@ use super::super::*;
 use super::*;
 
 #[test]
-fn repo_loop_spec_accepts_controller_id_and_keyed_contract_maps() {
+fn repo_loop_spec_accepts_loop_id_and_keyed_contract_maps() {
     let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
         "schema": "homeboy/controller-spec/v1",
-        "controller_id": "repo-loop-keyed-spec",
+        "loop_id": "repo-loop-keyed-spec",
         "agents": {
             "repair-agent": {
                 "role": "repair",
@@ -39,6 +39,26 @@ fn repo_loop_spec_accepts_controller_id_and_keyed_contract_maps() {
     assert_eq!(spec.tools[0].tool_id, "repo-inspector");
     assert_eq!(spec.workflows[0].workflow_id, "repair-findings");
     assert_eq!(spec.artifacts[0].artifact_id, "patch");
+}
+
+#[test]
+fn repo_loop_spec_rejects_unrecognized_execution_instead_of_compiling_an_empty_workflow() {
+    let error = serde_json::from_value::<AgentTaskRepoLoopSpec>(json!({
+        "loop_id": "explicit-execution-contract",
+        "workflows": { "command": {
+            "execution": { "command": "sh", "args": ["-c", "exit 1"] }
+        }}
+    }))
+    .expect_err("unrecognized command input cannot silently compile as empty work");
+    assert!(error.to_string().contains("unknown field `execution`"));
+    let spec: AgentTaskRepoLoopSpec = serde_json::from_value(json!({
+        "loop_id": "explicit-execution-contract",
+        "workflows": { "command": {
+            "runtime_execution": { "command": "sh", "args": ["-c", "exit 1"] }
+        }}
+    }))
+    .expect("canonical executable workflow");
+    assert_eq!(spec.workflows[0].runtime_execution["command"], "sh");
 }
 
 #[test]
@@ -264,7 +284,7 @@ fn init_from_spec_compiles_workflow_fan_out_items_into_deduped_dispatch_action()
                 "workflow_id": "repair-findings",
                 "prompt": "Repair each routed finding.",
                 "fan_out": {
-                    "items": ["finding:alpha", "finding:beta"],
+                    "entity_ids": ["finding:alpha", "finding:beta"],
                     "max_items": 1,
                     "fail_fast": false
                 }
