@@ -529,6 +529,7 @@ pub(super) fn upload_runner_file_chunk(
                 Some(path.display().to_string()),
             ));
         }
+        let _ = fs::remove_file(&upload.temp);
         let _ = fs::remove_file(&upload.record);
         registry.uploads.remove(&key);
     }
