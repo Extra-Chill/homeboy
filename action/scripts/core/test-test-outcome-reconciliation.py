@@ -70,6 +70,17 @@ def main() -> None:
         install_pair(baseline, "13290-baseline")
         assert gate(current, baseline) == {COMMAND: "fail"}, "#13290 nondeterministic identity must block"
 
+        retry_path = current / f"{STEM}.test-retry.json"
+        retry_path.write_text(json.dumps({
+            "schema": "homeboy/test-retry/v1", "command": COMMAND,
+            "flaky": [], "still_failing": ["nondeterministic"],
+            "infrastructure_errors": ["nondeterministic"],
+        }), encoding="utf-8")
+        result = run_gate(current, baseline)
+        assert json.loads(result.stdout) == {COMMAND: "invalid_evidence"}
+        assert "retry infrastructure" in result.stderr
+        retry_path.unlink()
+
         payload = json.loads((baseline / f"{STEM}.test-outcomes.json").read_text(encoding="utf-8"))
         payload["failed_test_ids"] = ["nondeterministic", "stable"]
         (baseline / f"{STEM}.test-outcomes.json").write_text(json.dumps(payload), encoding="utf-8")

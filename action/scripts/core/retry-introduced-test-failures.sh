@@ -17,8 +17,8 @@
 # Each candidate-only failed test identity is retried alone -- not as part of
 # a batched, filtered rerun -- so a flaky test cannot hide behind, or be
 # blamed for, contention with another test in the same process. A test that
-# passes even once within its retry budget is flaky; a test that fails every
-# attempt stays introduced.
+# passes even once within its retry budget is flaky. Unresolved attempts retain
+# their logs and distinguish an executed failure from missing runner evidence.
 #
 # Reads (env, required):
 #   COMMAND      -- the quality command, e.g. "review test" or "test"
@@ -129,17 +129,27 @@ if [ -z "${mode}" ]; then
   exit 0
 fi
 
+retry_dir="${current_dir}/${stem}.test-retry"
+mkdir -p "${retry_dir}"
+attempt_receipts="${retry_dir}/attempts.jsonl"
+: > "${attempt_receipts}"
+
 run_single_test() {
   local id="$1"
   local log
   local package kind binary test_name
-  log="$(mktemp)"
+  local identity_hash
+  identity_hash="$(printf '%s' "${id}" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+  log="${retry_dir}/${identity_hash}-${attempt}.log"
   local ok=1
+  local exit_code=0 outcome="infrastructure_error"
   # Homeboy's Rust inventory identity is package::kind::binary::test. Parse
   # the complete identity before invoking either runner; never let a malformed
   # identity degrade into a broad or zero-test run.
   if [[ ! "${id}" =~ ^([^:]+)::([^:]+)::([^:]+)::(.+)$ ]]; then
-    rm -f "${log}"
+    printf 'Malformed Rust test identity: %s\n' "${id}" > "${log}"
+    jq -cn --arg id "${id}" --arg log "${log}" --argjson attempt "${attempt}" \
+      '{id:$id,attempt:$attempt,outcome:"infrastructure_error",reason:"invalid_identity",log:$log}' >> "${attempt_receipts}"
     echo "::warning::Differential gate retry: malformed Rust test identity '${id}'; it was not retried." >&2
     return 1
   fi
@@ -151,7 +161,7 @@ run_single_test() {
     nextest)
       if (cd "${workspace}" && cargo nextest run -p "${package}" -E "package(=${package}) & kind(=${kind}) & binary(=${binary}) & test(=${test_name})") >"${log}" 2>&1; then
         grep -Eq '1 tests? run: 1 passed' "${log}" && ok=0
-      fi
+      else exit_code=$?; fi
       ;;
     cargo-test)
       # `--tests` restricts to lib/integration test binaries, excluding
@@ -163,21 +173,28 @@ run_single_test() {
         lib) target_args+=(--lib) ;;
         bin) target_args+=(--bin "${binary}") ;;
         test) target_args+=(--test "${binary}") ;;
-        *) rm -f "${log}"; echo "::warning::Differential gate retry: unsupported Rust test kind '${kind}' in '${id}'." >&2; return 1 ;;
+        *) printf 'Unsupported Rust test kind: %s\n' "${kind}" > "${log}"; exit_code=2 ;;
       esac
-      if (cd "${workspace}" && cargo test -p "${package}" "${target_args[@]}" -- --exact "${test_name}") >"${log}" 2>&1; then
+      if [ "${exit_code}" -eq 0 ] && (cd "${workspace}" && cargo test -p "${package}" "${target_args[@]}" -- --exact "${test_name}") >"${log}" 2>&1; then
         grep -Eq '(^| )1 passed(;| )' "${log}" && ok=0
-      fi
+      else exit_code=$?; fi
       ;;
   esac
-  if [ "${ok}" -ne 0 ]; then
+  if [ "${ok}" -eq 0 ]; then
+    outcome="passed"
+  elif grep -Eq '1 tests? run: 0 passed, 1 failed|(^| )0 passed; 1 failed;' "${log}"; then
+    outcome="failed"
+  fi
+  jq -cn --arg id "${id}" --arg log "${log}" --arg outcome "${outcome}" \
+    --argjson attempt "${attempt}" --argjson exit_code "${exit_code}" \
+    '{id:$id,attempt:$attempt,outcome:$outcome,exit_code:$exit_code,log:$log}' >> "${attempt_receipts}"
+  if [ "${outcome}" = "infrastructure_error" ]; then
     if grep -Eiq '0 tests? run|no tests (to run|matched)' "${log}"; then
-      echo "::warning::Differential gate retry: identity '${id}' selected zero tests; it remains introduced (check the test identity and runner filter)." >&2
-    elif ! grep -Eq '1 tests? run:|(^| )1 (passed|failed)(;| )' "${log}"; then
-      echo "::warning::Differential gate retry: identity '${id}' did not execute exactly one test; it remains introduced." >&2
+      echo "::warning::Differential gate retry: identity '${id}' selected zero tests; retry infrastructure is unresolved. Evidence: ${log}." >&2
+    else
+      echo "::warning::Differential gate retry: identity '${id}' has no exact test outcome; retry infrastructure is unresolved (exit ${exit_code}). Evidence: ${log}." >&2
     fi
   fi
-  rm -f "${log}"
   return "${ok}"
 }
 
@@ -202,7 +219,9 @@ still_failing=("${remaining[@]}")
 flaky_json="$(json_array_of "${flaky[@]}")"
 still_failing_json="$(json_array_of "${still_failing[@]}")"
 
-write_sidecar "${attempted_json}" "${flaky_json}" "${still_failing_json}" "${runner}" "${max_retries}" 'null'
+extra="$(jq -sc --argjson remaining "${still_failing_json}" \
+  '{attempts:.,infrastructure_errors:([.[] | select(.outcome == "infrastructure_error") | .id] | unique | map(select(. as $id | $remaining | index($id))))}' "${attempt_receipts}")"
+write_sidecar "${attempted_json}" "${flaky_json}" "${still_failing_json}" "${runner}" "${max_retries}" "${extra}"
 
 if [ "${#flaky[@]}" -gt 0 ]; then
   flaky_list="$(IFS=', '; echo "${flaky[*]}")"
@@ -210,7 +229,7 @@ if [ "${#flaky[@]}" -gt 0 ]; then
 fi
 if [ "${#still_failing[@]}" -gt 0 ]; then
   still_failing_list="$(IFS=', '; echo "${still_failing[*]}")"
-  echo "::warning::Differential gate retry: ${#still_failing[@]} candidate-only test identity(s) for ${command} failed every retry attempt in isolation and remain introduced: ${still_failing_list}." >&2
+  echo "::warning::Differential gate retry: ${#still_failing[@]} candidate-only test identity(s) for ${command} remain unresolved after ${max_retries} attempt(s): ${still_failing_list}. Inspect retained attempt outcomes before attributing a test failure." >&2
 fi
 
 exit 0

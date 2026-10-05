@@ -291,12 +291,15 @@ def retry_evidence(command: str, directory: str) -> dict[str, Any] | None:
         return None
     flaky = payload.get("flaky")
     still_failing = payload.get("still_failing")
+    infrastructure = payload.get("infrastructure_errors", [])
     if (
         payload.get("schema") != RETRY_SCHEMA
         or payload.get("command") != test_evidence_command_identity(command)
         or not isinstance(flaky, list)
         or not isinstance(still_failing, list)
+        or not isinstance(infrastructure, list)
         or any(not isinstance(value, str) or not value for value in flaky + still_failing)
+        or any(not isinstance(value, str) or not value for value in infrastructure)
     ):
         return None
     return payload
@@ -476,6 +479,16 @@ def main() -> int:
                     )
 
             if introduced:
+                infrastructure = set(retry.get("infrastructure_errors", [])) & introduced if retry else set()
+                if infrastructure:
+                    adjusted[command] = "invalid_evidence"
+                    print(
+                        f"::error::Differential gate rejected {command}: type=invalid_evidence; "
+                        f"retry infrastructure could not establish exact outcomes for: {', '.join(sorted(infrastructure))}. "
+                        "Inspect retained test-retry attempt logs; this is not confirmed introduced-failure attribution.",
+                        file=sys.stderr,
+                    )
+                    continue
                 print(
                     f"::error::Differential gate rejected {command}: {len(introduced)} candidate-only "
                     f"failed test identity(s): {', '.join(sorted(introduced))}.",
