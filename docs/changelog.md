@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.39] - 2026-10-05
+
+### Fixed
+- a component's rebuildable output no longer pins finished cook workspaces
+- a Cook that fails after its run settled corrects the observation and re-notifies
+
 ## [0.399.38] - 2026-10-04
 
 ### Fixed
