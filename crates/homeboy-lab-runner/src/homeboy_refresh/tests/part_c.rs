@@ -183,11 +183,13 @@ fn not_fresh_error() -> Error {
 
 fn transport_drop_error() -> Error {
     // Shape mirrors a dropped first request against the new loopback tunnel.
-    let mut error = Error::internal_unexpected(
-        "query runner daemon: error sending request for url (http://127.0.0.1:52163/admissions)",
-    );
-    error.retryable = Some(true);
-    error
+    crate::daemon_http_get::daemon_transport_error(
+        crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+        "/admissions",
+        None,
+        "runner endpoint unavailable",
+        "connection refused",
+    )
 }
 
 fn lease_mismatch_error() -> Error {

@@ -1936,8 +1936,7 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
             .pointer("/daemon_transport_error/kind")
             .and_then(Value::as_str),
         Some("connect" | "timeout" | "body_decode")
-    ) || (error.details.get("http_status").is_none()
-        && super::super::daemon_health::runner_daemon_health_failure(error).is_some())
+    )
 }
 
 fn refreshed_daemon_endpoint(

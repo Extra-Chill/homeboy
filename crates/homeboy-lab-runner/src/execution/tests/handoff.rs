@@ -496,9 +496,13 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
         // A transport-layer drop: the daemon endpoint became unreachable while
         // polling. This is the shape `runner_daemon_health_failure` classifies
         // as a recoverable daemon transport failure.
-        let transport_drop = Error::internal_unexpected(format!(
-            "query runner daemon: error sending request for url (http://127.0.0.1:65201/jobs/{job_id})"
-        ));
+        let transport_drop = crate::daemon_http_get::daemon_transport_error(
+            crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+            &format!("/jobs/{job_id}"),
+            None,
+            "runner endpoint unavailable",
+            "connection refused",
+        );
 
         let err = terminal_runner_poll_failure(
             &runner,
@@ -2203,9 +2207,13 @@ fn terminal_lab_result_transport_error_preserves_recovery_ids() {
 #[test]
 fn daemon_polling_error_for_known_job_is_recoverable_runner_disconnect() {
     let job_id = "8ae584d4-3395-4b76-8e83-14f2e8c4c1eb";
-    let source = Error::internal_unexpected(format!(
-        "query runner daemon: error sending request for url (http://127.0.0.1:1234/jobs/{job_id})"
-    ));
+    let source = crate::daemon_http_get::daemon_transport_error(
+        crate::daemon_http_get::DaemonHttpErrorKind::Connect,
+        &format!("/jobs/{job_id}"),
+        None,
+        "runner endpoint unavailable",
+        "connection refused",
+    );
 
     let err = daemon_job_context_error("lab", job_id, None, source);
 

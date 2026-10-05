@@ -19,8 +19,7 @@ pub(crate) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHe
         .details
         .pointer("/daemon_transport_error/kind")
         .and_then(|value| value.as_str())
-        .is_some_and(|kind| matches!(kind, "connect" | "timeout" | "status" | "body_decode"))
-        || legacy_string_daemon_transport_failure(err.message.as_str());
+        .is_some_and(|kind| matches!(kind, "connect" | "timeout" | "status" | "body_decode"));
     if daemon_transport_failure {
         Some(RunnerDaemonHealthFailure {
             reason: format!("runner daemon health check failed: {}", err.message),
@@ -38,15 +37,6 @@ pub(crate) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHe
     } else {
         None
     }
-}
-
-fn legacy_string_daemon_transport_failure(message: &str) -> bool {
-    // Remote daemons older than typed daemon_transport_error details can still
-    // return only string messages. Keep all substring compatibility here.
-    message.contains("query runner daemon")
-        || message.contains("submit runner daemon exec job")
-        || message.contains("parse daemon exec response")
-        || message.contains("daemon exec request failed")
 }
 
 #[cfg(test)]
@@ -86,6 +76,7 @@ mod tests {
             serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "job_id": "job-123",
+                "daemon_transport_error": { "kind": "connect" },
             }),
         );
 
@@ -102,7 +93,8 @@ mod tests {
 
     #[test]
     fn does_not_classify_unrelated_internal_errors_as_daemon_health() {
-        let err = Error::internal_unexpected("workspace sync failed unexpectedly");
+        let err =
+            Error::internal_unexpected("query runner daemon: workspace sync failed unexpectedly");
 
         assert_eq!(runner_daemon_health_failure(&err), None);
     }
