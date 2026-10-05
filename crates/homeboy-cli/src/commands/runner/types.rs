@@ -238,17 +238,15 @@ impl RunnerListOutput {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub enum RunnerListRows {
-    /// Default bounded inventory. Summaries are mirrored under the deprecated
-    /// `runner_summaries` key for one deprecation window (#14876).
+    /// Default bounded inventory summaries, under `entities` (#14876).
     Summaries(EntityRows<RunnerInventorySummary>),
-    /// `--full`: complete (redacted) runner records, with no legacy mirror;
-    /// full mode never emitted `runner_summaries`.
+    /// `--full`: complete (redacted) runner records, under `entities`.
     Full(EntityRows<Runner>),
 }
 
 impl RunnerListRows {
     pub fn summaries(rows: Vec<RunnerInventorySummary>) -> Self {
-        Self::Summaries(EntityRows::with_legacy_key(rows, "runner_summaries"))
+        Self::Summaries(EntityRows::new(rows))
     }
 
     pub fn full(rows: Vec<Runner>) -> Self {

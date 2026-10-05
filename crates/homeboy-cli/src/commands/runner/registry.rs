@@ -92,12 +92,8 @@ pub(super) fn add(input: RunnerAddInput) -> CmdResult<RunnerOutput> {
 
 const RUNNER_LIST_LIMIT: usize = 10;
 const RUNNER_LIST_TEXT_LIMIT: usize = 256;
-/// Wire budget for the default runner-list envelope. Doubled from 12 KiB while
-/// the deprecated `runner_summaries` key mirrors `entities` (#14876): the
-/// mirror doubles the row bytes, and without the headroom ten ordinary runners
-/// would trip the bounded fallback and show zero rows. Return this to
-/// `12 * 1024` when the mirror is removed.
-const RUNNER_LIST_PROJECTION_BYTES: usize = 24 * 1024;
+/// Wire budget for the default runner-list envelope.
+const RUNNER_LIST_PROJECTION_BYTES: usize = 12 * 1024;
 
 pub(super) fn list(full: bool) -> CmdResult<RunnerListOutput> {
     let sessions = runner::statuses()?;
@@ -966,14 +962,11 @@ mod tests {
             assert!(wire.stdout_json().unwrap().len() <= RUNNER_LIST_PROJECTION_BYTES);
             assert!(wire_json["data"].get("sessions").is_none());
             assert!(!wire_json["data"].to_string().contains("ENV_0"));
-            // Summaries are the canonical `entities` rows (#14876), mirrored
-            // under the deprecated `runner_summaries` key.
+            // Summaries are the canonical `entities` rows (#14876); the former
+            // `runner_summaries` key is gone.
             assert_eq!(wire_json["data"]["entities"].as_array().unwrap().len(), 10);
             assert_eq!(wire_json["data"]["entities"][0]["identity"], "lab-0");
-            assert_eq!(
-                wire_json["data"]["entities"],
-                wire_json["data"]["runner_summaries"]
-            );
+            assert!(wire_json["data"].get("runner_summaries").is_none());
             assert_eq!(wire_json["data"]["truncation"]["shown"], 10);
             assert_eq!(wire_json["data"]["truncation"]["omitted"], 15);
             assert_eq!(
@@ -1023,14 +1016,14 @@ mod tests {
         }
 
         #[test]
-        fn default_list_mirrors_summaries_under_entities_and_legacy_key() {
+        fn default_list_returns_summaries_under_entities_only() {
             let runners = vec![descriptor(&configured_runner("lab"))];
             let output = bounded_list_output(compact_list_output(&runners, &[]));
             let value = serde_json::to_value(&output).expect("list serializes");
 
             assert_eq!(value["command"], "runner.list");
             assert_eq!(value["entities"][0]["identity"], "lab");
-            assert_eq!(value["entities"], value["runner_summaries"]);
+            assert!(value.get("runner_summaries").is_none());
         }
 
         #[test]
@@ -1038,7 +1031,7 @@ mod tests {
             let compact = serde_json::to_value(bounded_list_output(compact_list_output(&[], &[])))
                 .expect("compact list serializes");
             assert_eq!(compact["entities"], serde_json::json!([]));
-            assert_eq!(compact["runner_summaries"], serde_json::json!([]));
+            assert!(compact.get("runner_summaries").is_none());
 
             let full = serde_json::to_value(full_list_output(Vec::new(), Vec::new()))
                 .expect("full list serializes");

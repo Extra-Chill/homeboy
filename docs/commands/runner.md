@@ -889,9 +889,8 @@ homeboy runner list --full
 Rows are always returned under `data.entities` (`[]` when no runners are
 configured). The default returns bounded inventory summaries (identity, kind,
 connection, admission, concurrency, drift, next action); `--full` returns the
-complete redacted runner records plus `sessions`. In the default mode the same
-summaries are also mirrored under `runner_summaries`, which is **deprecated**
-and will be removed after a deprecation window — read `data.entities`.
+complete redacted runner records plus `sessions`. The former
+`runner_summaries` key was removed in favour of `data.entities`.
 
 ### `show`
 
