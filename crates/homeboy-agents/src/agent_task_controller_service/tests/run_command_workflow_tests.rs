@@ -108,7 +108,7 @@ fn run_command_validates_consumed_artifacts_before_spawning() {
                 entity_id: None,
                 request: json!({
                     "consumes": ["producer_output"],
-                    "runtime_execution": {
+                    "execution": {
                         "command": "/bin/sh",
                         "args": ["-c", format!("touch {}", marker.path().display())]
                     }
