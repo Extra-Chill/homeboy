@@ -143,9 +143,6 @@ pub struct AgentTaskIntentionalNoChange {
 pub enum AgentTaskIntentionalNoChangeVerdict {
     Blocked,
     AlreadySatisfied,
-    /// Legacy `no_change` declarations deserialize as this unambiguous review
-    /// outcome, preserving existing providers while exposing the typed contract.
-    #[serde(alias = "no_change")]
     InvestigationOnly,
 }
 
