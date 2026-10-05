@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.401.0] - 2026-10-05
+
+### Changed
+- rustfmt
+- retire legacy findings migration
+
+### Fixed
+- a restarted daemon takes admission from a dead generation
+
 ## [0.400.2] - 2026-10-05
 
 ### Fixed
