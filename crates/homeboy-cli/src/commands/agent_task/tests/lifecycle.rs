@@ -143,6 +143,7 @@ fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
 
         let (status_value, status_exit) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -738,6 +739,7 @@ fn status_returns_control_plane_run_for_a_cancelled_retry() {
 
         let status_args = || StatusArgs {
             run_id: retry_run_id.to_string(),
+            full: false,
             exact: true,
             strict_subject_exit: false,
             watch: false,
@@ -854,6 +856,7 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
 
         let (value, exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
+            full: true,
             exact: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
@@ -3379,6 +3382,7 @@ fn submit_run_status_reports_terminal_state() {
         .expect("run completed");
         let (status_json, status_exit_code) = status(StatusArgs {
             run_id: "run-cli-terminal".to_string(),
+            full: true,
             interval: "5s".to_string(),
             timeout: "30m".to_string(),
             ..Default::default()
