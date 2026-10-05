@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.42] - 2026-10-05
+
+### Fixed
+- defer a missing review_form to the cook loop instead of failing the provider
+
 ## [0.399.41] - 2026-10-05
 
 ### Fixed
