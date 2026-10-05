@@ -86,8 +86,47 @@ fn managed_immutable_runner_prefers_selected_source_revision() {
             .as_deref()
     );
     assert_eq!(
-        managed_immutable_runner_target_revision(Some(&selected_revision)),
+        managed_immutable_runner_target_revision(
+            Some(&selected_revision),
+            Some("homeboy 9.9.9+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        ),
         Some(selected_revision)
+    );
+}
+
+#[test]
+fn managed_immutable_runner_converges_to_the_installed_controller_not_the_running_build() {
+    // `homeboy upgrade` refreshes runners from the pre-upgrade process; the
+    // target is the commit of the controller it just installed.
+    let installed = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    assert_ne!(
+        Some(installed),
+        homeboy_product_identity::build_identity()
+            .git_commit
+            .as_deref()
+    );
+    assert_eq!(
+        managed_immutable_runner_target_revision(
+            None,
+            Some(&format!("homeboy 0.401.0+{installed}"))
+        ),
+        Some(installed.to_string())
+    );
+    assert_eq!(
+        managed_immutable_runner_target_revision(
+            None,
+            Some(&format!("homeboy 0.401.0+{installed}-dirty"))
+        ),
+        Some(installed.to_string())
+    );
+    // An identity without a commit falls back to this build, as before.
+    assert_eq!(
+        managed_immutable_runner_target_revision(None, Some("homeboy 0.401.0")),
+        homeboy_product_identity::build_identity().git_commit
+    );
+    assert_eq!(
+        managed_immutable_runner_target_revision(None, None),
+        homeboy_product_identity::build_identity().git_commit
     );
 }
 
