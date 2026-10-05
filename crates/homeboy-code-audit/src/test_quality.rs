@@ -489,14 +489,7 @@ fn count_statements(body: &str) -> usize {
 }
 
 fn strip_comments(body: &str) -> String {
-    body.lines()
-        .map(|line| {
-            line.split_once("//")
-                .map(|(before, _)| before)
-                .unwrap_or(line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    SourceMasks::new(body, Language::Rust).code_text()
 }
 
 fn strip_use_lines(body: &str) -> String {
@@ -1071,6 +1064,22 @@ fn after_nested() { crate::product::run("é"); }
         );
         assert_eq!(findings.len(), 1);
         assert!(findings[0].description.contains("body only asserts true"));
+    }
+
+    #[test]
+    fn comment_stripping_preserves_product_calls_after_literal_urls() {
+        let findings = detect_vacuous_tests(
+            "tests/url_test.rs",
+            "#[test]\nfn url_case() { let url = \"https://example.test\"; crate::check(url); }\n",
+        );
+        assert!(
+            findings.is_empty(),
+            "URL must not erase the product call: {findings:?}"
+        );
+        assert_eq!(
+            strip_comments("/* outer /* nested */ } */ crate::run();").trim(),
+            "crate::run();"
+        );
     }
 
     #[test]

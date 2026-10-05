@@ -63,6 +63,32 @@ impl SourceMasks {
             .map(String::as_str)
             .unwrap_or("")
     }
+
+    /// Complete comment-stripped source, retaining literal contents.
+    pub(crate) fn code_text(&self) -> String {
+        self.code.join("\n")
+    }
+
+    /// Complete structural source, retaining character and line positions.
+    pub(crate) fn syntax_text(&self) -> String {
+        self.syntax.join("\n")
+    }
+
+    /// Comment text only, projected from the original source. Whitespace in
+    /// comments need not be distinguished from code whitespace for term scans.
+    pub(crate) fn comment_text(&self, content: &str) -> String {
+        content
+            .chars()
+            .zip(self.code_text().chars())
+            .map(|(original, code)| {
+                if original == '\n' || original != code {
+                    original
+                } else {
+                    blank(original)
+                }
+            })
+            .collect()
+    }
 }
 
 /// Which lexical region the scanner is currently inside.

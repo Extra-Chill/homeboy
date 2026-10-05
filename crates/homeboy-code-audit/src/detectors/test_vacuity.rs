@@ -14,8 +14,10 @@ use std::path::Path;
 use regex::Regex;
 
 use super::conventions::AuditFinding;
+use super::conventions::Language;
 use super::findings::{Finding, Severity};
 use super::fingerprint::FileFingerprint;
+use super::source_text::SourceMasks;
 use homeboy_audit_contract::{PackageNameSource, TestVacuityPolicy};
 
 /// Resolve a package name from a config-declared manifest source.
@@ -131,7 +133,8 @@ fn classify_vacuous_test(
         return None;
     }
 
-    let uncommented = strip_comments(body);
+    let masks = SourceMasks::new(body, Language::Rust);
+    let uncommented = masks.code_text();
     let compact: String = uncommented.chars().filter(|c| !c.is_whitespace()).collect();
     let has_assertion = uncommented.contains("assert") || uncommented.contains("panic!");
     let has_product_ref = has_product_reference(
@@ -165,7 +168,7 @@ fn classify_vacuous_test(
     if compact.contains("assert!(true)") {
         return Some("it contains only placeholder assertion logic".to_string());
     }
-    let comment_text = collect_comments(body).to_ascii_lowercase();
+    let comment_text = masks.comment_text(body).to_ascii_lowercase();
     if comment_text.contains("audit")
         && (comment_text.contains("mapping") || comment_text.contains("coverage"))
     {
@@ -309,14 +312,25 @@ fn collect_product_imports(content: &str, package_name: Option<&str>) -> HashSet
 /// so this is a generic block-body extractor rather than a language-specific
 /// one.
 fn extract_function_body(content: &str, fn_name: &str) -> Option<String> {
+    let syntax = SourceMasks::new(content, Language::Rust).syntax_text();
     let pattern = Regex::new(&format!(
-        r"(?m)\bfn\s+{}\s*\([^)]*\)\s*(?:->[^{{]+)?\{{",
+        r"(?m)\bfn\s+{}\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?:->[^{{]+)?\{{",
         regex::escape(fn_name)
     ))
     .ok()?;
-    let mat = pattern.find(content)?;
+    let mat = pattern.find(&syntax)?;
     let open = mat.end() - 1;
-    matching_brace(content, open).map(|end| content[mat.end()..end].to_string())
+    let end = matching_brace(&syntax, open)?;
+    // Lexical projections preserve character positions, not UTF-8 byte widths.
+    // Translate the regex/brace offsets before slicing the original body.
+    let original_offset = |offset: usize| {
+        content
+            .char_indices()
+            .nth(syntax[..offset].chars().count())
+            .map(|(index, _)| index)
+            .unwrap_or(content.len())
+    };
+    Some(content[original_offset(mat.end())..original_offset(end)].to_string())
 }
 
 fn matching_brace(content: &str, open: usize) -> Option<usize> {
@@ -325,23 +339,9 @@ fn matching_brace(content: &str, open: usize) -> Option<usize> {
     }
 
     let mut depth = 0_i32;
-    let mut iter = content[open..].char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
+    for (idx, ch) in content[open..].char_indices() {
         let absolute = open + idx;
         match ch {
-            '/' if iter.peek().is_some_and(|(_, next)| *next == '/') => {
-                skip_line_comment(&mut iter);
-            }
-            '/' if iter.peek().is_some_and(|(_, next)| *next == '*') => {
-                iter.next();
-                skip_block_comment(&mut iter);
-            }
-            'r' if raw_string_hashes(content, absolute).is_some() => {
-                let hashes = raw_string_hashes(content, absolute)?;
-                skip_raw_string(&mut iter, hashes);
-            }
-            '"' => skip_quoted_string(&mut iter),
-            '\'' => skip_char_literal(&mut iter),
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
@@ -353,164 +353,6 @@ fn matching_brace(content: &str, open: usize) -> Option<usize> {
         }
     }
     None
-}
-
-fn skip_line_comment(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
-    for (_, ch) in iter.by_ref() {
-        if ch == '\n' {
-            break;
-        }
-    }
-}
-
-fn skip_block_comment(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
-    let mut previous = '\0';
-    for (_, ch) in iter.by_ref() {
-        if previous == '*' && ch == '/' {
-            break;
-        }
-        previous = ch;
-    }
-}
-
-fn raw_string_hashes(content: &str, offset: usize) -> Option<usize> {
-    let bytes = content.as_bytes();
-    if bytes.get(offset) != Some(&b'r') {
-        return None;
-    }
-    let mut idx = offset + 1;
-    let mut hashes = 0;
-    while bytes.get(idx) == Some(&b'#') {
-        hashes += 1;
-        idx += 1;
-    }
-    (bytes.get(idx) == Some(&b'"')).then_some(hashes)
-}
-
-fn skip_raw_string(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>, hashes: usize) {
-    let mut saw_opening_quote = false;
-    for (_, ch) in iter.by_ref() {
-        if ch == '"' {
-            saw_opening_quote = true;
-            break;
-        }
-    }
-    if !saw_opening_quote {
-        return;
-    }
-
-    while let Some((_, ch)) = iter.next() {
-        if ch != '"' {
-            continue;
-        }
-        if hashes == 0 {
-            break;
-        }
-
-        let mut hash_count = 0usize;
-        while iter.peek().is_some_and(|(_, next)| *next == '#') {
-            iter.next();
-            hash_count += 1;
-            if hash_count == hashes {
-                break;
-            }
-        }
-        if hash_count == hashes {
-            break;
-        }
-    }
-}
-
-fn skip_quoted_string(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
-    let mut escaped = false;
-    for (_, ch) in iter.by_ref() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            break;
-        }
-    }
-}
-
-fn skip_char_literal(iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
-    let mut escaped = false;
-    for (_, ch) in iter.by_ref() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '\'' {
-            break;
-        }
-    }
-}
-
-fn strip_comments(content: &str) -> String {
-    let without_blocks = Regex::new(r"(?s)/\*.*?\*/")
-        .unwrap()
-        .replace_all(content, "");
-    without_blocks
-        .lines()
-        .map(|line| line.split_once("//").map(|(code, _)| code).unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn collect_comments(content: &str) -> String {
-    let mut comments = String::new();
-    let mut iter = content.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        match ch {
-            '/' if iter.peek().is_some_and(|(_, next)| *next == '/') => {
-                iter.next();
-                collect_line_comment(&mut iter, &mut comments);
-            }
-            '/' if iter.peek().is_some_and(|(_, next)| *next == '*') => {
-                iter.next();
-                collect_block_comment(&mut iter, &mut comments);
-            }
-            'r' if raw_string_hashes(content, idx).is_some() => {
-                if let Some(hashes) = raw_string_hashes(content, idx) {
-                    skip_raw_string(&mut iter, hashes);
-                }
-            }
-            '"' => skip_quoted_string(&mut iter),
-            '\'' => skip_char_literal(&mut iter),
-            _ => {}
-        }
-    }
-    comments
-}
-
-fn collect_line_comment(
-    iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
-    comments: &mut String,
-) {
-    for (_, ch) in iter.by_ref() {
-        if ch == '\n' {
-            comments.push('\n');
-            break;
-        }
-        comments.push(ch);
-    }
-}
-
-fn collect_block_comment(
-    iter: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
-    comments: &mut String,
-) {
-    let mut previous = '\0';
-    for (_, ch) in iter.by_ref() {
-        if previous == '*' && ch == '/' {
-            comments.pop();
-            comments.push('\n');
-            break;
-        }
-        comments.push(ch);
-        previous = ch;
-    }
 }
 
 #[cfg(test)]
@@ -571,6 +413,43 @@ fn parse_json() {
         let body = extract_function_body(content, "parse_json").expect("body");
 
         assert!(body.contains("assert!"));
+    }
+
+    #[test]
+    fn extraction_ignores_fixture_declarations_and_handles_lifetimes_and_unicode() {
+        let content = r###"
+const FIXTURE: &str = r#"fn real_test() { assert!(true); }"#;
+/* fn real_test() { } */
+fn real_test<'a>(input: &'a str) {
+    let label: &'a str = "é // not a comment";
+    /* outer { /* inner } */ } */
+    let quoted = br##"{ unmatched } }"##;
+    assert_eq!(crate::run(input), label);
+}
+fn next_test() {}
+"###;
+        let body = extract_function_body(content, "real_test").expect("actual function body");
+        assert!(body.contains("é // not a comment"));
+        assert!(body.contains("crate::run(input)"));
+        assert!(!body.contains("next_test"));
+        assert_eq!(
+            classify_vacuous_test(&body, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+    }
+
+    #[test]
+    fn comment_scanning_preserves_literal_urls_and_nested_mapping_comments() {
+        let literal = r#"let url = "https://example.test/audit coverage"; assert_eq!(url, "https://example.test/audit coverage");"#;
+        assert_eq!(
+            classify_vacuous_test(literal, &HashSet::new(), &HashSet::new(), &policy(), None),
+            None
+        );
+        let nested = "/* outer /* inner */ audit coverage mapping */";
+        assert_eq!(
+            classify_vacuous_test(nested, &HashSet::new(), &HashSet::new(), &policy(), None),
+            Some("its comments describe audit coverage mapping instead of behavior".to_string())
+        );
     }
 
     #[test]
