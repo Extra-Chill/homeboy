@@ -138,9 +138,17 @@ fn retry_recovers_a_missing_transport_child_projection_without_provider_dispatch
 
 #[test]
 fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() {
-    let Ok(old_binary) = std::env::var("HOMEBOY_15504_OLD_BINARY") else {
+    let (Ok(old_binary), Ok(new_binary)) = (
+        std::env::var("HOMEBOY_15504_OLD_BINARY"),
+        std::env::var("HOMEBOY_15504_NEW_BINARY"),
+    ) else {
         return;
     };
+    exercise_historical_runtime_retry(&old_binary, "homeboy 0.399.35+");
+    exercise_historical_runtime_retry(&new_binary, "homeboy 0.400.2+");
+}
+
+fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_prefix: &str) {
     let context = HermeticTestContext::new();
     let cook_id = "cook-runtime-atomic-replay";
     let run_id = format!("{cook_id}-attempt-1");
@@ -209,7 +217,7 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
     let mut recipe: Value =
         serde_json::from_slice(&std::fs::read(&recipe_path).expect("read recipe"))
             .expect("parse recipe");
-    let old_version = Command::new(&old_binary)
+    let old_version = Command::new(compatible_binary)
         .arg("--version")
         .output()
         .expect("run preserved old binary identity");
@@ -221,7 +229,7 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
         .trim()
         .to_string();
     assert!(
-        old_display.starts_with("homeboy 0.399.35+"),
+        old_display.starts_with(expected_identity_prefix),
         "{old_display}"
     );
     recipe["runtime_generation"] = old_display.clone().into();
@@ -232,7 +240,7 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
     .expect("persist historical recipe runtime");
 
     let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let mut source_submit = Command::new(&old_binary);
+    let mut source_submit = Command::new(compatible_binary);
     source_submit
         .args([
             "agent-task".to_string(),
@@ -262,8 +270,11 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
         .env("TMP", context.temp_dir())
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE", &old_binary)
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", &old_binary)
+        .env(
+            "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
+            compatible_binary,
+        )
+        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", compatible_binary)
         .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY", &old_display);
     let source_submitted = bounded_output(&mut source_submit, Duration::from_secs(30));
     assert!(
@@ -327,11 +338,14 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
             .env_remove("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE")
             .env_remove("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY")
             .env_remove("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV");
-        if binary == old_binary {
+        if binary == compatible_binary {
             command
                 .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
-                .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE", &old_binary)
-                .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", &old_binary)
+                .env(
+                    "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
+                    compatible_binary,
+                )
+                .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", compatible_binary)
                 .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY", &old_display);
         }
         bounded_output(&mut command, Duration::from_secs(60))
@@ -360,7 +374,7 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
         "incompatible retry must not persist its declared successor"
     );
 
-    let compatible = run_retry(&old_binary);
+    let compatible = run_retry(compatible_binary);
     assert!(
         compatible.status.success(),
         "old-runtime compatible replay failed ({}): stdout={} stderr={}",
@@ -377,7 +391,7 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
             .latest_run_id,
         retry_id
     );
-    let mut run_successor = Command::new(&old_binary);
+    let mut run_successor = Command::new(compatible_binary);
     run_successor
         .args(["--placement", "local", "agent-task", "run", &retry_id])
         .env("HOME", context.home())
@@ -399,8 +413,11 @@ fn historical_runtime_retry_rejects_before_action_admission_then_replays_once() 
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &provider_started)
         .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_USE_ENV", "1")
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE", &old_binary)
-        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", &old_binary)
+        .env(
+            "HOMEBOY_TEST_CONTROLLER_RUNTIME_EXECUTABLE",
+            compatible_binary,
+        )
+        .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_SOURCE", compatible_binary)
         .env("HOMEBOY_TEST_CONTROLLER_RUNTIME_IDENTITY", &old_display);
     let run_output = bounded_output(&mut run_successor, Duration::from_secs(60));
     assert!(
