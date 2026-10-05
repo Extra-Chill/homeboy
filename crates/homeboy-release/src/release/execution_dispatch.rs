@@ -416,8 +416,11 @@ fn run_default_branch_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
 ) -> ReleaseStepResult {
-    match super::planning_git::validate_default_branch(context.component) {
-        Ok(()) => ReleaseStepResult {
+    match super::planning_git::check_default_branch(
+        context.component,
+        super::planning_git::DefaultBranchRequirement::AtTip,
+    ) {
+        Ok(_) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),
             status: ReleaseStepStatus::Success,
@@ -517,11 +520,12 @@ pub(super) fn run_remote_sync_preflight(
             },
         )
         .and_then(|()| {
-            if context.options.pipeline.head {
-                super::planning_git::validate_head_reachable_from_default_branch(context.component)
+            let requirement = if context.options.pipeline.head {
+                super::planning_git::DefaultBranchRequirement::ReachableFromDefault
             } else {
-                super::planning_git::validate_default_branch_ancestry(context.component)
-            }
+                super::planning_git::DefaultBranchRequirement::BasedOnDefault
+            };
+            super::planning_git::check_default_branch(context.component, requirement).map(|_| ())
         });
 
     match result {
