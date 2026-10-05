@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.402.0] - 2026-10-05
+
+### Changed
+- make typed Lab handoff the acceptance authority
+- retire legacy gate satisfaction aliases
+- parse gh pr view once behind a shared record
+- restore isolated warm Cargo target script coverage
+- verify private SSH directories and capability refusal
+- preserve compiled action execution input
+- retire alternate spec field contracts
+- prune duplicate preset and gate-conversion coverage
+
+### Fixed
+- finalize an uncommitted candidate on its promoted parent instead of merging the base beneath it
+- treat a live owner's promotion claim as in-flight, not durable_failure
+- evict stale shared Cargo targets and name them in capacity recovery
+- bound helper drain at shutdown and stop the completion sweep per item
+- create evidence directories with private permissions
+
 ## [0.401.0] - 2026-10-05
 
 ### Changed
