@@ -178,29 +178,23 @@ mod tests {
 
     #[test]
     fn serializes_change_artifact_with_snapshot_provenance_and_digest() {
-        let artifact = ChangeArtifact {
-            schema: CHANGE_ARTIFACT_SCHEMA.to_string(),
-            source_snapshot: source_snapshot(),
-            patch: Some(ChangePatch {
-                format: "unified_diff".to_string(),
-                content: "diff --git a/a b/a\n".to_string(),
-            }),
-            delta: None,
-            provenance: Some(ChangeArtifactProvenance {
-                producer: "runner.capture_patch".to_string(),
-                run_id: Some("run-1".to_string()),
-                artifact_id: Some("patch.diff".to_string()),
-                command: Some(vec!["homeboy".to_string(), "lab".to_string()]),
-            }),
-            digest: Some(ChangeArtifactDigest {
-                algorithm: "sha256".to_string(),
-                value: "abc123".to_string(),
-            }),
-        };
+        let artifact: ChangeArtifact = serde_json::from_value(serde_json::json!({
+            "source_snapshot": source_snapshot(),
+            "patch": { "content": "diff --git a/a b/a\n" },
+            "provenance": {
+                "producer": "runner.capture_patch",
+                "run_id": "run-1",
+                "artifact_id": "patch.diff",
+                "command": ["homeboy", "lab"]
+            },
+            "digest": { "value": "abc123" }
+        }))
+        .expect("deserialize artifact with wire defaults");
 
         let json = serde_json::to_value(&artifact).expect("serialize artifact");
 
-        assert_eq!(json["schema"], CHANGE_ARTIFACT_SCHEMA);
+        assert_eq!(json["schema"], "homeboy/change-artifact/v1");
+        assert_eq!(json["patch"]["format"], "unified_diff");
         assert_eq!(json["source_snapshot"]["snapshot_hash"], "sha256:snapshot");
         assert_eq!(json["provenance"]["producer"], "runner.capture_patch");
         assert_eq!(json["digest"]["algorithm"], "sha256");
@@ -231,34 +225,16 @@ mod tests {
 
         let json = serde_json::to_value(&result).expect("serialize apply result");
 
-        assert_eq!(json["schema"], CHANGE_APPLY_RESULT_SCHEMA);
+        assert_eq!(json["schema"], "homeboy/change-apply-result/v1");
         assert_eq!(json["apply_status"], "applied");
         assert_eq!(json["force"], true);
         assert_eq!(json["modified_files"][0], "src/lib.rs");
-        assert_eq!(json["artifact"]["schema"], CHANGE_ARTIFACT_SCHEMA);
+        assert_eq!(json["artifact"]["schema"], "homeboy/change-artifact/v1");
         assert_eq!(
             json["artifact"]["provenance"]["producer"],
             "refactor.transform"
         );
         assert_eq!(json["artifact"]["digest"]["value"], "def456");
-    }
-
-    #[test]
-    fn constants_are_sourced_from_canonical_execution_contract() {
-        assert_eq!(
-            CHANGE_ARTIFACT_SCHEMA,
-            crate::execution_contract::EXECUTION_CONTRACT
-                .apply
-                .change_artifact_schema
-        );
-        assert_eq!(
-            CHANGE_APPLY_RESULT_SCHEMA,
-            crate::execution_contract::EXECUTION_CONTRACT
-                .apply
-                .change_apply_result_schema
-        );
-        assert_eq!(UNIFIED_DIFF_PATCH_FORMAT, "unified_diff");
-        assert_eq!(DIGEST_ALGORITHM_SHA256, "sha256");
     }
 
     fn source_snapshot() -> SourceSnapshot {

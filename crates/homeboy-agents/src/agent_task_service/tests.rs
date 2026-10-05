@@ -1537,7 +1537,8 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         let mut plan = discovery_plan();
         plan.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "homeboy",
-            "component_id": "homeboy-cli"
+            "component_id": "homeboy-cli",
+            "component_registered": true
         });
         agent_task_lifecycle::submit_plan(&plan, Some("run-discovery-list")).expect("submitted");
 
@@ -2182,7 +2183,7 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
 }
 
 #[test]
-fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_projection() {
+fn control_plane_reconciliation_completes_its_effect_across_runner_terminal_projection() {
     with_isolated_home(|_| {
         let run_id = "cook-runner-reconcile-claim-attempt-1-transport-retry";
         let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
@@ -2239,13 +2240,21 @@ fn control_plane_reconciliation_retains_its_claim_across_runner_terminal_project
                 .state,
             AgentTaskRunState::Cancelled
         );
-        let operation_key = format!("control-plane-action:reconcile:{}", request.effect_id.0);
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            .expect("lifecycle store");
+        let effect = store
+            .open_observation_initialized()
+            .expect("observation store")
+            .control_plane_effect_status(&request.effect_id)
+            .expect("effect status")
+            .expect("durable effect");
         assert_eq!(
-            agent_task_lifecycle::operation_claim(run_id, &operation_key)
-                .expect("operation claim")
-                .expect("completed operation claim")
-                .state,
-            agent_task_lifecycle::ClaimState::Completed
+            effect.state,
+            homeboy_control_plane_contract::ControlPlaneEffectState::Terminal
+        );
+        assert_eq!(
+            effect.terminal.expect("completed effect").acknowledgement,
+            first
         );
         assert_eq!(
             crate::orchestration::execute_action_from_current_environment(run_id, &request)

@@ -4,6 +4,55 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.404.1] - 2026-10-05
+
+### Changed
+- consolidate notification wire fixtures and assert exact metadata
+
+## [0.404.0] - 2026-10-05
+
+### Changed
+- replace vacuous secret metadata checks with exact wire assertions
+- consolidate cleanup fixtures and assert exact wire fields
+- centralize component workspace binding
+- require explicit component registration evidence
+- retire historical execution record identity decoder
+
+### Fixed
+- scope snapshot seed lookup to the source and own its execution
+- return list rows under data.entities, always present, with legacy keys mirrored
+- install --replace installs an extension that is not installed
+- adopt a PR a concurrent publication created instead of failing
+
+## [0.403.0] - 2026-10-05
+
+### Changed
+- replace artifact constant parity with independent wire assertions
+- pin 23 enum labels to their serde wire form
+- retire legacy scalar cleanup configuration
+- share POSIX quoting and prune copy parity tests
+- retire delimited extra-workspace input
+- route private git probe helpers through core output primitives
+- require canonical runtime selection fields
+- retire v1 workspace verification and legacy hash traversal
+- one shell_arg allowlist quoter, quoting empty arguments
+- retire legacy capture decoding and stale test signals
+- retire mission-keyed handoff ledger migration
+- require structured daemon transport evidence
+
+### Fixed
+- bound runner exec argument construction and unify dispatch
+- supervise deferred source materialization and report controller ownership
+- provision absent manifest destinations through the native lifecycle
+- bind lease stops to the registered generation store
+- classify canonical identity command results
+- preserve candidate refusal cause in durable status
+- recover a poisoned upload registry and isolate daemon tests from HOME races
+- pin cgroup directory lifetime and restore SIGKILL coverage
+- converge managed runners to the installed controller, not the pre-upgrade build
+- rotate deferred Lab reconciliation batches fairly
+- restore reverse staging coverage and preserve first failure
+
 ## [0.402.0] - 2026-10-05
 
 ### Changed

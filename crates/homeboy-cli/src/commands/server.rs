@@ -268,7 +268,7 @@ fn redact_server_output_env(output: &mut ServerOutput) {
     if let Some(server) = output.entity.as_mut() {
         redact_server_env(server);
     }
-    for server in &mut output.entities {
+    for server in output.entities.iter_mut().flatten() {
         redact_server_env(server);
     }
 }
@@ -444,7 +444,7 @@ fn list_output(servers: Vec<Server>, full: bool) -> (ServerOutput, i32) {
         return (
             ServerOutput {
                 command: "server.list".to_string(),
-                entities: servers,
+                entities: Some(servers),
                 ..Default::default()
             },
             0,
@@ -465,7 +465,7 @@ fn list_output(servers: Vec<Server>, full: bool) -> (ServerOutput, i32) {
     (
         ServerOutput {
             command: "server.list".to_string(),
-            entities: summaries.into_iter().take(kept.len()).collect(),
+            entities: Some(summaries.into_iter().take(kept.len()).collect()),
             extra: ServerExtra {
                 output_budget: Some(output_budget),
                 ..Default::default()
@@ -788,6 +788,27 @@ mod tests {
             REDACTED_ENV_VALUE
         );
         assert!(!full_json.to_string().contains(secret));
+    }
+
+    #[test]
+    fn empty_server_list_emits_entities_array() {
+        for full in [false, true] {
+            let (output, _) = list_output(Vec::new(), full);
+            let value = serde_json::to_value(&output).expect("serialize empty list");
+            assert_eq!(value["command"], "server.list");
+            assert_eq!(value["entities"], serde_json::json!([]), "full={full}");
+        }
+    }
+
+    #[test]
+    fn server_show_does_not_emit_entities() {
+        let output = ServerOutput {
+            command: "server.show".to_string(),
+            id: Some("lab".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&output).expect("serialize show");
+        assert!(value.get("entities").is_none());
     }
 
     #[test]

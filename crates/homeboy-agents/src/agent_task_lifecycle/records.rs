@@ -953,12 +953,15 @@ impl AgentTaskRunRecord {
     pub(crate) fn is_controller_pre_provider_phase(&self) -> bool {
         self.runner_job_id().is_none()
             && self.provider_handles.is_empty()
-            && matches!(
-                self.metadata
-                    .pointer("/cook_progress/phase")
-                    .and_then(Value::as_str),
-                Some("worktree_provider_lookup" | "worktree_provider_ensure" | "provider_start")
-            )
+            && (self.metadata["phase"] == "source_materialization"
+                || matches!(
+                    self.metadata
+                        .pointer("/cook_progress/phase")
+                        .and_then(Value::as_str),
+                    Some(
+                        "worktree_provider_lookup" | "worktree_provider_ensure" | "provider_start"
+                    )
+                ))
     }
 
     /// A controller-owned pre-provider phase is live only while its heartbeat
@@ -967,6 +970,9 @@ impl AgentTaskRunRecord {
     pub(crate) fn has_fresh_controller_pre_provider_heartbeat(&self) -> bool {
         if !self.is_controller_pre_provider_phase() {
             return false;
+        }
+        if self.metadata["phase"] == "source_materialization" {
+            return self.has_fresh_update();
         }
         // Once a Lab target is selected, progress heartbeats may advance
         // without bumping the run-level timestamp. The controller still owns

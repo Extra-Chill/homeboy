@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_evidence_persists_without_the_opaque_route() {
+    fn resolution_evidence_preserves_exact_metadata_fields() {
         let resolution = NotificationRouteResolution {
             schema: "homeboy/notification-route-resolution/v1".to_string(),
             classification: "route_less".to_string(),
@@ -381,11 +381,20 @@ mod tests {
             resolver_transport: Some("example.completed".to_string()),
             missing_context: vec!["CALLER_THREAD_ID".to_string()],
         };
-        let mut metadata = serde_json::json!({});
+        let mut metadata = serde_json::json!({"existing": true});
         resolution.insert_into_metadata(&mut metadata);
-        let serialized = serde_json::to_string(&metadata).unwrap();
-        assert!(serialized.contains("CALLER_THREAD_ID"));
-        assert!(!serialized.contains("opaque-destination"));
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "existing": true,
+                "notification_resolution": {
+                    "schema": "homeboy/notification-route-resolution/v1",
+                    "classification": "route_less",
+                    "resolver_transport": "example.completed",
+                    "missing_context": ["CALLER_THREAD_ID"]
+                }
+            })
+        );
     }
 
     #[test]

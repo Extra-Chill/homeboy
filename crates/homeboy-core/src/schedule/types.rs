@@ -519,3 +519,28 @@ mod tests {
         assert!("hourly".parse::<NotifyPolicy>().is_err());
     }
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn notify_policy_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                NotifyPolicy::Change,
+                NotifyPolicy::Failure,
+                NotifyPolicy::Always,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlap_policy_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [OverlapPolicy::Skip, OverlapPolicy::Allow]
+        );
+    }
+}
