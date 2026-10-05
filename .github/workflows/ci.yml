@@ -66,13 +66,13 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@663ca1713b01b5c4027692158832831fb3d63177
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@fd3236bf67b313618449c26e134c6069611ca71d
     with:
       commands: review test
       args: --skip-lint
       expected-commands: review lint,review test
       component: homeboy
-      action-ref: 663ca1713b01b5c4027692158832831fb3d63177
+      action-ref: fd3236bf67b313618449c26e134c6069611ca71d
       extension-ref: 7b638cf9bf2ef69e19051e370e91864987e997a2
       source: .
       scope: auto
