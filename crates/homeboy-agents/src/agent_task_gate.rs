@@ -2790,12 +2790,29 @@ fn run_rust_cache_command(
         .envs(environment)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let path = std::env::var_os("PATH").ok_or_else(|| {
+    let host_path = std::env::var_os("PATH").ok_or_else(|| {
         Error::validation_invalid_argument(
             "PATH",
             "unavailable for Rust gate cache hydration",
             None,
             None,
+        )
+    })?;
+    // A cache-owned executable must resolve its siblings from its own
+    // directory first: toolchain `cargo` spawns `rustc` by name, and the host
+    // PATH may hold no rustc at all (#15453). Gate execution prepends the same
+    // toolchain bin; hydration has to match it.
+    let path = std::env::join_paths(
+        program
+            .parent()
+            .map(Path::to_path_buf)
+            .into_iter()
+            .chain(std::env::split_paths(&host_path)),
+    )
+    .map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("Rust gate cache hydration phase {phase} PATH")),
         )
     })?;
     process.env("PATH", path);
@@ -7462,6 +7479,60 @@ mod tests {
         );
 
         result.expect("declared cargo homes initialize the toolchain");
+    }
+
+    /// #15453: the host PATH carries no rustc (rustup lives in ~/.cargo/bin and
+    /// the daemon started outside a login shell). Toolchain cargo spawns rustc
+    /// by name during `fetch --locked`, so hydration must put the toolchain bin
+    /// on PATH the way gate execution does.
+    #[cfg(unix)]
+    #[test]
+    fn rust_gate_cache_hydration_resolves_rustc_from_toolchain_bin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = env_mutex();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cache = tempfile::tempdir().expect("cache");
+        let fixtures = tempfile::tempdir().expect("fixtures");
+        let host_bin = tempfile::tempdir().expect("host bin");
+
+        let toolchain_cargo = fixtures.path().join("cargo");
+        fs::write(
+            &toolchain_cargo,
+            "#!/bin/sh\nrustc -vV >/dev/null || exit 101\n",
+        )
+        .expect("toolchain cargo fixture");
+        let toolchain_rustc = fixtures.path().join("rustc");
+        fs::write(&toolchain_rustc, "#!/bin/sh\necho 'rustc 1.95.0-test'\n")
+            .expect("toolchain rustc fixture");
+        let rustup = host_bin.path().join("rustup");
+        fs::write(
+            &rustup,
+            format!(
+                "#!/bin/sh\nbin=\"$RUSTUP_HOME/toolchains/1.95.0-test/bin\"\nif test \"$1\" = toolchain; then\n  /bin/mkdir -p \"$bin\"\n  /bin/cp \"{}\" \"$bin/cargo\"\n  /bin/cp \"{}\" \"$bin/rustc\"\nelif test \"$1\" = which; then\n  printf '%s\\n' \"$bin/cargo\"\nfi\n",
+                toolchain_cargo.display(),
+                toolchain_rustc.display()
+            ),
+        )
+        .expect("rustup fixture");
+        for path in [&toolchain_cargo, &toolchain_rustc, &rustup] {
+            let mut permissions = fs::metadata(path).expect("tool metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("tool executable");
+        }
+        let _environment = EnvVarGuard::set(&[("PATH", host_bin.path())]);
+
+        let relative = hydrate_rust_cache_with_timeout(
+            workspace.path(),
+            cache.path(),
+            Duration::from_secs(10),
+        )
+        .expect("fetch_locked resolves rustc from the toolchain bin");
+        assert_eq!(
+            relative,
+            PathBuf::from("toolchains/1.95.0-test/bin/cargo"),
+            "hydration reports the toolchain cargo relative to RUSTUP_HOME"
+        );
     }
 
     #[cfg(unix)]
