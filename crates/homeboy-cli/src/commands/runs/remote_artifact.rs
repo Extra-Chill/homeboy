@@ -1,4 +1,5 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use homeboy::core::cleanup::{resolve_cleanup_policy, CleanupPolicyOverrides};
@@ -8,6 +9,7 @@ use homeboy::core::observation::runs_service::{
 };
 use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::observation::ObservationStore;
+use homeboy::core::redaction::RedactionPolicy;
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
@@ -30,6 +32,22 @@ use super::types::{
 };
 use super::CmdResult;
 use crate::commands::cleanup::RUNNER_DOWNLOADS_METADATA;
+
+const MANAGED_RUNTIME_SNAPSHOT_LIMIT: u64 = 8 * 1024;
+
+struct ManagedRuntimeSnapshot {
+    path: PathBuf,
+    stream: &'static str,
+    source_bytes: u64,
+    snapshot_bytes: u64,
+    truncated: bool,
+}
+
+impl Drop for ManagedRuntimeSnapshot {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 pub fn get(artifact: ArtifactRecord, output: Option<PathBuf>) -> CmdResult<RunsOutput> {
     let download = runs_service::download_remote_artifact(artifact, output)?;
@@ -75,23 +93,37 @@ pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResu
     // the store's would let a local runner authorize a path against one
     // installation and land the artifact in another (#7505).
     let artifact_root = store.artifact_root()?;
-    let run_owned_runtime_evidence = is_run_owned_runtime_evidence(&run, &args.path);
-    if !run_owned_runtime_evidence {
+    let managed_runtime_evidence = run_owned_runtime_evidence(&run, &args.path, &artifact_root);
+    if managed_runtime_evidence.is_none() {
         validate_runner_artifact_path(&runner, &args.path, &artifact_root)?;
     }
 
     // The bytes land under the root this store indexes, because the path is
     // recorded into that same store two lines below (#7505).
-    let source = if run_owned_runtime_evidence {
+    let managed_snapshot = managed_runtime_evidence
+        .map(|(path, stream)| snapshot_managed_runtime_evidence(&artifact_root, &path, stream))
+        .transpose()?;
+    let source = if let Some(snapshot) = &managed_snapshot {
         RunnerAttachSource {
-            path: PathBuf::from(&args.path),
+            path: snapshot.path.clone(),
             artifact_type: RunnerAttachArtifactType::File,
             temporary: false,
         }
     } else {
         runner_artifact_attach::copy_runner_artifact_source(&artifact_root, &runner, &args.path)?
     };
-    let metadata = runner_attach_metadata(&runner, &args.path, &source);
+    let mut metadata = runner_attach_metadata(&runner, &args.path, &source);
+    if let Some(snapshot) = &managed_snapshot {
+        metadata["managed_runtime_evidence"] = serde_json::json!({
+            "stream": snapshot.stream,
+            "source_bytes": snapshot.source_bytes,
+            "snapshot_bytes": snapshot.snapshot_bytes,
+            "truncated": snapshot.truncated,
+            "max_snapshot_bytes": MANAGED_RUNTIME_SNAPSHOT_LIMIT,
+            "redacted": true,
+            "ownership": "reserved_provider_execution_attempt",
+        });
+    }
     let artifact = match source.artifact_type {
         RunnerAttachArtifactType::File => {
             store.record_artifact_with_metadata(&args.run_id, &args.name, &source.path, metadata)?
@@ -121,25 +153,172 @@ pub fn attach(store: &ObservationStore, args: RunsArtifactAttachArgs) -> CmdResu
     ))
 }
 
-fn is_run_owned_runtime_evidence(run: &homeboy::core::observation::RunRecord, path: &str) -> bool {
-    let Ok(requested) = Path::new(path).canonicalize() else {
-        return false;
-    };
+fn run_owned_runtime_evidence(
+    run: &homeboy::core::observation::RunRecord,
+    path: &str,
+    artifact_root: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    let requested = Path::new(path).canonicalize().ok()?;
+    let requested_name = requested.file_name()?.to_str()?;
+    let root = artifact_root.canonicalize().ok()?;
     run.metadata_json
         .get("provider_executions")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|execution| execution.get("runtime_evidence"))
-        .flat_map(|evidence| ["stdout", "stderr", "progress"].map(|key| evidence.get(key)))
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .filter_map(|uri| uri.strip_prefix("file://"))
-        .any(|owned| {
-            Path::new(owned)
+        .find_map(|execution| {
+            let task_id = execution.get("task_id")?.as_str()?;
+            let attempt = execution.get("attempt")?.as_u64()?;
+            if attempt == 0 {
+                return None;
+            }
+            let attempt_root = root
+                .join("agent-task")
+                .join("executor-artifacts")
+                .join(homeboy::core::paths::sanitize_path_segment(&run.id))
+                .join(homeboy::core::paths::sanitize_path_segment(task_id))
+                .join(format!("attempt-{attempt}"))
                 .canonicalize()
-                .is_ok_and(|owned| owned == requested)
+                .ok()?;
+            if requested.parent()? != attempt_root {
+                return None;
+            }
+            let runtime_evidence = execution.get("runtime_evidence")?;
+            [
+                (
+                    "stdout",
+                    format!("provider-runtime-stdout-{attempt}.log"),
+                    runtime_evidence.get("stdout"),
+                ),
+                (
+                    "stderr",
+                    format!("provider-runtime-stderr-{attempt}.log"),
+                    runtime_evidence.get("stderr"),
+                ),
+                (
+                    "progress",
+                    "provider-progress.jsonl".to_string(),
+                    runtime_evidence.get("structured_progress"),
+                ),
+            ]
+            .into_iter()
+            .find_map(|(stream, expected_name, uri)| {
+                (requested_name == expected_name
+                    && uri
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|uri| uri.strip_prefix("file://"))
+                        .and_then(|uri| Path::new(uri).canonicalize().ok())
+                        .is_some_and(|owned| owned == requested))
+                .then_some((requested.clone(), stream))
+            })
         })
+}
+
+fn snapshot_managed_runtime_evidence(
+    artifact_root: &Path,
+    source: &Path,
+    stream: &'static str,
+) -> homeboy::core::Result<ManagedRuntimeSnapshot> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(source).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("open managed runtime evidence".to_string()),
+        )
+    })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("stat managed runtime evidence".to_string()),
+            )
+        })?
+        .is_file()
+    {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "managed runtime evidence must be a regular file",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
+    let source_bytes = file
+        .metadata()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("stat managed runtime evidence".to_string()),
+            )
+        })?
+        .len();
+    let start = source_bytes.saturating_sub(MANAGED_RUNTIME_SNAPSHOT_LIMIT);
+    file.seek(SeekFrom::Start(start)).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("seek managed runtime evidence".to_string()),
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(MANAGED_RUNTIME_SNAPSHOT_LIMIT as usize);
+    file.take(MANAGED_RUNTIME_SNAPSHOT_LIMIT)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read managed runtime evidence".to_string()),
+            )
+        })?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut redacted = RedactionPolicy::default().redact_string(&text);
+    if redacted.len() as u64 > MANAGED_RUNTIME_SNAPSHOT_LIMIT {
+        let mut start = redacted.len() - MANAGED_RUNTIME_SNAPSHOT_LIMIT as usize;
+        while !redacted.is_char_boundary(start) {
+            start += 1;
+        }
+        redacted = redacted[start..].to_string();
+    }
+    let snapshot_root = artifact_root.join("runner-attach").join("managed-runtime");
+    fs::create_dir_all(&snapshot_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create managed runtime snapshot root".to_string()),
+        )
+    })?;
+    let snapshot_path = snapshot_root.join(format!("{}.log", uuid::Uuid::new_v4()));
+    let mut snapshot_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&snapshot_path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create managed runtime snapshot".to_string()),
+            )
+        })?;
+    if let Err(error) = snapshot_file
+        .write_all(redacted.as_bytes())
+        .and_then(|()| snapshot_file.sync_all())
+    {
+        let _ = fs::remove_file(&snapshot_path);
+        return Err(Error::internal_io(
+            error.to_string(),
+            Some("write managed runtime snapshot".to_string()),
+        ));
+    }
+    let snapshot_bytes = redacted.len() as u64;
+    Ok(ManagedRuntimeSnapshot {
+        path: snapshot_path,
+        stream,
+        source_bytes,
+        snapshot_bytes,
+        truncated: start > 0,
+    })
 }
 
 fn metadata_with_resource_lifecycle(
@@ -149,6 +328,10 @@ fn metadata_with_resource_lifecycle(
 ) -> serde_json::Value {
     if !metadata.is_object() {
         metadata = serde_json::json!({});
+    }
+    if metadata.get("managed_runtime_evidence").is_some() {
+        metadata["managed_runtime_evidence"]["snapshot_sha256"] =
+            serde_json::json!(artifact.sha256);
     }
     let resource = ResourceLifecycleRecord {
         owner: "homeboy-runs".to_string(),
@@ -572,7 +755,10 @@ mod tests {
     use std::env;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
@@ -584,6 +770,17 @@ mod tests {
     fn artifact_root_test_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct ProviderChild(std::process::Child);
+
+    impl Drop for ProviderChild {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
     }
 
     #[test]
@@ -787,58 +984,275 @@ mod tests {
     }
 
     #[test]
-    fn managed_runtime_evidence_authorization_is_exactly_run_owned() {
+    fn managed_runtime_evidence_is_retrievable_while_active_and_after_terminal() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
             let artifact_root = home.path().join("artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
             let workspace = home.path().join("runner-workspace");
             fs::create_dir_all(&workspace).expect("workspace");
-            let runner: Runner = serde_json::from_value(serde_json::json!({
-                "kind": "ssh",
-                "server_id": "test-server",
-                "workspace_root": workspace,
-            }))
-            .expect("SSH runner");
+            homeboy::core::server::create(
+                r#"{"id":"fixture-ssh-runner","host":"localhost","user":"fixture"}"#,
+                false,
+            )
+            .expect("disposable SSH server config");
+            runner::create(
+                &format!(
+                    r#"{{"id":"fixture-ssh-runner","kind":"ssh","server_id":"fixture-ssh-runner","workspace_root":"{}"}}"#,
+                    workspace.display()
+                ),
+                false,
+            )
+            .expect("disposable SSH runner config");
             let store = ObservationStore::open_initialized().expect("store");
-            let source = artifact_root.join("provider-runtime-stdout.log");
-            fs::create_dir_all(&artifact_root).expect("artifact root");
-            fs::write(&source, "bounded runtime evidence\n").expect("runtime evidence");
-            let owned = store
-                .start_run(
+            let run_id = "managed-runtime-active-terminal";
+            let attempt_root = artifact_root
+                .join("agent-task")
+                .join("executor-artifacts")
+                .join(run_id)
+                .join("task-live-evidence")
+                .join("attempt-1");
+            fs::create_dir_all(&attempt_root).expect("reserved attempt artifact root");
+            let source = attempt_root.join("provider-runtime-stdout-1.log");
+            let runtime_uri = format!("file://{}", source.display());
+            let ssh_runner = runner::load("fixture-ssh-runner").expect("configured SSH runner");
+            let run = store
+                .start_run_with_id(
                     NewRunRecord::builder("agent-task")
                         .metadata(serde_json::json!({
                             "provider_executions": [{
+                                "key": "task-live-evidence:1",
+                                "task_id": "task-live-evidence",
+                                "attempt": 1,
+                                "state": "running",
                                 "runtime_evidence": {
-                                    "stdout": format!("file://{}", source.display())
+                                    "stdout": runtime_uri,
+                                    "capture": "bounded_incremental"
                                 }
                             }]
                         }))
                         .build(),
+                    run_id.to_string(),
                 )
-                .expect("owned run");
-            let unrelated = store
-                .start_run(NewRunRecord::builder("agent-task").build())
-                .expect("unrelated run");
+                .expect("active durable run");
 
-            let owned = runs_service::require_run(&store, &owned.id).expect("owned run");
-            let unrelated =
-                runs_service::require_run(&store, &unrelated.id).expect("unrelated run");
-            assert!(validate_runner_artifact_path(
-                &runner,
-                &source.display().to_string(),
-                &artifact_root
+            let marker = home.path().join("provider-started");
+            let release = home.path().join("provider-release");
+            let script = "printf 'active provider output\\n' >> \"$1\"; touch \"$2\"; while [ ! -e \"$3\" ]; do printf 'active-provider-heartbeat\\n' >> \"$1\"; sleep 0.01; done; i=0; while [ $i -lt 40 ]; do printf '%0500d\\n' \"$i\" >> \"$1\"; i=$((i + 1)); done; printf 'api_key=sk-managed-evidence-secret\\n' >> \"$1\"";
+            let mut provider = ProviderChild(
+                Command::new("sh")
+                    .args(["-c", script, "provider-fixture"])
+                    .arg(&source)
+                    .arg(&marker)
+                    .arg(&release)
+                    .spawn()
+                    .expect("start harmless provider subprocess"),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !marker.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "provider did not signal active output"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(provider.0.try_wait().expect("poll provider").is_none());
+            let active_growth_deadline = Instant::now() + Duration::from_secs(5);
+            while fs::metadata(&source).expect("active runtime log").len() < 80 {
+                assert!(
+                    Instant::now() < active_growth_deadline,
+                    "provider runtime log did not grow while active"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                validate_runner_artifact_path(
+                    &ssh_runner,
+                    &source.display().to_string(),
+                    &artifact_root
+                )
+                .is_err(),
+                "managed store is outside the SSH workspace allowlist"
+            );
+
+            let active_attached = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id.clone(),
+                    runner: "fixture-ssh-runner".to_string(),
+                    path: source.display().to_string(),
+                    name: "provider-runtime-stdout-active".to_string(),
+                },
+            )
+            .expect("attach while provider remains active")
+            .0;
+            let RunsOutput::ArtifactAttach(active_artifact) = active_attached else {
+                panic!("unexpected output");
+            };
+            assert_eq!(active_artifact.artifact.run_id, run.id);
+            assert_eq!(
+                active_artifact.artifact.metadata_json["managed_runtime_evidence"]["truncated"],
+                false
+            );
+            let active_snapshot_source_bytes = active_artifact.artifact.metadata_json
+                ["managed_runtime_evidence"]["source_bytes"]
+                .as_u64()
+                .expect("active snapshot source bytes");
+            assert_artifact_get_matches(&store, &active_artifact.artifact, home.path());
+            let growth_deadline = Instant::now() + Duration::from_secs(5);
+            while fs::metadata(&source).expect("active runtime log").len()
+                <= active_snapshot_source_bytes
+            {
+                assert!(
+                    Instant::now() < growth_deadline,
+                    "active provider log stopped growing"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+
+            fs::write(&release, b"release provider").expect("release provider");
+            let status = provider.0.wait().expect("wait provider");
+            assert!(status.success(), "provider subprocess failed: {status}");
+            let terminal_source_bytes = fs::metadata(&source).expect("terminal runtime log").len();
+            assert!(terminal_source_bytes > MANAGED_RUNTIME_SNAPSHOT_LIMIT);
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("terminalize durable run");
+
+            let terminal_attached = attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id.clone(),
+                    runner: "fixture-ssh-runner".to_string(),
+                    path: source.display().to_string(),
+                    name: "provider-runtime-stdout-terminal".to_string(),
+                },
+            )
+            .expect("attach after provider terminalization")
+            .0;
+            let RunsOutput::ArtifactAttach(terminal_artifact) = terminal_attached else {
+                panic!("unexpected output");
+            };
+            let provenance = &terminal_artifact.artifact.metadata_json["managed_runtime_evidence"];
+            assert_eq!(provenance["stream"], "stdout");
+            assert_eq!(provenance["source_bytes"], terminal_source_bytes);
+            assert_eq!(provenance["truncated"], true);
+            assert_eq!(provenance["redacted"], true);
+            assert_eq!(
+                provenance["snapshot_sha256"].as_str(),
+                terminal_artifact.artifact.sha256.as_deref()
+            );
+            assert!(
+                provenance["snapshot_bytes"].as_u64().unwrap() <= MANAGED_RUNTIME_SNAPSHOT_LIMIT
+            );
+            assert_artifact_get_matches(&store, &terminal_artifact.artifact, home.path());
+            let downloaded = home.path().join("retrieved-terminal-runtime.log");
+            super::super::handlers::artifact_get(
+                &store,
+                super::super::types::RunsArtifactGetArgs {
+                    run_id: run.id.clone(),
+                    artifact_id: terminal_artifact.artifact.id.clone(),
+                    runner: None,
+                    output: Some(downloaded.clone()),
+                    field: Vec::new(),
+                },
+            )
+            .expect("canonical artifact get");
+            let retrieved = fs::read(&downloaded).expect("retrieved terminal snapshot");
+            let retrieved_text = String::from_utf8_lossy(&retrieved);
+            assert!(retrieved_text.contains("[REDACTED]"));
+            assert!(!retrieved_text.contains("sk-managed-evidence-secret"));
+            assert!(retrieved.len() as u64 <= MANAGED_RUNTIME_SNAPSHOT_LIMIT);
+
+            let unrelated_run_id = "managed-runtime-unrelated-run";
+            let unrelated = store
+                .start_run_with_id(
+                    NewRunRecord::builder("agent-task")
+                        .metadata(serde_json::json!({
+                            "provider_executions": [{
+                                "task_id": "task-live-evidence",
+                                "attempt": 1,
+                                "runtime_evidence": { "stdout": format!("file://{}", source.display()) }
+                            }]
+                        }))
+                        .build(),
+                    unrelated_run_id.to_string(),
+                )
+                .expect("unrelated durable run");
+            assert!(attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: unrelated.id,
+                    runner: "fixture-ssh-runner".to_string(),
+                    path: source.display().to_string(),
+                    name: "wrong-owner".to_string(),
+                }
             )
             .is_err());
-            assert!(is_run_owned_runtime_evidence(
-                &owned,
-                &source.display().to_string()
-            ));
-            assert!(!is_run_owned_runtime_evidence(
-                &unrelated,
-                &source.display().to_string()
-            ));
+
+            let unrelated_path = home.path().join("unrelated.log");
+            fs::write(&unrelated_path, b"not provider evidence").expect("unrelated file");
+            let forged_path = attempt_root.join("unrelated.log");
+            fs::write(&forged_path, b"URI claim is not ownership").expect("forged evidence file");
+            let mut uri_only_claim = run.clone();
+            uri_only_claim.metadata_json["provider_executions"][0]["runtime_evidence"]["stdout"] =
+                serde_json::json!(format!("file://{}", forged_path.display()));
+            assert!(run_owned_runtime_evidence(
+                &uri_only_claim,
+                &forged_path.display().to_string(),
+                &artifact_root
+            )
+            .is_none());
+            assert!(attach(
+                &store,
+                RunsArtifactAttachArgs {
+                    run_id: run.id.clone(),
+                    runner: "fixture-ssh-runner".to_string(),
+                    path: unrelated_path.display().to_string(),
+                    name: "unrelated".to_string(),
+                }
+            )
+            .is_err());
         });
+    }
+
+    fn assert_artifact_get_matches(
+        store: &ObservationStore,
+        artifact: &ArtifactRecord,
+        output_root: &Path,
+    ) {
+        let listed = store
+            .list_artifacts(&artifact.run_id)
+            .expect("canonical artifact list");
+        assert!(listed.iter().any(|listed| listed.id == artifact.id));
+        let (inventory, _) = super::super::handlers::artifacts(&artifact.run_id)
+            .expect("public runs artifacts handler");
+        let RunsOutput::Artifacts(inventory) = inventory else {
+            panic!("unexpected output");
+        };
+        assert!(inventory
+            .artifacts
+            .iter()
+            .any(|listed| listed.id == artifact.id));
+        let output = output_root.join(format!("retrieved-{}.log", artifact.id));
+        super::super::handlers::artifact_get(
+            store,
+            super::super::types::RunsArtifactGetArgs {
+                run_id: artifact.run_id.clone(),
+                artifact_id: artifact.id.clone(),
+                runner: None,
+                output: Some(output.clone()),
+                field: Vec::new(),
+            },
+        )
+        .expect("canonical artifact get");
+        assert_eq!(
+            homeboy::core::artifact_metadata::sha256_file(&output).expect("download digest"),
+            artifact
+                .sha256
+                .as_deref()
+                .expect("recorded artifact digest")
+        );
     }
 
     #[test]
