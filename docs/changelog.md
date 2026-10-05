@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.399.43] - 2026-10-05
+
+### Changed
+- share lexical masks for test structure detection
+
+### Fixed
+- sync a plan runtime with its extension's shared-asset closure
+
 ## [0.399.42] - 2026-10-05
 
 ### Fixed
