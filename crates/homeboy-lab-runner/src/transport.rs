@@ -747,12 +747,16 @@ fn provider_evidence_io_error(error: std::io::Error, operation: String) -> Error
     };
     let operation = redact_and_bound(&operation);
     let cause = redact_and_bound(&error.to_string());
-    Error::new(
-        ErrorCode::InternalIoError,
-        format!("{operation}: {cause}"),
-        json!({"context": operation, "error": cause}),
-    )
-    .with_source(error)
+    // Keep homeboy-error's ENOSPC/StorageFull classification and its
+    // retryability/hints. Only refine the operator-facing message and redact
+    // the two diagnostic strings placed in the structured details.
+    let mut diagnostic = Error::from_io_error(&error, Some(operation.clone()));
+    diagnostic.message = format!("{operation}: {cause}");
+    if let Some(details) = diagnostic.details.as_object_mut() {
+        details.insert("context".to_string(), json!(operation));
+        details.insert("error".to_string(), json!(cause));
+    }
+    diagnostic.with_source(error)
 }
 
 fn private_file_bytes_with_expected_digest(
@@ -1475,5 +1479,24 @@ mod tests {
         assert!(
             source.to_string().contains("No such file") || source.to_string().contains("not found")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_evidence_disk_full_keeps_canonical_storage_classification() {
+        let error = provider_evidence_io_error(
+            std::io::Error::from_raw_os_error(28),
+            "write evidence snapshot".to_string(),
+        );
+
+        assert_eq!(error.code, ErrorCode::StorageExhausted);
+        assert_eq!(error.retryable, Some(false));
+        assert_eq!(error.details["context"], "write evidence snapshot");
+        assert!(error.message.contains("write evidence snapshot"));
+        assert!(error.message.contains("No space left") || error.message.contains("storage full"));
+        let source = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("original disk-full I/O source");
+        assert_eq!(source.raw_os_error(), Some(28));
     }
 }

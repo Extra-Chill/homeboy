@@ -456,8 +456,8 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         let source = Error::internal_io(
             io_error.to_string(),
             Some(format!(
-                "private evidence upload {}",
-                missing_evidence.display()
+                "private evidence upload {}; Authorization: Bearer status-fixture-secret",
+                missing_evidence.display(),
             )),
         )
         .with_source(io_error)
@@ -501,7 +501,8 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         assert!(persisted_receipt["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("private evidence upload")
-                && (message.contains("No such file") || message.contains("not found"))));
+                && (message.contains("No such file") || message.contains("not found"))
+                && message.contains("[REDACTED]")));
 
         let (compact_diagnosis, _) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
@@ -582,11 +583,11 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         for output in [&compact_diagnosis, &full_diagnosis] {
             assert!(!serde_json::to_string(output)
                 .expect("serialize command output")
-                .contains("Authorization: Bearer"));
+                .contains("status-fixture-secret"));
         }
         assert!(!serde_json::to_string(&(record, aggregate))
             .expect("serialize durable evidence")
-            .contains("Authorization: Bearer"));
+            .contains("status-fixture-secret"));
     });
 }
 
