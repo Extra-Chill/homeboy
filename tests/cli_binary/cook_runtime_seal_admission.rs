@@ -66,9 +66,15 @@ fn local_cook_identity_is_discoverable_while_runtime_admission_is_locked() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let original_launcher = observed
-        .as_ref()
-        .map(|record| record.metadata["detached_cook_handoff"]["launcher_id"].clone());
+    let Some(record) = observed else {
+        let _ = child.kill();
+        let _ = child.wait();
+        let unlock_result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+        drop(lock);
+        assert_eq!(unlock_result, 0, "release isolated admission lock");
+        panic!("Cook identity was not durable while runtime admission was locked");
+    };
+    let original_launcher = record.metadata["detached_cook_handoff"]["launcher_id"].clone();
     let mut replay = context.controller_runtime_command(TestBinary::HomeboyFixture);
     replay
         .args([
@@ -109,7 +115,6 @@ fn local_cook_identity_is_discoverable_while_runtime_admission_is_locked() {
         remained_blocked,
         "Cook should be held at the fake admission lock"
     );
-    let record = observed.expect("Cook identity must be durable while pin admission waits");
     assert_eq!(record.run_id, cook_id);
     assert_eq!(record.metadata["detached_cook_handoff"]["state"], "pending");
     assert_eq!(
@@ -123,7 +128,7 @@ fn local_cook_identity_is_discoverable_while_runtime_admission_is_locked() {
     let after_replay = after_replay.expect("original parent remains discoverable");
     assert_eq!(
         after_replay.metadata["detached_cook_handoff"]["launcher_id"],
-        original_launcher.expect("startup launcher owns parent")
+        original_launcher
     );
     assert_eq!(
         after_replay.metadata["cook_progress"]["phase"],
