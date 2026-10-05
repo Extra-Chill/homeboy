@@ -10506,15 +10506,14 @@ pub fn cook_repository_identity_component_id(plan: &AgentTaskPlan) -> Option<Str
     admitted_component_id(plan.metadata.get("cook_repository_identity"))
 }
 
-/// The registered component identity recorded at Cook admission. Callers that
+/// The explicitly registered component identity recorded at Cook admission. Callers that
 /// already have this identity must not re-resolve it from a worktree path.
 pub fn admitted_component_id(identity: Option<&Value>) -> Option<String> {
     let identity = identity?;
     let component_id = identity.get("component_id").and_then(Value::as_str)?;
     let component_registered = identity
         .get("component_registered")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+        .and_then(Value::as_bool)?;
     if !component_registered || component_id.is_empty() {
         return None;
     }

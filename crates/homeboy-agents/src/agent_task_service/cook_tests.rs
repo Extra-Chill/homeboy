@@ -159,16 +159,25 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
         stale.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "blocks-engine",
             "component_id": "removed-transformer",
+            "component_registered": true,
             "provenance": "--repo:configured-component"
         });
         let error = bind_materialized_cook_component_workspace(&mut stale, repository.path(), None)
             .expect_err("stale component registration must fail closed");
         assert!(error.message.contains("no longer registered"));
 
+        let mut unattested = plan.clone();
+        unattested.metadata["cook_repository_identity"] = serde_json::json!({
+            "repository_name": "standalone-repository",
+            "component_id": "removed-transformer"
+        });
+        bind_materialized_cook_component_workspace(&mut unattested, repository.path(), None)
+            .expect("a component label without registration evidence grants no binding authority");
+
         let mut unregistered = plan.clone();
         unregistered.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "standalone-repository",
-            "component_id": null,
+            "component_id": "standalone-repository",
             "component_registered": false,
             "provenance": "--cwd:git-remote:origin"
         });

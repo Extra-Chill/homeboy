@@ -1537,7 +1537,8 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         let mut plan = discovery_plan();
         plan.metadata["cook_repository_identity"] = serde_json::json!({
             "repository_name": "homeboy",
-            "component_id": "homeboy-cli"
+            "component_id": "homeboy-cli",
+            "component_registered": true
         });
         agent_task_lifecycle::submit_plan(&plan, Some("run-discovery-list")).expect("submitted");
 
