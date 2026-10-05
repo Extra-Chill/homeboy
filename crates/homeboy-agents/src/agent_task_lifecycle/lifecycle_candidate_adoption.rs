@@ -503,8 +503,7 @@ pub fn candidate_adoption_recovery_outcome(
             && handoff.runner_job_id.is_none()
             && record.metadata["phase"] == "handoff_rejected"
             && record.metadata["provider_executions_consumed"] == 0
-            && record.metadata["handoff_acceptance"]["state"] == "expired"
-            && record.metadata["handoff_acceptance"]["reason"] == EXPIRED_LAB_HANDOFF_REASON
+            && record.metadata["managed_recovery"]["reason"] == EXPIRED_LAB_HANDOFF_REASON
     });
     let failure = &record.metadata["pre_execution_failure"];
     let recovery_matches_failure =

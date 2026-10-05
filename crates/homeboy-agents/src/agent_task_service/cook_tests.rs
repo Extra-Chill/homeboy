@@ -14332,10 +14332,8 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
             handoff.expired_at = Some("2000-01-01T00:00:01+00:00".to_string());
             record.state = agent_task_lifecycle::AgentTaskRunState::Cancelled;
             record.metadata["phase"] = serde_json::json!("handoff_rejected");
-            record.metadata["handoff_acceptance"] = serde_json::json!({
-                "state": "expired",
+            record.metadata["managed_recovery"] = serde_json::json!({
                 "reason": agent_task_lifecycle::EXPIRED_LAB_HANDOFF_REASON,
-                "expired_at": "2000-01-01T00:00:01+00:00",
             });
         })
         .expect("expire handoff deadline");
