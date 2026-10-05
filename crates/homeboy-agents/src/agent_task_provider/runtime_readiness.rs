@@ -999,27 +999,28 @@ mod tests {
         let count = root.path().join("count");
         let provider = provider(&readiness_script(root.path()), &count);
         let config = json!({ "model": "ready" });
-        let mut cache = ProviderRuntimeReadinessCache::process_local();
+        let mut compile_cache = ProviderRuntimeReadinessCache::process_local();
+        let mut admission_cache = ProviderRuntimeReadinessCache::process_local();
 
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut cache,
+            &mut compile_cache,
         )
         .expect("first phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
-            &mut cache,
+            &mut admission_cache,
         )
         .expect("same-credential phase verdict");
         readiness_verdict_with_credentials(
             &provider,
             &config,
             &[("TOKEN".to_string(), "rotated".to_string())],
-            &mut cache,
+            &mut admission_cache,
         )
         .expect("rotated-credential phase verdict");
 

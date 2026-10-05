@@ -400,6 +400,11 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     }
                 }
             };
+        let catalog = AgentTaskProviderCatalog {
+            providers: vec![provider.clone()],
+            diagnostics: Vec::new(),
+            version: None,
+        };
         let mut readiness_cache = match self.evidence.lock() {
             Ok(evidence) => evidence,
             Err(_) => {
@@ -420,11 +425,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         }
         .readiness
         .clone();
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![provider.clone()],
-            diagnostics: Vec::new(),
-            version: None,
-        };
         let evaluated = super::dispatchability::evaluate_request_dispatchability_with_credentials(
             &catalog,
             &request,
@@ -1091,6 +1091,41 @@ mod tests {
             json!({ "id": "test.provider", "backend": "test" }),
         )
         .expect("provider")])
+    }
+
+    #[test]
+    fn sibling_child_readiness_reuses_one_subprocess_probe() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let count = temp.path().join("probe-count");
+        let readiness: AgentTaskExecutorProvider = serde_json::from_value(json!({
+            "id": format!("test.provider.{}", uuid::Uuid::new_v4()),
+            "backend": "test",
+            "readiness_invocation": {
+                "argv": ["sh", "-c", format!(
+                    "count={:?}; value=0; test ! -f \"$count\" || value=$(cat \"$count\"); value=$((value + 1)); printf '%s' \"$value\" > \"$count\"; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"shared\",\"identity\":{{}}}}'",
+                    count.display()
+                )]
+            }
+        })).expect("provider");
+        let first_executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![readiness.clone()]);
+        let later_child_executor =
+            ExtensionProviderAgentTaskExecutor::with_providers(vec![readiness]);
+
+        for task_id in ["child-one", "child-two", "child-three"] {
+            let mut request = readiness_request("shared-model");
+            request.task_id = task_id.to_string();
+            assert!(
+                if task_id == "child-one" {
+                    first_executor.provider_route_readiness(&request)
+                } else {
+                    later_child_executor.provider_route_readiness(&request)
+                }
+                .ready
+            );
+        }
+
+        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
     }
 
     #[test]
