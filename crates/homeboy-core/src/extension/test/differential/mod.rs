@@ -877,3 +877,25 @@ pub fn measurement_from_test_output(output: &TestCommandOutput) -> TestMeasureme
     }
     .normalized()
 }
+
+#[cfg(test)]
+mod serde_label_pins {
+    use super::*;
+
+    #[test]
+    fn differential_verdict_label_matches_serde() {
+        homeboy_serde_pin::assert_label_matches_serde!(
+            as_str,
+            [
+                DifferentialVerdict::Pass,
+                DifferentialVerdict::Fail,
+                DifferentialVerdict::Timeout,
+                DifferentialVerdict::BaselineRed,
+                DifferentialVerdict::Inconclusive,
+                DifferentialVerdict::NoMeasurement,
+                DifferentialVerdict::NoBaseline,
+                DifferentialVerdict::InvalidEvidence,
+            ]
+        );
+    }
+}

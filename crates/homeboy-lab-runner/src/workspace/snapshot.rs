@@ -2127,6 +2127,7 @@ pub(super) struct SnapshotStableManifest {
     content_identity: String,
 }
 
+#[cfg(test)]
 pub(super) fn snapshot_stable_manifest(
     path: &Path,
     excludes: &[String],

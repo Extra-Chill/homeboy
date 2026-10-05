@@ -86,7 +86,7 @@ pub use workspace_authority::{
     WORKSPACE_OWNER_LEASE_CAPABILITY, WORKSPACE_OWNER_LEASE_SCHEMA,
 };
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -215,7 +215,7 @@ pub struct RunnerExecutionDispatch {
 /// serde attributes on each.
 pub type RunnerExecutionLifecycle = RunnerJobLifecycleMetadata;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerExecutionRecord {
     #[serde(default = "runner_execution_record_schema")]
     pub schema: String,
@@ -227,8 +227,7 @@ pub struct RunnerExecutionRecord {
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_run_id: Option<String>,
-    /// The durable Homeboy observation/run identity. Historical
-    /// `remote_run_id` values normalize into this field on deserialization.
+    /// The durable Homeboy observation/run identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_run_id: Option<String>,
     /// Flattened runtime view of `path_materialization_plan`, populated only by
@@ -245,59 +244,6 @@ pub struct RunnerExecutionRecord {
     pub artifact_refs: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
-}
-
-#[derive(Deserialize)]
-struct RunnerExecutionRecordWire {
-    #[serde(default = "runner_execution_record_schema")]
-    schema: String,
-    execution_id: String,
-    runner_id: String,
-    transport: String,
-    status: String,
-    #[serde(default)]
-    job_id: Option<String>,
-    #[serde(default)]
-    local_run_id: Option<String>,
-    #[serde(default)]
-    remote_run_id: Option<String>,
-    #[serde(default)]
-    mirror_run_id: Option<String>,
-    #[serde(default)]
-    materialized_paths: Vec<PathMaterializationProjection>,
-    #[serde(default)]
-    path_materialization_plan: Option<PathMaterializationPlan>,
-    #[serde(default)]
-    orchestration_provenance: Option<OrchestrationTargetProvenance>,
-    #[serde(default)]
-    artifact_refs: Vec<JobArtifactMetadata>,
-    #[serde(default)]
-    next_actions: Vec<RunnerExecutionNextAction>,
-}
-
-impl<'de> Deserialize<'de> for RunnerExecutionRecord {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = RunnerExecutionRecordWire::deserialize(deserializer)?;
-        Ok(Self {
-            schema: wire.schema,
-            execution_id: wire.execution_id,
-            runner_id: wire.runner_id,
-            transport: wire.transport,
-            status: wire.status,
-            job_id: wire.job_id,
-            local_run_id: wire.local_run_id,
-            // The canonical field wins when a historical dual-field record disagrees.
-            mirror_run_id: wire.mirror_run_id.or(wire.remote_run_id),
-            materialized_paths: wire.materialized_paths,
-            path_materialization_plan: wire.path_materialization_plan,
-            orchestration_provenance: wire.orchestration_provenance,
-            artifact_refs: wire.artifact_refs,
-            next_actions: wire.next_actions,
-        })
-    }
 }
 
 /// The inspection view of a runner execution record: the stored
@@ -720,7 +666,7 @@ mod tests {
 
     #[test]
     fn runner_execution_record_captures_durable_identity_and_actions() {
-        let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
+        let mut record = RunnerExecutionRecord::terminal("execution-1", "lab-a", "daemon", 0)
             .with_job_id("job-1")
             .with_mirror_run_id(Some("run-1".to_string()))
             .with_artifact_refs(vec![JobArtifactMetadata {
@@ -750,14 +696,16 @@ mod tests {
                     "job-1".to_string(),
                 ],
             }]);
+        record.local_run_id = Some("controller-run-1".to_string());
 
         let value = serde_json::to_value(&record).expect("serialize record");
         assert_eq!(value["schema"], RUNNER_EXECUTION_RECORD_SCHEMA);
-        assert_eq!(value["execution_id"], "job-1");
+        assert_eq!(value["execution_id"], "execution-1");
         assert_eq!(value["runner_id"], "lab-a");
         assert_eq!(value["transport"], "daemon");
         assert_eq!(value["status"], "succeeded");
         assert_eq!(value["job_id"], "job-1");
+        assert_eq!(value["local_run_id"], "controller-run-1");
         assert_eq!(value["mirror_run_id"], "run-1");
         assert!(value.get("remote_run_id").is_none());
         assert_eq!(
@@ -770,6 +718,9 @@ mod tests {
         );
         assert_eq!(value["artifact_refs"][0]["id"], "artifact-1");
         assert_eq!(value["next_actions"][0]["label"], "runner_job_logs");
+        let decoded: RunnerExecutionRecord =
+            serde_json::from_value(value).expect("read canonical record");
+        assert_eq!(decoded, record);
     }
 
     #[test]
@@ -786,56 +737,21 @@ mod tests {
     }
 
     #[test]
-    fn retired_agent_task_run_id_is_accepted_but_not_reemitted() {
-        let record: RunnerExecutionRecord = serde_json::from_value(serde_json::json!({
-            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
-            "execution_id": "execution-1",
-            "runner_id": "runner-1",
-            "transport": "daemon",
-            "status": "planned",
-            "agent_task_run_id": "legacy-run"
-        }))
-        .expect("legacy runner record");
-
-        let value = serde_json::to_value(record).expect("runner record");
-        assert!(value.get("agent_task_run_id").is_none());
-    }
-
-    #[test]
-    fn historical_remote_run_id_normalizes_to_mirror_run_id() {
-        let record: RunnerExecutionRecord = serde_json::from_value(json!({
-            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
-            "execution_id": "execution-1",
-            "runner_id": "runner-1",
-            "transport": "daemon",
-            "status": "planned",
-            "remote_run_id": "legacy-run"
-        }))
-        .expect("legacy runner record");
-
-        assert_eq!(record.mirror_run_id.as_deref(), Some("legacy-run"));
-        let value = serde_json::to_value(record).expect("runner record");
-        assert_eq!(value["mirror_run_id"], "legacy-run");
-        assert!(value.get("remote_run_id").is_none());
-    }
-
-    #[test]
-    fn historical_dual_run_ids_prefer_mirror_run_id_and_reserialize_canonically() {
-        let record: RunnerExecutionRecord = serde_json::from_value(json!({
-            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
-            "execution_id": "execution-1",
-            "runner_id": "runner-1",
-            "transport": "daemon",
-            "status": "planned",
-            "remote_run_id": "legacy-run",
-            "mirror_run_id": "canonical-run"
-        }))
-        .expect("dual-field runner record");
-
-        assert_eq!(record.mirror_run_id.as_deref(), Some("canonical-run"));
-        let value = serde_json::to_value(record).expect("runner record");
-        assert_eq!(value["mirror_run_id"], "canonical-run");
-        assert!(value.get("remote_run_id").is_none());
+    fn retired_record_fields_cannot_populate_canonical_mirror_identity() {
+        for field in ["remote_run_id", "agent_task_run_id"] {
+            let mut value = json!({
+                "execution_id": "execution-1",
+                "runner_id": "runner-1",
+                "transport": "daemon",
+                "status": "planned"
+            });
+            value[field] = json!("retired-run");
+            let record: RunnerExecutionRecord = serde_json::from_value(value).expect("read record");
+            assert!(record.mirror_run_id.is_none());
+            let value = serde_json::to_value(record).expect("serialize canonical record");
+            assert!(value.get(field).is_none());
+            assert!(value.get("mirror_run_id").is_none());
+        }
     }
 
     #[test]
