@@ -94,7 +94,8 @@ struct DetachedCookAdmission {
 impl DetachedCookAdmission {
     fn establish(cook_id: &str) -> homeboy::core::Result<Self> {
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-        let launcher_id = uuid::Uuid::new_v4().to_string();
+        let launcher_id = std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV)
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
             &store,
             cook_id,

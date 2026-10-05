@@ -38,6 +38,16 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// The file is streamed in [`FILE_CHUNK_BYTES`] chunks rather than read whole
 /// into memory, so this is safe for arbitrarily large artifacts.
 pub fn sha256_file(path: &Path) -> Result<String> {
+    sha256_file_with_checkpoint(path, || Ok(()))
+}
+
+/// SHA-256 of a streamed file, invoking `checkpoint` before each read and after
+/// EOF. Callers with a bounded operation budget can stop hashing cooperatively
+/// between I/O chunks without changing the canonical digest implementation.
+pub fn sha256_file_with_checkpoint(
+    path: &Path,
+    mut checkpoint: impl FnMut() -> Result<()>,
+) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -47,6 +57,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; FILE_CHUNK_BYTES];
     loop {
+        checkpoint()?;
         let read = file.read(&mut buffer).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -54,6 +65,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
             )
         })?;
         if read == 0 {
+            checkpoint()?;
             break;
         }
         hasher.update(&buffer[..read]);
@@ -241,6 +253,24 @@ mod tests {
         drop(file);
 
         assert_eq!(sha256_file(&path).unwrap(), sha256_hex(&bytes));
+    }
+
+    #[test]
+    fn sha256_file_checkpoint_stops_between_bounded_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deadline.bin");
+        std::fs::write(&path, vec![0x5a; FILE_CHUNK_BYTES * 8]).unwrap();
+        let mut checkpoints = 0;
+        let error = sha256_file_with_checkpoint(&path, || {
+            checkpoints += 1;
+            if checkpoints == 4 {
+                return Err(Error::internal_unexpected("test hash deadline"));
+            }
+            Ok(())
+        })
+        .expect_err("hash stops at an expired operation checkpoint");
+        assert_eq!(error.message, "test hash deadline");
+        assert_eq!(checkpoints, 4, "no chunks are read after the deadline");
     }
 
     #[test]

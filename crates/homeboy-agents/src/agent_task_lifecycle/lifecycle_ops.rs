@@ -4202,6 +4202,36 @@ pub fn record_provider_launch_context_in_store(
     })
 }
 
+/// Seal the current controller with a caller-owned bound on FIFO admission.
+/// The request ID is also the durable Cook identity, so the queue timeout points
+/// back to the record that the caller can inspect and retry.
+pub fn pin_current_controller_runtime_with_timeout(
+    data_root: &std::path::Path,
+    request_id: &str,
+    wait_timeout: std::time::Duration,
+    cancellation_requested: impl Fn() -> Result<bool>,
+) -> Result<std::path::PathBuf> {
+    let runtime_root = homeboy_core::controller_runtime::runtime_root_in(data_root)?;
+    let runtime = homeboy_core::controller_runtime::pin_current_queued_in_root_with_timeout(
+        &runtime_root,
+        request_id,
+        wait_timeout,
+        cancellation_requested,
+    )?;
+    runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "controller_runtime",
+                "new controller runtime pin has no immutable executable",
+                None,
+                None,
+            )
+        })
+}
+
 /// Bind a reserved provider execution to the subprocess that actually runs it.
 ///
 /// Fanout workers are threads and therefore share the coordinator PID. The

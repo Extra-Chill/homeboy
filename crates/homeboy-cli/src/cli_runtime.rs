@@ -122,6 +122,11 @@ pub trait CliCapability: Sync {
 }
 
 const COOK_PINNED_RUNTIME_ENV: &str = "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME";
+pub(crate) const COOK_STARTUP_LAUNCHER_ID_ENV: &str = "HOMEBOY_COOK_STARTUP_LAUNCHER_ID";
+const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(test, feature = "test-support"))]
+const COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV: &str =
+    "HOMEBOY_TEST_COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_MS";
 const RUNNER_EXEC_RECOVERY_OWNER_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_OWNER";
 const RUNNER_EXEC_RECOVERY_CHILD_ENV: &str = "HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD";
 const CONTROLLER_FALLBACK_RECONCILIATION_ENV: &str = "HOMEBOY_CONTROLLER_FALLBACK_RECONCILIATION";
@@ -131,6 +136,147 @@ const RELEASE_DISCOVERY_DEADLINE: Duration = Duration::from_secs(30);
 const RELEASE_EXECUTION_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 
 const RELEASE_EXECUTION_STAGE: &str = "executing release pipeline";
+
+fn cook_runtime_seal_admission_timeout() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(milliseconds) = std::env::var(COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT_TEST_ENV) {
+        if let Ok(milliseconds) = milliseconds.parse::<u64>() {
+            return Duration::from_millis(milliseconds.clamp(1, 30_000));
+        }
+    }
+    COOK_RUNTIME_SEAL_ADMISSION_TIMEOUT
+}
+
+/// Holds a local Cook's caller-visible identity while the executable is being
+/// sealed. Runtime pin admission can wait behind another invocation; publish a
+/// lifecycle parent first so the wait has a status/cancel handle.
+struct CookStartupAdmission {
+    store: homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: String,
+    launcher_id: String,
+    owns_launcher: bool,
+}
+
+impl CookStartupAdmission {
+    fn establish(
+        cli: &mut Cli,
+        normalized_args: &mut Vec<String>,
+    ) -> homeboy::core::Result<Option<Self>> {
+        if cli.placement != crate::cli_surface::Placement::Local {
+            return Ok(None);
+        }
+        let Commands::AgentTask(agent_task) = &mut cli.command else {
+            return Ok(None);
+        };
+        let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &mut agent_task.command
+        else {
+            return Ok(None);
+        };
+        if cook.preview {
+            return Ok(None);
+        }
+
+        let cook_id = cook
+            .dispatch
+            .run_id
+            .clone()
+            .unwrap_or_else(|| format!("agent-task-{}", Uuid::new_v4()));
+        let inherited_launcher_id = std::env::var(COOK_STARTUP_LAUNCHER_ID_ENV).ok();
+        let launcher_id = inherited_launcher_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let owns_launcher = inherited_launcher_id.is_none();
+        if cook.dispatch.run_id.is_none() {
+            cook.dispatch.run_id = Some(cook_id.clone());
+            let owned = crate::command_capability::homeboy_owned_args(normalized_args).len();
+            normalized_args.splice(owned..owned, ["--run-id".to_string(), cook_id.clone()]);
+        }
+
+        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let record =
+            homeboy::agents::agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
+                &store,
+                &cook_id,
+                &launcher_id,
+            )?;
+        std::env::set_var(COOK_STARTUP_LAUNCHER_ID_ENV, &launcher_id);
+        let handoff = &record.metadata["detached_cook_handoff"];
+        let progress_is_current =
+            record.metadata["cook_progress"]["phase"] == "controller_runtime_seal";
+        if !record.state.is_terminal()
+            && handoff["state"] == "pending"
+            && handoff["admission_state"] == "pre_supervisor"
+            && handoff["launcher_id"] == launcher_id
+            && !progress_is_current
+        {
+            if let Err(error) = homeboy::agents::agent_task_lifecycle::record_cook_progress_in_store(
+                &store,
+                &cook_id,
+                "controller_runtime_seal",
+                0,
+                Some("Cook identity is durable; waiting for bounded controller runtime admission"),
+            ) {
+                let _ = homeboy::agents::agent_task_lifecycle::fail_claimed_detached_cook_handoff_parent_in_store(
+                    &store,
+                    &cook_id,
+                    &launcher_id,
+                    &error.message,
+                );
+                return Err(error);
+            }
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "schema": "homeboy/agent-task-admission-progress/v1",
+                    "run_id": cook_id,
+                    "launcher_id": launcher_id,
+                    "state": "pending",
+                    "phase": "controller_runtime_seal",
+                    "status_command": format!("homeboy agent-task status {cook_id}"),
+                })
+            );
+        }
+        Ok(Some(Self {
+            store,
+            cook_id,
+            launcher_id,
+            owns_launcher,
+        }))
+    }
+
+    fn fail(&mut self, reason: &str) {
+        if !self.owns_launcher {
+            return;
+        }
+        let Ok(record) = self.store.read_record_bounded(&self.cook_id) else {
+            return;
+        };
+        let handoff = &record.metadata["detached_cook_handoff"];
+        // The pinning process may fail only the startup claim it owns. A replay
+        // or a transferred local launcher has a different token and must retain
+        // its own handoff custody.
+        if record.state.is_terminal()
+            || handoff["state"] != "pending"
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["launcher_id"] != self.launcher_id
+            || handoff["materializing_attempt_run_id"].is_string()
+        {
+            return;
+        }
+        let _ = homeboy::agents::agent_task_lifecycle::fail_claimed_detached_cook_handoff_parent_in_store(
+            &self.store,
+            &self.cook_id,
+            &self.launcher_id,
+            reason,
+        );
+    }
+}
+
+impl Drop for CookStartupAdmission {
+    fn drop(&mut self) {
+        self.fail("local Cook exited before runtime admission or handoff materialization");
+    }
+}
 
 fn release_stage_deadline(stage: &str) -> Duration {
     if stage == RELEASE_EXECUTION_STAGE {
@@ -1238,7 +1384,7 @@ impl CliRuntime {
     fn run_matches_with_capability_admission(
         &self,
         matches: ArgMatches,
-        normalized: Vec<String>,
+        mut normalized: Vec<String>,
         capability_admission: Option<
             crate::core::parsed_command_preflight::ResourceAdmissionEvidence,
         >,
@@ -1641,10 +1787,31 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
-        match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
+        let mut cook_startup_admission =
+            match CookStartupAdmission::establish(&mut cli, &mut normalized) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    output_runtime::emit_json_result_for_identity(
+                        Err(error),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
+                    return std::process::ExitCode::from(2);
+                }
+            };
+
+        match delegate_agent_task_cook_to_pinned_runtime(
+            &cli,
+            &normalized,
+            cook_startup_admission.as_ref(),
+        ) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
             Err(err) => {
+                if let Some(admission) = cook_startup_admission.as_mut() {
+                    admission.fail(&err.message);
+                }
                 output_runtime::emit_json_result_for_identity(
                     Err(err),
                     output_file.as_deref(),
@@ -2233,12 +2400,12 @@ fn schedule_controller_fallback_reconciliation() {
     let _ = command.spawn();
 }
 
-/// A cook has no durable run record until controller admission. Re-exec before
-/// routing so every subsequent local phase uses the immutable controller that
-/// started the cook rather than a globally replaced executable.
+/// Re-exec before routing so every subsequent local phase uses the immutable
+/// controller that started the cook rather than a globally replaced executable.
 fn delegate_agent_task_cook_to_pinned_runtime(
     cli: &Cli,
     normalized_args: &[String],
+    startup_admission: Option<&CookStartupAdmission>,
 ) -> homeboy::core::Result<Option<i32>> {
     let is_cook_preview = matches!(
         &cli.command,
@@ -2294,15 +2461,35 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         }
     }
 
-    let request_id = format!("seal-{}", Uuid::new_v4());
-    // Boundary: sealing the controller for a cook is one unit of work (#7505).
+    let cook_id = match &cli.command {
+        Commands::AgentTask(agent_task) => match &agent_task.command {
+            crate::commands::agent_task::AgentTaskCommand::Cook(cook) => {
+                cook.dispatch.run_id.clone()
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let request_id = cook_id
+        .clone()
+        .unwrap_or_else(|| format!("seal-{}", Uuid::new_v4()));
     let roots = homeboy::core::paths::PathRoots::from_environment()?;
-    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
-        roots.data(),
-        &request_id,
-        || Ok(false),
-    )
-    .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
+    let pin = if cook_id.is_some() && cli.placement == crate::cli_surface::Placement::Local {
+        crate::agents::agent_task_lifecycle::pin_current_controller_runtime_with_timeout(
+            roots.data(),
+            &request_id,
+            cook_runtime_seal_admission_timeout(),
+            || Ok(false),
+        )
+    } else {
+        crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
+            roots.data(),
+            &request_id,
+            || Ok(false),
+        )
+    };
+    let pinned =
+        pin.map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
     let prompt_snapshot = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Cook(cook) => cook
@@ -2317,6 +2504,9 @@ fn delegate_agent_task_cook_to_pinned_runtime(
     command
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned);
+    if let Some(admission) = startup_admission {
+        command.env(COOK_STARTUP_LAUNCHER_ID_ENV, &admission.launcher_id);
+    }
     let status = if let Some(prompt) = prompt_snapshot {
         command.stdin(std::process::Stdio::piped());
         let mut child = command.spawn().map_err(|error| {
@@ -5301,7 +5491,7 @@ mod tests {
             let before = std::fs::read_dir(home).expect("read isolated home").count();
 
             assert_eq!(
-                delegate_agent_task_cook_to_pinned_runtime(&cli, &args)
+                delegate_agent_task_cook_to_pinned_runtime(&cli, &args, None)
                     .expect("preview bypasses runtime sealing"),
                 None
             );
